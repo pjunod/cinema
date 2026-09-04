@@ -126,6 +126,7 @@ import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.Marker
 import tv.plurx.app.data.MediaFileDto
 import tv.plurx.app.data.PlaybackSessionStatus
+import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.Rung
 import tv.plurx.app.data.Session
 import tv.plurx.app.data.SubTrack
@@ -185,6 +186,8 @@ private data class Plan(
     val progressOffsetMs: Long,
     val itemDurationMs: Long?,
     val nextAudiobookPartId: Long?,
+    /** Quality captured by the exact request that produced this plan. */
+    val requestedQuality: PlaybackQuality,
 ) : PlanLike {
     fun globalPosition(localPositionMs: Long): Long =
         audiobookGlobalPosition(localPositionMs, progressOffsetMs)
@@ -209,13 +212,16 @@ private suspend fun loadPlan(
     itemId: Long,
     fileId: Long,
     tracks: PreplayTracks,
+    requestedQuality: PlaybackQuality,
 ): Plan {
     val detail = planLoadStage("item_detail") { vm.itemDetail(itemId) }
     // The pre-play choice reaches the *first* decision, so the plan that comes
     // back already carries it. Starting on the policy default and switching
     // afterwards is what criterion 4 forbids: it is a visible re-buffer to
     // apply something the viewer chose before playback began.
-    val playbackDecision = planLoadStage("decision") { vm.playbackDecision(fileId, tracks) }
+    val playbackDecision = planLoadStage("decision") {
+        vm.playbackDecision(fileId, tracks, requestedQuality)
+    }
     val decision: Decision = playbackDecision.decision
     val file = detail.files.firstOrNull { it.id == fileId } ?: detail.files.firstOrNull()
     val mode = decision.delivery?.mode ?: when (decision.method) {
@@ -264,6 +270,7 @@ private suspend fun loadPlan(
             nextAudiobookPartId = if (detail.item.isAudiobook) {
                 nextAudiobookPartId(detail.files, fileId)
             } else null,
+            requestedQuality = requestedQuality,
         )
     }
 }
@@ -463,6 +470,12 @@ fun PlayerScreen(
     var playbackSubtitle by remember(itemId, fileId) {
         mutableStateOf(preplayTracks.subtitle)
     }
+    // Identity and outstanding destination belong to the presentation. A
+    // quality change replaces both the plan and Controller, but not the viewer
+    // or the seek that caused the replacement.
+    val playbackIntent = remember(itemId, fileId) {
+        PlaybackIntent(initialQuality = vm.preferences.value.playbackQuality)
+    }
 
     ImmersivePlaybackEffect()
 
@@ -478,6 +491,7 @@ fun PlayerScreen(
                 itemId,
                 fileId,
                 PreplayTracks(audio = playbackAudio, subtitle = playbackSubtitle),
+                requestedQuality = vm.preferences.value.playbackQuality,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -519,6 +533,7 @@ fun PlayerScreen(
                 startMs = resumeAt,
                 startReason = startReason,
                 attemptOpenedAtMs = attemptOpenedAtMs,
+                playbackIntent = playbackIntent,
                 audioOffsetMs = playbackAudioOffset,
                 onAudioOffsetChanged = { playbackAudioOffset = it },
                 // The plan's own answer wins over the request that produced it:
@@ -625,6 +640,7 @@ private fun PlayerContent(
     startMs: Long,
     startReason: String,
     attemptOpenedAtMs: Long,
+    playbackIntent: PlaybackIntent,
     audioOffsetMs: Long,
     onAudioOffsetChanged: (Long) -> Unit,
     retainedAudio: Long?,
@@ -644,12 +660,16 @@ private fun PlayerContent(
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     var playFailure by remember { mutableStateOf<String?>(null) }
     val controller = remember(plan) {
+        // The decision and its session body must describe the same quality,
+        // even if the stored preference changes between request and compose.
+        playbackIntent.adoptQuality(plan.requestedQuality)
         Controller(
             context,
             buildPlayer(context, vm),
             plan,
             plan.legacyCaps,
             plan.decisionCaps,
+            playbackIntent,
             vm,
             scope,
             initialAudioOffsetMs = audioOffsetMs,
@@ -1322,7 +1342,13 @@ private fun PlayerContent(
                 audioOffsetMs = controller.audioOffsetMs,
                 declaredOffsetMs = plan.declaredOffsetMs,
                 currentPosition = controller::realPosition,
-                onReload = onReload,
+                onReload = { position, reason ->
+                    // Publish the new quality and destination on the old
+                    // reporter before Compose tears its player down. The next
+                    // controller inherits the same intent and identity.
+                    controller.prepareReplacement(position, preferences.playbackQuality)
+                    onReload(position, reason)
+                },
                 onAudioOffset = {
                     controller.setAudioOffset(it)
                     onAudioOffsetChanged(it)

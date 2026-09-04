@@ -89,6 +89,25 @@ private final class ControlGate: @unchecked Sendable {
 
 private let controlGate = ControlGate()
 
+/// One-shot owner handoff used to prove an ask does not wait on the new
+/// owner's unrelated sequence space.
+private final class ControlOwnerChange: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+
+    func arm() { lock.lock(); armed = true; lock.unlock() }
+    func reset() { lock.lock(); armed = false; lock.unlock() }
+    func take(sequence: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard armed, sequence > 1 else { return false }
+        armed = false
+        return true
+    }
+}
+
+private let controlOwnerChange = ControlOwnerChange()
+
 /// Accepts every exchange the way the server does, and records what it carried.
 private final class ControlExchangeURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -111,6 +130,19 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             return
         }
         controlExchanges.append(decoded)
+        if controlOwnerChange.take(sequence: decoded.sequence) {
+            let failure = #"{"code":"owner_changed","generation":"44444444-4444-4444-8444-444444444444","control_epoch":9,"retry_after_ms":250}"#
+            let changed = HTTPURLResponse(
+                url: url,
+                statusCode: 409,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: changed, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(failure.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let response = ControlResponse(
             proto: PlaybackControl.protocolName,
             generation: decoded.generation,
@@ -501,6 +533,31 @@ final class PlaybackControlSessionTests: XCTestCase {
         let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
         XCTAssertNil(verdict)
         XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+    }
+
+    func testAnOwnerChangeSettlesTheCurrentAskWithoutWaitingOnTheNewOwner() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlOwnerChange.reset()
+        defer { controlOwnerChange.reset() }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        controlOwnerChange.arm()
+        let started = Date()
+        let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
+        XCTAssertNil(verdict)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2,
+                          "the old ask is released while the reporter adopts the new owner")
+        session.end()
     }
 
     /// A verdict outlives its reporter and its session, but not the lease the

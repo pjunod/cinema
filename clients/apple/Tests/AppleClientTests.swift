@@ -2275,6 +2275,13 @@ final class AppleClientTests: XCTestCase {
         XCTAssertTrue(PlayerController.holdMayDecideStall(
             kind: .silent, publishedEndMs: 200_000, fetchedEndMs: 150_000, runwaySeconds: 0
         ))
+        XCTAssertFalse(PlayerController.holdMayDecideStall(
+            kind: .silent,
+            publishedEndMs: 200_000,
+            fetchedEndMs: 150_000,
+            runwaySeconds: 0,
+            durationMs: PlayerController.controlStallDeferralDeadlineMs
+        ), "even a decoder hold cannot own the frozen picture past the absolute deadline")
     }
 
     /// The wedge signature is the server's own, and both of its thresholds are
@@ -2343,6 +2350,20 @@ final class AppleClientTests: XCTestCase {
         XCTAssertTrue(held)
         XCTAssertEqual(controller.playbackNotice, PlayerController.holdNotice("demand"))
         XCTAssertFalse(controller.failed, "a hold is not a failure")
+
+        let expired = PlaybackStallEvent(
+            kind: .silent,
+            action: .reopen,
+            positionMs: 40_000,
+            durationMs: PlayerController.controlStallDeferralDeadlineMs
+        )
+        XCTAssertFalse(controller.applyStallVerdict(
+            ControlAction(type: "hold", reason: "demand"), event: expired
+        ))
+        XCTAssertFalse(controller.applyStallVerdict(
+            ControlAction(type: "retry_resource", reason: "reader_failed", afterMs: 1_000),
+            event: expired
+        ), "a pacing verdict cannot restart the absolute stall clock")
 
         // A terminal verdict is untouched: it still decides, and the viewer
         // still reads the server's words rather than this client's guess.

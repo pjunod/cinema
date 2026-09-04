@@ -135,6 +135,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     private var answerAction: ControlAction? = null
     private var answerRequestSequence = 0L
     private var answersSeen = 0L
+    private var ownerChangesSeen = 0L
     /**
      * The answer slot keeps its own copy of the generation rather than reading
      * the verdict slot's under the wrong lock. Two counters that must agree
@@ -203,6 +204,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         if (status.stopped) return null
         val floor = status.sequence + 1
         val seenAtStart = synchronized(answerLock) { answersSeen }
+        val ownerChangesAtStart = synchronized(answerLock) { ownerChangesSeen }
         publish()
         val startedAt = now()
         var deadline = startedAt + boundMs
@@ -220,6 +222,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             }
         }
         while (now() < deadline) {
+            if (synchronized(answerLock) { ownerChangesSeen > ownerChangesAtStart }) return null
             ready()?.let { return it.getOrNull() }
             val count = synchronized(answerLock) { answersSeen }
             if (count > seen) {
@@ -282,6 +285,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             answerAction = null
             answerRequestSequence = 0
             answersSeen = 0
+            ownerChangesSeen = 0
         }
         val leaseMs = bootstrap.leaseTimeoutMs
         val subtitleReadiness = SubtitleReadinessRetryState()
@@ -306,6 +310,9 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                 synchronized(answerLock) {
                     if (generation == answerGeneration) {
                         answersSeen += 1
+                        if (exchange.failure == "transport:409:owner_changed") {
+                            ownerChangesSeen += 1
+                        }
                         answerAction = exchange.response?.action
                         answerRequestSequence = exchange.request.sequence
                     }
@@ -352,6 +359,16 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * cadence is unchanged.
      */
     fun reportEvidence() {
+        val subject = reporter ?: return
+        scope.launch { subject.notifyUrgently(scope) }
+    }
+
+    /**
+     * Publish a viewer destination before the media item or server session is
+     * replaced. The pending target lives in [PlaybackIntent], so the snapshot
+     * remains truthful when the replacement reporter starts as well.
+     */
+    fun reportIntent() {
         val subject = reporter ?: return
         scope.launch { subject.notifyUrgently(scope) }
     }

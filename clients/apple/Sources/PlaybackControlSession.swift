@@ -203,7 +203,8 @@ final class PlaybackControlSession {
                 answers.record(
                     exchange.response?.action,
                     requestSequence: exchange.request.sequence,
-                    generation: generation
+                    generation: generation,
+                    ownerChanged: exchange.failure == "transport:409:owner_changed"
                 )
                 if subtitleReadiness.record(
                     exchange.response?.delivery?.subtitleReadiness
@@ -283,6 +284,7 @@ final class PlaybackControlSession {
         // very exchange that carried this stall's evidence.
         let floor = await reporter.sequence + 1
         let seenAtStart = answers.count()
+        let ownerChangesAtStart = answers.ownerChangeCount()
         var seen = seenAtStart
         publish()
         // Monotonic, because this file's own stall policy is monotonic: a
@@ -302,6 +304,10 @@ final class PlaybackControlSession {
             return answer.action
         }
         while ProcessInfo.processInfo.systemUptime < deadline {
+            // The adopted owner has a new sequence space and did not answer
+            // this observation. Let it continue independently, but release the
+            // current recovery owner instead of extending a frozen wait.
+            if answers.ownerChangeCount() > ownerChangesAtStart { return nil }
             if let answer = settled() { return answer }
             let count = answers.count()
             if count > seen {
@@ -383,6 +389,7 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
     private let lock = NSLock()
     private var latest: Answer?
     private var answered = 0
+    private var ownerChanges = 0
     private var generation = 0
 
     /// Adopt the verdict slot's generation rather than keeping a second one.
@@ -393,13 +400,20 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
         self.generation = generation
         latest = nil
         answered = 0
+        ownerChanges = 0
     }
 
-    func record(_ action: ControlAction?, requestSequence: Int, generation: Int) {
+    func record(
+        _ action: ControlAction?,
+        requestSequence: Int,
+        generation: Int,
+        ownerChanged: Bool = false
+    ) {
         lock.lock()
         defer { lock.unlock() }
         guard generation == self.generation else { return }
         answered += 1
+        if ownerChanged { ownerChanges += 1 }
         latest = Answer(requestSequence: requestSequence, action: action)
     }
 
@@ -408,6 +422,12 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return answered
+    }
+
+    func ownerChangeCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return ownerChanges
     }
 
     func answer(atOrAfter sequence: Int) -> Answer? {

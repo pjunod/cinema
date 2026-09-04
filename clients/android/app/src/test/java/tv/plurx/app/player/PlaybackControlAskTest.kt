@@ -97,6 +97,32 @@ class PlaybackControlAskTest {
         return PlaybackControlTransport("https://cinema.example", client, json)
     }
 
+    private fun ownerChangingTransport(sequence: AtomicLong): PlaybackControlTransport {
+        val client = OkHttpClient.Builder().addInterceptor(
+            Interceptor { chain ->
+                val request = sequence.incrementAndGet()
+                val status = if (request == 1L) 200 else 409
+                val body = if (request == 1L) {
+                    """{"protocol":"${PlaybackControl.PROTOCOL}",""" +
+                        """"generation":"$GENERATION","control_epoch":7,""" +
+                        """"accepted_sequence":1,"action":{"type":"none"}}"""
+                } else {
+                    """{"code":"owner_changed",""" +
+                        """"generation":"44444444-4444-4444-8444-444444444444",""" +
+                        """"control_epoch":9,"retry_after_ms":250}"""
+                }
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(status)
+                    .message(if (status == 200) "OK" else "owner changed")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            },
+        ).build()
+        return PlaybackControlTransport("https://cinema.example", client, json)
+    }
+
     /**
      * The ask's floor is the reporter's own request counter, so it only means
      * anything once the reporter has built a request. `begin` launches the
@@ -241,6 +267,27 @@ class PlaybackControlAskTest {
             assertTrue(
                 monotonicNowMs() - startedAt < CONTROL_ASK_CAP_MS * 3,
                 "the bound is the bound",
+            )
+        } finally {
+            session.end()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `an owner change settles the current ask without waiting on the new owner`() = runBlocking {
+        val scope = scope()
+        val session = PlaybackControlSession(scope)
+        try {
+            val sequence = AtomicLong(0)
+            session.begin(bootstrap(), ::observation, ownerChangingTransport(sequence))
+            awaitFirstExchange(sequence)
+            val startedAt = monotonicNowMs()
+            val verdict = session.askForAction(boundMs = 5_000, capMs = 8_000, publish = {})
+            assertNull(verdict)
+            assertTrue(
+                monotonicNowMs() - startedAt < 2_000,
+                "the old ask is released while the reporter adopts the new owner",
             )
         } finally {
             session.end()

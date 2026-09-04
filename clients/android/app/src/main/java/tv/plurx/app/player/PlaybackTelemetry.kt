@@ -263,6 +263,80 @@ internal data class StallMeasurement(
 )
 
 /**
+ * A recovery deadline that fires while the picture is still frozen.
+ *
+ * [BufferingStallTracker] intentionally measures the completed interruption;
+ * using that retrospective instrument to own recovery made an open-ended
+ * Media3 wait invisible forever. This tracker has the opposite contract: one
+ * advisory event at [thresholdMs], then — only when control explicitly asks
+ * the client to wait — one non-deferrable event at [maximumDeferralMs]. Real
+ * progress, pause, startup, or an explicit reset cancels the episode.
+ */
+internal class OpenBufferingStallTracker(
+    private val thresholdMs: Long = 8_000,
+    private val maximumDeferralMs: Long = 20_000,
+    private val progressThresholdMs: Long = 250,
+) {
+    data class Event(
+        val durationMs: Long,
+        val positionMs: Long,
+        val controlMayDefer: Boolean,
+    )
+
+    private var baselinePositionMs: Long? = null
+    private var stagnantSinceMs: Long? = null
+    private var fired = false
+    private var deferred = false
+
+    fun sample(
+        buffering: Boolean,
+        playbackRequested: Boolean,
+        establishedPlayback: Boolean,
+        positionMs: Long,
+        observedAtMs: Long,
+    ): Event? {
+        if (!buffering || !playbackRequested || !establishedPlayback) {
+            reset()
+            return null
+        }
+        val baseline = baselinePositionMs
+        if (baseline == null || kotlin.math.abs(positionMs - baseline) >= progressThresholdMs) {
+            baselinePositionMs = positionMs
+            stagnantSinceMs = observedAtMs
+            fired = false
+            deferred = false
+            return null
+        }
+        if (fired) return null
+        val durationMs = (observedAtMs - (stagnantSinceMs ?: observedAtMs)).coerceAtLeast(0)
+        val deadline = if (deferred) maximumDeferralMs else thresholdMs
+        if (durationMs < deadline) return null
+        fired = true
+        return Event(durationMs, positionMs, controlMayDefer = !deferred)
+    }
+
+    /**
+     * Honour one control hold without surrendering recovery ownership. The
+     * second deadline is absolute from the first stagnant sample, not another
+     * twenty seconds from the verdict.
+     */
+    fun defer(observedAtMs: Long): Boolean {
+        val since = stagnantSinceMs ?: return false
+        if (deferred || observedAtMs - since >= maximumDeferralMs) return false
+        deferred = true
+        fired = false
+        return true
+    }
+
+    fun reset() {
+        baselinePositionMs = null
+        stagnantSinceMs = null
+        fired = false
+        deferred = false
+    }
+}
+
+/**
  * Reports one final-duration event when an established, requested playback
  * recovers after the playhead was stagnant for the threshold while Media3 was
  * buffering. Startup and paused buffering are excluded; policy belongs to N4.

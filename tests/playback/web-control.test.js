@@ -534,6 +534,35 @@ async function main() {
   assert.equal(seeking.render_state,"seeking");
   assert.equal(seeking.seek_target_ms,20_000);
   video.seeking=false; player._seekPreview=null;
+  player.controlSeek={sequence:7,targetMs:45_000};
+  const committedSeek=adapter.playbackControlSnapshot(video,player);
+  assert.equal(committedSeek.position_ms,15_000, "the current playhead stays current");
+  assert.equal(committedSeek.seek_target_ms,45_000,
+    "a committed destination survives after preview state is cleared");
+  player.controlSeek=null;
+  const seekIntentAdapter=new Function([
+    "let PLAYER=null; let notifications=0;",
+    "function notifyPlaybackControl(){notifications+=1;}",
+    shippedSource("beginPlaybackControlSeek"),
+    shippedSource("settlePlaybackControlSeek"),
+    "return {begin:beginPlaybackControlSeek,settle:settlePlaybackControlSeek,"+
+      "notifications:()=>notifications};",
+  ].join("\n"))();
+  const intentPlayer={started:true,offset:0};
+  const intentVideo={currentTime:10,seeking:false,readyState:4};
+  const firstIntent=seekIntentAdapter.begin(intentPlayer,30);
+  const finalIntent=seekIntentAdapter.begin(intentPlayer,90);
+  assert.equal(finalIntent.sequence,firstIntent.sequence+1,"later seeks supersede monotonically");
+  intentVideo.currentTime=30;
+  assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer),false,
+    "an old destination cannot clear the newest intent");
+  assert.equal(intentPlayer.controlSeek.targetMs,90_000);
+  intentVideo.currentTime=90.4;
+  assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer),true,
+    "the presented destination clears its own intent");
+  assert.equal(intentPlayer.controlSeek,null);
+  assert.equal(seekIntentAdapter.notifications(),3,
+    "both intents and the presented landing are published");
   player.waitAt=performance.now()-9_000;
   const inferredSupply=adapter.playbackControlSnapshot(video,player);
   assert.equal(inferredSupply.render_state,"stalled");
@@ -893,7 +922,7 @@ async function main() {
   // player disagrees — and the supply/decode split these fixtures straddle is
   // decided by exactly one of them.
   const askConstants = ["CONTROL_ASK_MS", "CONTROL_ASK_CAP_MS", "CONTROL_MIN_EXCHANGE_MS",
-    "CONTROL_DEFER_LIMIT", "SUPPLY_RUNWAY_SECS"].map((name) => {
+    "CONTROL_DEFER_LIMIT", "CONTROL_STALL_DEFER_DEADLINE_MS", "SUPPLY_RUNWAY_SECS"].map((name) => {
       const found = SHIPPED_UI.match(new RegExp(`const ${name}=\\d+(?:\\.\\d+)?;`));
       assert.notEqual(found, null, `index.html no longer declares ${name}`);
       return found[0];
@@ -922,6 +951,7 @@ async function main() {
         askConstants,
         shippedSource("holdReasonText"),
         shippedSource("controlVerdictText"),
+        shippedSource("armedPlaybackControlVerdict"),
         shippedSource("playbackControlObservationOverride"),
         shippedSource("notifyPlaybackControl"),
         shippedSource("askPlaybackControl"),
@@ -1019,13 +1049,15 @@ async function main() {
     // real behaviour, and has its own test below.
     const h = stallHarness({ answer: () => ({ type: "none" }) });
     const player = Object.assign(stalledPlayer(), options.player || {});
+    const began=options.began==null?100:options.began;
+    player.waitAt=began;
     h.stub.attach(player, stalledVideo, bootstrap());
     h.attached.push(player);
     await flush();
     h.answerWith(() => action);
     // start() already spent sequence 1; the ask must be answered by its own.
     const before = h.sent.length;
-    const running = h.stub.stall(player, stalledVideo, 100, 3);
+    const running = h.stub.stall(player, stalledVideo, began, 3);
     await settleExchange();
     // Settled by its own exchange, not by its bound: the line in onExchange
     // that connects the reporter to the waiters is what makes that true, and
@@ -1126,6 +1158,17 @@ async function main() {
     assert.equal(h.timers.get(player.waitTimer).ms, 8_000, "and the deadline comes round again");
   }
 
+  {
+    const { h, player } = await askWith({ type: "hold", reason: "no_room" }, {
+      began: performance.now()-20_000,
+      player: { waitRunway: 8 },
+    });
+    assert.equal(h.reopened.length, 1,
+      "a repeated hold cannot own a decode freeze past the absolute deadline");
+    assert.equal(player.waitTimer, null, "the deadline cannot be restarted");
+    assert.ok(h.log.some((entry) => entry.detail === "fallthrough:hold_deadline"));
+  }
+
   // retry_resource paces to the server's interval, clamped, and bounded: a
   // server that keeps saying "soon" is not distinguishable from here from one
   // that is never going to be ready.
@@ -1176,11 +1219,33 @@ async function main() {
     h.stub.detach(player);
   }
 
-  // A terminal verdict can arrive on any exchange, and the reporter stops on
-  // it. Ruling D1 says the verdict is armed, not executed — so the stall an
-  // hour later must still read the server's words, even though there is no
-  // longer a reporter to ask.
+  // A handoff is not a verdict from the replacement owner. The reporter
+  // adopts it independently; the old recovery falls through immediately.
   {
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = stalledPlayer();
+    h.attached.push(player);
+    h.stub.attach(player, stalledVideo, bootstrap());
+    await flush();
+    h.holdWith(() => Promise.reject(controlError(409,"owner_changed",{
+      generation:"44444444-4444-4444-8444-444444444444",controlEpoch:9,
+    })));
+    const running=h.stub.stall(player,stalledVideo,100,3);
+    await settleExchange();
+    assert.equal(await settledPromptly(running),true,
+      "owner_changed settles the old owner's ask immediately");
+    await running;
+    assert.equal(h.reopened.length,1,"recovery does not wait on the new owner");
+    h.stub.detach(player);
+  }
+
+  // A terminal verdict can arrive on any exchange, and the reporter stops on
+  // it. Ruling D1 says the verdict is armed, not executed — so a later stall
+  // inside the lease must still read the server's words, even though there is
+  // no longer a reporter to ask.
+  {
+    assert.doesNotMatch(shippedSource("attachSession"), /controlVerdict\s*=\s*null/,
+      "a same-title session replacement preserves the armed diagnosis");
     const h = stallHarness({
       answer: () => ({ type: "terminal", code: "unsupported", message: "No decoder for this." }),
     });
@@ -1193,12 +1258,19 @@ async function main() {
     assert.deepEqual(player.controlVerdict,
       { type: "terminal", code: "unsupported", message: "No decoder for this." },
       "and the verdict outlives it");
+    assert.ok(player.controlVerdictExpiresAt>performance.now(),
+      "the armed diagnosis is bounded by the server lease");
     const running = h.stub.stall(player, stalledVideo, 100, 3);
     await flush(); await flush();
     await running;
     assert.equal(h.reopened.length, 0, "the armed verdict still suppresses the guess");
     assert.equal(h.loading[0].title, "No decoder for this.",
       "and the viewer reads it rather than the client's invention");
+    player.controlVerdictExpiresAt=performance.now()-1;
+    const afterLease=h.stub.stall(player,stalledVideo,100,3);
+    await flush(); await afterLease;
+    assert.equal(h.reopened.length,1,"an expired diagnosis cannot suppress client recovery");
+    assert.equal(player.controlVerdict,null,"expiration clears the stale verdict");
     h.stub.detach(player);
   }
 
@@ -1368,6 +1440,7 @@ async function main() {
         "let PLAYER=null;",
         askConstants,
         shippedSource("controlVerdictText"),
+        shippedSource("armedPlaybackControlVerdict"),
         shippedSource("holdReasonText"),
         shippedSource("playbackControlObservationOverride"),
         shippedSource("notifyPlaybackControl"),

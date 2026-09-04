@@ -147,6 +147,36 @@ class PlaybackTelemetryTest {
     }
 
     @Test
+    fun openBufferingFiresWhileStillFrozenAndControlGetsOnlyOneBoundedDeferral() {
+        val tracker = OpenBufferingStallTracker()
+
+        assertNull(tracker.sample(true, true, true, 12_000, 0))
+        assertNull(tracker.sample(true, true, true, 12_000, 7_999))
+        val first = tracker.sample(true, true, true, 12_000, 8_000)
+        assertEquals(8_000L, first?.durationMs)
+        assertTrue(first?.controlMayDefer == true)
+        assertTrue("the first verdict may defer inside the absolute cap", tracker.defer(9_500))
+
+        assertNull(tracker.sample(true, true, true, 12_000, 19_999))
+        val deadline = tracker.sample(true, true, true, 12_000, 20_000)
+        assertEquals(20_000L, deadline?.durationMs)
+        assertFalse(deadline?.controlMayDefer ?: true)
+        assertFalse("control cannot restart the twenty-second clock", tracker.defer(20_000))
+    }
+
+    @Test
+    fun progressPauseAndStartupCancelAnOpenBufferingDeadline() {
+        val tracker = OpenBufferingStallTracker()
+        assertNull(tracker.sample(true, true, true, 5_000, 0))
+        assertNull("real progress rearms", tracker.sample(true, true, true, 5_300, 7_000))
+        assertNull("pause cancels", tracker.sample(true, false, true, 5_300, 20_000))
+        assertNull("startup is not a stall", tracker.sample(true, true, false, 5_300, 40_000))
+        assertNull(tracker.sample(true, true, true, 5_300, 41_000))
+        assertNull(tracker.sample(true, true, true, 5_300, 48_999))
+        assertEquals(8_000L, tracker.sample(true, true, true, 5_300, 49_000)?.durationMs)
+    }
+
+    @Test
     fun clientLogRequestMatchesTheTypedServerContractWithoutSecretsOrMediaUrls() {
         val request = clientLogRequest(
             origin = "http://plurx.test:32400/",

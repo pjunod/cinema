@@ -3519,6 +3519,10 @@ function reportTtff(){
 const STALL_MIN_MS=350;      // shorter than this and playback did not visibly pause
 const SUPPLY_RUNWAY_SECS=1.5; // less buffered than this when it began: we ran dry
 const PERSISTENT_STALL_MS=8000; // browser nudges failed; recover instead of spinning forever
+// One control hold may explain why production paused, but it cannot own a
+// frozen picture. This is absolute from beginWait(), not another interval
+// from each verdict.
+const CONTROL_STALL_DEFER_DEADLINE_MS=20000;
 const CHASE_RATE_MAX=0.90;   // realized rate under this fraction of the asked rate is a chase
 const CHASE_RUNWAY_SECS=4;   // and only with this much buffered — starved is a stall, not a chase
 const CHASE_REPORT_MS=60000; // one report per minute while it persists
@@ -3581,9 +3585,13 @@ function endWait(resumed){
 async function persistentWait(v,p,began,generation){
   if(PLAYER!==p || p.waitAt!==began || !p.started ||
      (p._seekToken||0)!==generation || v.paused || v.seeking) return;
+  // The ask itself consumes frozen-picture time. Re-read the absolute age
+  // after it settles so a slow control response cannot extend the deadline.
+  const controlElapsedMs=Math.round(performance.now()-began);
   p.waitTimer=null;
   const ms=Math.round(performance.now()-began), runway=p.waitRunway;
   const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
+  const firstReport=!p.waitReported;
   p.waitReported=true;
   // This exact transition owns the legacy reopen. Cadence alone is too late:
   // the replacement normally stops this reporter before its next scheduled
@@ -3593,11 +3601,11 @@ async function persistentWait(v,p,began,generation){
     : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
   const ask=askPlaybackControl("stalled",controlObservation);
   const controlTrigger=ask.trigger;
-  recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
+  if(firstReport) recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=pbPosSec();
   // An armed verdict is used only when this ask produced none of its own: a
   // fresh answer is always better evidence than a remembered one.
-  const verdict=(await ask.action)||p.controlVerdict||null;
+  const verdict=(await ask.action)||armedPlaybackControlVerdict(p);
   // The viewer had up to CONTROL_ASK_MS to seek, pause or close. Re-check
   // every condition the entry guard checked, because none of them survived
   // the await on their own — acting on a stale generation here would reopen
@@ -3632,7 +3640,7 @@ async function persistentWait(v,p,began,generation){
       clientLog({level:"warn",event:"stall_recovery",detail:"fallthrough:hold",
         message:`server holds this stall (${verdict.reason}) — nothing left to play, recovering anyway`,
         control_trigger:controlTrigger});
-    }else{
+    }else if(controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
       // Production is deliberately not advancing, so the client's reopen would
       // churn against a server that already knows better. This player holds
       // media it cannot render rather than media it cannot get, so waiting
@@ -3651,11 +3659,16 @@ async function persistentWait(v,p,began,generation){
           `<button onclick="closePlayer()">Close</button>`);
       }
       p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),
-        PERSISTENT_STALL_MS);
+        Math.min(PERSISTENT_STALL_MS,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
       return;
+    }else{
+      clientLog({level:"warn",event:"stall_recovery",detail:"fallthrough:hold_deadline",
+        message:"server hold reached the client recovery deadline — recovering anyway",
+        control_trigger:controlTrigger});
     }
   }
-  if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT){
+  if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
+     &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
     // Production stopped for something that may not recur, and named when to
     // look again. Pace to it rather than reopening — but bounded, because a
     // server that keeps saying "soon" is not distinguishable, from here, from
@@ -3667,7 +3680,8 @@ async function persistentWait(v,p,began,generation){
       message:`server paces this stall (${verdict.reason}) — waiting ${(again/1000).toFixed(1)}s`+
         ` (${p.stallDeferrals}/${CONTROL_DEFER_LIMIT})`,
       control_trigger:controlTrigger});
-    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),again);
+    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation).catch(()=>{}),
+      Math.min(again,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
     return;
   }
   const action=PlaybackPolicy.stallRecoveryAction({
@@ -6755,9 +6769,10 @@ function playbackControlHlsFatal(data,started){
 }
 function playbackControlSnapshot(v,p){
   if(!v||!p) return null;
-  const seeking=!!v.seeking || p._seekPreview!=null;
+  const pendingSeek=p.controlSeek||null;
+  const seeking=!!pendingSeek || !!v.seeking || p._seekPreview!=null;
   const hinted=!p.started&&p.controlPositionHintSec!=null?p.controlPositionHintSec:null;
-  const preview=seeking&&p._seekPreview!=null
+  const preview=!pendingSeek&&seeking&&p._seekPreview!=null
     ? Math.max(0,p._seekPreview-((p.bookOffset||0)/1000)) : null;
   let positionMs=Math.max(0,Math.round((hinted!=null?hinted:
     preview!=null?preview:(p.offset||0)+(v.currentTime||0))*1000));
@@ -6797,7 +6812,8 @@ function playbackControlSnapshot(v,p){
   const bps=p.hls&&Number(p.hls.bandwidthEstimate);
   return {demand,position_ms:positionMs,buffered_from_ms:range.from,
     buffered_through_ms:range.through,playback_rate:playbackRate,render_state:render,
-    seek_target_ms:render==="seeking"?positionMs:null,
+    seek_target_ms:render==="seeking"
+      ? (pendingSeek?pendingSeek.targetMs:positionMs) : null,
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
     observation,acknowledgement:null};
@@ -6870,6 +6886,16 @@ function controlVerdictText(message){
   const text=String(message==null?"":message).replace(/[\r\n\0]+/g," ").trim();
   if(!text) return "Playback stopped.";
   return text.length>160?text.slice(0,159)+"\u2026":text;
+}
+function armedPlaybackControlVerdict(p){
+  if(!p||!p.controlVerdict) return null;
+  if(Number.isFinite(p.controlVerdictExpiresAt)
+     &&performance.now()>=p.controlVerdictExpiresAt){
+    p.controlVerdict=null;
+    p.controlVerdictExpiresAt=null;
+    return null;
+  }
+  return p.controlVerdict;
 }
 function holdReasonText(reason){
   return {demand:"Another player is using this stream.",
@@ -6954,9 +6980,16 @@ function askPlaybackControl(renderOverride,observationOverride){
 // failed settles them too, with null: "no answer" is an answer a stalled
 // viewer can act on immediately, and making them wait out the full bound for
 // it would add six seconds to a stall for nothing.
-function settlePlaybackControlWaiters(p,request,response){
+function settlePlaybackControlWaiters(p,request,response,error){
   const waiters=p&&p.controlWaiters;
   if(!waiters||!waiters.length) return;
+  // The new owner has its own sequence space and did not answer this
+  // observation. Let the reporter adopt it, but release every current recovery
+  // owner immediately rather than extending a frozen wait to the hard cap.
+  if(error&&error.code==="owner_changed"){
+    clearPlaybackControlWaiters(p);
+    return;
+  }
   const sequence=Number(request&&request.sequence);
   if(!Number.isSafeInteger(sequence)) return;
   const action=(response&&response.action)||null;
@@ -7033,19 +7066,21 @@ function startPlaybackControl(v,p,bootstrap){
       onExchange:({request,response,error})=>{
         if(PLAYER!==p||p.controlReporter!==reporter) return;
         p.controlLastRequest=request;
-        settlePlaybackControlWaiters(p,request,response);
+        settlePlaybackControlWaiters(p,request,response,error);
         if(response&&response.delivery
           &&subtitleReadinessRetryTransition(p,response.delivery)){
           retryReadyNativeSubtitle(p);
         }
         // A terminal verdict can arrive on any exchange, and the reporter
         // stops on it — correctly, since it owns no recovery. But a stall an
-        // hour later would then find no reporter to ask and fall through to
-        // the client's own guess, discarding the one answer the server was
-        // sure of. Ruling D1 says the verdict is armed rather than executed;
-        // this is where it is armed. It outlives the reporter deliberately.
+        // later in the same lease would then find no reporter to ask and fall
+        // through to the client's own guess, discarding the one answer the
+        // server was sure of. Ruling D1 says the verdict is armed rather than
+        // executed; this is where it is armed. It outlives the reporter and a
+        // same-title session replacement, but not the lease.
         if(response&&response.action&&response.action.type==="terminal"){
           p.controlVerdict=response.action;
+          p.controlVerdictExpiresAt=performance.now()+bootstrap.lease_timeout_ms;
         }
         if(response){
           const recovered=p.controlLastError;
@@ -7143,7 +7178,6 @@ function attachSession(v, t, info, wantSec){
   stopPlaybackControl(t);
   t.controlRenderOverride=null;
   t.controlObservationOverride=null;
-  t.controlVerdict=null;
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
@@ -9474,6 +9508,27 @@ function pbPosSec(){ const v=document.getElementById("video"); return ((PLAYER&&
 // the end of the film. Clamp the display; leave pbPosSec itself honest, since
 // resume points and seeks want the raw figure.
 function pbShownSec(){ const p=pbPosSec(), t=pbTotalSec(); return t>0?Math.min(p,t):p; }
+// A committed destination outlives the media element/session it replaces.
+// `_seekPreview` is only pointer UI and is cleared before seekTo(); this is the
+// control-plane intent, monotonically superseded by later seeks and cleared
+// only after the requested timeline is actually presenting.
+function beginPlaybackControlSeek(p,targetSec){
+  if(!p) return null;
+  const sequence=(p.controlSeekSequence||0)+1;
+  p.controlSeekSequence=sequence;
+  p.controlSeek={sequence,targetMs:Math.max(0,Math.round(targetSec*1000))};
+  notifyPlaybackControl();
+  return p.controlSeek;
+}
+function settlePlaybackControlSeek(v,p){
+  const pending=p&&p.controlSeek;
+  if(!pending||!v||!p.started||v.seeking||v.readyState<2) return false;
+  const positionMs=Math.max(0,Math.round(((p.offset||0)+(v.currentTime||0))*1000));
+  if(Math.abs(positionMs-pending.targetMs)>2500) return false;
+  p.controlSeek=null;
+  notifyPlaybackControl();
+  return true;
+}
 function pbTick(){
   if(!PLAYER) return;
   const v=document.getElementById("video");
@@ -9625,7 +9680,7 @@ function wirePlayer(){
   ["mousemove","pointerdown","touchstart"].forEach(ev=>window.addEventListener(ev,()=>{
     const modal=document.getElementById("modal"); if(modal&&modal.classList.contains("open")) playerActivity();
   }));
-  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.controlRenderOverride=null; PLAYER.controlObservationOverride=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
+  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.controlRenderOverride=null; PLAYER.controlObservationOverride=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); settlePlaybackControlSeek(v,PLAYER); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
   v.addEventListener("canplay",()=>{ if(PLAYER.started) setLoading(false); });
   // Only a stream that HAS started can "buffer". Before that, the loading
   // overlay owns the message (and a watchdog owns the deadline), so a stalled
@@ -9713,7 +9768,7 @@ function wirePlayer(){
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
   document.addEventListener("visibilitychange",notifyPlaybackControl);
-  v.addEventListener("timeupdate",checkMarkers);
+  v.addEventListener("timeupdate",()=>{ settlePlaybackControlSeek(v,PLAYER); checkMarkers(); });
   // Click the picture to play/pause and double-click for fullscreen — the
   // behaviour the native controls used to give us, gone now that we draw our
   // own transport. (Two clicks toggle play twice, so a double-click only
@@ -9810,7 +9865,6 @@ function skipMarker(m,automatic=false){
 // restart the server-side stream at the new offset (the stream is one-directional).
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
-  endWait(false);
   targetSec=Math.max(0,targetSec);
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
   if(markerEnd && targetSec*1000<markerEnd-1000 && markerNowMs()>=markerEnd-1000){
@@ -9839,6 +9893,11 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
     }
     targetSec=local;
   }
+  // Publish the destination while the old media and reporter still exist.
+  // Everything below can detach a source, destroy hls.js, or replace the
+  // server session; none of those operations is allowed to erase the intent.
+  beginPlaybackControlSeek(PLAYER,targetSec);
+  endWait(false);
   // Direct play and film-addressed VOD seek without opening a new session.
   if(!forceReopen && (PLAYER.method==='direct_play' || PLAYER.vod)){
     try{ v.currentTime=Math.max(0,targetSec-(PLAYER.offset||0)); }catch(e){}
@@ -10024,7 +10083,7 @@ async function handleEnded(fileId){
   const ask=askPlaybackControl("failed",
     {decoder_state:"failed",error_code:"media",error_detail:"truncated_stream"});
   const controlTrigger=ask.trigger;
-  const verdict=(await ask.action)||PLAYER.controlVerdict||null;
+  const verdict=(await ask.action)||armedPlaybackControlVerdict(PLAYER);
   // The viewer had the whole ask window — up to CONTROL_ASK_CAP_MS — to seek,
   // pause or close, and `handleEnded` can be re-entered by the next `ended`
   // event on a stream that reopened while we waited. `endedAt` alone is a poor

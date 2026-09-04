@@ -69,6 +69,7 @@ import tv.plurx.app.data.SubTrack
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlaybackSessionStatus
+import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.Session
 import tv.plurx.app.ui.AppViewModel
 import tv.plurx.app.ui.theme.Accent
@@ -119,6 +120,7 @@ class Controller(
     private val plan: PlanLike,
     private val caps: Map<String, String>,
     private val decisionCaps: DeviceCaps,
+    private val playbackIntent: PlaybackIntent,
     private val vm: AppViewModel,
     private val scope: CoroutineScope,
     initialAudioOffsetMs: Long = 0,
@@ -199,6 +201,9 @@ class Controller(
 
     private val stallReopenBudget = StallReopenBudget()
     private val stallGuard = ControllerStallGuard(stallReopenBudget)
+    private val openStallTracker = OpenBufferingStallTracker()
+    private var sessionlessStallRecoveryUsed = false
+    private var sessionlessStallRecoveryPositionMs: Long? = null
 
     /**
      * Every create for this playback passes through one coordinator. This
@@ -361,9 +366,6 @@ class Controller(
         private set
     var lastTimeToFirstFrameMs by mutableStateOf<Long?>(null)
         private set
-
-    /** Stable for this player instance — the server's supersession key. */
-    private val playbackId = UUID.randomUUID().toString()
 
     /**
      * This player's passive control reporting. Nothing about playback depends
@@ -574,6 +576,8 @@ class Controller(
         override fun onRenderedFirstFrame() {
             establishedPlayback = true
             lastTimeToFirstFrameMs = playbackTelemetry.firstFrame(monotonicNowMs())?.elapsedMs
+            if (playbackIntent.presented(realPosition())) playbackControl.playerChanged()
+            playbackNotice = null
         }
 
         override fun onTracksChanged(tracks: Tracks) {
@@ -601,11 +605,30 @@ class Controller(
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         stallWatchdogJob = scope.launch {
             while (isActive) {
+                settlePlaybackIntentIfPresented()
                 playbackControlPlayerChanged()
-                val measurement = playbackTelemetry.sampleStall(establishedPlayback, monotonicNowMs())
-                if (measurement != null) {
-                    playbackStallCount += 1
-                    onStall(measurement.positionMs)
+                val observedAtMs = monotonicNowMs()
+                // Retrospective telemetry still records the final interruption
+                // duration, but recovery is owned by the open deadline below.
+                playbackTelemetry.sampleStall(establishedPlayback, observedAtMs)
+                val openStall = openStallTracker.sample(
+                    buffering = player.playbackState == Player.STATE_BUFFERING,
+                    playbackRequested = player.playWhenReady,
+                    establishedPlayback = establishedPlayback,
+                    positionMs = realPosition(),
+                    observedAtMs = observedAtMs,
+                )
+                if (openStall != null) {
+                    if (openStall.controlMayDefer) {
+                        playbackStallCount += 1
+                    }
+                    onStall(openStall)
+                }
+                sessionlessStallRecoveryPositionMs?.let { recoveredAt ->
+                    if (kotlin.math.abs(realPosition() - recoveredAt) >= 5_000) {
+                        sessionlessStallRecoveryUsed = false
+                        sessionlessStallRecoveryPositionMs = null
+                    }
                 }
                 delay(1_000)
             }
@@ -642,12 +665,15 @@ class Controller(
 
     fun seekTo(targetMs: Long) {
         val t = targetMs.coerceIn(0, if (plan.durationMs > 0) plan.durationMs else Long.MAX_VALUE)
+        playbackIntent.beginSeek(t, realPosition())
+        playbackControl.reportIntent()
         when {
             directTransport -> {
                 beginPlaybackAttempt("seek")
-                player.seekTo(t)
+                stallGuard.vodSeek { player.seekTo(t) }
             }
             subtitleDelivery.usesPlanTransport && planMode == "remux" -> {
+                stallGuard.invalidateForUserAction()
                 val attempt = beginPlaybackAttempt("seek")
                 leaveSessionPlayback()
                 Session.resetMediaFailover()
@@ -672,6 +698,12 @@ class Controller(
                 stallGuard.liveSessionSeek { openSession(t, attempt) }
             }
         }
+    }
+
+    /** Publish a screen-owned replacement before Compose disposes this controller. */
+    fun prepareReplacement(positionMs: Long, quality: PlaybackQuality = playbackIntent.quality) {
+        playbackIntent.beginSeek(positionMs, realPosition(), quality)
+        playbackControl.reportIntent()
     }
 
     fun playPause() {
@@ -772,6 +804,10 @@ class Controller(
         reason: String,
         observedAtMs: Long = monotonicNowMs(),
     ) {
+        if (reason == "quality" || reason == "audio") {
+            playbackIntent.beginSeek(positionMs, realPosition())
+            playbackControl.reportIntent()
+        }
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
@@ -890,7 +926,10 @@ class Controller(
      * without spending its own budget. False means today's path, unchanged —
      * which is the branch every node in the fleet takes.
      */
-    private fun applyStallVerdict(verdict: ControlAction): Boolean = when (verdict.type) {
+    private fun applyStallVerdict(
+        verdict: ControlAction,
+        event: OpenBufferingStallTracker.Event,
+    ): Boolean = when (verdict.type) {
         "terminal" -> {
             // Ruling D1: the verdict is armed, not executed. This player is
             // stalled with nothing left to render, so the only thing the
@@ -904,16 +943,19 @@ class Controller(
             // against a server that already knows better, and it must not
             // spend the budget either.
             //
-            // And unlike web and Apple, this one says nothing to the viewer,
-            // because of what this detector actually is. `sampleStall` emits
-            // a measurement when a stall ENDS — the playhead has moved again
-            // by the time control reaches here — so the viewer is watching,
-            // not staring at a frozen picture. A banner reading "the server is
-            // busy" over playback that just resumed is noise, and the case the
-            // banner exists for on the other two platforms cannot reach this
-            // function at all: during an open-ended freeze `sampleStall`
-            // returns null forever.
-            true
+            // Control may defer the first recovery, never own the frozen
+            // picture. The absolute twenty-second deadline fires again with
+            // controlMayDefer=false and falls through to the client recovery.
+            if (!event.controlMayDefer || !openStallTracker.defer(monotonicNowMs())) {
+                false
+            } else {
+                playbackNotice = if (verdict.type == "hold") {
+                    "Waiting briefly for the server. Your place is saved."
+                } else {
+                    "The server asked playback to retry shortly. Your place is saved."
+                }
+                true
+            }
         }
         else -> false
     }
@@ -928,18 +970,14 @@ class Controller(
      * stopped early.  Once the budget is exhausted at the ladder floor the
      * session stays on that rung without further reopen attempts.
      */
-    private suspend fun onStall(positionMs: Long) {
-        if (sessionId == null) return
+    private suspend fun onStall(event: OpenBufferingStallTracker.Event) {
+        val positionMs = event.positionMs
         // The ask goes before the budget is consulted, and before anything
         // else this function does. The evidence is published from INSIDE it,
         // after it has read the sequence floor — publishing first lets the
         // pump start the next request before that read lands, which makes the
         // floor one too high and rejects the very exchange that carried this
         // stall's evidence.
-        //
-        // The limit this does not close: the detector that got us here cannot
-        // fire during an open-ended freeze at all, so a frozen playhead stays
-        // invisible to the control plane either way.
         val session = sessionId
         // The token is taken BEFORE the ask, not after, and it is the token
         // the reopen goes on to use. A VOD seek or an in-place subtitle change
@@ -967,14 +1005,32 @@ class Controller(
         // `playWhenReady && establishedPlayback`; a viewer who paused, or a
         // transport failover that started on the same session, or any seek
         // that invalidated the guard, all leave the id alone.
-        if (sessionId != session || sessionId == null) return
+        if (sessionId != session) return
         if (!stallGuard.isCurrent(requestVersion)) return
         if (!player.playWhenReady || !establishedPlayback) return
-        if (verdict != null && applyStallVerdict(verdict)) return
+        if (verdict != null && applyStallVerdict(verdict, event)) return
+        // A reopen is a new recovery episode. If the replacement freezes at
+        // the same playhead, it must receive its own bounded deadline rather
+        // than inheriting the fired latch from the item it replaced.
+        openStallTracker.reset()
+        if (session == null) {
+            if (sessionlessStallRecoveryUsed) {
+                onError("Playback stopped responding after retrying this stream.")
+                return
+            }
+            sessionlessStallRecoveryUsed = true
+            sessionlessStallRecoveryPositionMs = positionMs
+            restartAt(positionMs, "stall", observedAtMs)
+            return
+        }
         // If we have already exhausted the budget at the current floor rung,
-        // stop reopening — the server cannot step further down and the client
-        // must not churn forever.
-        if (!stallReopenBudget.canReopen()) return
+        // stop reopening — but do not leave the viewer on a frozen picture.
+        // The server cannot step further down, so this is a visible terminal
+        // failure with a retry affordance rather than silent infinite wait.
+        if (!stallReopenBudget.canReopen()) {
+            onError("Playback stopped responding after exhausting recovery attempts.")
+            return
+        }
         val reason = "stall"
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         // Use the stall-specific session body that carries the predecessor
@@ -996,7 +1052,7 @@ class Controller(
         scope.launch {
             val body = bindDecisionPlan(
                 body = subtitleSessionBody(
-                    playbackId = playbackId,
+                    playbackId = playbackIntent.playbackId,
                     requestId = UUID.randomUUID().toString(),
                     controlSequence = playbackControl.controlSequence(),
                     startSeconds = positionMs / 1000.0,
@@ -1007,7 +1063,7 @@ class Controller(
                     preserveDolbyVision = plan.preserveDolbyVision,
                     audioIndex = selectedAudio,
                     audioOffsetMs = audioOffsetMs,
-                    quality = vm.preferences.value.playbackQuality,
+                    quality = playbackIntent.quality,
                     sourceHeight = plan.sourceHeight,
                     deliveredDynamicRange = deliveredRange,
                     previousSessionId = prevId,
@@ -1084,7 +1140,7 @@ class Controller(
 
     internal fun sessionBody(ms: Long, controlSequence: Long? = null): CreateSessionReq = bindDecisionPlan(
         body = subtitleSessionBody(
-            playbackId = playbackId,
+            playbackId = playbackIntent.playbackId,
             requestId = UUID.randomUUID().toString(),
             controlSequence = controlSequence,
             startSeconds = ms / 1000.0,
@@ -1100,7 +1156,7 @@ class Controller(
             preserveDolbyVision = plan.preserveDolbyVision,
             audioIndex = selectedAudio,
             audioOffsetMs = audioOffsetMs,
-            quality = vm.preferences.value.playbackQuality,
+            quality = playbackIntent.quality,
             sourceHeight = plan.sourceHeight,
             deliveredDynamicRange = deliveredRange,
         ),
@@ -1453,9 +1509,8 @@ class Controller(
             isEnded = player.playbackState == Player.STATE_ENDED,
             // A seek Media3 has accepted but not yet rendered is exactly the
             // discontinuity the protocol calls seeking.
-            isSeeking = player.isCurrentMediaItemSeekable &&
-                player.playbackState == Player.STATE_BUFFERING &&
-                player.currentPosition != player.contentPosition,
+            isSeeking = playbackIntent.pendingSeek != null,
+            seekTargetMs = playbackIntent.pendingSeek?.targetMs,
             hasStarted = establishedPlayback,
             waitingForMs = controlWaitingSince?.let {
                 (monotonicNowMs() - it).coerceAtLeast(0L)
@@ -1494,10 +1549,16 @@ class Controller(
             else -> SubtitleMode.NATIVE
         }
         return ClientSelection(
-            // A picked rung rebuilds this controller rather than being held
-            // as state here, so there is no manual height to report and
-            // inventing one would claim a choice the client is not carrying.
-            quality = QualitySelection.Auto,
+            quality = when (val requested = playbackIntent.quality) {
+                PlaybackQuality.Auto -> QualitySelection.Auto
+                PlaybackQuality.Original -> plan.sourceHeight
+                    ?.coerceIn(144, 2_160)
+                    ?.let(QualitySelection::Manual)
+                    ?: QualitySelection.Auto
+                else -> requested.rungHeight
+                    ?.let(QualitySelection::Manual)
+                    ?: QualitySelection.Auto
+            },
             audioTrack = selectedAudio?.toInt(),
             subtitle = SubtitleSelection(
                 mode = mode,
@@ -1518,6 +1579,19 @@ class Controller(
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()
         playbackControl.playerChanged()
+    }
+
+    /**
+     * Settle an in-place Media3 seek only after the replacement position is
+     * ready to present. `onRenderedFirstFrame` owns new media items; this tick
+     * covers VOD seeks where Media3 keeps the same item and does not promise a
+     * second first-frame callback.
+     */
+    private fun settlePlaybackIntentIfPresented() {
+        if (!establishedPlayback || player.playbackState != Player.STATE_READY || player.isLoading) {
+            return
+        }
+        if (playbackIntent.presented(realPosition())) playbackControl.playerChanged()
     }
 
     private fun refreshControlWaiting() {

@@ -1554,6 +1554,10 @@ final class PlayerController: ObservableObject {
     /// lower rung.
     private var sessionHeight: Int?
     private var deliveryStarvation = DeliveryStarvationDetector()
+    /// One advisory control hold, with an absolute deadline measured from the
+    /// stall's first stagnant sample. Control may explain a pause; it may not
+    /// own a frozen picture indefinitely.
+    private var deferredStall: (event: PlaybackStallEvent, deadline: TimeInterval)?
     private var recoveryReopenBudget = RecoveryReopenBudget()
     /// Evidence that this server understands `native_subtitles`: its create
     /// response handed back a native master query. A server predating the
@@ -3373,6 +3377,22 @@ final class PlayerController: ObservableObject {
                     && self.player.currentItem != nil
                 let timeControlStatus = self.player.timeControlStatus
                 let position = self.realPositionMs()
+                if !shouldMonitor || abs(position - (self.deferredStall?.event.positionMs ?? position)) >= 250 {
+                    self.deferredStall = nil
+                } else if let deferred = self.deferredStall,
+                          ProcessInfo.processInfo.systemUptime >= deferred.deadline {
+                    self.deferredStall = nil
+                    await self.retrySameDeliveryAfterStall(
+                        PlaybackStallEvent(
+                            kind: deferred.event.kind,
+                            action: .reopen,
+                            positionMs: position,
+                            durationMs: Self.controlStallDeferralDeadlineMs
+                        ),
+                        consultControl: false
+                    )
+                    continue
+                }
                 if self.diagnosticProbesEnabled, self.player.currentItem != nil {
                     self.reportPlaybackProbe(at: position)
                 }
@@ -3415,7 +3435,11 @@ final class PlayerController: ObservableObject {
     /// replacement uses the identical recipe — but it names the session that
     /// stalled, so the server resolves it one rung down instead of rebuilding
     /// the rung that just starved.
-    private func retrySameDeliveryAfterStall(_ event: PlaybackStallEvent) async {
+    private func retrySameDeliveryAfterStall(
+        _ event: PlaybackStallEvent,
+        consultControl: Bool = true
+    ) async {
+        if consultControl, deferredStall != nil { return }
         // The ask goes here, before the first statement, and the placement is
         // the one detail worth getting right. `next(for:)` below sets
         // `attempted` and returns `.stop` on every later call — it IS the
@@ -3423,10 +3447,22 @@ final class PlayerController: ObservableObject {
         // permanently retire the one same-delivery reopen this client had,
         // which is the exact failure a hold exists to avoid.
         let generation = openGeneration
-        let verdict = await controlVerdictForStall(event)
+        let deferralDeadline = consultControl
+            ? ProcessInfo.processInfo.systemUptime
+                + Double(max(0, Self.controlStallDeferralDeadlineMs - event.durationMs)) / 1_000
+            : nil
+        let verdict: ControlAction?
+        if consultControl, Self.controlMayDeferStall(durationMs: event.durationMs) {
+            verdict = await controlVerdictForStall(event)
+        } else {
+            verdict = nil
+        }
         // Everything the caller checked may have changed across that await.
         guard openGeneration == generation, started, stallRecoveryStillEligible else { return }
-        if let verdict, applyStallVerdict(verdict, event: event) { return }
+        if let verdict,
+           applyStallVerdict(verdict, event: event, deferralDeadline: deferralDeadline) {
+            return
+        }
         var decision = sameDeliveryStallRecovery.next(for: event.kind)
         #if os(iOS)
         let hasOfflineAsset = offlineAssetURL != nil
@@ -3491,6 +3527,11 @@ final class PlayerController: ObservableObject {
     /// while another is in flight.
     static let controlAskSeconds: TimeInterval = 1.5
     static let controlAskCapSeconds: TimeInterval = 3
+    static let controlStallDeferralDeadlineMs = 20_000
+
+    nonisolated static func controlMayDeferStall(durationMs: Int) -> Bool {
+        durationMs < controlStallDeferralDeadlineMs
+    }
 
     /// Publish this owner's evidence and wait, briefly, for the verdict.
     ///
@@ -3562,7 +3603,8 @@ final class PlayerController: ObservableObject {
     /// has ever completed a full-vocabulary exchange with one.
     func applyStallVerdict(
         _ verdict: ControlAction,
-        event: PlaybackStallEvent
+        event: PlaybackStallEvent,
+        deferralDeadline: TimeInterval? = nil
     ) -> Bool {
         switch verdict.type {
         case "terminal":
@@ -3592,8 +3634,10 @@ final class PlayerController: ObservableObject {
                 kind: event.kind,
                 publishedEndMs: sessionStatus?.publishedEndMs,
                 fetchedEndMs: sessionStatus?.fetchedEndMs,
-                runwaySeconds: bufferedRunwaySeconds()
+                runwaySeconds: bufferedRunwaySeconds(),
+                durationMs: event.durationMs
             ) else { return false }
+            guard deferStall(event, deadline: deferralDeadline) else { return false }
             // Production is deliberately not advancing, so a reopen would
             // churn against a server that already knows better — and it must
             // not spend the one same-delivery attempt either.
@@ -3612,6 +3656,8 @@ final class PlayerController: ObservableObject {
             // when to look again. The monitor is already a loop, so the honest
             // response is to spend nothing and let it come round — the pacing
             // this client can honour is "not now", not a precise interval.
+            guard Self.controlMayDeferStall(durationMs: event.durationMs) else { return false }
+            guard deferStall(event, deadline: deferralDeadline) else { return false }
             showPlaybackNotice(Self.holdNotice(verdict.reason), duration: .seconds(30))
             restartDeliveryPollAfterDeferral(event)
             reportPlaybackStall(event, outcome: .serverRetryResource)
@@ -3636,8 +3682,10 @@ final class PlayerController: ObservableObject {
         kind: PlaybackStallKind,
         publishedEndMs: Int?,
         fetchedEndMs: Int?,
-        runwaySeconds: Double?
+        runwaySeconds: Double?,
+        durationMs: Int = 0
     ) -> Bool {
+        guard controlMayDeferStall(durationMs: durationMs) else { return false }
         switch kind {
         case .delivery:
             return false
@@ -3655,6 +3703,18 @@ final class PlayerController: ObservableObject {
             return !(runwayGone
                 && unfetchedMs >= DeliveryStarvationDetector.pendingMediaThresholdMs)
         }
+    }
+
+    private func deferStall(
+        _ event: PlaybackStallEvent,
+        deadline: TimeInterval?
+    ) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let remainingMs = max(0, Self.controlStallDeferralDeadlineMs - event.durationMs)
+        let absoluteDeadline = deadline ?? now + Double(remainingMs) / 1_000
+        guard absoluteDeadline > now else { return false }
+        deferredStall = (event, absoluteDeadline)
+        return true
     }
 
     /// The server-side wedge signature, read from the last status poll: no
