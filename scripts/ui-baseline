@@ -1386,6 +1386,24 @@ def stress_cluster_metric_containment(page, name, layout_id):
         raise Fail(f"{name}/{layout_id}: cluster hostname did not wrap at the narrow viewport")
 
 
+def counted_api_calls(name, route, api_calls):
+    """Keep exact control-plane counts, including route-owned polling reads."""
+    counted = {}
+    for call in api_calls:
+        if route.get("player") and call == "POST /api/v1/items/<id>/progress":
+            counted[call] = 1
+        # Chromium is free to satisfy one direct-play video with one GET or
+        # several byte-range GETs. The baseline contract is that the real
+        # direct endpoint was used; its transport chunk count changes with
+        # decoder buffering and is not a UI or routing invariant. Control
+        # plane calls remain exact counts.
+        elif route.get("player") and call == "GET /api/v1/files/<id>/direct":
+            counted[call] = 1
+        else:
+            counted[call] = counted.get(call, 0) + 1
+    return dict(sorted(counted.items()))
+
+
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -1647,20 +1665,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
                 )
             problems = annotations + problems
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
-        counted = {}
-        for call in api_calls:
-            if route.get("player") and call == "POST /api/v1/items/<id>/progress":
-                counted[call] = 1
-            # Chromium is free to satisfy one direct-play video with one GET or
-            # several byte-range GETs. The baseline contract is that the real
-            # direct endpoint was used; its transport chunk count changes with
-            # decoder buffering and is not a UI or routing invariant. Control
-            # plane calls remain exact counts.
-            elif route.get("player") and call == "GET /api/v1/files/<id>/direct":
-                counted[call] = 1
-            else:
-                counted[call] = counted.get(call, 0) + 1
-        return focus, dict(sorted(counted.items())), dom
+        return focus, counted_api_calls(name, route, api_calls), dom
     finally:
         # A context disappearing is not the same lifecycle as a viewer closing
         # the player. Return an HLS capability immediately instead of leaving
