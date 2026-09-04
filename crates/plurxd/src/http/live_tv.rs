@@ -125,7 +125,7 @@ pub(crate) async fn readiness_for_config(
                 "Every active serving node publishes the live-TV v1 protocol".to_owned()
             }
             Ok(nodes) => format!(
-                "Upgrade or restart these nodes before enabling Live TV: {}",
+                "Start, restart, upgrade, or remove these unready nodes before enabling Live TV: {}",
                 nodes.join(", ")
             ),
             Err(error) => format!("Cannot prove live-TV cluster compatibility: {error}"),

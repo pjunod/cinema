@@ -2561,7 +2561,7 @@ pub async fn update_settings(
         };
         if !updated {
             return Err(ApiError::Conflict(
-                "Live TV activation lost its generation, compatible-fleet, join, or owner-voter fence; reload readiness and try again"
+                "Live TV activation lost its generation, compatible-and-present-fleet, join, or owner-voter fence; reload readiness and try again"
                     .into(),
             ));
         }

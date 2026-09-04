@@ -1668,6 +1668,14 @@ fn no_absent_node_predicate() -> &'static str {
        WHERE present.removed_at IS NULL AND present.last_seen_at < $3)"
 }
 
+/// Live-TV activation supplies its absence cutoff as parameter 7. Keep this
+/// separate from the learner-protocol predicate because `$3` in the settings
+/// statement is the tuple's `updated_at`, not a liveness boundary.
+fn no_absent_live_tv_node_predicate() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM cluster_nodes AS present \
+       WHERE present.removed_at IS NULL AND present.last_seen_at < $7)"
+}
+
 /// The same rule as a roster, so a refusal can name who is not answering.
 fn absent_nodes_sql() -> &'static str {
     "SELECT present.node_id FROM cluster_nodes AS present \
@@ -1719,7 +1727,8 @@ fn capability_ready_predicate(capability: &str) -> String {
 }
 
 /// Exact replicated precondition for enabling Live TV. Parameter 4 is the
-/// generation key, 5 its expected canonical integer, and 6 the owner node.
+/// generation key, 5 its expected canonical integer, 6 the owner node, and 7
+/// the oldest heartbeat activation may accept.
 fn live_tv_activation_guard_predicate() -> String {
     let generation_ready = "(\
       (NOT EXISTS (SELECT 1 FROM settings WHERE key = $4) AND $5 = 0) \
@@ -1734,9 +1743,13 @@ fn live_tv_activation_guard_predicate() -> String {
         AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance maintenance \
           WHERE maintenance.node_id = owner.node_id))";
     format!(
-        "{generation_ready} AND {} AND {} AND {owner_ready}",
+        // Keep the first occurrence of Hiqlite's named `$N` parameters in
+        // numeric order. Its SQLite binding indexes named placeholders by
+        // first appearance, so `$6` must occur before `$7`.
+        "{generation_ready} AND {} AND {} AND {owner_ready} AND {}",
         capability_ready_predicate(LIVE_TV_CAPABILITY),
         no_join_in_flight_predicate(),
+        no_absent_live_tv_node_predicate(),
     )
 }
 
@@ -6902,20 +6915,33 @@ impl MembershipManager {
         self.unready_nodes(capability, Read::Quorum).await
     }
 
-    /// Active nodes whose current binary has not published the always-compiled
-    /// live-TV v1 owner/snapshot protocol. An unclustered server is the whole
-    /// serving set and supports the protocol by construction.
+    /// Active nodes that cannot currently prove the always-compiled live-TV
+    /// v1 owner/snapshot protocol. A matching capability row from a process
+    /// that has since gone silent is not proof: activation must wait for a
+    /// fresh heartbeat or for the absent member to be removed. An unclustered
+    /// server is the whole serving set and supports the protocol by
+    /// construction.
     pub async fn live_tv_protocol_pending_nodes(&self) -> Result<Vec<String>, MembershipError> {
         if !self.is_replicated() {
             return Ok(Vec::new());
         }
-        self.nodes_missing_capability(LIVE_TV_CAPABILITY).await
+        let cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+        let (missing, absent) = tokio::try_join!(
+            self.nodes_missing_capability(LIVE_TV_CAPABILITY),
+            self.absent_nodes(cutoff),
+        )?;
+        Ok(missing
+            .into_iter()
+            .chain(absent)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
     }
 
     /// Publish an enabled Live-TV tuple only while the generation, fleet
-    /// capability, join barrier, and owner voter are all true in the same
-    /// replicated transaction. The readiness route is advisory; this is the
-    /// activation linearization point.
+    /// capability, fresh presence, join barrier, and owner voter are all true
+    /// in the same replicated transaction. The readiness route is advisory;
+    /// this is the activation linearization point.
     pub async fn activate_live_tv_settings_if_ready(
         &self,
         generation_key: &str,
@@ -6943,6 +6969,7 @@ impl MembershipManager {
         }
         let sql = guarded_live_tv_setting_sql();
         let now = unix_ms()?;
+        let absence_cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
         let mut ordered = values
             .iter()
             .filter(|(key, _)| *key != generation_key)
@@ -6965,7 +6992,8 @@ impl MembershipManager {
                         now,
                         generation_key,
                         expected_generation,
-                        owner_node_id
+                        owner_node_id,
+                        absence_cutoff
                     ),
                 )
             }))
@@ -9071,6 +9099,7 @@ mod tests {
     fn commit_live_tv_activation(
         connection: &mut rusqlite::Connection,
         session_limit: &str,
+        absence_cutoff: i64,
     ) -> bool {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -9092,7 +9121,8 @@ mod tests {
                             1_i64,
                             crate::store::keys::LIVE_TV_CONFIG_GENERATION,
                             0_i64,
-                            "owner"
+                            "owner",
+                            absence_cutoff
                         ],
                     )
                     .expect("guarded activation write"),
@@ -9343,7 +9373,7 @@ mod tests {
                 .busy_timeout(Duration::from_secs(5))
                 .expect("activation busy timeout");
             activation_barrier.wait();
-            commit_live_tv_activation(&mut connection, "1")
+            commit_live_tv_activation(&mut connection, "1", 0)
         });
         let join_path = path.clone();
         let join_barrier = Arc::clone(&barrier);
@@ -9496,6 +9526,23 @@ mod tests {
     }
 
     #[test]
+    fn absent_capable_node_cannot_publish_any_live_tv_setting() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("fixture");
+        install_live_tv_membership_fixture(&connection);
+        assert!(
+            !commit_live_tv_activation(&mut connection, "2", 2),
+            "a capability proof from before the absence cutoff is stale"
+        );
+        let published: i64 = connection
+            .query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))
+            .expect("published setting count");
+        assert_eq!(
+            published, 0,
+            "a refused activation must leave the complete tuple unpublished"
+        );
+    }
+
+    #[test]
     fn live_tv_generation_allows_one_concurrent_activation_writer() {
         let path = std::env::temp_dir().join(format!(
             "plurx-live-tv-cas-race-{}.sqlite",
@@ -9514,7 +9561,7 @@ mod tests {
                     .busy_timeout(Duration::from_secs(5))
                     .expect("CAS busy timeout");
                 barrier.wait();
-                commit_live_tv_activation(&mut connection, limit)
+                commit_live_tv_activation(&mut connection, limit, 0)
             })
         };
         let first = writer("1");

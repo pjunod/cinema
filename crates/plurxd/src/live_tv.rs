@@ -29,6 +29,10 @@ const GRAPH_PROBE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const GRAPH_PROBE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DOCUMENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Forced refreshes are expensive, signed owner operations. One caller does
+/// the work while a small bounded set of followers may wait for its result;
+/// additional callers fail promptly instead of building an unbounded queue.
+const MAX_FORCED_REFRESH_CALLERS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LiveTvConfig {
@@ -187,7 +191,7 @@ pub(crate) struct SnapshotRequest {
     pub(crate) probe_graph: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum LiveTvError {
     InvalidConfig(String),
     DeviceUnavailable(String),
@@ -215,6 +219,118 @@ struct CachedSnapshot {
 }
 
 #[derive(Clone)]
+struct CompletedSnapshotRefresh {
+    generation: i64,
+    completed: tokio::time::Instant,
+    result: Result<LiveTvSnapshot, LiveTvError>,
+}
+
+#[derive(Default)]
+struct SnapshotCacheState {
+    snapshot: Option<CachedSnapshot>,
+    completed_refresh: Option<CompletedSnapshotRefresh>,
+}
+
+struct SnapshotCache {
+    state: tokio::sync::Mutex<SnapshotCacheState>,
+    forced_admission: tokio::sync::Semaphore,
+}
+
+impl Default for SnapshotCache {
+    fn default() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(SnapshotCacheState::default()),
+            forced_admission: tokio::sync::Semaphore::new(MAX_FORCED_REFRESH_CALLERS),
+        }
+    }
+}
+
+impl SnapshotCache {
+    async fn get_or_refresh<F, Future>(
+        &self,
+        generation: i64,
+        force: bool,
+        refresh: F,
+    ) -> Result<LiveTvSnapshot, LiveTvError>
+    where
+        F: FnOnce() -> Future,
+        Future: std::future::Future<Output = Result<LiveTvSnapshot, LiveTvError>>,
+    {
+        let requested = tokio::time::Instant::now();
+        let _forced_permit = if force {
+            Some(self.forced_admission.try_acquire().map_err(|_| {
+                LiveTvError::DeviceUnavailable(
+                    "HDHomeRun refresh is busy; retry shortly".to_owned(),
+                )
+            })?)
+        } else {
+            None
+        };
+        let mut state = self.state.lock().await;
+        let now = tokio::time::Instant::now();
+
+        // A caller that arrived while another refresh was in flight is a
+        // follower, even when it also requested `force`. Reuse the completed
+        // result so one burst performs one device operation. This includes a
+        // failed result: otherwise a down tuner turns the mutex into a serial
+        // retry queue.
+        if let Some(completed) = state.completed_refresh.as_ref().filter(|completed| {
+            completed.generation == generation && completed.completed >= requested
+        }) {
+            return completed.result.clone();
+        }
+        if !force {
+            if let Some(cached) = state.snapshot.as_ref().filter(|cached| {
+                cached.generation == generation
+                    && now.duration_since(cached.observed) <= SNAPSHOT_TTL
+            }) {
+                return Ok(with_age(cached, now, SnapshotFreshness::Fresh, None));
+            }
+        }
+
+        let result = match refresh().await {
+            Ok(mut snapshot) => {
+                let observed = tokio::time::Instant::now();
+                snapshot.age_seconds = 0;
+                snapshot.freshness = SnapshotFreshness::Fresh;
+                snapshot.refresh_error = None;
+                state.snapshot = Some(CachedSnapshot {
+                    generation,
+                    observed,
+                    snapshot: snapshot.clone(),
+                });
+                Ok(snapshot)
+            }
+            Err(error) => {
+                let failed_at = tokio::time::Instant::now();
+                state
+                    .snapshot
+                    .as_ref()
+                    .filter(|cached| {
+                        cached.generation == generation
+                            && failed_at.duration_since(cached.observed) <= STALE_TTL
+                    })
+                    .map(|cached| {
+                        with_age(
+                            cached,
+                            failed_at,
+                            SnapshotFreshness::Stale,
+                            Some(sanitize_error(&error.to_string())),
+                        )
+                    })
+                    .ok_or(error)
+            }
+        };
+        state.completed_refresh = Some(CompletedSnapshotRefresh {
+            generation,
+            completed: tokio::time::Instant::now(),
+            result: result.clone(),
+        });
+        result
+    }
+}
+
+#[derive(Clone)]
 struct CachedGraphProbe {
     height: u16,
     encoder: Encoder,
@@ -228,7 +344,7 @@ pub(crate) struct LiveTvManager {
     system: Arc<SystemInfo>,
     node_id: String,
     scratch_root: PathBuf,
-    cache: tokio::sync::Mutex<Option<CachedSnapshot>>,
+    cache: SnapshotCache,
     graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
 }
 
@@ -250,7 +366,7 @@ impl LiveTvManager {
             system,
             node_id,
             scratch_root,
-            cache: tokio::sync::Mutex::new(None),
+            cache: SnapshotCache::default(),
             graph_cache: tokio::sync::Mutex::new(None),
         })
     }
@@ -274,58 +390,18 @@ impl LiveTvManager {
                 "this node is not the configured HDHomeRun owner".to_owned(),
             ));
         }
-        let now = tokio::time::Instant::now();
-        let mut cache = self.cache.lock().await;
-        if !force {
-            if let Some(cached) = cache.as_ref().filter(|cached| {
-                cached.generation == config.generation
-                    && now.duration_since(cached.observed) <= SNAPSHOT_TTL
-            }) {
-                let snapshot = with_age(cached, now, SnapshotFreshness::Fresh, None);
-                drop(cache);
-                return Ok(self
-                    .with_graph_probe(snapshot, config, force, probe_graph)
-                    .await);
-            }
-        }
         let address = config.device_ipv4.ok_or_else(|| {
             LiveTvError::InvalidConfig("an HDHomeRun IPv4 address is required".to_owned())
         })?;
-        match self.fetch_snapshot(address, config).await {
-            Ok(mut snapshot) => {
-                let observed = tokio::time::Instant::now();
-                snapshot.age_seconds = 0;
-                snapshot.freshness = SnapshotFreshness::Fresh;
-                snapshot.refresh_error = None;
-                *cache = Some(CachedSnapshot {
-                    generation: config.generation,
-                    observed,
-                    snapshot: snapshot.clone(),
-                });
-                drop(cache);
-                Ok(self
-                    .with_graph_probe(snapshot, config, force, probe_graph)
-                    .await)
-            }
-            Err(error) => {
-                if let Some(cached) = cache.as_ref().filter(|cached| {
-                    cached.generation == config.generation
-                        && now.duration_since(cached.observed) <= STALE_TTL
-                }) {
-                    let snapshot = with_age(
-                        cached,
-                        now,
-                        SnapshotFreshness::Stale,
-                        Some(sanitize_error(&error.to_string())),
-                    );
-                    drop(cache);
-                    return Ok(self
-                        .with_graph_probe(snapshot, config, force, probe_graph)
-                        .await);
-                }
-                Err(error)
-            }
-        }
+        let snapshot = self
+            .cache
+            .get_or_refresh(config.generation, force, || {
+                self.fetch_snapshot(address, config)
+            })
+            .await?;
+        Ok(self
+            .with_graph_probe(snapshot, config, force, probe_graph)
+            .await)
     }
 
     async fn fetch_snapshot(
@@ -504,6 +580,19 @@ struct LineupDocument {
     url: Option<String>,
 }
 
+fn top_level_lineup_marker(value: Option<&serde_json::Value>, fail_closed: bool) -> bool {
+    match value {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(serde_json::Value::Number(value)) if value.as_u64() == Some(0) => false,
+        Some(serde_json::Value::Number(value)) if value.as_u64() == Some(1) => true,
+        // Firmware fields that decide whether plurx may open a tuner are not
+        // permissively coerced. An unfamiliar DRM marker means protected;
+        // an unfamiliar Favorite marker is merely not a favorite.
+        Some(_) => fail_closed,
+    }
+}
+
 fn validate_lineup(rows: Vec<serde_json::Value>) -> Result<Vec<LiveTvChannel>, LiveTvError> {
     if rows.len() > MAX_CHANNELS {
         return Err(LiveTvError::InvalidResponse(format!(
@@ -513,6 +602,8 @@ fn validate_lineup(rows: Vec<serde_json::Value>) -> Result<Vec<LiveTvChannel>, L
     let mut seen = HashSet::with_capacity(rows.len());
     let mut channels = Vec::with_capacity(rows.len());
     for raw_row in rows {
+        let top_level_drm = top_level_lineup_marker(raw_row.get("DRM"), true);
+        let top_level_favorite = top_level_lineup_marker(raw_row.get("Favorite"), false);
         let Ok(row) = serde_json::from_value::<LineupDocument>(raw_row) else {
             continue;
         };
@@ -551,8 +642,9 @@ fn validate_lineup(rows: Vec<serde_json::Value>) -> Result<Vec<LiveTvChannel>, L
         {
             continue;
         }
-        let favorite = tags.iter().any(|tag| tag.eq_ignore_ascii_case("favorite"));
-        let drm = tags.iter().any(|tag| tag.eq_ignore_ascii_case("drm"));
+        let favorite =
+            top_level_favorite || tags.iter().any(|tag| tag.eq_ignore_ascii_case("favorite"));
+        let drm = top_level_drm || tags.iter().any(|tag| tag.eq_ignore_ascii_case("drm"));
         channels.push(LiveTvChannel {
             id: guide_number.to_owned(),
             guide_number: guide_number.to_owned(),
@@ -889,6 +981,110 @@ mod tests {
         )
         .expect("hostile");
         assert!(validate_lineup(hostile).is_err());
+    }
+
+    #[test]
+    fn flex_lineup_combines_current_markers_and_fails_closed_on_unknown_drm() {
+        let rows = serde_json::from_str::<Vec<serde_json::Value>>(
+            r#"[
+              {"GuideNumber":"2.1","GuideName":"Protected","DRM":1},
+              {"GuideNumber":"4.1","GuideName":"Clear","DRM":0},
+              {"GuideNumber":"5.1","GuideName":"Favorite","Favorite":1},
+              {"GuideNumber":"6.1","GuideName":"Legacy","Tags":"favorite, DRM","DRM":0},
+              {"GuideNumber":"7.1","GuideName":"Unknown","DRM":"unknown"},
+              {"GuideNumber":"8.1","GuideName":"Null","DRM":null}
+            ]"#,
+        )
+        .expect("FLEX lineup");
+        let channels = validate_lineup(rows).expect("validated FLEX lineup");
+        assert_eq!(channels.len(), 6);
+        assert!(channels[0].drm);
+        assert_eq!(channels[0].support, LiveTvChannelSupport::DrmUnsupported);
+        assert!(!channels[1].drm);
+        assert_eq!(channels[1].support, LiveTvChannelSupport::Ready);
+        assert!(channels[2].favorite);
+        assert!(channels[3].favorite);
+        assert!(channels[3].drm, "legacy DRM must combine with DRM:0");
+        assert!(channels[4].drm, "an unknown DRM marker must fail closed");
+        assert!(channels[5].drm, "a null DRM marker must fail closed");
+    }
+
+    fn cache_test_snapshot(generation: i64) -> LiveTvSnapshot {
+        LiveTvSnapshot {
+            generation,
+            device: LiveTvDevice {
+                device_id: "test-device".to_owned(),
+                friendly_name: "HDHomeRun FLEX 4K".to_owned(),
+                model_number: "HDFX-4K".to_owned(),
+                firmware_version: "test".to_owned(),
+                tuner_count: 4,
+            },
+            channels: Vec::new(),
+            freshness: SnapshotFreshness::Fresh,
+            age_seconds: 0,
+            last_success_at: 1,
+            refresh_error: None,
+            ffmpeg_graph_ready: false,
+            ffmpeg_graph_message: "not probed".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_forced_refreshes_perform_one_bounded_device_operation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(SnapshotCache::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(tokio::sync::Barrier::new(MAX_FORCED_REFRESH_CALLERS + 1));
+        let mut tasks = Vec::new();
+        for _ in 0..MAX_FORCED_REFRESH_CALLERS {
+            let cache = Arc::clone(&cache);
+            let calls = Arc::clone(&calls);
+            let start = Arc::clone(&start);
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                cache
+                    .get_or_refresh(7, true, || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        // Keep the first operation in flight long enough for
+                        // every released caller to become its follower.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Ok(cache_test_snapshot(7))
+                    })
+                    .await
+            }));
+        }
+        start.wait().await;
+        for task in tasks {
+            assert_eq!(
+                task.await
+                    .expect("refresh task")
+                    .expect("snapshot")
+                    .generation,
+                7
+            );
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one forced burst must perform exactly one device refresh"
+        );
+
+        let permits = cache.forced_admission.available_permits();
+        assert_eq!(permits, MAX_FORCED_REFRESH_CALLERS);
+        let held = (0..MAX_FORCED_REFRESH_CALLERS)
+            .map(|_| {
+                cache
+                    .forced_admission
+                    .try_acquire()
+                    .expect("bounded permit")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            cache.forced_admission.try_acquire().is_err(),
+            "forced-refresh admission must have a fixed ceiling"
+        );
+        drop(held);
     }
 
     #[test]
