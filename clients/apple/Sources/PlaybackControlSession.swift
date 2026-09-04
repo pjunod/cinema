@@ -188,6 +188,7 @@ final class PlaybackControlSession {
                 try await Task.sleep(nanoseconds: UInt64(max(0, milliseconds)) * 1_000_000)
             },
             now: { Int(Date().timeIntervalSince1970 * 1_000) },
+            intentGeneration: { [verdicts] in verdicts.intentGeneration() },
             // The return path. Until now this defaulted to a no-op, so the
             // server could send a verdict the player would never see.
             //
@@ -215,7 +216,12 @@ final class PlaybackControlSession {
                       action.type == "terminal",
                       action.message?.isEmpty == false
                 else { return }
-                verdicts.store(action, generation: generation, lease: lease)
+                verdicts.store(
+                    action,
+                    generation: generation,
+                    intentGeneration: exchange.intentGeneration,
+                    lease: lease
+                )
             }
         )
         guard let reporter else {
@@ -360,7 +366,7 @@ final class PlaybackControlSession {
     /// A new title. The old verdict described a source that is no longer
     /// playing, so keeping it would show a confident sentence about the wrong
     /// film.
-    func clearVerdict() { verdicts.clear() }
+    func clearVerdict() { verdicts.clearAndAdvanceIntent() }
 
     func end() {
         latest.store(nil)
@@ -459,9 +465,10 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
 private final class PlaybackControlLatestVerdict: @unchecked Sendable {
     private let lock = NSLock()
     private var value: ControlAction?
-    private var armedAt = Date.distantPast
+    private var armedAt: TimeInterval = 0
     private var lease: TimeInterval = 0
     private var generation = 0
+    private var viewerIntentGeneration = 0
 
     /// Claim the next generation. Deliberately does not clear the verdict: a
     /// reopen is the same viewer on the same title, and the failure a verdict
@@ -473,19 +480,33 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
         return generation
     }
 
-    func store(_ action: ControlAction, generation: Int, lease: TimeInterval) {
+    func store(
+        _ action: ControlAction,
+        generation: Int,
+        intentGeneration: Int,
+        lease: TimeInterval
+    ) {
         lock.lock()
         defer { lock.unlock() }
-        guard generation == self.generation else { return }
+        guard generation == self.generation,
+              intentGeneration == viewerIntentGeneration
+        else { return }
         value = action
-        armedAt = Date()
+        armedAt = ProcessInfo.processInfo.systemUptime
         self.lease = lease
     }
 
-    func clear() {
+    func clearAndAdvanceIntent() {
         lock.lock()
         defer { lock.unlock() }
+        viewerIntentGeneration += 1
         value = nil
+    }
+
+    func intentGeneration() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return viewerIntentGeneration
     }
 
     /// A verdict outlives its reporter and its session, but not the lease the
@@ -496,7 +517,7 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard value != nil else { return nil }
-        if Date().timeIntervalSince(armedAt) > lease {
+        if ProcessInfo.processInfo.systemUptime - armedAt > lease {
             value = nil
             return nil
         }

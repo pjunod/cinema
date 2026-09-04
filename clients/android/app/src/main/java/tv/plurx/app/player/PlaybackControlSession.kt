@@ -150,6 +150,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     private var verdictArmedAtMs = 0L
     private var verdictLeaseMs = 0L
     private var verdictGeneration = 0
+    private var verdictIntentGeneration = 0L
 
     /**
      * The last terminal verdict this session was given, if any.
@@ -168,7 +169,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             // production attempt that ended an hour ago would caption an
             // unrelated failure. The bound is the server's own number rather
             // than one invented here.
-            if (System.currentTimeMillis() - verdictArmedAtMs > verdictLeaseMs) {
+            if (monotonicNowMs() - verdictArmedAtMs > verdictLeaseMs) {
                 verdict = null
                 return@synchronized null
             }
@@ -258,7 +259,10 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * explains normally arrives on the far side of one.
      */
     fun clearVerdict() {
-        synchronized(verdictLock) { verdict = null }
+        synchronized(verdictLock) {
+            verdictIntentGeneration += 1
+            verdict = null
+        }
     }
 
     /** Test seam: what the verdict's staleness bound is measured against. */
@@ -298,6 +302,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             send = { path, request -> transport.send(path, request) },
             pace = { kotlinx.coroutines.delay(it) },
             now = { System.currentTimeMillis() },
+            intentGeneration = { synchronized(verdictLock) { verdictIntentGeneration } },
             // The return path. Until now this defaulted to a no-op, so the
             // server could send a verdict the player would never see.
             //
@@ -328,9 +333,11 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                     !action.message.isNullOrEmpty()
                 ) {
                     synchronized(verdictLock) {
-                        if (generation == verdictGeneration) {
+                        if (generation == verdictGeneration &&
+                            exchange.intentGeneration == verdictIntentGeneration
+                        ) {
                             verdict = action
-                            verdictArmedAtMs = System.currentTimeMillis()
+                            verdictArmedAtMs = monotonicNowMs()
                             verdictLeaseMs = leaseMs
                         }
                     }

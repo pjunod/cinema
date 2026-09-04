@@ -52,7 +52,6 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
-import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import androidx.media3.session.MediaSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -450,18 +449,6 @@ class Controller(
         onFailure = { playbackNotice = it },
     )
 
-    /** Per-frame proof for in-place seeks; READY alone is not presentation. */
-    private val videoFrameMetadataListener = VideoFrameMetadataListener {
-            presentationTimeUs, _, _, _ ->
-        val localPositionMs = (presentationTimeUs / 1_000L).coerceAtLeast(0L)
-        val filmPositionMs = if (directTransport || sessionIsVod) {
-            localPositionMs
-        } else {
-            baseMs + localPositionMs
-        }
-        scope.launch { notePresentedVideoFrame(filmPositionMs) }
-    }
-
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
@@ -590,11 +577,11 @@ class Controller(
             }
         }
 
+        /** Media3 calls this after output, unlike its pre-render metadata hook. */
         override fun onRenderedFirstFrame() {
             establishedPlayback = true
             openStallTracker.reset()
             lastTimeToFirstFrameMs = playbackTelemetry.firstFrame(monotonicNowMs())?.elapsedMs
-            notePresentedVideoFrame(realPosition())
             playbackNotice = null
         }
 
@@ -608,9 +595,6 @@ class Controller(
             newPosition: Player.PositionInfo,
             reason: Int,
         ) {
-            if (reason == Player.DISCONTINUITY_REASON_SEEK) {
-                playbackIntent.pendingSeek?.let { playbackIntent.markExecuted(it.sequence) }
-            }
             pgsOverlay.reconcile()
         }
 
@@ -626,14 +610,37 @@ class Controller(
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            playbackIntent.pendingSeek?.let { playbackIntent.markExecuted(it.sequence) }
             pgsOverlay.itemChanged()
         }
     }
 
+    /** One actual-output listener carrying the exact mutation it can settle. */
+    private var presentationListener: Player.Listener? = null
+
+    private fun disarmVideoPresentation() {
+        presentationListener?.let(player::removeListener)
+        presentationListener = null
+    }
+
+    private fun armVideoPresentation(sequence: Long) {
+        disarmVideoPresentation()
+        // Audio-only destinations settle from two advancing player-clock
+        // samples; they will never render a video frame.
+        if (plan.videoCodec == null) return
+        val captured = object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                if (!playbackIntent.presentedVideoFrame(realPosition(), sequence)) return
+                playbackControl.playerChanged()
+                player.removeListener(this)
+                if (presentationListener === this) presentationListener = null
+            }
+        }
+        presentationListener = captured
+        player.addListener(captured)
+    }
+
     init {
         player.addListener(listener)
-        player.setVideoFrameMetadataListener(videoFrameMetadataListener)
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         stallWatchdogJob = scope.launch {
             while (isActive) {
@@ -698,15 +705,26 @@ class Controller(
 
     fun seekTo(targetMs: Long) {
         val t = targetMs.coerceIn(0, if (plan.durationMs > 0) plan.durationMs else Long.MAX_VALUE)
+        enqueueSeek { playbackIntent.beginSeek(t, realPosition()) }
+    }
+
+    /** Repeated transport nudges accumulate while the newest seek is coalescing. */
+    fun seekBy(deltaMs: Long) {
+        enqueueSeek {
+            playbackIntent.beginRelativeSeek(deltaMs, realPosition(), plan.durationMs)
+        }
+    }
+
+    private fun enqueueSeek(begin: () -> PlaybackIntent.PendingSeek) {
         stallGuard.viewerSeek {
             playbackControl.clearVerdict()
-            val pending = playbackIntent.beginSeek(t, realPosition())
+            val pending = begin()
             seekJob?.cancel()
             seekJob = scope.launch {
                 playbackIntent.retainControlSequence(playbackControl.reportIntent())
                 delay(SEEK_COALESCE_MS)
                 if (!playbackIntent.isCurrent(pending.sequence)) return@launch
-                executeSeek(t, pending.sequence)
+                executeSeek(pending.targetMs, pending.sequence)
             }
         }
     }
@@ -716,8 +734,8 @@ class Controller(
         when {
             directTransport -> {
                 beginPlaybackAttempt("seek")
-                playbackIntent.markExecuted(sequence)
                 player.seekTo(t)
+                if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
             }
             subtitleDelivery.usesPlanTransport && planMode == "remux" -> {
                 val attempt = beginPlaybackAttempt("seek")
@@ -727,8 +745,8 @@ class Controller(
                 val uri = remuxUri(t)
                 activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, t)
-                playbackIntent.markExecuted(sequence)
                 player.setMediaItem(MediaItem.fromUri(uri))
+                if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
                 player.playWhenReady = true
@@ -738,12 +756,12 @@ class Controller(
             // session churn. A live one can't be range-sought, so it reopens.
             sessionIsVod -> {
                 beginPlaybackAttempt("seek")
-                playbackIntent.markExecuted(sequence)
                 player.seekTo(t)
+                if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
             }
             else -> {
                 val attempt = beginPlaybackAttempt("seek")
-                openSession(t, attempt)
+                openSession(t, attempt, sequence)
             }
         }
     }
@@ -782,7 +800,7 @@ class Controller(
         sessionId = null
 
         player.removeListener(listener)
-        player.clearVideoFrameMetadataListener(videoFrameMetadataListener)
+        disarmVideoPresentation()
         mediaSession.release()
         player.release()
     }
@@ -840,6 +858,9 @@ class Controller(
                 playbackIntent.markExecuted(pending.sequence)
                 armTrackSelections()
                 applyTextSelection()
+                if (playbackIntent.presentedInPlace(pending.sequence)) {
+                    playbackControl.playerChanged()
+                }
             }
         }
         return true
@@ -884,12 +905,17 @@ class Controller(
         Session.resetMediaFailover()
 
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
+        val executionSequence = playbackIntent.pendingSeek?.sequence
         when {
-            !subtitleDelivery.usesPlanTransport -> openSession(positionMs, attempt)
+            !subtitleDelivery.usesPlanTransport ->
+                openSession(positionMs, attempt, executionSequence)
             planMode == "direct" -> {
                 leaveSessionPlayback()
                 activeMediaPath = relativeMediaPath(plan.playUrl)
                 player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
+                executionSequence?.let { sequence ->
+                    if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+                }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
                 player.playWhenReady = true
@@ -902,12 +928,15 @@ class Controller(
                 activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, positionMs)
                 player.setMediaItem(MediaItem.fromUri(uri))
+                executionSequence?.let { sequence ->
+                    if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+                }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
                 player.playWhenReady = true
                 armTrackSelections()
             }
-            else -> openSession(positionMs, attempt)
+            else -> openSession(positionMs, attempt, executionSequence)
         }
     }
 
@@ -919,7 +948,11 @@ class Controller(
      * is [subtitleSessionBody]'s answer, so the shape of every request this
      * client sends is unit-tested rather than assembled inline.
      */
-    private fun openSession(ms: Long, attempt: PlaybackAttempt) {
+    private fun openSession(
+        ms: Long,
+        attempt: PlaybackAttempt,
+        executionSequence: Long? = playbackIntent.pendingSeek?.sequence,
+    ) {
         val requestVersion = stallGuard.beginRequest()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
@@ -985,6 +1018,9 @@ class Controller(
                 MediaItem.fromUri(Session.url(hls.playlist_url)),
                 timeline.attachPositionMs,
             )
+            executionSequence?.let { sequence ->
+                if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+            }
             player.prepare()
             playbackTelemetry.prepared(attempt)
             player.playWhenReady = true
@@ -1422,6 +1458,8 @@ class Controller(
     private fun retryMediaOnNextNode(error: PlaybackException): Boolean {
         val path = activeMediaPath ?: return false
         val next = Session.nextMediaFailoverUrl(path) ?: return false
+        val resumesPlayback = player.playWhenReady
+        val presentationSequence = playbackIntent.executedSequence()
         val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
         playbackTelemetry.report(
             event = "playback_transport_failover",
@@ -1430,6 +1468,11 @@ class Controller(
             code = error.errorCode,
             detail = "delivery=$deliveryMode compatibility_ladder=false",
         )
+        // A failover is a new media generation. Any stall owner awaiting a
+        // verdict for the failed item is stale, and the successor needs the
+        // startup deadline rather than the predecessor's established one.
+        stallGuard.invalidateForPlaybackAttempt()
+        beginPlaybackAttempt("node-failover")
         // A progressive remux answers its achieved origin in a response
         // header, and the tracker only accepts a response whose URI it is
         // expecting. Re-arming it here is what keeps every position after a
@@ -1440,8 +1483,11 @@ class Controller(
             progressiveMediaOrigin.begin(next, realPosition())
         }
         player.setMediaItem(MediaItem.fromUri(next), attachPosition)
+        presentationSequence?.let { sequence ->
+            if (playbackIntent.markExecuted(sequence)) armVideoPresentation(sequence)
+        }
         player.prepare()
-        player.playWhenReady = true
+        player.playWhenReady = resumesPlayback
         armTrackSelections()
         return true
     }
@@ -1659,14 +1705,6 @@ class Controller(
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()
         playbackControl.playerChanged()
-    }
-
-    private fun notePresentedVideoFrame(positionMs: Long) {
-        if (!establishedPlayback) {
-            establishedPlayback = true
-            openStallTracker.reset()
-        }
-        if (playbackIntent.presentedVideoFrame(positionMs)) playbackControl.playerChanged()
     }
 
     /** Audio-only playback has no video-frame callback; an advancing active clock is presentation. */

@@ -3598,7 +3598,12 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   const controlObservation=kind==="supply"
     ? {decoder_state:"starved"}
     : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
-  const ask=askPlaybackControl("stalled",controlObservation);
+  // A deferred callback is scheduled on the absolute twenty-second boundary.
+  // At or beyond it there is no control budget left to spend: asking here
+  // would add another 1.5–3 seconds to a deadline that has already expired.
+  const ask=ms>=CONTROL_STALL_DEFER_DEADLINE_MS
+    ? {trigger:null,action:Promise.resolve(null)}
+    : askPlaybackControl("stalled",controlObservation);
   const controlTrigger=ask.trigger;
   if(firstReport) recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=pbPosSec();
@@ -7077,8 +7082,9 @@ function startPlaybackControl(v,p,bootstrap){
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
       clientInstanceId:CONTROL_CLIENT_ID,
       snapshot:()=>PLAYER===p?playbackControlSnapshot(v,p):null,
+      intentGeneration:()=>p.controlIntentGeneration||0,
       send:sendPlaybackControl,
-      onExchange:({request,response,error})=>{
+      onExchange:({request,response,error,intentGeneration})=>{
         if(PLAYER!==p||p.controlReporter!==reporter) return;
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);
@@ -7093,7 +7099,8 @@ function startPlaybackControl(v,p,bootstrap){
         // server was sure of. Ruling D1 says the verdict is armed rather than
         // executed; this is where it is armed. It outlives the reporter and a
         // same-title session replacement, but not the lease.
-        if(response&&response.action&&response.action.type==="terminal"){
+        if(response&&response.action&&response.action.type==="terminal"
+          &&intentGeneration===(p.controlIntentGeneration||0)){
           p.controlVerdict=response.action;
           p.controlVerdictExpiresAt=performance.now()+bootstrap.lease_timeout_ms;
         }

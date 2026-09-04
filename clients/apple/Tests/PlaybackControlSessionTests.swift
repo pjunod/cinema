@@ -341,6 +341,46 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertNotNil(session.terminalVerdict, "ending reporting does not retract a verdict")
     }
 
+    /// A viewer command is an atomic intent boundary even when the prior
+    /// request has already reached the server. Its late terminal response may
+    /// neither re-arm the cleared verdict nor stop reporting the new intent.
+    func testClearingVerdictFencesATerminalResponseAlreadyInFlight() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        defer {
+            controlGate.reset()
+            controlAnswer.set(ControlAction(type: "none"))
+        }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "stale intent"
+        ))
+        controlGate.arm()
+        session.playerChanged()
+        _ = try await waitForExchange { $0.sequence == 2 }
+
+        session.clearVerdict()
+        controlAnswer.set(ControlAction(type: "none"))
+        session.playerChanged()
+        controlGate.release()
+        _ = try await waitForExchange { $0.sequence == 3 }
+
+        XCTAssertNil(session.terminalVerdict)
+        session.end()
+    }
+
     func testAnOrdinaryVerdictArmsNothing() async throws {
         controlExchanges.reset()
         let player = PlayerStub()

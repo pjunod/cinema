@@ -152,6 +152,23 @@ class StallBudgetTest {
     }
 
     @Test
+    fun transportFailoverInvalidatesAWaitingStallWithoutResettingItsBudget() {
+        val budget = StallReopenBudget()
+        budget.seed(720)
+        budget.record(720)
+        val guard = ControllerStallGuard(budget)
+        val waitingStall = guard.beginRequest()
+
+        // This is the exact ownership transition used by
+        // Controller.retryMediaOnNextNode before it starts the successor.
+        guard.invalidateForPlaybackAttempt()
+
+        assertFalse(guard.isCurrent(waitingStall))
+        assertEquals(1, budget.nonDowngradeCount)
+        assertEquals(0, budget.resetCount)
+    }
+
+    @Test
     fun badRequestRetriesExactlyOnceUnboundWithFreshRequestId() = runBlocking {
         val calls = mutableListOf<CreateSessionReq>()
         val badRequest = TestBadRequest()

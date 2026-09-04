@@ -13,6 +13,8 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -123,6 +125,36 @@ class PlaybackControlAskTest {
         return PlaybackControlTransport("https://cinema.example", client, json)
     }
 
+    private fun heldTerminalTransport(
+        sequence: AtomicLong,
+        terminalArrived: CountDownLatch,
+        releaseTerminal: CountDownLatch,
+    ): PlaybackControlTransport {
+        val client = OkHttpClient.Builder().addInterceptor(
+            Interceptor { chain ->
+                val accepted = sequence.incrementAndGet()
+                val action = if (accepted == 2L) {
+                    terminalArrived.countDown()
+                    releaseTerminal.await(5, TimeUnit.SECONDS)
+                    """{"type":"terminal","code":"unsupported","message":"stale intent"}"""
+                } else {
+                    """{"type":"none"}"""
+                }
+                val body = """{"protocol":"${PlaybackControl.PROTOCOL}",""" +
+                    """"generation":"$GENERATION","control_epoch":7,""" +
+                    """"accepted_sequence":$accepted,"action":$action}"""
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            },
+        ).build()
+        return PlaybackControlTransport("https://cinema.example", client, json)
+    }
+
     /**
      * The ask's floor is the reporter's own request counter, so it only means
      * anything once the reporter has built a request. `begin` launches the
@@ -219,6 +251,40 @@ class PlaybackControlAskTest {
             assertEquals("terminal", verdict?.type)
             assertEquals("No decoder for this.", session.terminalVerdict?.message)
         } finally {
+            session.end()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `clearing verdict fences a terminal response already in flight`() = runBlocking {
+        val scope = scope()
+        val session = PlaybackControlSession(scope)
+        val sequence = AtomicLong(0)
+        val terminalArrived = CountDownLatch(1)
+        val releaseTerminal = CountDownLatch(1)
+        try {
+            session.begin(
+                bootstrap(),
+                ::observation,
+                heldTerminalTransport(sequence, terminalArrived, releaseTerminal),
+            )
+            awaitFirstExchange(sequence)
+            session.playerChanged()
+            assertTrue(terminalArrived.await(5, TimeUnit.SECONDS), "terminal request never arrived")
+
+            session.clearVerdict()
+            session.playerChanged()
+            releaseTerminal.countDown()
+            val deadline = monotonicNowMs() + 5_000
+            while (sequence.get() < 3 && monotonicNowMs() < deadline) {
+                kotlinx.coroutines.delay(10)
+            }
+
+            assertTrue(sequence.get() >= 3, "the stale terminal must not stop the reporter")
+            assertNull(session.terminalVerdict, "the old viewer intent must not re-arm")
+        } finally {
+            releaseTerminal.countDown()
             session.end()
             scope.cancel()
         }

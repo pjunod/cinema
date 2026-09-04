@@ -1275,8 +1275,8 @@ private fun PlayerContent(
                     }
                 },
                 onPlayPause = { controller.playPause(); poke() },
-                onSeekBack = { seekWithMarkerUndo(controller.realPosition() - 10_000); poke() },
-                onSeekForward = { seekWithMarkerUndo(controller.realPosition() + 10_000); poke() },
+                onSeekBack = { controller.seekBy(-10_000); poke() },
+                onSeekForward = { controller.seekBy(10_000); poke() },
                 onScrub = { pendingMs = it.coerceIn(0L, plan.durationMs.coerceAtLeast(0L)) },
                 onScrubEnd = {
                     pendingMs?.let(::seekWithMarkerUndo)

@@ -2284,6 +2284,36 @@ final class AppleClientTests: XCTestCase {
         ), "even a decoder hold cannot own the frozen picture past the absolute deadline")
     }
 
+    /// The monitor normally samples every two seconds, but the control plane
+    /// gets exactly the remainder of the twenty-second stall budget — not the
+    /// remainder plus one scheduler tick.
+    func testRecoveryMonitorWakesAtTheAbsoluteControlDeadline() {
+        XCTAssertEqual(
+            PlayerController.recoveryPollDelayMs(now: 100, deferredDeadline: nil),
+            2_000
+        )
+        XCTAssertEqual(
+            PlayerController.recoveryPollDelayMs(now: 100, deferredDeadline: 105),
+            2_000,
+            "a distant deadline preserves the normal health cadence"
+        )
+        XCTAssertEqual(
+            PlayerController.recoveryPollDelayMs(now: 100, deferredDeadline: 100.250),
+            250,
+            "the last sleep lands on the absolute deadline"
+        )
+        XCTAssertEqual(
+            PlayerController.recoveryPollDelayMs(now: 100, deferredDeadline: 100.000_1),
+            1,
+            "sub-millisecond remainders round late, never early"
+        )
+        XCTAssertEqual(
+            PlayerController.recoveryPollDelayMs(now: 100, deferredDeadline: 99),
+            0,
+            "an expired verdict is handled without another cadence delay"
+        )
+    }
+
     /// The wedge signature is the server's own, and both of its thresholds are
     /// `DeliveryStarvationDetector`'s — so the reopen that drops its ticket and
     /// the watchdog that fires one read the same numbers.
@@ -2871,8 +2901,38 @@ final class AppleClientTests: XCTestCase {
         )
         XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: 90_000))
         XCTAssertEqual(state.pendingMs, 90_000, "open completion is not presentation")
+        XCTAssertTrue(
+            state.allowsStallRecovery,
+            "a video output that never yields must not suppress the bounded recovery owner"
+        )
         XCTAssertTrue(state.presentedVideo(positionMs: 90_000, generation: request.generation))
         XCTAssertNil(state.pendingMs)
+    }
+
+    func testAnUnexecutedCoalescingSeekDoesNotRaceStallRecovery() {
+        var state = PlayerSeekState()
+        _ = state.absolute(90_000, durationMs: 600_000)
+
+        XCTAssertFalse(state.allowsStallRecovery)
+    }
+
+    @MainActor
+    func testQualityAndAudioCommandsCreateANewPresentationDestinationSynchronously() {
+        let controller = PlayerController()
+
+        controller.selectQuality(720)
+        let quality = controller.pendingPlaybackIntentForTesting
+        XCTAssertEqual(quality.targetMs, 0)
+
+        controller.selectOriginalQuality()
+        let original = controller.pendingPlaybackIntentForTesting
+        XCTAssertEqual(original.targetMs, 0)
+        XCTAssertGreaterThan(original.generation, quality.generation)
+
+        controller.selectAudio(2)
+        let audio = controller.pendingPlaybackIntentForTesting
+        XCTAssertEqual(audio.targetMs, 0)
+        XCTAssertGreaterThan(audio.generation, original.generation)
     }
 
     func testAudioOnlySeekRequiresAnAdvancingPostExecutionClock() {

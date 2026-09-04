@@ -156,11 +156,14 @@
       this.setTimer = value.setTimer || scheduleDefault;
       this.clearTimer = value.clearTimer || cancelDefault;
       this.now = value.now || defaultNow;
+      this.intentGeneration = typeof value.intentGeneration === "function"
+        ? value.intentGeneration : function () { return 0; };
       this.onExchange = typeof value.onExchange === "function" ? value.onExchange : function () {};
       this.sequence = 0;
       this.acceptedSequence = 0;
       this.inFlight = false;
       this.pending = null;
+      this.pendingIntentGeneration = 0;
       this.timer = null;
       this.exchangeTimer = null;
       this.abortController = null;
@@ -169,6 +172,7 @@
       this.lastAccepted = null;
       this.lastStartedAt = null;
       this.retryRequest = null;
+      this.retryIntentGeneration = 0;
       this.acceptedCapabilitiesKey = null;
       this.nextAllowedAt = 0;
     }
@@ -183,6 +187,7 @@
       const newest = snapshot || this.snapshot();
       if (!validSnapshot(newest)) return null;
       this.pending = newest;
+      this.pendingIntentGeneration = Number(this.intentGeneration()) || 0;
       if (this.timer !== null) {
         this.clearTimer(this.timer);
         this.timer = null;
@@ -223,8 +228,10 @@
         return;
       }
       let request = this.retryRequest;
+      let requestIntentGeneration = this.retryIntentGeneration;
       if (!request) {
         const snapshot = this.pending;
+        requestIntentGeneration = this.pendingIntentGeneration;
         this.pending = null;
         const sequence = this.sequence + 1;
         if (!Number.isSafeInteger(sequence)) {
@@ -262,6 +269,7 @@
           throw error;
         }
         this.retryRequest = null;
+        this.retryIntentGeneration = 0;
         if (request.capabilities) {
           this.acceptedCapabilitiesKey = JSON.stringify(request.capabilities);
         }
@@ -286,12 +294,14 @@
           this.nextAllowedAt = this.now()
             + Math.max(MIN_EXCHANGE_MS, response.action.after_ms);
         }
-        this.onExchange({ request, response, error: null });
+        this.onExchange({ request, response, error: null, intentGeneration:requestIntentGeneration });
         // A terminal verdict ends reporting. It does not tear down the player:
         // this reporter still owns no recovery, and the buffer already fetched
         // is still worth playing. The milestone that moves that authority is
         // the one that acts on this.
-        if (request.demand === "end" || response.action.type === "terminal") {
+        if (request.demand === "end"
+            || (response.action.type === "terminal"
+              && requestIntentGeneration === (Number(this.intentGeneration()) || 0))) {
           this.stop();
           return;
         }
@@ -303,7 +313,8 @@
             reportedError = new Error("playback-control exchange deadline exceeded");
             reportedError.name = "TimeoutError";
           }
-          this.onExchange({ request, response: null, error: reportedError });
+          this.onExchange({ request, response: null, error: reportedError,
+            intentGeneration:requestIntentGeneration });
           const status = Number(reportedError && reportedError.status);
           const terminalProtocolError = reportedError
             && reportedError.name === "PlaybackControlProtocolError";
@@ -317,6 +328,7 @@
             this.nextAllowedAt = this.now() + retryDelay(reportedError, MIN_EXCHANGE_MS);
           } else if (!terminalProtocolError && (retryableControl || retryableTransport)) {
             this.retryRequest = request;
+            this.retryIntentGeneration = requestIntentGeneration;
             const fallback = retryableControl ? 500 : this.bootstrap.next_exchange_ms;
             this.nextAllowedAt = this.now() + retryDelay(reportedError, fallback);
           } else {
@@ -372,10 +384,12 @@
       this.sequence = 0;
       this.acceptedSequence = 0;
       this.retryRequest = null;
+      this.retryIntentGeneration = 0;
       this.acceptedCapabilitiesKey = null;
       this.lastAccepted = null;
       this.lastStartedAt = null;
       this.pending = newest;
+      this.pendingIntentGeneration = Number(this.intentGeneration()) || 0;
       return true;
     }
 
@@ -396,7 +410,9 @@
       if (this.stopped) return;
       this.stopped = true;
       this.pending = null;
+      this.pendingIntentGeneration = 0;
       this.retryRequest = null;
+      this.retryIntentGeneration = 0;
       this.nextAllowedAt = 0;
       if (this.timer !== null) this.clearTimer(this.timer);
       this.timer = null;

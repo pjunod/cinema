@@ -88,6 +88,11 @@ internal class ControllerStallGuard(
         requestVersion++
     }
 
+    /** Invalidate stale recovery ownership without resetting its retry budget. */
+    fun invalidateForPlaybackAttempt() {
+        requestVersion++
+    }
+
     fun viewerSeek(action: () -> Unit) {
         invalidateForUserAction()
         action()

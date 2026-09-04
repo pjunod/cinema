@@ -419,6 +419,18 @@ actor PlaybackControlReporter {
         var request: ControlRequest
         var response: ControlResponse?
         var failure: String?
+        /// Local-only viewer intent that produced this request.
+        var intentGeneration = 0
+    }
+
+    private struct PendingSnapshot {
+        var snapshot: PlaybackControlSnapshot
+        var intentGeneration: Int
+    }
+
+    private struct PendingRequest {
+        var request: ControlRequest
+        var intentGeneration: Int
     }
 
     private(set) var bootstrap: ControlBootstrap
@@ -427,14 +439,15 @@ actor PlaybackControlReporter {
     private let send: Send
     private let sleep: Sleep
     private let now: @Sendable () -> Int
+    private let intentGeneration: @Sendable () -> Int
     private let onExchange: @Sendable (Exchange) -> Void
 
     private(set) var sequence = 0
     private(set) var acceptedSequence = 0
     private(set) var stopped = false
     private var inFlight = false
-    private var pending: PlaybackControlSnapshot?
-    private var retryRequest: ControlRequest?
+    private var pending: PendingSnapshot?
+    private var retryRequest: PendingRequest?
     private var acceptedCapabilities: DynamicCapabilities?
     private var lastStartedAt: Int?
     private var nextAllowedAt = 0
@@ -447,6 +460,7 @@ actor PlaybackControlReporter {
         send: @escaping Send,
         sleep: @escaping Sleep,
         now: @escaping @Sendable () -> Int,
+        intentGeneration: @escaping @Sendable () -> Int = { 0 },
         onExchange: @escaping @Sendable (Exchange) -> Void = { _ in }
     ) {
         guard bootstrap.isValid, PlaybackControl.isUUID(clientInstanceId) else { return nil }
@@ -456,6 +470,7 @@ actor PlaybackControlReporter {
         self.send = send
         self.sleep = sleep
         self.now = now
+        self.intentGeneration = intentGeneration
         self.onExchange = onExchange
     }
 
@@ -464,7 +479,9 @@ actor PlaybackControlReporter {
     /// alive is a no-op rather than a second exchange loop.
     func start() {
         guard !stopped, pump == nil else { return }
-        pending = pending ?? snapshot()
+        if pending == nil, let snapshot = snapshot() {
+            pending = PendingSnapshot(snapshot: snapshot, intentGeneration: intentGeneration())
+        }
         pump = Task { [weak self] in await self?.run() }
     }
 
@@ -474,7 +491,7 @@ actor PlaybackControlReporter {
     func notify(_ value: PlaybackControlSnapshot? = nil) {
         guard !stopped else { return }
         guard let newest = value ?? snapshot(), newest.isValid else { return }
-        pending = newest
+        pending = PendingSnapshot(snapshot: newest, intentGeneration: intentGeneration())
     }
 
     /// Report now rather than at the next cadence.
@@ -530,7 +547,12 @@ actor PlaybackControlReporter {
     private func run() async {
         while !stopped && !Task.isCancelled {
             if pending == nil && retryRequest == nil {
-                pending = snapshot()
+                if let snapshot = snapshot() {
+                    pending = PendingSnapshot(
+                        snapshot: snapshot,
+                        intentGeneration: intentGeneration()
+                    )
+                }
             }
             guard pending != nil || retryRequest != nil else {
                 try? await sleep(bootstrap.nextExchangeMs, .pacing)
@@ -561,14 +583,15 @@ actor PlaybackControlReporter {
     /// A retry replays the exact request that failed — the same sequence, the
     /// same body — because a control exchange the server never accepted must
     /// not consume a sequence number, and the server dedupes on it.
-    private func nextRequest() -> ControlRequest? {
+    private func nextRequest() -> PendingRequest? {
         if let retryRequest { return retryRequest }
-        guard let snapshot = pending, snapshot.isValid else {
+        guard let pending, pending.snapshot.isValid else {
             pending = nil
             return nil
         }
-        pending = nil
+        self.pending = nil
         sequence += 1
+        let snapshot = pending.snapshot
         var request = ControlRequest(
             proto: PlaybackControl.protocolName,
             generation: bootstrap.generation,
@@ -594,10 +617,11 @@ actor PlaybackControlReporter {
         if request.sequence != 1 && snapshot.capabilities == acceptedCapabilities {
             request.capabilities = nil
         }
-        return request
+        return PendingRequest(request: request, intentGeneration: pending.intentGeneration)
     }
 
-    private func exchange(_ request: ControlRequest) async {
+    private func exchange(_ pendingRequest: PendingRequest) async {
+        let request = pendingRequest.request
         nextAllowedAt = 0
         lastStartedAt = now()
         inFlight = true
@@ -619,15 +643,24 @@ actor PlaybackControlReporter {
             if response.action.type == "retry_resource", let afterMs = response.action.afterMs {
                 nextAllowedAt = now() + max(PlaybackControl.minimumExchangeMs, afterMs)
             }
-            onExchange(Exchange(request: request, response: response, failure: nil))
+            onExchange(Exchange(
+                request: request,
+                response: response,
+                failure: nil,
+                intentGeneration: pendingRequest.intentGeneration
+            ))
             // A terminal verdict ends reporting. It does not tear the player
             // down: this reporter still owns no recovery, and buffer already
             // fetched is still worth playing. The milestone that moves that
             // authority is the one that acts on this.
-            if request.demand == .end || response.action.type == "terminal" { stop() }
+            if request.demand == .end ||
+                (response.action.type == "terminal" &&
+                    pendingRequest.intentGeneration == intentGeneration()) {
+                stop()
+            }
         } catch {
             if stopped { return }
-            handle(failure: error, for: request)
+            handle(failure: error, for: pendingRequest)
         }
     }
 
@@ -677,10 +710,16 @@ actor PlaybackControlReporter {
         }
     }
 
-    private func handle(failure: Error, for request: ControlRequest) {
+    private func handle(failure: Error, for pendingRequest: PendingRequest) {
+        let request = pendingRequest.request
         if let transport = failure as? ControlTransportError, transport.canceled { return }
         onExchange(
-            Exchange(request: request, response: nil, failure: describe(failure))
+            Exchange(
+                request: request,
+                response: nil,
+                failure: describe(failure),
+                intentGeneration: pendingRequest.intentGeneration
+            )
         )
         if failure is ControlProtocolError {
             stop()
@@ -701,7 +740,7 @@ actor PlaybackControlReporter {
             stop()
             return
         }
-        retryRequest = request
+        retryRequest = pendingRequest
         let fallback = retryableControl ? 500 : bootstrap.nextExchangeMs
         nextAllowedAt = now() + retryDelay(transport, fallback)
     }
@@ -729,7 +768,10 @@ actor PlaybackControlReporter {
         retryRequest = nil
         acceptedCapabilities = nil
         lastStartedAt = nil
-        pending = newest
+        pending = PendingSnapshot(
+            snapshot: newest,
+            intentGeneration: intentGeneration()
+        )
         return true
     }
 

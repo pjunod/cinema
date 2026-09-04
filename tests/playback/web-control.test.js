@@ -956,6 +956,7 @@ async function main() {
       [
         "let PLAYER=null;",
         askConstants,
+        shippedSource("supersedePlaybackControlIntent"),
         shippedSource("holdReasonText"),
         shippedSource("controlVerdictText"),
         shippedSource("armedPlaybackControlVerdict"),
@@ -974,6 +975,8 @@ async function main() {
         " stall(player,video,began,generation){PLAYER=player;",
         "   return persistentWait(video,player,began,generation,player.controlIntentGeneration||0);},",
         " verdictText:controlVerdictText,",
+        " supersede(player){PLAYER=player; return supersedePlaybackControlIntent(player);},",
+        " armedVerdict(player){PLAYER=player; return armedPlaybackControlVerdict(player);},",
         " askProbe(player){PLAYER=player;",
         "  try{ const a=askPlaybackControl('stalled',{decoder_state:'starved'});",
         "   return {trigger:a.trigger, w:(player.controlWaiters||[]).length}; }",
@@ -1077,6 +1080,59 @@ async function main() {
     return { h, player };
   }
 
+  // An invocation scheduled on the absolute boundary has no remaining
+  // control budget. It must recover without putting another request on the
+  // wire or waiting through another ask window.
+  {
+    const h = stallHarness();
+    const player = stalledPlayer();
+    const began = performance.now() - 20_000;
+    player.waitAt = began;
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await flush();
+    const before = h.sent.length;
+
+    await h.stub.stall(player, stalledVideo, began, 3);
+
+    assert.equal(h.sent.length, before, "the expired deadline starts no control ask");
+    assert.equal(h.reopened.length, 1, "the absolute boundary falls through to recovery");
+    h.stub.detach(player);
+  }
+
+  // A terminal response belongs to the viewer intent captured with its
+  // request. Clearing while that request is in flight must neither re-arm the
+  // verdict nor stop the reporter that now owns the newer intent.
+  {
+    let releaseTerminal;
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = stalledPlayer();
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await flush();
+    h.holdWith((request) => request.sequence === 2
+      ? new Promise((resolve) => { releaseTerminal = () => resolve(Object.assign(
+        response(request),
+        { action: { type: "terminal", code: "unsupported", message: "stale intent" } },
+      )); })
+      : null);
+    h.stub.askProbe(player);
+    await settleExchange();
+    assert.equal(typeof releaseTerminal, "function", "the terminal exchange is in flight");
+
+    h.stub.supersede(player);
+    h.answerWith(() => ({ type: "none" }));
+    h.stub.probe(player, stalledVideo);
+    releaseTerminal();
+    await settleExchange();
+
+    assert.equal(h.stub.armedVerdict(player), null, "the stale terminal does not re-arm");
+    assert.equal(h.stub.probe(player, stalledVideo).stopped, false,
+      "the stale terminal does not stop the new intent reporter");
+    assert.ok(h.sent.length >= 3, "the newer intent still exchanges");
+    h.stub.detach(player);
+  }
+
   // A none verdict leaves today's behaviour exactly as it was. This is the
   // branch every node in the fleet actually takes: vocabulary_total is zero.
   {
@@ -1163,17 +1219,6 @@ async function main() {
     assert.equal(player.waitReported, true,
       "the wait stays reported, so resuming does not emit a second record for it");
     assert.equal(h.timers.get(player.waitTimer).ms, 8_000, "and the deadline comes round again");
-  }
-
-  {
-    const { h, player } = await askWith({ type: "hold", reason: "no_room" }, {
-      began: performance.now()-20_000,
-      player: { waitRunway: 8 },
-    });
-    assert.equal(h.reopened.length, 1,
-      "a repeated hold cannot own a decode freeze past the absolute deadline");
-    assert.equal(player.waitTimer, null, "the deadline cannot be restarted");
-    assert.ok(h.log.some((entry) => entry.detail === "fallthrough:hold_deadline"));
   }
 
   {
