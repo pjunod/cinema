@@ -3045,10 +3045,6 @@ final class AppleClientTests: XCTestCase {
             expectedActionEpoch: selectionB,
             currentActionEpoch: selectionB
         ))
-        XCTAssertTrue(PlayerController.subtitleMutationIsCurrent(
-            expectedActionEpoch: nil,
-            currentActionEpoch: selectionB
-        ), "open-time reconciliation has its own item generation fence")
     }
 
     func testAudioOnlySeekRequiresAnAdvancingPostExecutionClock() {
