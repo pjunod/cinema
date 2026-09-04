@@ -18,7 +18,7 @@
     dialog{width:min(34rem,calc(100% - 1.2rem));max-height:80%;border:1px solid var(--line);border-radius:.9rem;background:var(--surface);color:var(--text);padding:1rem}dialog::backdrop{background:#000b}.panel-title{display:flex;align-items:center;justify-content:space-between;gap:1rem}.toc,.search-results{display:grid;gap:.35rem;max-height:55vh;overflow:auto}.toc button,.search-results button{text-align:left;background:transparent}.toc button[aria-current=true]{border-color:var(--accent);color:var(--accent)}
     .search{display:flex;gap:.5rem;margin-bottom:.8rem}.search input{min-height:2.75rem;min-width:0;flex:1;border:1px solid var(--line);border-radius:.65rem;background:var(--bg);color:var(--text);padding:.55rem}.search-results button{display:grid;gap:.2rem}.result-title{font-weight:700}.result-snippet{color:var(--muted);font-size:.88rem}
     .settings{display:grid;grid-template-columns:minmax(7rem,1fr) minmax(10rem,2fr);align-items:center;gap:.8rem}.settings input,.settings select{width:100%}#location{min-width:8rem;text-align:center}
-    @media(max-width:620px){header .word{display:none}.title{font-size:.9rem}#location{min-width:5.4rem}.settings{grid-template-columns:1fr}}
+    @media(max-width:620px){header .word{display:none}.title{font-size:.9rem}#location{min-width:5.4rem}.settings{grid-template-columns:minmax(0,1fr)}}
   </style>
 </head>
 <body>
