@@ -31,17 +31,17 @@ jobs:
     permissions:
       contents: read
       checks: write
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - name: Restore patched crates to registry provenance for advisory matching
         run: scripts/vendor-audit-lock --output target/vendor-audit/Cargo.lock
       # v2.0.0, pinned so the security gate cannot move without review.
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+      - uses: https://github.com/rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.FORGEJO_TOKEN }}
       # cargo-audit intentionally skips path-sourced packages. Re-scan a
       # synthesized lockfile so future advisories against either vendored
       # upstream release remain visible.
@@ -59,15 +59,15 @@ jobs:
     permissions:
       contents: read
       checks: write
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       # v2.0.0, pinned so the security gate cannot move without review.
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+      - uses: https://github.com/rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.FORGEJO_TOKEN }}
           working-directory: fuzz
 
   scheduled:
@@ -76,11 +76,11 @@ jobs:
     permissions:
       contents: read
       issues: write
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - name: Build one complete advisory inventory
         run: >-
           scripts/vendor-audit-lock --output target/rust-audit/Cargo.lock
@@ -88,7 +88,7 @@ jobs:
       # Keep exactly one issue publisher over the deduplicated root, vendored,
       # and fuzz package inventory. One reporter per lockfile can race when the
       # same advisory affects dependencies shared by more than one lock.
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+      - uses: https://github.com/rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.FORGEJO_TOKEN }}
           working-directory: target/rust-audit

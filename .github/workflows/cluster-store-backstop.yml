@@ -14,13 +14,13 @@ env:
 jobs:
   cluster-store-backstop:
     name: full unsharded replicated Store contracts
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, ci-store]
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -52,7 +52,7 @@ jobs:
           --command "make cluster-store-check"
       - name: Retain the complete Store evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-store-backstop
           path: |

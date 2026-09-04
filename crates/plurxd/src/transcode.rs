@@ -5328,6 +5328,7 @@ impl Session {
                 crate::playback_control::ControlDisposition,
                 u64,
                 crate::playback_control::ControlAction,
+                bool,
                 crate::playback_control::ClientPlatform,
                 // What the viewer changed and what the device can do about
                 // it. A distinct type rather than a bare `bool`, which also
@@ -5364,6 +5365,7 @@ impl Session {
             outcome.disposition,
             outcome.accepted_sequence,
             outcome.action,
+            outcome.action_suppressed,
             outcome.platform,
             outcome.selection,
             outcome.lease.expires_at_unix_ms(),
@@ -9697,6 +9699,7 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
                     outcome.disposition,
                     outcome.accepted_sequence,
                     outcome.action,
+                    outcome.action_suppressed,
                     outcome.platform,
                     outcome.selection,
                     outcome.lease.expires_at_unix_ms(),
@@ -16734,6 +16737,7 @@ impl TranscodeManager {
             disposition,
             accepted_sequence,
             action,
+            action_suppressed,
             platform,
             selection,
             lease_expires_at_unix_ms,
@@ -16783,6 +16787,7 @@ impl TranscodeManager {
                     disposition,
                     accepted_sequence,
                     action,
+                    action_suppressed,
                     platform,
                     selection,
                     lease_expires_at_unix_ms,
@@ -16807,6 +16812,7 @@ impl TranscodeManager {
         disposition: crate::playback_control::ControlDisposition,
         accepted_sequence: u64,
         action: crate::playback_control::ControlAction,
+        action_suppressed: bool,
         platform: crate::playback_control::ClientPlatform,
         selection: crate::playback_control::SelectionObservation,
         lease_expires_at_unix_ms: i64,
@@ -16870,6 +16876,7 @@ impl TranscodeManager {
                 disposition,
                 accepted_sequence,
                 action,
+                action_suppressed,
                 lease_expires_at_unix_ms,
                 lease_timeout_ms,
                 lease_state,
@@ -21157,6 +21164,15 @@ impl HlsDeliveryFixture {
         self.session.delivery.total_bytes()
     }
 
+    /// Seed one closed delivery-rate window without making an HTTP test sleep
+    /// for the meter's 1.5-second minimum.
+    pub(crate) fn set_delivered_bps_for_test(&self, bits_per_second: i64) {
+        self.session.delivery.idle_for_test(2_000);
+        self.session
+            .delivery
+            .note(u64::try_from(bits_per_second / 4).unwrap_or_default());
+    }
+
     pub(crate) fn file_id(&self) -> i64 {
         self.session.file_id
     }
@@ -21644,6 +21660,7 @@ pub(crate) mod tests {
             snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
                 crate::playback_control::ClientPlatform::Web,
             ),
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
         };
 
         let accepted = fixture
@@ -21857,6 +21874,8 @@ pub(crate) mod tests {
                 client_instance_id: &client,
                 sequence,
                 snapshot,
+                prepared_successor:
+                    crate::playback_control::PreparedSuccessorObservation::NotRequested,
             }
         };
         let retry_pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -22085,6 +22104,8 @@ pub(crate) mod tests {
                 client_instance_id: &client,
                 sequence,
                 snapshot,
+                prepared_successor:
+                    crate::playback_control::PreparedSuccessorObservation::NotRequested,
             }
         };
 
@@ -22209,6 +22230,8 @@ pub(crate) mod tests {
                         client_instance_id: &client,
                         sequence: 1,
                         snapshot,
+                        prepared_successor:
+                            crate::playback_control::PreparedSuccessorObservation::NotRequested,
                     })
                     .await
             })
@@ -22249,6 +22272,8 @@ pub(crate) mod tests {
                 client_instance_id: &client,
                 sequence: 1,
                 snapshot,
+                prepared_successor:
+                    crate::playback_control::PreparedSuccessorObservation::NotRequested,
             })
             .await
             .expect("live session")
@@ -22300,6 +22325,8 @@ pub(crate) mod tests {
                         snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
                             crate::playback_control::ClientPlatform::Web,
                         ),
+                        prepared_successor:
+                            crate::playback_control::PreparedSuccessorObservation::NotRequested,
                     })
                     .await
             })

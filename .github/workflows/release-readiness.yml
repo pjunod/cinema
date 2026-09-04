@@ -16,16 +16,16 @@ jobs:
     name: current version is ready to tag
     # Readiness answers "would the gate pass if we tagged now", so it has to run
     # the gate's ffmpeg rather than the week's. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2
       - uses: ./.github/actions/ffmpeg
         with:
           major: "6"
