@@ -625,7 +625,17 @@ struct PlayerSeekState: Equatable {
     private(set) var pendingMs: Int?
     private(set) var generation = 0
     private(set) var executedGeneration: Int?
+    private(set) var requiresMediaPresentation = false
     private var lastAudioPositionMs: Int?
+    private var executionSampledAt: TimeInterval?
+    private var executionRate = 0.0
+    private var executionActiveSeconds = 0.0
+    private var plausibleProgressMs = 0.0
+    private var demandSampledAt: TimeInterval?
+    private var demandWasActive = false
+    private var demandActiveSeconds = 0.0
+
+    static let presentationDeadlineSeconds: TimeInterval = 8
 
     /// A target still coalescing or awaiting execution suppresses recovery;
     /// an executed target waiting for presentation is itself recoverable work.
@@ -637,9 +647,26 @@ struct PlayerSeekState: Equatable {
         generation &+= 1
         let target = Self.clamp(requestedMs, durationMs: durationMs)
         pendingMs = target
+        requiresMediaPresentation = true
         executedGeneration = nil
         lastAudioPositionMs = nil
+        resetPresentationClock()
         return (target, generation)
+    }
+
+    /// Changing an in-place selection cannot present an outstanding seek.
+    /// Carry that obligation into the new command even when its target is
+    /// unchanged; only a selection on an already presented item can settle
+    /// when the subtitle mutation completes.
+    mutating func selection(
+        at observedMs: Int,
+        durationMs: Int,
+        inPlace: Bool
+    ) -> (target: Int, generation: Int) {
+        let requiresMedia = (pendingMs != nil && requiresMediaPresentation) || !inPlace
+        let destination = absolute(pendingMs ?? observedMs, durationMs: durationMs)
+        requiresMediaPresentation = requiresMedia
+        return destination
     }
 
     mutating func relative(
@@ -653,11 +680,75 @@ struct PlayerSeekState: Equatable {
     /// A completed seek/open is only execution. It is not presentation: the
     /// transport can complete while the old frame remains on screen.
     @discardableResult
-    mutating func markExecuted(generation expected: Int, targetMs: Int) -> Bool {
+    mutating func markExecuted(
+        generation expected: Int,
+        targetMs: Int,
+        at now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> Bool {
         guard expected == generation, pendingMs == targetMs else { return false }
         executedGeneration = expected
         lastAudioPositionMs = nil
+        resetPresentationClock()
+        executionSampledAt = now
+        demandSampledAt = now
         return true
+    }
+
+    /// Integrate the observed active clock between samples. A delayed first
+    /// callback can already be a second into healthy playback; a paused clock
+    /// earns no forward allowance. The allowance never grows beyond the
+    /// execution's eight active seconds; a pause does not spend that window.
+    mutating func observePlaybackClock(
+        at now: TimeInterval,
+        rate: Double,
+        isPlaying: Bool,
+        generation expected: Int
+    ) {
+        guard expected == generation,
+              executedGeneration == expected,
+              let sampledAt = executionSampledAt,
+              now.isFinite
+        else { return }
+        if executionRate > 0 {
+            let active = min(max(0, now - sampledAt),
+                             max(0, Self.presentationDeadlineSeconds - executionActiveSeconds))
+            plausibleProgressMs += active * executionRate * 1_000
+            executionActiveSeconds += active
+        }
+        executionSampledAt = max(now, sampledAt)
+        executionRate = isPlaying && rate.isFinite ? max(0, rate) : 0
+    }
+
+    /// A wrong-position clock may keep advancing, so destination timeout is
+    /// independent of media progress. Only time when presentation is wanted
+    /// and observable spends this budget, not a viewer pause or background.
+    mutating func observePresentationDemand(
+        at now: TimeInterval,
+        eligible: Bool,
+        generation expected: Int
+    ) -> Bool {
+        guard expected == generation, executedGeneration == expected,
+              let sampledAt = demandSampledAt, now.isFinite
+        else { return false }
+        if demandWasActive { demandActiveSeconds += max(0, now - sampledAt) }
+        demandSampledAt = max(now, sampledAt)
+        demandWasActive = eligible
+        return eligible && demandActiveSeconds >= Self.presentationDeadlineSeconds
+    }
+
+    private func isPlausibleLanding(_ positionMs: Int, targetMs: Int) -> Bool {
+        let delta = Double(positionMs) - Double(targetMs)
+        return delta >= -250 && delta <= plausibleProgressMs + 250
+    }
+
+    private mutating func resetPresentationClock() {
+        executionSampledAt = nil
+        executionRate = 0
+        executionActiveSeconds = 0
+        plausibleProgressMs = 0
+        demandSampledAt = nil
+        demandWasActive = false
+        demandActiveSeconds = 0
     }
 
     /// Only a frame from the latest executed generation, at its destination,
@@ -667,7 +758,7 @@ struct PlayerSeekState: Equatable {
         guard expected == generation,
               executedGeneration == expected,
               let target = pendingMs,
-              abs(positionMs - target) <= 250
+              isPlausibleLanding(positionMs, targetMs: target)
         else { return false }
         pendingMs = nil
         executedGeneration = nil
@@ -681,11 +772,31 @@ struct PlayerSeekState: Equatable {
     mutating func presentedAudio(positionMs: Int, generation expected: Int) -> Bool {
         guard expected == generation,
               executedGeneration == expected,
-              let target = pendingMs,
-              abs(positionMs - target) <= 250
+              let target = pendingMs
         else { return false }
-        defer { lastAudioPositionMs = positionMs }
-        guard let previous = lastAudioPositionMs, previous != positionMs else { return false }
+        guard let previous = lastAudioPositionMs else {
+            guard isPlausibleLanding(positionMs, targetMs: target) else { return false }
+            lastAudioPositionMs = positionMs
+            return false
+        }
+        guard positionMs > previous,
+              isPlausibleLanding(positionMs, targetMs: target)
+        else { return false }
+        pendingMs = nil
+        executedGeneration = nil
+        lastAudioPositionMs = nil
+        return true
+    }
+
+    /// An in-place selection has no successor item or frame generation. Its
+    /// completed AVPlayer/overlay mutation is the presentation boundary.
+    @discardableResult
+    mutating func presentedInPlace(generation expected: Int, targetMs: Int) -> Bool {
+        guard expected == generation,
+              executedGeneration == expected,
+              !requiresMediaPresentation,
+              pendingMs == targetMs
+        else { return false }
         pendingMs = nil
         executedGeneration = nil
         lastAudioPositionMs = nil
@@ -699,7 +810,9 @@ struct PlayerSeekState: Equatable {
     mutating func clear() {
         pendingMs = nil
         executedGeneration = nil
+        requiresMediaPresentation = false
         lastAudioPositionMs = nil
+        resetPresentationClock()
         generation &+= 1
     }
 
@@ -1496,6 +1609,8 @@ final class PlayerController: ObservableObject {
     private var timeObserver: Any?
     private var interactiveSeekTask: Task<Void, Never>?
     private var seekPresentationTask: Task<Void, Never>?
+    private var seekPresentationLifecycle: [AnyCancellable] = []
+    private var seekPresentationBackgrounded = false
     private var seekVideoOutput: AVPlayerItemVideoOutput?
     private var endObserver: NSObjectProtocol?
     private var itemStatusObservation: NSKeyValueObservation?
@@ -2338,6 +2453,12 @@ final class PlayerController: ObservableObject {
             isDirectPlayback: isDirectPlayback,
             activeOverlay: activeOverlay
         )
+        let destination = seekState.selection(
+            at: positionForPlaybackIntent(),
+            durationMs: knownDurationMs,
+            inPlace: route != .reopen
+        )
+        currentMs = destination.target
         // Set before the reopen is scheduled: the open it leads to reads this
         // to decide it may no longer direct-play, and it stays set for the rest
         // of the title, so turning subtitles off again costs no second restart.
@@ -2347,7 +2468,13 @@ final class PlayerController: ObservableObject {
         Task {
             retainControlSequence(await playbackControl.reportIntent())
             guard actionEpoch == viewerActionEpoch, selectedSubtitle == index else { return }
-            await applySubtitleSelection(index, route: route)
+            guard destination.generation == seekState.generation else { return }
+            await applySubtitleSelection(
+                index,
+                route: route,
+                destination: destination,
+                expectedActionEpoch: actionEpoch
+            )
         }
     }
 
@@ -2376,25 +2503,79 @@ final class PlayerController: ObservableObject {
         playbackNotice = nil
     }
 
-    private func applySubtitleSelection(_ index: Int?, route: SubtitleSelectionRoute) async {
+    private func applySubtitleSelection(
+        _ index: Int?,
+        route: SubtitleSelectionRoute,
+        destination: (target: Int, generation: Int)? = nil,
+        expectedActionEpoch: Int? = nil
+    ) async {
         // Overlay teardown/installation changes visible presentation and
         // external-output behavior, so it belongs after the urgent intent
         // publication and stale-action guard just like the AVPlayer mutation.
         updatePGSOverlaySelection(index)
         switch route {
         case .reopen:
-            await reopen(at: positionForPlaybackIntent())
+            await reopen(at: destination?.target ?? positionForPlaybackIntent())
         case .bitmapOverlay:
             // Moving from a native rendition to bitmap presentation must also
             // turn AVPlayer's legible option off. The synchronized layer then
             // owns the only subtitle pixels without replacing the video item.
-            await applyNativeSubtitleSelection(nil, to: player.currentItem)
+            await applyNativeSubtitleSelection(
+                nil,
+                to: player.currentItem,
+                expectedActionEpoch: expectedActionEpoch
+            )
+            if Self.subtitleMutationIsCurrent(
+                expectedActionEpoch: expectedActionEpoch,
+                currentActionEpoch: viewerActionEpoch
+            ) {
+                settleInPlaceSubtitleDestination(destination)
+            }
         case .mediaSelection:
             // Selection belongs to AVPlayerItem, not the HLS session. This is
             // the no-restart path that preserves video copy, HDR, position,
             // and the viewer's selected quality.
-            await applyNativeSubtitleSelection(index, to: player.currentItem)
+            let applied = await applyNativeSubtitleSelection(
+                index,
+                to: player.currentItem,
+                expectedActionEpoch: expectedActionEpoch
+            )
+            if applied,
+               Self.subtitleMutationIsCurrent(
+                expectedActionEpoch: expectedActionEpoch,
+                currentActionEpoch: viewerActionEpoch
+               ) {
+                settleInPlaceSubtitleDestination(destination)
+            }
         }
+    }
+
+    private func settleInPlaceSubtitleDestination(
+        _ destination: (target: Int, generation: Int)?
+    ) {
+        guard let destination,
+              destination.generation == seekState.generation,
+              destination.target == seekState.pendingMs
+        else { return }
+        if seekState.requiresMediaPresentation {
+            // The subtitle command superseded the old seek task's action
+            // epoch. Reissue its destination through the normal seek route;
+            // selecting subtitles alone cannot prove that the target played.
+            issueSeek(to: destination.target, generation: destination.generation)
+            return
+        }
+        guard seekState.markExecuted(
+                generation: destination.generation,
+                targetMs: destination.target
+              ),
+              seekState.presentedInPlace(
+                generation: destination.generation,
+                targetMs: destination.target
+              )
+        else { return }
+        currentMs = realPositionMs()
+        playbackControlPlayerChanged()
+        updateNowPlaying()
     }
 
     func selectAudio(_ index: Int) {
@@ -2541,6 +2722,7 @@ final class PlayerController: ObservableObject {
         interactiveSeekTask = nil
         seekPresentationTask?.cancel()
         seekPresentationTask = nil
+        seekPresentationLifecycle.removeAll()
         seekVideoOutput = nil
         viewerActionEpoch &+= 1
         pendingControlSequence = nil
@@ -3705,7 +3887,7 @@ final class PlayerController: ObservableObject {
     static let controlAskSeconds: TimeInterval = 1.5
     static let controlAskCapSeconds: TimeInterval = 3
     nonisolated static let controlStallDeferralDeadlineMs = 20_000
-    static let seekPresentationDeadlineSeconds: TimeInterval = 8
+    static let seekPresentationDeadlineSeconds = PlayerSeekState.presentationDeadlineSeconds
     nonisolated private static let recoveryPollCadenceMs: Int64 = 2_000
 
     /// Wake at the earlier of the ordinary health cadence and a control
@@ -4189,10 +4371,11 @@ final class PlayerController: ObservableObject {
 
     // MARK: - Observation and metadata
 
-    /// Install one passive presentation tap per attached item. It is idle
-    /// outside an interactive seek; while a target is pending, consuming a
-    /// pixel buffer is AVFoundation's proof that the successor frame was
-    /// actually presented rather than merely decoded or declared ready.
+    /// Install one passive frame-availability tap per attached item. It is
+    /// idle outside an interactive seek. A pixel buffer proves that this
+    /// item's output reached the requested timeline, but AVPlayerItemVideoOutput
+    /// does not acknowledge physical display by AVPlayerLayer; device playback
+    /// qualification must still verify that final rendering boundary.
     private func installSeekVideoOutput(on item: AVPlayerItem) {
         seekPresentationTask?.cancel()
         seekPresentationTask = nil
@@ -4206,8 +4389,20 @@ final class PlayerController: ObservableObject {
         guard let item = player.currentItem else { return }
         let output = seekVideoOutput
         let hasVideo = decision?.source?.videoCodec != nil
-        let deadline = ProcessInfo.processInfo.systemUptime
-            + Self.seekPresentationDeadlineSeconds
+        seekPresentationBackgrounded = UIApplication.shared.applicationState == .background
+        seekPresentationLifecycle = [
+            (UIApplication.didEnterBackgroundNotification, true),
+            (UIApplication.willEnterForegroundNotification, false)
+        ].map { name, backgrounded in
+            NotificationCenter.default.publisher(for: name).sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.seekPresentationBackgrounded = backgrounded
+                    self.sampleSeekPresentationClocks()
+                }
+            }
+        }
+        sampleSeekPresentationClocks()
         seekPresentationTask = Task { [weak self, weak item] in
             while !Task.isCancelled {
                 guard let self, let item,
@@ -4216,16 +4411,22 @@ final class PlayerController: ObservableObject {
                       self.seekState.generation == generation
                 else { return }
 
+                let deadlineReached = self.sampleSeekPresentationClocks()
+
                 var settled = false
                 if hasVideo, let output {
                     let itemTime = output.itemTime(
                         forHostTime: ProcessInfo.processInfo.systemUptime
                     )
+                    var displayTime = CMTime.invalid
                     if itemTime.isValid,
                        itemTime.seconds.isFinite,
                        output.hasNewPixelBuffer(forItemTime: itemTime),
-                       output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) != nil {
-                        let presentedMs = self.baseMs + max(0, Int(itemTime.seconds * 1_000))
+                       output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime) != nil,
+                       displayTime.isValid, displayTime.seconds.isFinite {
+                        // Use the returned frame's own display time rather
+                        // than assigning the requested clock to an old image.
+                        let presentedMs = self.baseMs + max(0, Int(displayTime.seconds * 1_000))
                         settled = self.seekState.presentedVideo(
                             positionMs: presentedMs,
                             generation: generation
@@ -4246,7 +4447,7 @@ final class PlayerController: ObservableObject {
                     self.updateNowPlaying()
                     return
                 }
-                if ProcessInfo.processInfo.systemUptime >= deadline {
+                if deadlineReached {
                     // An attached/seeked item that never presents is a stall,
                     // not an indefinitely pending UI state. Recover from a
                     // separate task: reopen installs a new video output and
@@ -4259,6 +4460,7 @@ final class PlayerController: ObservableObject {
                         guard let self,
                               self.openGeneration == recoveryGeneration,
                               self.viewerActionEpoch == recoveryActionEpoch,
+                              self.wantsPlayback, !self.failed, !self.finished,
                               self.seekState.pendingMs == targetMs,
                               self.seekState.generation == generation
                         else { return }
@@ -4276,6 +4478,23 @@ final class PlayerController: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(50))
             }
         }
+    }
+
+    @discardableResult
+    private func sampleSeekPresentationClocks() -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let generation = seekState.generation
+        seekState.observePlaybackClock(
+            at: now, rate: Double(player.rate),
+            isPlaying: player.timeControlStatus == .playing,
+            generation: generation
+        )
+        return seekState.observePresentationDemand(
+            at: now,
+            eligible: started && wantsPlayback && !failed && !finished && !isChangingStream
+                && !(seekPresentationBackgrounded && decision?.source?.videoCodec != nil),
+            generation: generation
+        )
     }
 
     private func addPeriodicObserver() {
@@ -5665,19 +5884,30 @@ final class PlayerController: ObservableObject {
         return correction >= minimumCorrectionMs ? correction : nil
     }
 
-    private func applyNativeSubtitleSelection(_ index: Int?, to item: AVPlayerItem?) async {
-        guard let item, player.currentItem === item else { return }
+    @discardableResult
+    private func applyNativeSubtitleSelection(
+        _ index: Int?,
+        to item: AVPlayerItem?,
+        expectedActionEpoch: Int? = nil
+    ) async -> Bool {
+        guard let item, player.currentItem === item else { return false }
         let group = try? await item.asset.loadMediaSelectionGroup(for: .legible)
-        guard started, player.currentItem === item else { return }
-        if let group, selectNativeSubtitle(index, in: group, of: item) { return }
+        guard started,
+              player.currentItem === item,
+              Self.subtitleMutationIsCurrent(
+                expectedActionEpoch: expectedActionEpoch,
+                currentActionEpoch: viewerActionEpoch
+              )
+        else { return false }
+        if let group, selectNativeSubtitle(index, in: group, of: item) { return true }
         // Off never fails: without a legible group nothing is being rendered.
-        guard let index else { return }
+        guard let index else { return true }
         // "Has a legible group" is not "advertises subtitle renditions".
         // AVFoundation may synthesise a closed-caption option into `.legible`
         // for a variant that carries no CLOSED-CAPTIONS attribute, so a legacy
         // master can hand back a non-empty group with no subtitles in it.
         let hasSubtitleOptions = group?.options.contains { $0.mediaType == .subtitle } ?? false
-        await recoverFromFailedNativeSelection(
+        return await recoverFromFailedNativeSelection(
             index,
             item: item,
             hasSubtitleOptions: hasSubtitleOptions
@@ -5724,9 +5954,9 @@ final class PlayerController: ObservableObject {
         _ index: Int,
         item: AVPlayerItem,
         hasSubtitleOptions: Bool
-    ) async {
+    ) async -> Bool {
         // The item itself failing is the status observer's story, not ours.
-        guard item.status != .failed, selectedSubtitle == index else { return }
+        guard item.status != .failed, selectedSubtitle == index else { return false }
         let serverIsLegacy = Self.serverIsLegacy(
             servesNative: serverServesNativeSubtitles,
             hasSubtitleOptions: hasSubtitleOptions,
@@ -5735,18 +5965,28 @@ final class PlayerController: ObservableObject {
         let isText = subtitles.first(where: { $0.index == index })?.text ?? false
         if serverIsLegacy && isText {
             forceLegacySubtitleBurn = true
-            let position = realPositionMs()
+            let position = positionForPlaybackIntent()
             if isChangingStream {
                 // Called from inside `open()`, which `reopen()` refuses to
                 // overlap. Run the burn once this open has finished.
-                Task { [weak self] in await self?.reopen(at: position) }
+                let actionEpoch = viewerActionEpoch
+                Task { [weak self] in
+                    guard let self, self.started,
+                          self.viewerActionEpoch == actionEpoch,
+                          self.selectedSubtitle == index
+                    else { return }
+                    await self.reopen(at: position)
+                }
             } else {
                 await reopen(at: position)
             }
-            return
+            return false
         }
         selectedSubtitle = nil
         showPlaybackNotice("That subtitle track could not be turned on.")
+        // The selection resolved to Off without changing the item. The
+        // caller still owes any pending media destination to the viewer.
+        return true
     }
 
     /// The audible half of owning media selection (P2-8). An HLS session
@@ -6035,6 +6275,15 @@ final class PlayerController: ObservableObject {
         if needsBurn || activeBurn != nil || leavesDirectPlay { return .reopen }
         if targetUsesOverlay || (activeOverlay != nil && index == nil) { return .bitmapOverlay }
         return .mediaSelection
+    }
+
+    /// Rechecked after AVAsset's asynchronous legible-group load and before
+    /// touching the item. A delayed A completion must not overwrite B.
+    nonisolated static func subtitleMutationIsCurrent(
+        expectedActionEpoch: Int?,
+        currentActionEpoch: Int
+    ) -> Bool {
+        expectedActionEpoch == nil || expectedActionEpoch == currentActionEpoch
     }
 
     /// P1-2: what an `open()` still owes the viewer when it completes. The
@@ -6381,6 +6630,7 @@ extension PlayerController {
     /// Called wherever the player's state moves. The reporter coalesces, so
     /// this is cheap enough for the periodic time observer.
     func playbackControlPlayerChanged() {
+        sampleSeekPresentationClocks()
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()
         playbackControl.playerChanged()

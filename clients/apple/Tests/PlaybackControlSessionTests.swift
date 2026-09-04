@@ -39,6 +39,7 @@ private let controlExchanges = ControlExchangeLog()
 private final class ControlAnswer: @unchecked Sendable {
     private let lock = NSLock()
     private var value = ControlAction(type: "none")
+    private var readiness: String?
 
     func set(_ action: ControlAction) {
         lock.lock()
@@ -51,9 +52,40 @@ private final class ControlAnswer: @unchecked Sendable {
         defer { lock.unlock() }
         return value
     }
+
+    func setReadiness(_ readiness: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.readiness = readiness
+    }
+
+    func delivery() -> ControlDelivery? {
+        lock.lock()
+        defer { lock.unlock() }
+        return readiness.map { ControlDelivery(subtitleReadiness: $0) }
+    }
 }
 
 private let controlAnswer = ControlAnswer()
+
+/// Holds the actual callback scheduled by the production session so the
+/// main-actor queue race is deterministic rather than dependent on timing.
+private final class SubtitleCallbackQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callbacks: [@MainActor @Sendable () -> Void] = []
+
+    func append(_ callback: @escaping @MainActor @Sendable () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        callbacks.append(callback)
+    }
+
+    func take() -> (@MainActor @Sendable () -> Void)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return callbacks.isEmpty ? nil : callbacks.removeFirst()
+    }
+}
 
 /// Holds one exchange open so a test can stage a race that is otherwise
 /// unstageable: an old reporter's response landing after the next session has
@@ -148,6 +180,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             generation: decoded.generation,
             controlEpoch: decoded.controlEpoch,
             acceptedSequence: decoded.sequence,
+            delivery: controlAnswer.delivery(),
             action: controlAnswer.get()
         )
         let body = (try? PlaybackControl.encoder.encode(response)) ?? Data()
@@ -184,6 +217,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
 private final class PlayerStub {
     var positionMs = 4_000
     var reads = 0
+    var subtitleTrack: Int?
 
     func observation() -> PlayerControlObservation? {
         reads += 1
@@ -208,7 +242,7 @@ private final class PlayerStub {
             selection: ClientSelection(
                 quality: .auto,
                 audioTrack: 0,
-                subtitle: SubtitleSelection(mode: .off, track: nil),
+                subtitle: SubtitleSelection(mode: subtitleTrack == nil ? .off : .native, track: subtitleTrack),
                 audioOffsetMs: 0,
                 codec: .auto,
                 dynamicRange: .auto
@@ -304,6 +338,66 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertEqual(first.generation, "11111111-1111-4111-8111-111111111111")
         XCTAssertEqual(first.controlEpoch, 7)
         XCTAssertNotNil(first.capabilities)
+    }
+
+    func testQueuedSubtitleReadinessFromSessionACannotMutateSessionBWithTheSameTrack() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: true)
+    }
+
+    func testQueuedSubtitleReadinessCannotMutatePlaybackAfterEnd() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: false)
+    }
+
+    func testQueuedSubtitleReadinessIsDeliveredForItsCurrentSession() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: nil)
+    }
+
+    private func assertQueuedSubtitleReadinessIsFenced(replaceSession: Bool?) async throws {
+        controlExchanges.reset()
+        controlAnswer.setReadiness("pending")
+        defer { controlAnswer.setReadiness(nil) }
+        let player = PlayerStub()
+        player.subtitleTrack = 7
+        let callbacks = SubtitleCallbackQueue()
+        let session = PlaybackControlSession(scheduleSubtitleReady: { callbacks.append($0) })
+        let (transport, urlSession) = makeTransport()
+        defer { session.end(); urlSession.invalidateAndCancel() }
+        var deliveries = 0
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() },
+            onSubtitleReady: { deliveries += 1 }
+        )
+        // Seeing two requests guarantees the first non-ready response was
+        // consumed before the readiness edge is introduced.
+        _ = try await waitForExchange { $0.sequence == 2 }
+        controlAnswer.setReadiness("ready")
+        session.playerChanged()
+        let deadline = Date().addingTimeInterval(5)
+        var queued: (@MainActor @Sendable () -> Void)?
+        while queued == nil, Date() < deadline {
+            queued = callbacks.take()
+            if queued == nil { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        let staleReady = try XCTUnwrap(queued, "the real session must schedule a readiness callback")
+
+        if replaceSession == true {
+            var next = sessionBootstrap()
+            next.generation = "22222222-2222-4222-8222-222222222222"
+            session.begin(
+                bootstrap: next,
+                transport: transport,
+                observe: { player.observation() },
+                onSubtitleReady: { deliveries += 100 }
+            )
+        } else if replaceSession == false {
+            session.end()
+        }
+        staleReady()
+        XCTAssertEqual(deliveries, replaceSession == nil ? 1 : 0,
+                       "a queued response loses its authority when its reporting session ends")
     }
 
     /// The return path M5 exists to open. Before this the reporter was built

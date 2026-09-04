@@ -109,6 +109,18 @@ struct PlaybackControlTransport {
 final class PlaybackControlSession {
     private var reporter: PlaybackControlReporter?
     private var observe: (() -> PlayerControlObservation?)?
+    private var activeGeneration: Int?
+    private let scheduleSubtitleReady: @Sendable (
+        @escaping @MainActor @Sendable () -> Void
+    ) -> Void
+
+    init(
+        scheduleSubtitleReady: @escaping @Sendable (
+            @escaping @MainActor @Sendable () -> Void
+        ) -> Void = { callback in Task { @MainActor in callback() } }
+    ) {
+        self.scheduleSubtitleReady = scheduleSubtitleReady
+    }
 
     /// What the reporter reads. See `PlaybackControlLatestSnapshot`: the
     /// player pushes here, the reporter never pulls from the player.
@@ -172,6 +184,7 @@ final class PlaybackControlSession {
         // given in, because the failure it explains usually arrives after a
         // reopen; `clearVerdict()` is how a new title starts clean.
         let generation = verdicts.beginGeneration()
+        activeGeneration = generation
         answers.begin(generation: generation)
         let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         let subtitleReadiness = SubtitleReadinessRetryState()
@@ -197,7 +210,7 @@ final class PlaybackControlSession {
             // `retry_resource` are exchange-level and the reporter already
             // honours them; a player that acted on them here would be
             // deciding, which is M5e.
-            onExchange: { [verdicts, answers] exchange in
+            onExchange: { [weak self, verdicts, answers, scheduleSubtitleReady] exchange in
                 // Every exchange advances the counter, including a failed one:
                 // an owner that asked must not wait out its whole bound for an
                 // exchange that has already come back with nothing.
@@ -210,7 +223,13 @@ final class PlaybackControlSession {
                 if subtitleReadiness.record(
                     exchange.response?.delivery?.subtitleReadiness
                 ) {
-                    Task { @MainActor in onSubtitleReady() }
+                    scheduleSubtitleReady { [weak self] in
+                        // A ready edge can wait for MainActor while a new
+                        // session begins or playback ends. Validate when the
+                        // callback executes, not when it was enqueued.
+                        guard self?.activeGeneration == generation else { return }
+                        onSubtitleReady()
+                    }
                 }
                 guard let action = exchange.response?.action,
                       action.type == "terminal",
@@ -369,6 +388,7 @@ final class PlaybackControlSession {
     func clearVerdict() { verdicts.clearAndAdvanceIntent() }
 
     func end() {
+        activeGeneration = nil
         latest.store(nil)
         observe = nil
         guard let reporter else { return }

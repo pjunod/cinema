@@ -707,4 +707,4 @@ commits = ["78223cef"]
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func selectQuality(_ height: Int?)"
 test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "testQualityAndAudioCommandsCreateANewPresentationDestinationSynchronously"
+test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"

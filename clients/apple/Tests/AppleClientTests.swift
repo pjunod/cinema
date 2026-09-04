@@ -2917,7 +2917,7 @@ final class AppleClientTests: XCTestCase {
     }
 
     @MainActor
-    func testQualityAndAudioCommandsCreateANewPresentationDestinationSynchronously() {
+    func testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously() {
         let controller = PlayerController()
 
         controller.selectQuality(720)
@@ -2933,16 +2933,177 @@ final class AppleClientTests: XCTestCase {
         let audio = controller.pendingPlaybackIntentForTesting
         XCTAssertEqual(audio.targetMs, 0)
         XCTAssertGreaterThan(audio.generation, original.generation)
+
+        controller.selectSubtitle(7)
+        let subtitle = controller.pendingPlaybackIntentForTesting
+        XCTAssertEqual(subtitle.targetMs, 0)
+        XCTAssertGreaterThan(subtitle.generation, audio.generation)
+    }
+
+    func testInPlaceSubtitleSettlementRequiresItsExactExecutedGeneration() {
+        var state = PlayerSeekState()
+        let predecessor = state.selection(at: 20_000, durationMs: 600_000, inPlace: true)
+        XCTAssertTrue(state.markExecuted(
+            generation: predecessor.generation,
+            targetMs: predecessor.target
+        ))
+        let successor = state.selection(at: 30_000, durationMs: 600_000, inPlace: true)
+
+        XCTAssertFalse(state.presentedInPlace(
+            generation: predecessor.generation,
+            targetMs: predecessor.target
+        ))
+        XCTAssertTrue(state.markExecuted(
+            generation: successor.generation,
+            targetMs: successor.target
+        ))
+        XCTAssertTrue(state.presentedInPlace(
+            generation: successor.generation,
+            targetMs: successor.target
+        ))
+        XCTAssertNil(state.pendingMs)
+    }
+
+    func testInPlaceSubtitleMutationCannotSettleAnUnpresentedSeek() {
+        for alreadyExecuted in [false, true] {
+            var state = PlayerSeekState()
+            let seek = state.absolute(90_000, durationMs: 600_000)
+            if alreadyExecuted {
+                XCTAssertTrue(state.markExecuted(generation: seek.generation, targetMs: seek.target))
+            }
+            let subtitle = state.selection(at: 12_000, durationMs: 600_000, inPlace: true)
+            XCTAssertEqual(subtitle.target, 90_000)
+            XCTAssertTrue(state.requiresMediaPresentation)
+            XCTAssertTrue(state.markExecuted(generation: subtitle.generation, targetMs: subtitle.target))
+            XCTAssertFalse(state.presentedInPlace(generation: subtitle.generation, targetMs: subtitle.target))
+            XCTAssertEqual(state.pendingMs, 90_000)
+            XCTAssertFalse(state.presentedVideo(positionMs: 12_000, generation: subtitle.generation))
+            XCTAssertTrue(state.presentedVideo(positionMs: 90_000, generation: subtitle.generation))
+        }
+    }
+
+    func testDelayedSubtitleACompletionCannotOverwriteNewerSelectionB() {
+        let selectionA = 41
+        let selectionB = 42
+
+        XCTAssertFalse(PlayerController.subtitleMutationIsCurrent(
+            expectedActionEpoch: selectionA,
+            currentActionEpoch: selectionB
+        ))
+        XCTAssertTrue(PlayerController.subtitleMutationIsCurrent(
+            expectedActionEpoch: selectionB,
+            currentActionEpoch: selectionB
+        ))
+        XCTAssertTrue(PlayerController.subtitleMutationIsCurrent(
+            expectedActionEpoch: nil,
+            currentActionEpoch: selectionB
+        ), "open-time reconciliation has its own item generation fence")
     }
 
     func testAudioOnlySeekRequiresAnAdvancingPostExecutionClock() {
         var state = PlayerSeekState()
         let request = state.absolute(30_000, durationMs: 600_000)
-        XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: request.target))
+        XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: request.target, at: 100))
+        state.observePlaybackClock(at: 100, rate: 1, isPlaying: true, generation: request.generation)
         XCTAssertFalse(state.presentedAudio(positionMs: 30_000, generation: request.generation))
         XCTAssertFalse(state.presentedAudio(positionMs: 30_000, generation: request.generation))
-        XCTAssertTrue(state.presentedAudio(positionMs: 30_050, generation: request.generation))
+        XCTAssertFalse(state.presentedAudio(positionMs: 29_999, generation: request.generation))
+        state.observePlaybackClock(at: 101, rate: 1, isPlaying: true, generation: request.generation)
+        XCTAssertFalse(state.presentedAudio(positionMs: 120_000, generation: request.generation),
+                       "an unrelated advancing clock is not destination presentation")
+        XCTAssertTrue(
+            state.presentedAudio(positionMs: 31_000, generation: request.generation),
+            "a delayed healthy sample may advance beyond the landing tolerance"
+        )
         XCTAssertNil(state.pendingMs)
+    }
+
+    func testDelayedAudioSamplesLandWithinTheElapsedActiveClockAndThenAdvance() {
+        var state = PlayerSeekState()
+        let request = state.absolute(30_000, durationMs: 600_000)
+        XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: request.target, at: 100))
+        state.observePlaybackClock(at: 100, rate: 1, isPlaying: true, generation: request.generation)
+
+        // Actual one-second observer cadence: the first reported sample is
+        // already a second beyond the seek target, not within 250 ms of it.
+        state.observePlaybackClock(at: 101, rate: 1, isPlaying: true, generation: request.generation)
+        XCTAssertFalse(state.presentedAudio(positionMs: 31_000, generation: request.generation))
+        XCTAssertFalse(state.presentedAudio(positionMs: 30_900, generation: request.generation))
+        state.observePlaybackClock(at: 102, rate: 1, isPlaying: true, generation: request.generation)
+        XCTAssertTrue(state.presentedAudio(positionMs: 32_000, generation: request.generation))
+    }
+
+    func testPresentationLandingAllowanceHonorsRatePauseDeadlineAndGeneration() {
+        var paused = PlayerSeekState()
+        let pauseSeek = paused.absolute(30_000, durationMs: 600_000)
+        XCTAssertTrue(paused.markExecuted(generation: pauseSeek.generation, targetMs: pauseSeek.target, at: 100))
+        paused.observePlaybackClock(at: 100, rate: 1, isPlaying: false, generation: pauseSeek.generation)
+        paused.observePlaybackClock(at: 105, rate: 1, isPlaying: false, generation: pauseSeek.generation)
+        XCTAssertFalse(paused.presentedAudio(positionMs: 31_000, generation: pauseSeek.generation),
+                       "five paused seconds cannot justify a one-second-forward landing")
+
+        var fast = PlayerSeekState()
+        let fastSeek = fast.absolute(30_000, durationMs: 600_000)
+        XCTAssertTrue(fast.markExecuted(generation: fastSeek.generation, targetMs: fastSeek.target, at: 100))
+        fast.observePlaybackClock(at: 100, rate: 2, isPlaying: true, generation: fastSeek.generation)
+        fast.observePlaybackClock(at: 101, rate: 2, isPlaying: true, generation: fastSeek.generation)
+        XCTAssertFalse(fast.presentedAudio(positionMs: 32_500, generation: fastSeek.generation))
+        XCTAssertFalse(fast.presentedAudio(positionMs: 32_000, generation: fastSeek.generation))
+        fast.observePlaybackClock(at: 102, rate: 2, isPlaying: true, generation: fastSeek.generation)
+        XCTAssertTrue(fast.presentedAudio(positionMs: 34_000, generation: fastSeek.generation))
+
+        let next = fast.absolute(60_000, durationMs: 600_000)
+        XCTAssertTrue(fast.markExecuted(generation: next.generation, targetMs: next.target, at: 110))
+        fast.observePlaybackClock(at: 110, rate: 1, isPlaying: true, generation: next.generation)
+        fast.observePlaybackClock(at: 120, rate: 1, isPlaying: true, generation: next.generation)
+        XCTAssertFalse(fast.presentedVideo(positionMs: 69_000, generation: next.generation),
+                       "a late callback cannot grow the allowance past the eight-second deadline")
+        XCTAssertFalse(fast.presentedVideo(positionMs: 60_000, generation: fastSeek.generation),
+                       "the predecessor generation never gains authority from a matching clock")
+        XCTAssertTrue(fast.presentedVideo(positionMs: 68_000, generation: next.generation))
+    }
+
+    func testDelayedVideoSampleAcceptsCurrentOutputButRejectsThePredecessorTimeline() {
+        var state = PlayerSeekState()
+        let request = state.absolute(90_000, durationMs: 600_000)
+        XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: request.target, at: 100))
+        state.observePlaybackClock(at: 100, rate: 1, isPlaying: true, generation: request.generation)
+        state.observePlaybackClock(at: 101, rate: 1, isPlaying: true, generation: request.generation)
+        XCTAssertFalse(state.presentedVideo(positionMs: 12_000, generation: request.generation))
+        XCTAssertFalse(state.presentedVideo(positionMs: 93_000, generation: request.generation))
+        XCTAssertTrue(state.presentedVideo(positionMs: 91_000, generation: request.generation))
+    }
+
+    func testPresentationAllowanceSurvivesALongPauseWithoutSpendingItsActiveWindow() {
+        var state = PlayerSeekState()
+        let request = state.absolute(30_000, durationMs: 600_000)
+        XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: request.target, at: 100))
+        state.observePlaybackClock(at: 100, rate: 1, isPlaying: false, generation: request.generation)
+        state.observePlaybackClock(at: 200, rate: 1, isPlaying: true, generation: request.generation)
+        state.observePlaybackClock(at: 201, rate: 1, isPlaying: true, generation: request.generation)
+        XCTAssertFalse(state.presentedAudio(positionMs: 31_000, generation: request.generation))
+        state.observePlaybackClock(at: 202, rate: 1, isPlaying: true, generation: request.generation)
+        XCTAssertTrue(state.presentedAudio(positionMs: 32_000, generation: request.generation),
+                      "resumed 1 Hz samples still settle after a long paused interval")
+    }
+
+    func testPresentationDeadlineCountsOnlyActiveDemandAndRejectsStaleGenerations() {
+        var state = PlayerSeekState()
+        let request = state.absolute(90_000, durationMs: 600_000)
+        XCTAssertTrue(state.markExecuted(generation: request.generation, targetMs: request.target, at: 100))
+        XCTAssertFalse(state.observePresentationDemand(at: 100, eligible: true, generation: request.generation))
+        XCTAssertFalse(state.observePresentationDemand(at: 103, eligible: false, generation: request.generation))
+        XCTAssertFalse(state.observePresentationDemand(at: 203, eligible: false, generation: request.generation),
+                       "pause or background cannot spend the remaining budget")
+        XCTAssertFalse(state.observePresentationDemand(at: 204, eligible: true, generation: request.generation))
+        XCTAssertFalse(state.observePresentationDemand(at: 208.9, eligible: true, generation: request.generation))
+        XCTAssertTrue(state.observePresentationDemand(at: 209, eligible: true, generation: request.generation))
+        let next = state.absolute(120_000, durationMs: 600_000)
+        XCTAssertTrue(state.markExecuted(generation: next.generation, targetMs: next.target, at: 210))
+        XCTAssertFalse(state.observePresentationDemand(at: 250, eligible: true, generation: request.generation))
+        XCTAssertFalse(state.observePresentationDemand(at: 210, eligible: true, generation: next.generation))
+        XCTAssertFalse(state.observePresentationDemand(at: 217.9, eligible: true, generation: next.generation))
+        XCTAssertTrue(state.observePresentationDemand(at: 218, eligible: true, generation: next.generation))
     }
 
     func testClearInvalidatesOutstandingSeekGenerations() {
