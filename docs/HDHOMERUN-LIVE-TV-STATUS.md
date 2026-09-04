@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** M2 Astra findings implemented; final focused verification pending · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** M2 Astra approved and focused qualification passed; M3 web in review · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-04 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -15,9 +15,9 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 |---|---|---|---|
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
-| Forgejo main synchronization | review pending | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | merge `f087f9d8`; later main changes still need incorporation |
-| M2 live HLS and cluster relay | review fixes in progress; merge held | pending Forgejo PR | earlier focused checks passed; second review found unresolved owner recovery, cleanup, response bounds, metrics, and behavioral-test gaps |
-| M3 web client | implementation staged | — | controller and browser tests are ready to resume after the M2 review closes |
+| Forgejo main synchronization | Astra approved; fresh gate pending | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | pushed `c4b66e1d`, incorporating main `4ce33f95`; pinned fmt/check/clippy passed |
+| M2 live HLS and cluster relay | Astra approved; focused qualification passed | pending Forgejo PR | candidate `4baf64bb`: 41 Live TV, 1 signature, 2 route and 2 admission regressions passed on Rust 1.97.1 |
+| M3 web client | implementation under Astra review | — | Developer configuration/enable/recovery card, channel browser and separate live player implemented in own worktree; 7 lifecycle and 14 settings tests pass |
 | M4 Apple and Android | not started | — | — |
 | M5 docs, hardware, promotion | not started | — | — |
 
@@ -45,9 +45,9 @@ The second M2 review and combined-effort review requested changes. Work now
 covers monotonic signed drain proofs, recovery when the prior owner is lost,
 cancellation during startup, confirmed cleanup failures, bounded file streaming,
 expiring terminal errors, truthful metrics, cluster Activity, and stronger
-behavioral tests. These changes are unqualified until they compile and pass
-focused tests. An explicitly selected Astra agent is independently reviewing
-the owner-transition design. The earlier review labelled “Astra” selected a
+behavioral tests. These changes passed focused qualification. An explicitly
+selected Astra agent independently reviewed the owner-transition design.
+The earlier review labelled “Astra” selected a
 reviewer role without changing its model; it is retained as an additional
 review, not evidence that Astra ran.
 
@@ -57,11 +57,13 @@ and unsupported source decoders lacked a typed error. The working fix closes
 registry insertion permanently at shutdown, authenticates bounded owner
 control responses (including playlists), constructs activation URLs locally,
 and recognizes missing-decoder diagnostics in bounded stderr capture.
-The latest completed local focused run passed 40 Live TV tests plus the
-cluster Activity aggregation test. The signature-tampering regression passed
-separately. Local lint and policy checks passed; the exact committed tree still
-needs Rust 1.97.1 verification. No current-commit approval
-or merge qualification is claimed.
+Candidate `4baf64bb` passed 41 Live TV tests on pinned Rust 1.97.1, including
+the real video-only MPEG-TS regression with FFmpeg 5.1.9. The signature-tampering
+test passed with the `hiqlite-store` feature; two route-matrix and two live
+admission regressions passed. Pinned formatting, workspace check, denied-lint
+Clippy, and no-default daemon compilation passed. Astra approved this exact
+candidate and tree `a0946a83561816923f74d4efd5f5245f3e9daacf` with no findings.
+This is focused task evidence, not final release qualification.
 
 Commit `3945a713` contains the owner/recovery/cleanup hardening. Astra's closure
 review accepted those findings and identified optional audio as a final gap:
@@ -71,8 +73,10 @@ execute FFmpeg because Homebrew's x265 dylib is missing; the isolated compiler
 image now includes FFmpeg for the pinned-toolchain verification. The user's
 Homebrew installation was not modified.
 
-Next is compilation and tests of the completed fixes, adversarial approval,
-the Forgejo effort gate, and task merge.
+Next are the Forgejo effort gates and task merges, then completion of web and
+native clients. Browser PR controls are temporarily unavailable while the Mac
+is locked; source work and compiler checks continue. No authentication bypass
+or credential extraction was attempted.
 Forgejo is the only mutable remote after the repository migration. Repository
 access is confirmed through the host SSH agent; the supplied deploy key
 remains scoped to node access.
@@ -99,6 +103,11 @@ remains scoped to node access.
 | 2026-09-04 | current adversarial-fix tree | `cargo test -p plurxd live_tv -- --nocapture` | 30 passed, including the one-GET fake-tuner/fake-FFmpeg lifecycle, source-generation binding, and confirmed cleanup fixture |
 | 2026-09-04 | `80f63b7b` archive `385f478c…c7b88d` | exact Rust 1.97.1 source-only loop | format, workspace check, workspace clippy `-D warnings`, no-default compile, 30 Live TV, 2 route-matrix, relay-ceiling, voter-role, and 2 admission tests passed |
 | 2026-09-04 | authoritative Forgejo | fetch and intended-base check | `main` is `2727ead0`; task base `effort/hdhomerun-live-tv` is `b15d241a`; GitHub is fetch-only historical context |
+| 2026-09-04 | `c4b66e1d` | exact Astra review; pinned fmt/workspace check/workspace clippy | passed; PR #7 updated; includes main `4ce33f95` |
+| 2026-09-04 | `4baf64bb`, source archive SHA-256 `51dd11bc220d079c39e2aca28961c23c77f521ea441f26d15f8f02fd97e16464` | Rust 1.97.1 fmt/workspace check/clippy; no-default check; `cargo test -p plurxd live_tv --locked`; route_matrix; live_admission | passed: 41 + 2 + 2 focused tests; no-default compilation retains existing unrelated dead-code warnings |
+| 2026-09-04 | `4baf64bb` | `cargo test -p plurx-core --features hiqlite-store --lib live_tv_drain_response_signature --locked` | 1 passed; a previous filter without the feature ran zero and was not counted |
+| 2026-09-04 | `4baf64bb` | actual Astra exact-candidate review | approved, no actionable findings; real rollover and two-node fault acceptance remain M5 |
+| 2026-09-04 | physical tuner discovery | sanitized `discover.json`, no tuner stream opened | FLEX 4K, HDFX-4K, device `10AF300E`, four tuners, firmware `20260326`; not playback proof |
 
 ## Decisions made while the owner is away
 
