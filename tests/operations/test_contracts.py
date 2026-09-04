@@ -704,6 +704,17 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn("needs: [scope, preflight]", apple)
         self.assertNotIn("mobile_version", apple)
+        self.assertIn(
+            "PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            apple,
+        )
+        effort_apple = workflow_job_blocks(".github/workflows/effort-ci.yml")[
+            "apple_compile"
+        ]
+        self.assertIn(
+            "PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            effort_apple,
+        )
 
         coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
         self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
@@ -1893,6 +1904,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertEqual(len(re.findall(r'docker port "\$name" 32400/tcp', smoke)), 2)
         self.assertIn('curl -fsS "$base/readyz"', smoke)
         self.assertIn('curl -fsS "$base/metrics"', smoke)
+        self.assertNotRegex(smoke, r"curl [^\n]+\| grep -q")
         self.assertIn('test "$instance_before" = "$instance_after"', smoke)
 
     def test_perf_report_counts_copy_video_as_a_real_session(self):

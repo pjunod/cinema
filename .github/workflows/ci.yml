@@ -609,6 +609,10 @@ jobs:
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      # The Apple runner is a launch daemon with a deliberately narrow PATH.
+      # Homebrew owns the host's Node.js runtime, which Forgejo needs before
+      # JavaScript actions such as checkout and cache can even start.
+      PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       - name: Verify the pinned Apple toolchain
