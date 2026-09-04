@@ -704,6 +704,10 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn("needs: [scope, preflight]", apple)
         self.assertNotIn("mobile_version", apple)
+        self.assertIn(
+            "PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            apple,
+        )
 
         coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
         self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
