@@ -1,5 +1,6 @@
 use crate::app_state::RaftType;
 use crate::network::handshake::HandshakeSecret;
+use crate::network::frame_io::write_socket_close_frame_flushed;
 use crate::{Error, LEADER_STREAM_CONNECT_TIMEOUT, NodeId, tls};
 use axum::http::Request;
 use axum::http::header::{CONNECTION, UPGRADE};
@@ -97,9 +98,11 @@ async fn try_connect_stream(
 
     if let Err(err) = HandshakeSecret::client(&mut ws, secret, node_id).await {
         error!("Error opening WebSocket stream to {addr}: {err:?}");
-        let _ = ws
-            .write_frame(Frame::close(1000, b"Invalid Handshake"))
-            .await;
+        let _ = write_socket_close_frame_flushed(
+            &mut ws,
+            Frame::close(1000, b"Invalid Handshake"),
+        )
+        .await;
         Err(Error::Connect(format!(
             "Error during API WebSocket handshake to {addr}: {err}"
         )))

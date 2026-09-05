@@ -4,11 +4,14 @@ use crate::network::api::{
     WsWriteMsg,
 };
 use crate::network::handshake::HandshakeSecret;
+use crate::network::frame_io::{
+    write_close_frame_flushed, write_frame_flushed, write_socket_close_frame_flushed,
+};
 use crate::server::proxy::handlers::AppStateExt;
 use crate::store::state_machine::sqlite::state_machine::Query;
 use crate::{Client, Error};
 use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, Payload, upgrade};
-use std::ops::Deref;
+use tokio::sync::{oneshot, watch};
 use tokio::task;
 use tracing::{debug, error};
 
@@ -21,7 +24,7 @@ pub async fn handle_socket(
 
     if let Err(err) = HandshakeSecret::server(&mut ws, state.secret_api.as_bytes()).await {
         error!("Error during WebSocket handshake: {}", err);
-        ws.write_frame(Frame::close(1000, b"Invalid Handshake"))
+        write_socket_close_frame_flushed(&mut ws, Frame::close(1000, b"Invalid Handshake"))
             .await?;
         return Ok(());
     };
@@ -35,13 +38,20 @@ pub async fn handle_socket(
     // IMPORTANT: the reader is NOT CANCEL SAFE in v0.8!
     let mut read = FragmentCollectorRead::new(rx);
 
+    let (tx_connection_closed, mut rx_connection_closed) = watch::channel(false);
+    let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
+    let writer_connection_closed = tx_connection_closed.clone();
     let handle_write = task::spawn(async move {
-        while let Ok(req) = rx_write.recv_async().await {
+        let outcome = loop {
+            let req = match rx_write.recv_async().await {
+                Ok(req) => req,
+                Err(_) => break Ok(()),
+            };
             match req {
                 WsWriteMsg::Payload(resp) => {
                     let bytes = serialize(&resp).unwrap();
                     let frame = Frame::binary(Payload::Borrowed(&bytes));
-                    if let Err(err) = write.write_frame(frame).await {
+                    if let Err(err) = write_frame_flushed(&mut write, frame).await {
                         error!("Error during WebSocket write: {}", err);
                         // // if we have a WebSocket error, save all open requests into the client_buffer
                         // let payload = bincode::serialize(&resp).unwrap();
@@ -50,60 +60,91 @@ pub async fn handle_socket(
                         //     .await
                         //     .expect("client_buffer to always be working");
 
-                        break;
+                        break Err(err.to_string());
                     }
                 }
                 WsWriteMsg::Break => {
                     // we ignore any errors here since it may be possible that the reader
                     // has closed already - we just try a graceful connection close
-                    let _ = write
-                        .write_frame(Frame::close(1000, b"Invalid Request"))
-                        .await;
+                    let _ = write_close_frame_flushed(
+                        &mut write,
+                        Frame::close(1000, b"Invalid Request"),
+                    )
+                    .await;
                     debug!("server stream break message");
-                    break;
+                    break Ok(());
                 }
             }
-        }
+        };
 
+        writer_connection_closed.send_replace(true);
+        let _ = tx_writer_finished.send(outcome);
         debug!("server stream exiting");
     });
 
-    while let Ok(frame) = read
-        .read_frame(&mut |frame| async move {
-            // TODO obligated sends should be auto ping / pong / close ? -> verify!
-            debug!(
-                "Received obligated send in stream client: OpCode: {:?}: {:?}",
-                frame.opcode.clone(),
-                frame.payload
-            );
-            Ok::<(), Error>(())
-        })
-        .await
-    {
-        let req = match frame.opcode {
-            OpCode::Close => {
-                debug!("received Close frame in server stream");
-                break;
-            }
-            OpCode::Binary => {
-                let bytes = frame.payload.deref();
-                match deserialize::<ApiStreamRequest>(bytes) {
+    let (tx_read, rx_read) = flume::bounded(1);
+    let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
+    let reader_connection_closed = tx_connection_closed.clone();
+    let handle_read = task::spawn(async move {
+        let outcome = loop {
+            let frame = match read
+                .read_frame(&mut |frame| async move {
+                    debug!(
+                        "Received obligated send in stream client: OpCode: {:?}: {:?}",
+                        frame.opcode.clone(),
+                        frame.payload
+                    );
+                    Ok::<(), Error>(())
+                })
+                .await
+            {
+                Ok(frame) => frame,
+                Err(err) => break Err(err.to_string()),
+            };
+            let req = match frame.opcode {
+                OpCode::Close => break Ok(()),
+                OpCode::Binary => match deserialize::<ApiStreamRequest>(&frame.payload) {
                     Ok(req) => req,
-                    Err(err) => {
-                        error!("Error deserializing ApiStreamRequest: {:?}", err);
-                        // ws.write_frame(Frame::close(1000, b"Error deserializing ApiStreamRequest"))
-                        //     .await?;
-                        let _ = tx_write.send_async(WsWriteMsg::Break).await;
-                        break;
+                    Err(err) => break Err(format!("invalid proxy stream request: {err}")),
+                },
+                _ => break Err("non-binary proxy stream payload".to_owned()),
+            };
+            tokio::select! {
+                _ = rx_connection_closed.changed() => break Ok(()),
+                result = tx_read.send_async(req) => {
+                    if result.is_err() {
+                        break Ok(());
                     }
                 }
             }
-            _ => {
-                let _ = tx_write.send_async(WsWriteMsg::Break).await;
-                // ws.write_frame(Frame::close(1000, b"Invalid Request"))
-                //     .await?;
+        };
+        reader_connection_closed.send_replace(true);
+        let _ = tx_reader_finished.send(outcome);
+    });
+
+    loop {
+        let req = tokio::select! {
+            biased;
+            writer = &mut rx_writer_finished => {
+                match writer {
+                    Ok(Ok(())) => error!("proxy WebSocket writer exited while connected"),
+                    Ok(Err(err)) => error!("proxy WebSocket writer failed: {err}"),
+                    Err(_) => error!("proxy WebSocket writer panicked or was cancelled"),
+                }
                 break;
             }
+            reader = &mut rx_reader_finished => {
+                match reader {
+                    Ok(Ok(())) => debug!("proxy WebSocket reader exited"),
+                    Ok(Err(err)) => error!("proxy WebSocket reader failed: {err}"),
+                    Err(_) => error!("proxy WebSocket reader panicked or was cancelled"),
+                }
+                break;
+            }
+            req = rx_read.recv_async() => match req {
+                Ok(req) => req,
+                Err(_) => break,
+            },
         };
 
         let state = state.clone();
@@ -270,12 +311,14 @@ pub async fn handle_socket(
         });
     }
 
-    // ignore the result in case the writer has already exited and drop the channel
-    // on purpose to make sure a maybe still running writer catches it
-    let _ = tx_write.send_async(WsWriteMsg::Break).await;
+    tx_connection_closed.send_replace(true);
+    let _ = tx_write.try_send(WsWriteMsg::Break);
     drop(tx_write);
 
-    handle_write.await.unwrap();
+    handle_write.abort();
+    handle_read.abort();
+    let _ = handle_write.await;
+    let _ = handle_read.await;
 
     Ok(())
 }

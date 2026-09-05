@@ -15,6 +15,7 @@ pub use raft_client::NetworkStreaming;
 
 pub(crate) mod api;
 mod challenge_response;
+pub(crate) mod frame_io;
 pub(crate) mod handshake;
 pub(crate) mod management;
 pub(crate) mod raft_client;

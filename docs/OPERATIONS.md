@@ -1689,6 +1689,16 @@ inconclusive, keep 4. Preserve all raw pair files with the three campaign
 summaries; a summary without its hash-bound raw evidence is not a selection
 artifact.
 
+Every Hiqlite Raft, internal cluster-API, proxy, and authentication WebSocket
+frame is complete only after its writer flushes the TLS stream. One 30-second
+transport budget covers the write and flush together. A write or flush error,
+including deadline expiry, ends that socket and wakes its connection owner even
+when the peer sends no more traffic; it does not authorize replay of an
+ambiguous API mutation. Graceful Close frames are best effort within 250
+milliseconds, and an incomplete server authentication exchange still loses the
+existing five-second connection allowance. These are transport bounds, not
+database execution or snapshot-installation timeouts.
+
 `cluster.install_snapshot_timeout_secs` is bounded from 10 through 3,600 and
 defaults to 120 seconds. It is the deadline OpenRaft applies while sending and
 installing snapshot segments because Hiqlite leaves its separate non-final

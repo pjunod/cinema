@@ -1,5 +1,6 @@
 use crate::app_state::RaftType;
 use crate::helpers::deserialize;
+use crate::network::frame_io::{write_close_frame_flushed, write_frame_flushed};
 use crate::network::api::{ApiStreamResponse, ApiStreamResponsePayload};
 use crate::network::{serialize_network, web_socket_connect};
 use crate::{Client, Error, Node, NodeId};
@@ -434,7 +435,8 @@ async fn client_stream(
         let read = FragmentCollectorRead::new(rx);
 
         let handle_read = task::spawn(stream_reader(read, tx_read.clone()));
-        let handle_write = task::spawn(stream_writer(write, rx_write));
+        let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
+        let handle_write = task::spawn(stream_writer(write, rx_write, tx_writer_finished));
 
         pending_leader_ready.acknowledge(&connected_leader);
 
@@ -444,8 +446,18 @@ async fn client_stream(
 
         loop {
             let res = select! {
+                biased;
                 _ = stream_shutdown.changed() => {
                     shutdown = true;
+                    None
+                }
+                writer_result = &mut rx_writer_finished => {
+                    match writer_result {
+                        Ok(Ok(())) => error!("API WebSocket writer exited while connected"),
+                        Ok(Err(err)) => error!("API WebSocket writer failed: {err}"),
+                        Err(_) => error!("API WebSocket writer task exited without an outcome"),
+                    }
+                    rotate_after_disconnect = client.inner.proxy_mode;
                     None
                 }
                 res = rx_read.recv_async() => Some(res),
@@ -814,6 +826,8 @@ async fn client_stream(
         handle_buf.abort();
         handle_write.abort();
         handle_read.abort();
+        let _ = handle_write.await;
+        let _ = handle_read.await;
 
         debug!("make sure reader rx is empty and closed");
         while let Ok(req) = rx_read.recv_async().await {
@@ -1074,24 +1088,31 @@ async fn stream_reader(
 async fn stream_writer(
     mut write: WebSocketWrite<WriteHalf<TokioIo<Upgraded>>>,
     rx: flume::Receiver<WritePayload>,
+    finished: oneshot::Sender<Result<(), String>>,
 ) {
-    while let Ok(payload) = rx.recv_async().await {
+    let outcome = loop {
+        let payload = match rx.recv_async().await {
+            Ok(payload) => payload,
+            Err(_) => break Ok(()),
+        };
         match payload {
             WritePayload::Payload(bytes) => {
                 let frame = Frame::binary(Payload::from(bytes));
-                if let Err(err) = write.write_frame(frame).await {
+                if let Err(err) = write_frame_flushed(&mut write, frame).await {
                     error!("Client Stream error: {:?}", err);
-                    break;
+                    break Err(err.to_string());
                 }
             }
             WritePayload::Close => {
                 debug!("Received Close request in Client Stream Writer");
-                let _ = write.write_frame(Frame::close(1000, b"go away")).await;
-                break;
+                let _ =
+                    write_close_frame_flushed(&mut write, Frame::close(1000, b"go away")).await;
+                break Ok(());
             }
         }
-    }
+    };
 
+    let _ = finished.send(outcome);
     debug!("Exiting Client Stream Writer");
 }
 

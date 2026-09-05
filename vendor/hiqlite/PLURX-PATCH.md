@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirteen compatibility patches for clustered
+Apache-2.0. Plurx carries fourteen compatibility patches for clustered
 deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
@@ -48,6 +48,15 @@ deployments:
   covers convergence; these vendor tests do not claim to drive that private
   sender themselves. Remove this patch only after upstream Hiqlite preserves
   peer snapshot errors on both transports.
+- Every Raft, cluster-API, proxy, and authentication WebSocket frame is flushed
+  before its writer waits for more work. One 30-second budget covers the write
+  and flush together; errors and expiry terminate the writer and wake the
+  connection supervisor even while its reader remains live. Graceful Close
+  frames use a separate 250-millisecond best-effort allowance, and the server
+  challenge/response exchange remains inside the existing five-second
+  connection deadline. The real-TLS frame regressions hold the ciphertext tail
+  of both client and server writes, including 3 MiB frames, and prove that the
+  same socket completes after backpressure clears.
 - A dropped OpenRaft RPC signals its WebSocket manager through a dedicated
   retained notification instead of best-effort enqueueing `Reset` behind the
   request itself. The old one-slot queue could be full at the hard deadline,
@@ -108,7 +117,7 @@ deployments:
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
 
-Remove this vendor when an upstream Hiqlite release contains all thirteen patches
+Remove this vendor when an upstream Hiqlite release contains all fourteen patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep

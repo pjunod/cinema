@@ -1,7 +1,8 @@
 use crate::helpers::deserialize;
 use crate::network::challenge_response::{Challenge, ChallengeResponse, ResponseFinal};
 use crate::network::serialize_network;
-use crate::{Error, NodeId};
+use crate::network::frame_io::write_socket_frame_flushed;
+use crate::{Error, LEADER_STREAM_CONNECT_TIMEOUT, NodeId};
 use fastwebsockets::{Frame, OpCode, Payload, WebSocket};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
@@ -29,7 +30,7 @@ impl HandshakeSecret {
         };
 
         let frame = Frame::binary(Payload::from(serialize_network(&challenge_response)));
-        ws.write_frame(frame).await?;
+        write_socket_frame_flushed(ws, frame).await?;
 
         let frame = ws.read_frame().await?;
         match frame.opcode {
@@ -53,11 +54,28 @@ impl HandshakeSecret {
         ws: &mut WebSocket<TokioIo<Upgraded>>,
         secret: &[u8],
     ) -> Result<NodeId, Error> {
+        tokio::time::timeout(
+            LEADER_STREAM_CONNECT_TIMEOUT,
+            Self::server_exchange(ws, secret),
+        )
+        .await
+        .map_err(|_| {
+            Error::Connect(format!(
+                "WebSocket server handshake exceeded {} seconds",
+                LEADER_STREAM_CONNECT_TIMEOUT.as_secs()
+            ))
+        })?
+    }
+
+    async fn server_exchange(
+        ws: &mut WebSocket<TokioIo<Upgraded>>,
+        secret: &[u8],
+    ) -> Result<NodeId, Error> {
         debug!("Executing HandshakeSecret::server");
         let challenge = Challenge::new()?;
 
         let frame = Frame::binary(Payload::from(serialize_network(&challenge)));
-        ws.write_frame(frame).await?;
+        write_socket_frame_flushed(ws, frame).await?;
 
         // we are not using a fragment collector and don't check for a full frame either
         // it should never be an issue though because the handshake packets are tiny
@@ -77,7 +95,7 @@ impl HandshakeSecret {
         };
 
         let frame = Frame::binary(Payload::from(serialize_network(&response)));
-        ws.write_frame(frame).await?;
+        write_socket_frame_flushed(ws, frame).await?;
 
         debug!("HandshakeSecret::server finished");
         Ok(node_id)

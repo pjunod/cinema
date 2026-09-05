@@ -2,6 +2,7 @@ use crate::Node;
 use crate::NodeId;
 use crate::app_state::RaftType;
 use crate::helpers::{deserialize, serialize};
+use crate::network::frame_io::{write_close_frame_flushed, write_frame_flushed};
 use crate::network::raft_server::{
     RaftStreamRequest, RaftStreamResponse, RaftStreamResponsePayload,
 };
@@ -290,17 +291,30 @@ enum WriteEnqueueError {
     Disconnected(flume::SendError<WritePayload>),
 }
 
+// Boxing the request variant would add an allocation to every Raft RPC only to
+// reduce this short-lived supervisor value's stack size.
+#[allow(clippy::large_enum_variant)]
+enum ConnectedEvent {
+    Reset,
+    WriterFinished(Result<(), String>),
+    Request(Result<RaftRequest, flume::RecvError>),
+}
+
 async fn next_connected_event(
     reset: &ConnectionResetState,
     socket_epoch: u64,
     rx_read: &flume::Receiver<RaftRequest>,
     rx: &flume::Receiver<RaftRequest>,
-) -> Option<Result<RaftRequest, flume::RecvError>> {
+    writer_finished: &mut oneshot::Receiver<Result<(), String>>,
+) -> ConnectedEvent {
     select! {
         biased;
-        _ = reset.changed_since(socket_epoch) => None,
-        result = rx_read.recv_async() => Some(result),
-        result = rx.recv_async() => Some(result),
+        _ = reset.changed_since(socket_epoch) => ConnectedEvent::Reset,
+        result = writer_finished => ConnectedEvent::WriterFinished(
+            result.unwrap_or_else(|_| Err("Raft writer task exited without reporting an outcome".into()))
+        ),
+        result = rx_read.recv_async() => ConnectedEvent::Request(result),
+        result = rx.recv_async() => ConnectedEvent::Request(result),
     }
 }
 
@@ -452,17 +466,38 @@ impl NetworkStreaming {
             let read = FragmentCollectorRead::new(read);
 
             let handle_read = task::spawn(Box::pin(Self::stream_reader(read, tx_read.clone())));
-            let handle_write = task::spawn(Box::pin(Self::stream_writer(write, rx_write)));
+            let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
+            let handle_write = task::spawn(Box::pin(Self::stream_writer(
+                write,
+                rx_write,
+                tx_writer_finished,
+            )));
 
             let mut forced_reset = false;
             'connected: loop {
-                let res = match next_connected_event(&reset, socket_epoch, &rx_read, &rx).await {
-                    None => {
+                let res = match next_connected_event(
+                    &reset,
+                    socket_epoch,
+                    &rx_read,
+                    &rx,
+                    &mut rx_writer_finished,
+                )
+                .await
+                {
+                    ConnectedEvent::Reset => {
                         debug!("RPC future was cancelled - reconnecting Raft stream");
                         forced_reset = true;
                         break;
                     }
-                    Some(res) => res,
+                    ConnectedEvent::WriterFinished(outcome) => {
+                        match outcome {
+                            Ok(()) => error!("Raft WebSocket writer exited while connected"),
+                            Err(err) => error!("Raft WebSocket writer failed: {err}"),
+                        }
+                        forced_reset = true;
+                        break;
+                    }
+                    ConnectedEvent::Request(res) => res,
                 };
 
                 let req = match res {
@@ -641,24 +676,34 @@ impl NetworkStreaming {
     async fn stream_writer(
         mut write: WebSocketWrite<WriteHalf<TokioIo<Upgraded>>>,
         rx: flume::Receiver<WritePayload>,
+        finished: oneshot::Sender<Result<(), String>>,
     ) {
-        while let Ok(payload) = rx.recv_async().await {
+        let outcome = loop {
+            let payload = match rx.recv_async().await {
+                Ok(payload) => payload,
+                Err(_) => break Ok(()),
+            };
             match payload {
                 WritePayload::Payload(bytes) => {
                     let frame = Frame::binary(Payload::from(bytes));
-                    if let Err(err) = write.write_frame(frame).await {
+                    if let Err(err) = write_frame_flushed(&mut write, frame).await {
                         error!("Client Stream error: {:?}", err);
-                        break;
+                        break Err(err.to_string());
                     }
                 }
                 WritePayload::Close => {
                     debug!("Received Close request in Client Stream Writer");
-                    let _ = write.write_frame(Frame::close(1000, b"go away")).await;
-                    break;
+                    let _ = write_close_frame_flushed(
+                        &mut write,
+                        Frame::close(1000, b"go away"),
+                    )
+                    .await;
+                    break Ok(());
                 }
             }
-        }
+        };
 
+        let _ = finished.send(outcome);
         debug!("Exiting Client Stream Writer");
     }
 }
@@ -1000,19 +1045,84 @@ mod tests {
         let reset = Arc::new(ConnectionResetState::default());
         let socket_epoch = reset.epoch();
         let guard = ConnectionResetGuard::new(Arc::clone(&reset));
+        let (_writer_finished, mut writer_finished) = oneshot::channel();
 
         drop(guard);
 
         let event = tokio::time::timeout(
             Duration::from_secs(1),
-            next_connected_event(&reset, socket_epoch, &reader_receiver, &receiver),
+            next_connected_event(
+                &reset,
+                socket_epoch,
+                &reader_receiver,
+                &receiver,
+                &mut writer_finished,
+            ),
         )
         .await
-            .expect("the handler's reconnect consumer must observe the retained reset");
-        assert!(event.is_none());
+        .expect("the handler's reconnect consumer must observe the retained reset");
+        assert!(matches!(event, ConnectedEvent::Reset));
         assert!(matches!(
             receiver.recv_async().await,
             Ok(RaftRequest::Shutdown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_coordinator_observes_writer_failure_while_reader_is_pending() {
+        let (_request_sender, request_receiver) = flume::bounded(1);
+        let (_reader_sender, reader_receiver) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let socket_epoch = reset.epoch();
+        let (writer_finished, mut writer_result) = oneshot::channel();
+
+        writer_finished
+            .send(Err("injected flush failure".to_owned()))
+            .expect("writer outcome receiver must remain open");
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_connected_event(
+                &reset,
+                socket_epoch,
+                &reader_receiver,
+                &request_receiver,
+                &mut writer_result,
+            ),
+        )
+        .await
+        .expect("writer failure must wake the connection supervisor");
+        assert!(matches!(
+            event,
+            ConnectedEvent::WriterFinished(Err(ref err)) if err == "injected flush failure"
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_coordinator_treats_writer_panic_as_terminal() {
+        let (_request_sender, request_receiver) = flume::bounded(1);
+        let (_reader_sender, reader_receiver) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let socket_epoch = reset.epoch();
+        let (writer_finished, mut writer_result) = oneshot::channel::<Result<(), String>>();
+        drop(writer_finished);
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_connected_event(
+                &reset,
+                socket_epoch,
+                &reader_receiver,
+                &request_receiver,
+                &mut writer_result,
+            ),
+        )
+        .await
+        .expect("dropped writer outcome must wake the connection supervisor");
+        assert!(matches!(
+            event,
+            ConnectedEvent::WriterFinished(Err(ref err))
+                if err.contains("without reporting an outcome")
         ));
     }
 
