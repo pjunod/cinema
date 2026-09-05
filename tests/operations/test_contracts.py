@@ -21,7 +21,7 @@ def read(path: str) -> str:
 
 def make_dry_run_commands(target: str) -> list[str]:
     result = subprocess.run(
-        ["make", "-n", target],
+        ["make", "--no-print-directory", "-n", target],
         cwd=ROOT,
         check=True,
         text=True,
