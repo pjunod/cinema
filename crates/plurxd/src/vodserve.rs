@@ -1522,11 +1522,12 @@ impl VodPreparationGate {
 }
 
 impl crate::playback_control::PreparationGate for VodPreparationGate {
-    fn stage_preparation<'a>(
+    fn stage_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        expected_owner_epoch: i64,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1544,18 +1545,20 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .control
                 .lock()
                 .expect("control lock")
-                .stage_preparation(
+                .stage_preparation_for_owner(
                     staged_incarnation_id,
                     predecessor_incarnation_id,
                     deadline_ms,
+                    expected_owner_epoch,
                 );
             staged
         })
     }
 
-    fn may_commit_preparation<'a>(
+    fn may_commit_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: &'a str,
+        expected_owner_epoch: i64,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1574,15 +1577,54 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                 .control
                 .lock()
                 .expect("control lock")
-                .may_commit_preparation(staged_incarnation_id);
+                .may_commit_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             may
         })
     }
 
-    fn settle_preparation<'a>(
+    fn begin_abort_preparation_for_owner<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+        expected_owner_epoch: i64,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            let reserved = session
+                .control
+                .lock()
+                .expect("control lock")
+                .begin_abort_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
+            reserved
+        })
+    }
+
+    fn reject_preparation_commit_for_owner<'a>(
+        &'a self,
+        staged_incarnation_id: &'a str,
+        expected_owner_epoch: i64,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            let rejected = session
+                .control
+                .lock()
+                .expect("control lock")
+                .reject_preparation_commit_for_owner(staged_incarnation_id, expected_owner_epoch);
+            rejected
+        })
+    }
+
+    fn settle_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: &'a str,
         committed: bool,
+        expected_owner_epoch: i64,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1594,9 +1636,11 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
             };
             let mut control = session.control.lock().expect("control lock");
             if !committed {
-                control.abort_preparation(staged_incarnation_id);
+                control
+                    .begin_abort_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             }
-            let settled = control.settle_preparation(staged_incarnation_id);
+            let settled =
+                control.settle_preparation_for_owner(staged_incarnation_id, expected_owner_epoch);
             drop(control);
             settled
         })
@@ -3388,7 +3432,8 @@ impl VodServe {
             crate::playback_control::ControlStateError,
         >,
     > {
-        self.control_with_terminal(control, i64::MAX, None).await
+        self.control_with_terminal(control, i64::MAX, None, None)
+            .await
     }
 
     pub(crate) async fn control_with_terminal(
@@ -3396,6 +3441,9 @@ impl VodServe {
         control: crate::playback_control::LocalControlRequest<'_>,
         deadline_unix_ms: i64,
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        preparation_admission: Option<
+            Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
     ) -> Option<
         Result<
             crate::playback_control::LocalControlResult,
@@ -3533,10 +3581,11 @@ impl VodServe {
                 accepted_sequence: u64,
                 action: crate::playback_control::ControlAction,
                 action_suppressed: bool,
+                preparation_directive: Option<Box<crate::playback_control::PreparationDirective>>,
                 platform: crate::playback_control::ClientPlatform,
                 selection: crate::playback_control::SelectionObservation,
                 lease_expires_at_unix_ms: i64,
-                marker_prewarm: Option<MarkerPrewarmControl>,
+                marker_prewarm: Option<Box<MarkerPrewarmControl>>,
             },
         }
         let outcome = {
@@ -3552,15 +3601,19 @@ impl VodServe {
             // two reads of the same fence, and taking the lock twice would let
             // another exchange land between them and be measured against a
             // selection this one had already replaced.
-            let (accepted, selection) = {
+            let (accepted, selection, preparation_directive) = {
                 let mut fence = session.control.lock().expect("control lock");
                 let accepted = fence.accept(
                     control.generation,
                     control.owner_epoch,
                     control.client_instance_id,
                     control.sequence,
-                    control.snapshot.platform(),
-                    &control.prepared_successor,
+                    crate::playback_control::ControlAcceptance::observed(
+                        control.snapshot.platform(),
+                        &control.prepared_successor,
+                        control.snapshot.acknowledgement.as_ref(),
+                        control.snapshot.request_fingerprint.as_deref(),
+                    ),
                 );
                 // Only for an accepted exchange: a replay is the same exchange
                 // arriving twice, and it changed the selection the first time
@@ -3576,25 +3629,49 @@ impl VodServe {
                 } else {
                     crate::playback_control::SelectionObservation::default()
                 };
-                (accepted, observation)
+                let preparation_directive = fence.preparation_directive();
+                (accepted, observation, preparation_directive)
             };
             let (disposition, accepted_sequence, action, platform, action_suppressed) =
                 match accepted {
                     Ok(outcome) => outcome,
                     Err(error) => return Some(Err(error)),
                 };
-
             if disposition == crate::playback_control::ControlDisposition::Accepted
                 && control.snapshot.demand == crate::playback_control::PlaybackDemand::End
             {
                 let status = ending_status?;
                 let rendition = session.rendition.as_ref().map(Arc::clone)?;
+                let lease_expires_at_unix_ms = crate::media_sessions::unix_ms();
+                if let (Some(admission), Some(directive)) = (
+                    preparation_admission.as_ref(),
+                    preparation_directive.clone(),
+                ) {
+                    // End tombstones the VOD session and synchronously clears
+                    // its local slot. Transfer any rollover/acknowledgement
+                    // cleanup to the durable owner first, while the retained
+                    // gate can still settle that exact slot even if the HTTP
+                    // waiter disappears after this critical section.
+                    admission.accepted(crate::playback_control::PreparationControlOutcome {
+                        disposition,
+                        accepted_sequence,
+                        action: action.clone(),
+                        action_suppressed,
+                        preparation_directive: directive,
+                        platform,
+                        lease_expires_at_unix_ms,
+                        lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                        lease_state: "ended",
+                        selection: selection.clone(),
+                    });
+                }
                 let mut result = crate::playback_control::LocalControlResult {
                     disposition,
                     accepted_sequence,
                     action,
                     action_suppressed,
-                    lease_expires_at_unix_ms: crate::media_sessions::unix_ms(),
+                    preparation_directive,
+                    lease_expires_at_unix_ms,
                     lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
                     lease_state: "ended",
                     status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
@@ -3644,16 +3721,39 @@ impl VodServe {
                 }
                 let remaining = SESSION_IDLE_TTL.saturating_sub(last_touch.elapsed());
                 let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
+                let lease_expires_at_unix_ms =
+                    crate::media_sessions::unix_ms().saturating_add(remaining_ms);
+                if let (Some(admission), Some(directive)) = (
+                    preparation_admission.as_ref(),
+                    preparation_directive.clone(),
+                ) {
+                    // Transfer durable ownership while the accepted sequence
+                    // and its preparation directive are still under the VOD
+                    // lifecycle/control fence. The HTTP future may disappear
+                    // immediately after this scope without stranding the slot.
+                    admission.accepted(crate::playback_control::PreparationControlOutcome {
+                        disposition,
+                        accepted_sequence,
+                        action: action.clone(),
+                        action_suppressed,
+                        preparation_directive: directive,
+                        platform,
+                        lease_expires_at_unix_ms,
+                        lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                        lease_state: "active",
+                        selection: selection.clone(),
+                    });
+                }
                 Ok(AppliedControl::Live {
                     disposition,
                     accepted_sequence,
                     action,
                     action_suppressed,
+                    preparation_directive: preparation_directive.map(Box::new),
                     platform,
                     selection: selection.clone(),
-                    lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
-                        .saturating_add(remaining_ms),
-                    marker_prewarm,
+                    lease_expires_at_unix_ms,
+                    marker_prewarm: marker_prewarm.map(Box::new),
                 })
             }
         };
@@ -3666,6 +3766,7 @@ impl VodServe {
             accepted_sequence,
             action,
             action_suppressed,
+            preparation_directive,
             platform,
             selection,
             lease_expires_at_unix_ms,
@@ -3698,6 +3799,7 @@ impl VodServe {
                 accepted_sequence,
                 action,
                 action_suppressed,
+                preparation_directive,
                 platform,
                 selection,
                 lease_expires_at_unix_ms,
@@ -3707,10 +3809,11 @@ impl VodServe {
                 accepted_sequence,
                 action,
                 action_suppressed,
+                preparation_directive.map(|directive| *directive),
                 platform,
                 selection,
                 lease_expires_at_unix_ms,
-                marker_prewarm,
+                marker_prewarm.map(|prewarm| *prewarm),
             ),
         };
         if let Some(marker_prewarm) = marker_prewarm {
@@ -3738,6 +3841,7 @@ impl VodServe {
             accepted_sequence,
             action,
             action_suppressed,
+            preparation_directive,
             lease_expires_at_unix_ms,
             lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             lease_state: "active",
@@ -6484,6 +6588,20 @@ mod tests {
         expires_at_unix_ms: i64,
     }
 
+    #[derive(Default)]
+    struct RecordingPreparationAdmission {
+        outcome: std::sync::Mutex<Option<crate::playback_control::PreparationControlOutcome>>,
+    }
+
+    impl crate::playback_control::PreparationSettlementAdmission for RecordingPreparationAdmission {
+        fn accepted(&self, outcome: crate::playback_control::PreparationControlOutcome) {
+            *self
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+        }
+    }
+
     impl crate::playback_control::TerminalControlCommitter for CleanupObservingCommitter {
         fn start(
             &self,
@@ -8329,7 +8447,10 @@ mod tests {
             gate.stage_preparation(successor.clone(), predecessor.clone(), i64::MAX)
                 .await
         );
-        assert!(gate.may_commit_preparation(&successor).await);
+        assert!(
+            !gate.may_commit_preparation(&successor).await,
+            "staging alone is not commit authority; a client acknowledgement must reserve it"
+        );
         // One per playback, and the second ask is refused rather than
         // replacing the first: the store's primary key would reject it, and an
         // engine that believed in two could commit the wrong one.
@@ -10200,7 +10321,7 @@ mod tests {
         });
         let committer_weak = Arc::downgrade(&committer);
         let accepted = serve
-            .control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
+            .control_with_terminal(request(1), i64::MAX, Some(committer.clone()), None)
             .await
             .expect("VOD registry owner")
             .expect("end accepted");
@@ -10379,6 +10500,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vod_end_transfers_a_rollover_abort_before_tombstoning() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(store.as_ref(), &session_id, &generation).await;
+        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, &session_id, rendition, Instant::now()).await;
+
+        let epoch_one_client = uuid::Uuid::new_v4().to_string();
+        serve
+            .control(crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "node-a",
+                owner_epoch: 1,
+                client_instance_id: &epoch_one_client,
+                sequence: 1,
+                snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Apple,
+                ),
+                prepared_successor:
+                    crate::playback_control::PreparedSuccessorObservation::NotRequested,
+            })
+            .await
+            .expect("VOD registry owner")
+            .expect("epoch one control accepted");
+
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        {
+            let sessions = serve.shared.sessions.lock().await;
+            assert!(sessions[&session_id]
+                .control
+                .lock()
+                .expect("control lock")
+                .stage_preparation_for_owner(
+                    staged_incarnation_id.clone(),
+                    generation.clone(),
+                    i64::MAX,
+                    1,
+                ));
+        }
+
+        let route = store
+            .media_session_route(&session_id)
+            .await
+            .expect("route read")
+            .expect("active route");
+        let takeover_at = route.lease_expires_at_ms.saturating_add(1);
+        let transferred = store
+            .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+                incarnation_id: generation.clone(),
+                expected_owner_node_id: "node-a".to_owned(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "node-b".to_owned(),
+                now_ms: takeover_at,
+                lease_expires_at_ms: takeover_at.saturating_add(60_000),
+            })
+            .await
+            .expect("takeover")
+            .expect("epoch two route");
+        assert_eq!(transferred.owner_epoch, 2);
+
+        let admission = Arc::new(RecordingPreparationAdmission::default());
+        let epoch_two_client = uuid::Uuid::new_v4().to_string();
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        snapshot.demand = crate::playback_control::PlaybackDemand::End;
+        snapshot.playback_rate = 0.0;
+        snapshot.render_state = crate::playback_control::RenderState::Ended;
+        let ended = serve
+            .control_with_terminal(
+                crate::playback_control::LocalControlRequest {
+                    session_id: &session_id,
+                    generation: &generation,
+                    owner_node_id: "node-b",
+                    owner_epoch: 2,
+                    client_instance_id: &epoch_two_client,
+                    sequence: 1,
+                    snapshot,
+                    prepared_successor:
+                        crate::playback_control::PreparedSuccessorObservation::NotRequested,
+                },
+                i64::MAX,
+                None,
+                Some(admission.clone()),
+            )
+            .await
+            .expect("VOD registry owner")
+            .expect("epoch two End accepted");
+        assert_eq!(ended.lease_state, "ended");
+        assert_eq!(
+            admission
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(|outcome| &outcome.preparation_directive),
+            Some(&crate::playback_control::PreparationDirective::Abort {
+                staged_incarnation_id,
+                acknowledgement_rejected: false,
+            }),
+            "the durable abort owner must receive the inherited slot before End clears it"
+        );
+        assert_eq!(
+            serve.shared.sessions.lock().await[&session_id].tombstone,
+            Some(Terminal::Deleted)
+        );
+    }
+
+    #[tokio::test]
     async fn cancelled_vod_end_response_cannot_cancel_terminal_reader_cleanup() {
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -10436,6 +10670,7 @@ mod tests {
                         },
                         i64::MAX,
                         Some(committer),
+                        None,
                     )
                     .await
             })

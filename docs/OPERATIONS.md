@@ -190,22 +190,31 @@ ssh nuc3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
     --username fleet --password-stdin'
 ```
 
-Build only on nuc4, from the exact checkout being shipped. The script embeds
-the git description in the binary and publishes one rollback tag plus the
-moving fleet tag:
+Every successful Forgejo `main` run ends with
+`publish merged image (Forgejo registry)`. The job waits for the post-merge
+validation fan-out, builds once on an X64 runner, verifies the immutable
+registry copy, and only then moves the fleet tag. It publishes
+`sha-<12hex>` for rollback and `main` for the newest qualified merge.
+Versioned releases own `latest`; fleet merges never overwrite that alias.
+
+If the automatic job must be recovered, run the same guarded publisher on
+nuc4 from the exact Forgejo commit. Supplying both identity variables makes a
+retry reuse an existing immutable image instead of rebuilding it:
 
 ```bash
 ssh nuc4
 cd /opt/noirr/plurx
 git fetch origin
 git switch --detach origin/main
-scripts/registry-push
+PLURX_BUILD_REF="$(git rev-parse HEAD)" \
+PLURX_BUILD_SHA="$(git rev-parse HEAD)" \
+  scripts/registry-push
 ```
 
 Each voter keeps this gitignored setting in `deploy/.env`:
 
 ```bash
-PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:latest
+PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main
 ```
 
 Pulling does not stop the running voter, so it may happen ahead of the rolling
@@ -221,7 +230,7 @@ curl -fsS http://127.0.0.1:32400/api/v1/server
 ```
 
 **Rollback by digest-bearing tag, not by rebuilding an old tree on every
-node.** Replace `latest` in `deploy/.env` with the known-good
+node.** Replace `main` in `deploy/.env` with the known-good
 `sha-<12hex>` tag, then run the same serial `up -d` and readiness gate. The
 Forgejo cleanup rule keeps the ten newest `sha-` tags, which bounds disk use
 and rollback depth together.

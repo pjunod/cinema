@@ -4,8 +4,8 @@
      Unraid Docker UI ("Add Container" → paste this template). -->
 <Container version="2">
   <Name>plurx</Name>
-  <Repository>ghcr.io/pjunod/plurx:latest</Repository>
-  <Registry>https://github.com/pjunod/plurx/pkgs/container/plurx</Registry>
+  <Repository>192.168.4.7:3000/noirr/plurxd:main</Repository>
+  <Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/main</Registry>
   <!-- Host networking is required for Bonjour multicast. A bridge can expose
        TCP 32400 but cannot publish _plurx._tcp to iPhone/iPad/Apple TV. -->
   <Network>host</Network>
@@ -14,7 +14,7 @@
   <Overview>Self-hosted media server in the spirit of old Plex: scan a folder, play on any screen. Hardware transcode, HDR tone-mapping, anime, and a Plex-compatible API for Kodi clients.</Overview>
   <Category>MediaApp:Video</Category>
   <WebUI>http://[IP]:[PORT:32400]/</WebUI>
-  <Icon>https://raw.githubusercontent.com/pjunod/plurx/main/docs/icon.png</Icon>
+  <Icon>http://192.168.4.7:3000/noirr/plurx/raw/branch/main/docs/icon.png</Icon>
   <ExtraParams>--restart unless-stopped</ExtraParams>
 
   <Config Name="HTTP Bind" Target="PLURX_BIND" Default="0.0.0.0:32400" Mode="" Description="HTTP API + web app bind; host networking is required for native Bonjour discovery" Type="Variable" Display="always" Required="true">0.0.0.0:32400</Config>

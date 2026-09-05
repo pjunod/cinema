@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9524f5c8"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The historical regression evidence audit retains the preparation-settlement correction mappings after the authoritative base moved."

@@ -7,6 +7,7 @@ import re
 import runpy
 import subprocess
 import tempfile
+import textwrap
 import tomllib
 import unittest
 
@@ -123,20 +124,19 @@ def store_shard_count() -> int:
 def self_hosted_label_sets(block: str) -> list[tuple[str, ...]]:
     """Every self-hosted label set a job's `runs-on` can resolve to.
 
-    A job either names both pools inline in one `fromJSON` ternary over
-    `vars.CI_RUNNER_MODE`, or reads the self-hosted side from a matrix key. Both
-    spell that side as a single-quoted JSON array, so parse the arrays that are
-    actually there instead of matching label strings this test already knows.
+    A job either names the local labels as a YAML flow sequence or reads the
+    same sequence from a matrix key. Parse the arrays that are actually there
+    instead of matching label strings this test already knows.
     """
-    sources = re.findall(r"(?m)^ +runs-on: .+$", block)
-    sources += re.findall(r"(?m)^ +self_hosted_runs_on: .+$", block)
-    return [
-        tuple(labels)
-        for source in sources
-        for literal in re.findall(r"'(\[[^']*\])'", source)
-        for labels in (json.loads(literal),)
-        if "self-hosted" in labels
+    direct = [
+        tuple(part.strip().strip('"\'') for part in literal.split(","))
+        for literal in re.findall(r"(?m)^ +runs-on: \[([^]]+)\]$", block)
     ]
+    matrix = [
+        tuple(json.loads(literal))
+        for literal in re.findall(r"(?m)^ +runs_on: '(\[[^']*\])'$", block)
+    ]
+    return [labels for labels in (*direct, *matrix) if "self-hosted" in labels]
 
 
 def workflow_step_literal(step: str, key: str) -> list[str]:
@@ -200,6 +200,37 @@ class OperationsContractCase(unittest.TestCase):
             script.index("page.wait_for_timeout(settle_ms)"),
         )
 
+    def test_ui_baseline_preserves_exact_periodic_route_request_counts(self):
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_request_contract"
+        )
+        counted = contract["counted_api_calls"]
+
+        self.assertEqual(
+            counted(
+                "activity",
+                {},
+                ["GET /api/v1/activity/detail"] * 3
+                + ["GET /api/v1/cluster/nodes"],
+            ),
+            {
+                "GET /api/v1/activity/detail": 3,
+                "GET /api/v1/cluster/nodes": 1,
+            },
+        )
+        self.assertEqual(
+            counted(
+                "analysis",
+                {},
+                ["GET /api/v1/analysis/summary"] * 2
+                + ["GET /api/v1/analysis/jobs"] * 2,
+            ),
+            {
+                "GET /api/v1/analysis/jobs": 2,
+                "GET /api/v1/analysis/summary": 2,
+            },
+        )
+
     def test_ui_baseline_pins_vod_index_status_before_seeding_libraries(self):
         script = read("scripts/ui-baseline")
         seed = script.index("    def seed(self):")
@@ -207,6 +238,104 @@ class OperationsContractCase(unittest.TestCase):
         libraries = script.index("for name, kind, share in LIBRARIES:", seed)
 
         self.assertLess(pinned, libraries)
+
+    def test_activity_capture_observes_one_real_tick_without_hiding_extra_requests(self):
+        script = read("scripts/ui-baseline")
+        capture = runpy.run_path(str(ROOT / "scripts/ui-baseline"))["ACTIVITY_CAPTURE_JS"]
+        web = read("crates/plurxd/src/web/index.html")
+        page_timer = web.split("function setPageTimer(", 1)[1].split("\nasync function render()", 1)[0]
+        production = "function setPageTimer(" + page_timer
+        contract = r"""
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const [capture, production] = process.argv.slice(1);
+for (const startupDelay of [0, 1600, 7000]) {
+  for (const extraRequest of [false, true]) {
+    let now = 0, next = 0;
+    const timers = new Map(), calls = [];
+    const context = vm.createContext({
+      location: {hash: '#/activity'}, PAGE_TIMER: null, PAGE_RENDER_GENERATION: 1,
+      setInterval(callback, delay, ...args) {
+        const id = ++next;
+        timers.set(id, {callback, delay, args, due: now + delay});
+        return id;
+      },
+      clearInterval(id) { timers.delete(id); },
+      record: value => calls.push(value),
+    });
+    context.window = context;
+    vm.runInContext(capture + '\n' + production, context);
+    vm.runInContext(`
+      record('activity/detail'); // initial production render
+      setPageTimer(() => record('activity/detail'), 3000);
+      setInterval(() => record('unrelated'), 4000);
+    `, context);
+    if (extraRequest) {
+      vm.runInContext("setInterval(() => record('activity/detail'), 4000)", context);
+    }
+    const target = startupDelay + 4500;
+    while (true) {
+      const ready = [...timers].filter(([, t]) => t.due <= target)
+        .sort((a, b) => a[1].due - b[1].due)[0];
+      if (!ready) break;
+      const [id, timer] = ready;
+      now = timer.due;
+      timer.due += timer.delay;
+      timer.callback(...timer.args);
+    }
+    assert.equal(context.__plurxActivityCaptureTick, true);
+    assert.equal(context.PAGE_TIMER, null);
+    assert.ok(calls.includes('unrelated'), 'other timers must remain real');
+    const count = calls.filter(call => call === 'activity/detail').length;
+    assert.equal(count === 2, !extraRequest,
+      `raw request golden: delay=${startupDelay}, extra=${extraRequest}, count=${count}`);
+  }
+}
+"""
+        subprocess.run(["node", "-e", contract, capture, production], check=True)
+        self.assertIn("page.add_init_script(ACTIVITY_CAPTURE_JS)", script)
+        self.assertIn("ACTIVITY_DETAIL_BUSY === 0", script)
+
+    def test_store_verdict_handles_unused_forgejo_workflow_without_weakening_required_lane(self):
+        verdict = workflow_job_blocks(".github/workflows/ci.yml")["cluster_store"]
+        step = workflow_step_blocks(verdict)["Select the required Store graph"]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        states = ("success", "skipped", "failure", "cancelled", "", "unknown")
+        for mode in ("legacy", "shadow", "accelerated", "", "unknown"):
+            for legacy in states:
+                for shard in states:
+                    expected = (
+                        mode in ("legacy", "shadow")
+                        and legacy == "success"
+                        and shard in ("skipped", "success")
+                    ) or (
+                        mode == "accelerated"
+                        and legacy == "skipped"
+                        and shard == "success"
+                    )
+                    with self.subTest(mode=mode, legacy=legacy, shard=shard):
+                        result = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", script],
+                            env={**os.environ, "EXECUTION_MODE": mode,
+                                 "LEGACY_RESULT": legacy, "SHARD_RESULT": shard},
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(result.returncode == 0, expected, result.stdout + result.stderr)
+
+    def test_ui_baseline_reserves_distinct_http_raft_and_api_ports(self):
+        script = read("scripts/ui-baseline")
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
+        )
+        ports = contract["free_ports"](0, 3)
+
+        self.assertEqual(len(ports), 3)
+        self.assertEqual(len(set(ports)), 3)
+        self.assertTrue(all(port > 0 for port in ports))
+        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
+        self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
     def test_ui_baseline_releases_players_and_narrowly_retries_root_attachment(self):
         script = read("scripts/ui-baseline")
@@ -495,9 +624,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("docker/setup-qemu-action@v3", workflow)
         self.assertIn("name: package and smoke (${{ matrix.arch }})", workflow)
         self.assertIn("- arch: arm64", workflow)
-        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", workflow)
         self.assertIn(
-            "self_hosted_runs_on: "
+            "runs_on: "
             "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
             workflow,
         )
@@ -685,8 +813,8 @@ class OperationsContractCase(unittest.TestCase):
         workflow = read(".github/workflows/ci.yml")
         makefile = read("Makefile")
         self.assertIn("/Applications/Xcode.app/Contents/Developer", workflow)
-        self.assertIn("/Applications/Xcode_26.6.app/Contents/Developer", workflow)
-        self.assertIn("brew install xcodegen", workflow)
+        self.assertNotIn("/Applications/Xcode_26.6.app/Contents/Developer", workflow)
+        self.assertNotIn("brew install xcodegen", workflow)
         self.assertIn('grep -Fxq "Xcode 26.6"', workflow)
         self.assertIn('grep -Fxq "Build version 17F113"', workflow)
         self.assertIn('= "Version: 2.46.0"', workflow)
@@ -843,6 +971,17 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn("needs: [scope, preflight]", apple)
         self.assertNotIn("mobile_version", apple)
+        self.assertIn(
+            "PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            apple,
+        )
+        effort_apple = workflow_job_blocks(".github/workflows/effort-ci.yml")[
+            "apple_compile"
+        ]
+        self.assertIn(
+            "PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            effort_apple,
+        )
 
         coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
         self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
@@ -856,14 +995,20 @@ class OperationsContractCase(unittest.TestCase):
         )
         self.assertIn("git add coverage.json coverage.svg", coverage)
 
-        # Shields cannot fetch badge data anonymously from a private branch.
-        # GitHub serves both badge images to authorized repository viewers.
+        # The private Forgejo repository serves badges to authenticated local
+        # viewers; no external badge proxy receives repository metadata.
         readme = read("README.md")
         self.assertIn(
             "ci.yml/badge.svg?branch=main&event=push",
             readme,
         )
-        self.assertIn("blob/badges/coverage.svg?raw=true", readme)
+        self.assertIn("/raw/branch/badges/coverage.svg", readme)
+        self.assertIn("http://192.168.4.7:3000/noirr/plurx/actions", readme)
+        self.assertIn(
+            "git clone http://192.168.4.7:3000/noirr/plurx.git",
+            readme,
+        )
+        self.assertNotIn("git clone https://github.com/pjunod/plurx", readme)
         self.assertNotIn("img.shields.io/endpoint", readme)
         self.assertNotIn("raw.githubusercontent.com/pjunod/plurx/badges", readme)
 
@@ -876,7 +1021,7 @@ class OperationsContractCase(unittest.TestCase):
             "preflight"
         ]
         for contract_preflight in (preflight, effort_preflight):
-            self.assertIn("uses: actions/setup-node@v4", contract_preflight)
+            self.assertIn("uses: https://data.forgejo.org/actions/setup-node@v4", contract_preflight)
             self.assertIn('node-version: "22"', contract_preflight)
             self.assertLess(
                 contract_preflight.index("actions/setup-node@v4"),
@@ -934,17 +1079,17 @@ class OperationsContractCase(unittest.TestCase):
         makefile = read("Makefile")
         precommit = read("scripts/pre-commit")
 
-        # The single required aggregate workflow must fire on merge_group.
-        # The badge-only lint workflow runs after merge; Clippy already belongs
-        # to the aggregate workflow's fast Rust lane.
-        self.assertIn("\n  merge_group:\n", workflow)
+        # Forgejo has no GitHub merge-queue event. The single required
+        # aggregate workflow fires on main-bound pull requests, while the
+        # badge-only lint workflow runs after merge.
+        self.assertNotIn("\n  merge_group:\n", workflow)
         self.assertNotIn("\n  merge_group:\n", lint)
         self.assertNotIn("\n  pull_request:\n", lint)
         self.assertIn(
-            "if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')",
+            "if: always() && github.event_name == 'pull_request'",
             workflow,
         )
-        # Queue runs must never be cancelled by a later PR push.
+        # Main pushes may supersede older main pushes, but tags remain durable.
         self.assertIn(
             "github.event_name == 'push' && github.ref == 'refs/heads/main'",
             workflow,
@@ -1230,7 +1375,7 @@ class OperationsContractCase(unittest.TestCase):
 
         build = workflow_step_blocks(shard)["Build the exact Store test binary"]
         self.assertEqual(workflow_step_scalar(build, "continue-on-error"), "true")
-        self.assertIn("uses: docker/build-push-action@v6", build)
+        self.assertIn("uses: https://github.com/docker/build-push-action@v6", build)
         self.assertIn("file: Dockerfile.store-shard", build)
         self.assertIn("target: store-contract-binary", build)
         self.assertIn("platforms: linux/amd64", build)
@@ -1272,7 +1417,7 @@ class OperationsContractCase(unittest.TestCase):
         for contract in (
             'test "$LEGACY_RESULT" = success',
             'test "$LEGACY_RESULT" = skipped',
-            'test "$SHARD_RESULT" = skipped',
+            'skipped|success) ;;',
             'test "$SHARD_RESULT" = success',
             'echo "Store shadow evidence is intentionally outside this gate"',
         ):
@@ -1307,8 +1452,8 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertIn('cron: "23 6 * * 1"', workflow)
         self.assertIn("workflow_dispatch:", workflow)
-        self.assertIn('\"ci-store\"', job)
-        self.assertIn("uses: dtolnay/rust-toolchain@1.97.1", job)
+        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-store]", job)
+        self.assertIn("uses: https://github.com/dtolnay/rust-toolchain@1.97.1", job)
         self.assertIn("lane: cluster-store-backstop", job)
         self.assertIn('persistent-eligible: "true"', job)
         self.assertEqual(job.count("make cluster-store-check"), 2)
@@ -1330,31 +1475,27 @@ class OperationsContractCase(unittest.TestCase):
         arm64 = matrix.split("- arch: arm64", 1)[1]
 
         self.assertIn(
-            "runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && "
-            "matrix.github_runs_on || matrix.self_hosted_runs_on) }}",
+            "runs-on: ${{ fromJSON(matrix.runs_on) }}",
             package,
         )
-        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", package)
         self.assertIn(
-            "self_hosted_runs_on: "
+            "runs_on: "
             "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
             package,
         )
         self.assertIn("target: x86_64-unknown-linux-gnu", amd64)
         self.assertIn("kernel_machine: x86_64", amd64)
         self.assertIn("docker_machine: x86_64", amd64)
-        self.assertIn("github_runs_on: '[\"ubuntu-24.04\"]'", amd64)
         self.assertIn(
-            "self_hosted_runs_on: "
+            "runs_on: "
             "'[\"self-hosted\",\"Linux\",\"X64\",\"lab\",\"general\",\"high-cpu\"]'",
             amd64,
         )
         self.assertIn("target: aarch64-unknown-linux-gnu", arm64)
         self.assertIn("kernel_machine: aarch64", arm64)
         self.assertIn("docker_machine: aarch64", arm64)
-        self.assertIn("github_runs_on: '[\"ubuntu-24.04-arm\"]'", arm64)
         self.assertIn(
-            "self_hosted_runs_on: "
+            "runs_on: "
             "'[\"self-hosted\",\"Linux\",\"ARM64\",\"lab\",\"ci-arm64\"]'",
             arm64,
         )
@@ -1378,12 +1519,16 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("plurx-apple-silicon-heavy", apple)
         self.assertIn("cancel-in-progress: false", package)
         self.assertIn("cancel-in-progress: false", apple)
-        self.assertIn("queue: max", package)
-        self.assertIn("queue: max", apple)
+        # Forgejo supports the standard concurrency group and cancellation
+        # policy, but rejects the non-standard `queue` mapping key during
+        # workflow schema validation before a runner can start.
+        self.assertNotIn("queue:", package)
+        self.assertNotIn("queue:", apple)
 
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
         action = read(".github/actions/playwright/action.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
 
         # The Playwright pip pin and the browser-bundle cache key must move
         # together, or a version bump silently reuses the wrong browsers.
@@ -1398,12 +1543,23 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIsNotNone(cache_pin)
         self.assertEqual(workflow_pin.group(1), cache_pin.group(1))
 
-        # Both Android jobs reuse the GHCR toolchain image keyed on the
+        # Both Android jobs reuse the Forgejo toolchain image keyed on the
         # Dockerfile hash, and the Makefile honors the pre-pull instead of
         # rebuilding the SDK image from scratch.
         self.assertEqual(
             workflow.count("sha256sum clients/android/Dockerfile"), 2
         )
+        self.assertEqual(
+            sum(
+                jobs[name].count("secrets.LOCAL_REGISTRY_TOKEN")
+                for name in ("android_jvm", "android_device")
+            ),
+            2,
+        )
+        self.assertEqual(
+            jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1
+        )
+        self.assertIn("192.168.4.7:3000/noirr/android-build", workflow)
         self.assertEqual(workflow.count("PLURX_ANDROID_IMAGE_READY=1"), 4)
         makefile = read("Makefile")
         self.assertIn('if [ "$${PLURX_ANDROID_IMAGE_READY:-}" = "1" ]', makefile)
@@ -1428,7 +1584,7 @@ class OperationsContractCase(unittest.TestCase):
             "\n  coverage:", 1
         )[0]
         self.assertEqual(
-            android_device.count("uses: reactivecircus/android-emulator-runner@v2"),
+            android_device.count("uses: https://github.com/reactivecircus/android-emulator-runner@v2"),
             2,
         )
         android_steps = workflow_step_blocks(android_device)
@@ -1590,10 +1746,26 @@ class OperationsContractCase(unittest.TestCase):
         # Every artifact has an explicit bound. Only the tiny qualification
         # receipt outlives the one-day diagnostic binaries.
         self.assertEqual(
-            workflow.count("uses: actions/upload-artifact@v4"),
+            workflow.count("uses: https://data.forgejo.org/forgejo/upload-artifact@v4"),
             workflow.count("retention-days:"),
         )
         self.assertIn("retention-days: 14", workflow)
+
+        # GitHub's v4 artifact clients reject every non-GitHub server. Forgejo
+        # publishes patched v4 clients with that host check removed; all local
+        # workflows must use those clients for both upload and download.
+        for workflow_path in (ROOT / ".github" / "workflows").glob("*.yml"):
+            workflow_text = workflow_path.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "https://data.forgejo.org/actions/upload-artifact@v4",
+                workflow_text,
+                workflow_path.name,
+            )
+            self.assertNotIn(
+                "https://data.forgejo.org/actions/download-artifact@v4",
+                workflow_text,
+                workflow_path.name,
+            )
 
         # Ordinary PRs retain only the small identity/digest receipt. Pushes
         # and final qualifications retain exact binaries for one day.
@@ -1602,13 +1774,24 @@ class OperationsContractCase(unittest.TestCase):
             "name: Retain candidate binaries for push, tag, and qualification runs",
             build,
         )
+        self.assertIn(
+            "name: Retain candidate binaries for non-qualification push and tag runs",
+            build,
+        )
         self.assertIn("needs.scope.outputs.qualification == 'true'", build)
         self.assertIn("name: Retain the exact package receipt", build)
         self.assertIn("release-bin/*.sha256", build)
-        self.assertIn(
-            "continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}",
-            build,
+        blocking_upload = workflow_step_blocks(build)[
+            "Retain candidate binaries for push, tag, and qualification runs"
+        ]
+        advisory_upload = workflow_step_blocks(build)[
+            "Retain candidate binaries for non-qualification push and tag runs"
+        ]
+        self.assertNotIn("continue-on-error:", blocking_upload)
+        self.assertEqual(
+            workflow_step_scalar(advisory_upload, "continue-on-error"), "true"
         )
+        self.assertIn("github.event_name == 'push'", advisory_upload)
         self.assertIn("name: package-smoke-binaries-${{ matrix.arch }}", build)
         self.assertIn("retention-days: 1", build)
         self.assertIn("retention-days: 14", build)
@@ -1628,15 +1811,61 @@ class OperationsContractCase(unittest.TestCase):
         readiness = read(".github/workflows/release-readiness.yml")
 
         self.assertIn("uses: ./.github/workflows/publish-release.yml", ci)
-        self.assertIn("REGISTRY_IMAGE: ghcr.io/${{ github.repository }}", publisher)
-        self.assertIn("<Repository>ghcr.io/pjunod/plurx:latest</Repository>", unraid)
+        self.assertIn("REGISTRY_IMAGE: 192.168.4.7:3000/noirr/plurxd", publisher)
+        self.assertEqual(publisher.count("secrets.LOCAL_REGISTRY_TOKEN"), 4)
+        self.assertEqual(
+            publisher.count(
+                "buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml"
+            ),
+            4,
+        )
         self.assertIn(
-            "<Registry>https://github.com/pjunod/plurx/pkgs/container/plurx</Registry>",
+            "<Repository>192.168.4.7:3000/noirr/plurxd:main</Repository>",
+            unraid,
+        )
+        self.assertIn(
+            "<Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/main</Registry>",
             unraid,
         )
         self.assertIn('cron: "41 16 * * 1"', readiness)
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
+
+    def test_main_push_builds_once_and_publishes_only_after_validation(self):
+        workflow = read(".github/workflows/ci.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        publish = jobs["publish_main"]
+        script = read("scripts/registry-push")
+
+        self.assertIn("name: publish merged image (Forgejo registry)", publish)
+        self.assertIn("github.event_name == 'push'", publish)
+        self.assertIn("github.ref == 'refs/heads/main'", publish)
+        for dependency in (
+            "check",
+            "cluster_store",
+            "cluster_topology",
+            "cluster_wal",
+            "cluster_daemon",
+            "web_layout",
+            "vod_web",
+            "package_smoke",
+        ):
+            self.assertIn(f"      - {dependency}\n", publish)
+        self.assertIn("Require the post-merge validation fan-out", publish)
+        self.assertIn("secrets.LOCAL_REGISTRY_TOKEN", publish)
+        self.assertIn("run: scripts/registry-push", publish)
+        self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", publish)
+
+        self.assertIn('IMMUTABLE_REF="$IMAGE:sha-$SHORT_SHA"', script)
+        self.assertIn('FLEET_REF="$IMAGE:main"', script)
+        self.assertNotIn('plurxd:latest', script)
+        self.assertLess(
+            script.index('verify_image "$IMMUTABLE_REF"'),
+            script.index('docker push "$FLEET_REF"'),
+        )
+        self.assertIn('test "$fleet_digest" = "$immutable_digest"', script)
+        self.assertIn("refusing to publish a checkout with tracked changes", script)
+        self.assertIn("registry state is indeterminate; refusing to publish", script)
 
     def test_every_actions_job_has_an_explicit_timeout(self):
         for path in (
@@ -1673,54 +1902,29 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("if: github.event_name == 'schedule'", scheduled)
         self.assertIn("      issues: write", scheduled)
         self.assertNotIn("      checks: write", scheduled)
-        self.assertEqual(scheduled.count("uses: rustsec/audit-check@"), 1)
+        self.assertEqual(scheduled.count("uses: https://github.com/rustsec/audit-check@"), 1)
         self.assertIn("--additional-lock fuzz/Cargo.lock", scheduled)
         self.assertIn("working-directory: target/rust-audit", scheduled)
-        self.assertEqual(workflow.count("token: ${{ secrets.GITHUB_TOKEN }}"), 3)
+        self.assertEqual(workflow.count("token: ${{ secrets.FORGEJO_TOKEN }}"), 3)
 
     def test_ci_jobs_use_the_intended_runner_trust_boundary(self):
-        def choose(hosted, labels):
-            return (
-                "    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && "
-                + f"'[\"{hosted}\"]' || '[\"self-hosted\",{labels}]') "
-                + "}}"
-            )
+        def local(*labels):
+            return f"    runs-on: [{', '.join(('self-hosted', *labels))}]"
 
-        general = choose(
-            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"general\"'
+        general = local("Linux", "X64", "lab", "general")
+        high_cpu = local("Linux", "X64", "lab", "general", "high-cpu")
+        ffmpeg6 = local("Linux", "X64", "lab", "general", "ffmpeg-6")
+        high_cpu_ffmpeg6 = local(
+            "Linux", "X64", "lab", "general", "high-cpu", "ffmpeg-6"
         )
-        high_cpu = choose(
-            "ubuntu-24.04",
-            '\"Linux\",\"X64\",\"lab\",\"general\",\"high-cpu\"',
+        android = local("Linux", "X64", "lab", "android-kvm")
+        apple = local("macOS", "ARM64", "lab", "apple", "xcode-26")
+        ci_store = local("Linux", "X64", "lab", "ci-store")
+        ci_topology = local("Linux", "X64", "lab", "ci-topology")
+        release_general = "    runs-on: [self-hosted, Linux, X64, lab, general]"
+        release_high_cpu = (
+            "    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]"
         )
-        ffmpeg6 = choose(
-            "ubuntu-24.04",
-            '\"Linux\",\"X64\",\"lab\",\"general\",\"ffmpeg-6\"',
-        )
-        high_cpu_ffmpeg6 = (
-            choose(
-                "ubuntu-24.04",
-                (
-                    '\"Linux\",\"X64\",\"lab\",\"general\",'
-                    '\"high-cpu\",\"ffmpeg-6\"'
-                ),
-            )
-        )
-        android = choose(
-            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"android-kvm\"'
-        )
-        apple = choose(
-            "macos-26",
-            '\"macOS\",\"ARM64\",\"lab\",\"apple\",\"xcode-26\"',
-        )
-        ci_store = choose(
-            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"ci-store\"'
-        )
-        ci_topology = choose(
-            "ubuntu-24.04", '\"Linux\",\"X64\",\"lab\",\"ci-topology\"'
-        )
-        hosted_linux_24 = "    runs-on: ubuntu-24.04"
-        hosted_linux = "    runs-on: ubuntu-latest"
 
         for path in (
             ".github/workflows/ci.yml",
@@ -1754,11 +1958,9 @@ class OperationsContractCase(unittest.TestCase):
                 elif path == ".github/workflows/ci.yml" and name == "web_layout":
                     expected = ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
-                    expected = (
-                        "    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == "
-                        "'github' && matrix.github_runs_on || "
-                        "matrix.self_hosted_runs_on) }}"
-                    )
+                    expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
+                elif path == ".github/workflows/ci.yml" and name == "publish_main":
+                    expected = high_cpu
                 elif (
                     path == ".github/workflows/ci.yml"
                     and name == "cluster_store_legacy"
@@ -1803,7 +2005,7 @@ class OperationsContractCase(unittest.TestCase):
                     path == ".github/workflows/validation-nightly.yml"
                     and name == "ffmpeg8-pacing"
                 ):
-                    expected = hosted_linux_24
+                    expected = general
                 elif (
                     "uses: ./.github/actions/ffmpeg" in block
                     and "container: ubuntu:26.04" not in block
@@ -1811,17 +2013,21 @@ class OperationsContractCase(unittest.TestCase):
                     expected = ffmpeg6
                 self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            self.assertNotIn("CI_RUNNER_MODE", path.read_text(encoding="utf-8"))
+
         for path in (".github/workflows/publish-release.yml",):
             for name, block in workflow_job_blocks(path).items():
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
-                self.assertEqual(hosted_linux, runs_on.group(0), f"{path}:{name}")
+                expected = release_general if name == "resolve" else release_high_cpu
+                self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
         for name, block in workflow_job_blocks(
             ".github/workflows/rust-audit.yml"
         ).items():
             self.assertIn(
-                "uses: dtolnay/rust-toolchain@1.97.1",
+                "uses: https://github.com/dtolnay/rust-toolchain@1.97.1",
                 block,
                 f"rust-audit:{name} does not provision the pinned Cargo toolchain",
             )
@@ -1875,14 +2081,16 @@ class OperationsContractCase(unittest.TestCase):
             # wearing a different hat, so compare against the whole file.
             self.assertEqual(
                 sorted(parsed),
-                sorted(
-                    tuple(json.loads(literal))
-                    for literal in re.findall(r"'(\[[^']*\])'", read(path))
-                    if '"self-hosted"' in literal
-                ),
+                sorted(self_hosted_label_sets(read(path))),
                 f"{path} selects a self-hosted runner in a shape this test "
                 "cannot parse; teach self_hosted_label_sets to read it",
             )
+            for declaration in re.findall(r"(?m)^ +runs-on: (.+)$", read(path)):
+                self.assertTrue(
+                    declaration.startswith("[self-hosted, ")
+                    or declaration == "${{ fromJSON(matrix.runs_on) }}",
+                    f"{path} has a non-local runner declaration: {declaration}",
+                )
         # Guard against the parser silently matching nothing at all and the
         # loop above passing vacuously.
         self.assertGreater(selections, 20)
@@ -1946,7 +2154,7 @@ class OperationsContractCase(unittest.TestCase):
             "the Store shard count exceeds the number of ci-store slots",
         )
 
-    def test_job_containers_never_use_persistent_self_hosted_workspaces(self):
+    def test_root_job_containers_restore_persistent_workspace_ownership(self):
         workflow_root = ROOT / ".github/workflows"
         for path in sorted(workflow_root.glob("*.y*ml")):
             relative = path.relative_to(ROOT).as_posix()
@@ -1955,33 +2163,21 @@ class OperationsContractCase(unittest.TestCase):
                     continue
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{relative}:{name} has no runner")
-                self.assertNotIn(
-                    "self-hosted",
-                    runs_on.group(0),
-                    f"{relative}:{name} runs a root container on persistent storage",
+                self.assertIn("self-hosted", runs_on.group(0))
+                self.assertIn(
+                    "Restore persistent runner workspace ownership",
+                    block,
+                    f"{relative}:{name} does not repair root container output",
                 )
 
-    def test_ci_runner_mode_has_one_validated_operator_switch(self):
-        ci = read(".github/workflows/ci.yml")
-        audit = read(".github/workflows/rust-audit.yml")
+    def test_workflows_have_no_hosted_runner_escape(self):
         script = ROOT / "scripts/ci-runner-mode"
 
-        self.assertIn("CI_RUNNER_MODE must be self-hosted or github", ci)
-        self.assertIn("vars.CI_RUNNER_MODE == 'github'", ci)
-        self.assertEqual(audit.count("vars.CI_RUNNER_MODE == 'github'"), 3)
-        self.assertTrue(script.stat().st_mode & 0o111)
-        subprocess.run(
-            [str(script), "--help"],
-            check=True,
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-        switch = script.read_text()
-        self.assertIn("gh variable set CI_RUNNER_MODE", switch)
-        self.assertIn("gh variable list", switch)
-        self.assertNotIn("2>/dev/null", switch)
-        self.assertIn("new workflow runs will use", switch)
-        self.assertIn("self-hosted|github", switch)
+        self.assertFalse(script.exists())
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            self.assertNotIn("CI_RUNNER_MODE", workflow)
+            self.assertNotRegex(workflow, r"(?m)^ +runs-on: (?:ubuntu|macos)-")
 
     def test_every_ffmpeg_lane_pins_the_build_it_asserts_against(self):
         # An unpinned `apt-get install -y ffmpeg` on `ubuntu-latest` made the
@@ -2047,6 +2243,11 @@ class OperationsContractCase(unittest.TestCase):
     def test_ci_flake_ledger_records_real_job_outcomes_and_durations(self):
         script = ROOT / "scripts/ci-flake-report"
         subprocess.run([str(script), "--help"], check=True, stdout=subprocess.PIPE)
+        reporter = script.read_text(encoding="utf-8")
+        self.assertIn('default="http://192.168.4.7:3000/api/v1"', reporter)
+        self.assertIn('default="noirr/plurx"', reporter)
+        self.assertIn('os.environ.get("FORGEJO_TOKEN")', reporter)
+        self.assertNotIn("api.github.com", reporter)
         ledger = json.loads(read("validation/ci-flake-ledger.json"))
 
         self.assertEqual(ledger["schema"], 1)
@@ -2074,6 +2275,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertEqual(len(re.findall(r'docker port "\$name" 32400/tcp', smoke)), 2)
         self.assertIn('curl -fsS "$base/readyz"', smoke)
         self.assertIn('curl -fsS "$base/metrics"', smoke)
+        self.assertNotRegex(smoke, r"curl [^\n]+\| grep -q")
         self.assertIn('test "$instance_before" = "$instance_after"', smoke)
 
     def test_perf_report_counts_copy_video_as_a_real_session(self):

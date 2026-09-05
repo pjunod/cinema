@@ -9,11 +9,6 @@ on:
   # deliberately expands to the complete fan-out below.
   pull_request:
     branches: [main]
-  # Queue support remains available for a future plan upgrade. Every
-  # merge_group event fails open into the full cross-surface fan-out, and the
-  # aggregate gate reports on both PR and queue events so enabling a queue
-  # later will not strand its required check.
-  merge_group:
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,15 +16,15 @@ env:
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   # A later main push contains every earlier main push, so one exhaustive
-  # post-merge run is enough. Tags and merge groups remain immutable evidence.
+  # post-merge run is enough. Tags remain immutable evidence.
   cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
   # Resolve the PR diff once. Expensive jobs consume these outputs in parallel;
-  # merge groups, pushes, and tags deliberately enable every surface.
+  # pushes and tags deliberately enable every surface.
   scope:
     name: validation scope
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
@@ -46,7 +41,7 @@ jobs:
       qualification: ${{ steps.scope.outputs.qualification }}
       execution_mode: ${{ steps.execution_mode.outputs.mode }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Select affected CI surfaces
@@ -71,14 +66,6 @@ jobs:
           python3 -m validation.ci_scope \
             --event "$scope_event" --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
           echo "qualification=$qualification" >> "$GITHUB_OUTPUT"
-      - name: Validate the configured runner mode
-        env:
-          CI_RUNNER_MODE: ${{ vars.CI_RUNNER_MODE || 'self-hosted' }}
-        run: |
-          case "$CI_RUNNER_MODE" in
-            self-hosted|github) ;;
-            *) echo "::error::CI_RUNNER_MODE must be self-hosted or github"; exit 1 ;;
-          esac
       - name: Resolve the fail-safe execution rollout mode
         id: execution_mode
         env:
@@ -94,10 +81,10 @@ jobs:
     name: mobile release version
     needs: scope
     if: needs.scope.outputs.mobile_version == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
       # The recorded base sha is the target tip at event time, not now. Two
@@ -136,10 +123,10 @@ jobs:
   preflight:
     name: fast policy and contract preflight
     needs: scope
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Audit corrective-history evidence
@@ -148,7 +135,7 @@ jobs:
         run: |
           make validation-lint
           python3 -m unittest discover -s tests/validation -p 'test_*.py'
-      - uses: actions/setup-node@v4
+      - uses: https://data.forgejo.org/actions/setup-node@v4
         with:
           node-version: "22"
       - name: Check CI, deploy, and shipping contracts
@@ -168,11 +155,11 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/ffmpeg
@@ -199,11 +186,11 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' &&
       needs.scope.outputs.execution_mode != 'accelerated'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-store"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, ci-store]
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -231,7 +218,7 @@ jobs:
           --command "make cluster-store-check"
       - name: Retain the Store lane log and receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-store-legacy-contracts
           path: |
@@ -281,7 +268,7 @@ jobs:
       - cluster_store_legacy
       - cluster_store_shards
     if: always() && needs.scope.outputs.cluster_auth == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     steps:
       - name: Select the required Store graph
@@ -290,15 +277,20 @@ jobs:
           LEGACY_RESULT: ${{ needs.cluster_store_legacy.result }}
           SHARD_RESULT: ${{ needs.cluster_store_shards.result }}
         run: |
+          printf 'Store verdict: mode=%s legacy=%s shards=%s\n' "$EXECUTION_MODE" "$LEGACY_RESULT" "$SHARD_RESULT"
           case "$EXECUTION_MODE" in
-            legacy)
+            legacy|shadow)
               test "$LEGACY_RESULT" = success
-              test "$SHARD_RESULT" = skipped
-              ;;
-            shadow)
-              test "$LEGACY_RESULT" = success
-              test "$SHARD_RESULT" = skipped
-              echo "Store shadow evidence is intentionally outside this gate"
+              # Forgejo reports an unused reusable workflow as success when
+              # all its inner jobs are skipped. Only the non-selected graph
+              # may use either neutral status; the required lane stays strict.
+              case "$SHARD_RESULT" in
+                skipped|success) ;;
+                *) exit 1 ;;
+              esac
+              if [ "$EXECUTION_MODE" = shadow ]; then
+                echo "Store shadow evidence is intentionally outside this gate"
+              fi
               ;;
             accelerated)
               test "$LEGACY_RESULT" = skipped
@@ -316,13 +308,13 @@ jobs:
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","ci-topology"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
     # A cold runner builds the command-profile dependency graph before the
     # three-voter proof. Persistent non-voter caches shorten later runs.
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - name: Resolve pinned Rust executables for the long contract run
@@ -384,7 +376,7 @@ jobs:
           "${receipt[@]}"
       - name: Retain the topology lane log and receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-topology-contracts
           path: |
@@ -395,7 +387,7 @@ jobs:
       - name: Retain deterministic topology evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-topology-semantic
           path: target/validation/cluster-topology-semantic.json
@@ -404,7 +396,7 @@ jobs:
       - name: Retain deterministic failure-drill evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: cluster-failure-drills
           path: target/validation/cluster-failure-drills.json
@@ -425,11 +417,11 @@ jobs:
     name: replicated WAL recovery contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -449,11 +441,11 @@ jobs:
     name: cluster daemon contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -482,11 +474,11 @@ jobs:
     if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -495,7 +487,7 @@ jobs:
       # Pinned so the browser-bundle cache key below is meaningful; bump both
       # together. A cache hit skips the ~150 MB Chromium download every run.
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.0
@@ -524,21 +516,21 @@ jobs:
     name: film-addressed VOD browser acceptance
     needs: [scope, preflight]
     if: needs.scope.outputs.web_layout == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
           lane: vod-web
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
-      - uses: actions/setup-node@v4
+      - uses: https://data.forgejo.org/actions/setup-node@v4
         with:
           node-version: "22"
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-1.62.0
@@ -572,23 +564,23 @@ jobs:
     name: Android JVM tests and lint
     needs: [scope, preflight]
     if: needs.scope.outputs.android_jvm == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","android-kvm"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
       # The toolchain image only changes when its Dockerfile does, yet both
       # Android jobs used to rebuild it from scratch — cmdline-tools plus four
       # sdkmanager downloads — on every run. Keyed on the Dockerfile hash, a
       # pull replaces the rebuild; any failure falls back to the local build.
-      - name: Reuse the pinned Android toolchain image from GHCR
+      - name: Reuse the pinned Android toolchain image from Forgejo
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
-          tag="ghcr.io/${GITHUB_REPOSITORY,,}/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || true
+          tag="192.168.4.7:3000/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$REGISTRY_TOKEN" | docker login 192.168.4.7:3000 -u fleet --password-stdin || true
           if docker pull "$tag"; then
             docker tag "$tag" plurx-android-build
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
@@ -599,7 +591,7 @@ jobs:
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           fi
       - name: Cache Gradle dependencies
-        uses: actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@v4
         with:
           path: |
             clients/android/.gradle-validation/caches
@@ -615,19 +607,19 @@ jobs:
     name: Apple iOS + tvOS tests
     needs: [scope, preflight]
     if: needs.scope.outputs.apple == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["macos-26"]' || '["self-hosted","macOS","ARM64","lab","apple","xcode-26"]') }}
+    runs-on: [self-hosted, macOS, ARM64, lab, apple, xcode-26]
     concurrency:
-      group: ${{ vars.CI_RUNNER_MODE != 'github' && 'plurx-apple-silicon-heavy' || format('plurx-apple-{0}', github.run_id) }}
+      group: plurx-apple-silicon-heavy
       cancel-in-progress: false
-      queue: max
     timeout-minutes: 30
     env:
-      DEVELOPER_DIR: ${{ vars.CI_RUNNER_MODE == 'github' && '/Applications/Xcode_26.6.app/Contents/Developer' || '/Applications/Xcode.app/Contents/Developer' }}
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      # The Apple runner is a launch daemon with a deliberately narrow PATH.
+      # Homebrew owns the host's Node.js runtime, which Forgejo needs before
+      # JavaScript actions such as checkout and cache can even start.
+      PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
     steps:
-      - uses: actions/checkout@v4
-      - name: Install XcodeGen on the disposable GitHub runner
-        if: vars.CI_RUNNER_MODE == 'github'
-        run: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
+      - uses: https://data.forgejo.org/actions/checkout@v4
       - name: Verify the pinned Apple toolchain
         run: |
           xcode_version="$(xcodebuild -version)"
@@ -645,7 +637,7 @@ jobs:
       # incremental rebuild from a near miss still beats a cold compile, and a
       # poisoned cache only ever costs the rebuild we paid before caching.
       - name: Cache DerivedData
-        uses: actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@v4
         with:
           path: clients/apple/build/DerivedData
           key: apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
@@ -686,13 +678,13 @@ jobs:
     name: Android instrumented UI tests
     needs: [scope, preflight]
     if: needs.scope.outputs.android_device == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","android-kvm"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 35
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
       - name: Isolate the Android SDK from the repository checkout
         run: |
           echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
@@ -708,12 +700,12 @@ jobs:
           test -c /dev/kvm
           test -r /dev/kvm
           test -w /dev/kvm
-      - name: Reuse the pinned Android toolchain image from GHCR
+      - name: Reuse the pinned Android toolchain image from Forgejo
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
-          tag="ghcr.io/${GITHUB_REPOSITORY,,}/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || true
+          tag="192.168.4.7:3000/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$REGISTRY_TOKEN" | docker login 192.168.4.7:3000 -u fleet --password-stdin || true
           if docker pull "$tag"; then
             docker tag "$tag" plurx-android-build
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
@@ -724,7 +716,7 @@ jobs:
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
           fi
       - name: Cache Gradle dependencies
-        uses: actions/cache@v4
+        uses: https://data.forgejo.org/actions/cache@v4
         with:
           path: |
             clients/android/.gradle-validation/caches
@@ -736,7 +728,7 @@ jobs:
       - name: Run the Compose and TV focus suite on a disposable emulator
         id: android_instrumentation
         continue-on-error: true
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: https://github.com/reactivecircus/android-emulator-runner@v2
         with:
           # Google's Android TV repository publishes API 36 for both x86 and
           # x86_64 (and none for API 35). The x86_64 guest hangs its QEMU CPU
@@ -763,7 +755,7 @@ jobs:
           fi
       - name: Retry a pre-test emulator boot failure once
         if: steps.android_instrumentation.outcome == 'failure' && steps.android_instrumentation_first_attempt.outputs.started == 'false'
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: https://github.com/reactivecircus/android-emulator-runner@v2
         with:
           # The upstream action checks boot completion and then sends one
           # unretied unlock command. API 36 can briefly reconnect ADB between
@@ -785,7 +777,7 @@ jobs:
       - name: Upload Android test reports
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: android-instrumentation-reports
           path: |
@@ -799,7 +791,7 @@ jobs:
     name: coverage
     # Same fast unit and SQLite-contract suite as `check`, so the same pinned
     # ffmpeg. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
     needs: [scope, check]
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;
@@ -813,8 +805,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
         with:
           components: llvm-tools-preview
       - id: cargo-cache
@@ -822,7 +814,7 @@ jobs:
         with:
           lane: coverage
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: https://github.com/taiki-e/install-action@cargo-llvm-cov
       # Instrumented or not, this runs the same suite as the check job, so it
       # needs the same ffmpeg.
       - uses: ./.github/actions/ffmpeg
@@ -860,17 +852,15 @@ jobs:
       - name: Publish badge to the `badges` branch
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd badge
           git init -q
           git checkout -q -b badges
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name  "forgejo-actions[bot]"
+          git config user.email "forgejo-actions@noirr.local"
           git add coverage.json coverage.svg
           git commit -q -m "coverage badge"
-          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
+          git push -f origin badges
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -881,11 +871,10 @@ jobs:
 
   package_smoke:
     name: package and smoke (${{ matrix.arch }})
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && matrix.github_runs_on || matrix.self_hosted_runs_on) }}
+    runs-on: ${{ fromJSON(matrix.runs_on) }}
     concurrency:
-      group: ${{ vars.CI_RUNNER_MODE != 'github' && matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
+      group: ${{ matrix.arch == 'arm64' && 'plurx-apple-silicon-heavy' || format('plurx-package-{0}-{1}', github.run_id, matrix.arch) }}
       cancel-in-progress: false
-      queue: max
     needs: [scope, preflight]
     if: needs.scope.outputs.release_build == 'true' || needs.scope.outputs.container == 'true'
     timeout-minutes: 90
@@ -897,16 +886,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
             kernel_machine: x86_64
             docker_machine: x86_64
-            github_runs_on: '["ubuntu-24.04"]'
-            self_hosted_runs_on: '["self-hosted","Linux","X64","lab","general","high-cpu"]'
+            runs_on: '["self-hosted","Linux","X64","lab","general","high-cpu"]'
           - arch: arm64
             target: aarch64-unknown-linux-gnu
             kernel_machine: aarch64
             docker_machine: aarch64
-            github_runs_on: '["ubuntu-24.04-arm"]'
-            self_hosted_runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
+            runs_on: '["self-hosted","Linux","ARM64","lab","ci-arm64"]'
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Prove the package runner and Docker engine are native
@@ -929,7 +916,7 @@ jobs:
           python3 -m validation.release_dockerfile --binary-export
           Dockerfile Dockerfile.binaries
       - name: Compile and export the exact candidate binaries
-        uses: docker/build-push-action@v6
+        uses: https://github.com/docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.binaries
@@ -957,7 +944,7 @@ jobs:
             }
           done
       - name: Build the runtime from only the verified binaries
-        uses: docker/build-push-action@v6
+        uses: https://github.com/docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.release
@@ -966,7 +953,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           tags: plurx/plurxd:ci-${{ matrix.arch }}
           labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             tv.plurx.build-ref=${{ github.sha }}
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-runtime-{0}', matrix.arch) || '' }}
@@ -987,7 +974,7 @@ jobs:
             "$IMAGE" build-identity)" = "$GITHUB_SHA"
           scripts/container-smoke "$IMAGE"
       - name: Retain the exact package receipt
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: package-smoke-receipt-${{ matrix.arch }}
           path: |
@@ -996,9 +983,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Retain candidate binaries for push, tag, and qualification runs
-        if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
-        continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}
-        uses: actions/upload-artifact@v4
+        if: needs.scope.outputs.qualification == 'true'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: package-smoke-binaries-${{ matrix.arch }}
+          path: |
+            release-bin/plurxd
+            release-bin/plurx-cluster-check
+            release-bin/build-manifest.json
+            release-bin/*.sha256
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain candidate binaries for non-qualification push and tag runs
+        if: github.event_name == 'push' && needs.scope.outputs.qualification != 'true'
+        continue-on-error: true
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: package-smoke-binaries-${{ matrix.arch }}
           path: |
@@ -1018,7 +1017,7 @@ jobs:
   # per-platform smoke, and alias publication to the manually recoverable release
   # workflow. A cancelled tag run can therefore be recovered without moving it.
   publish:
-    name: publish image (ghcr)
+    name: publish image (local registry)
     needs: [check, package_smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/publish-release.yml
@@ -1028,15 +1027,12 @@ jobs:
       contents: read
       packages: write
 
-  # Configure this as the single required check for main-bound PRs and the
-  # merge queue when repository protections become available. Until then it is
-  # the documented "pretty please" promotion verdict.
-  # A conditional job is valid when it either passed or was skipped because
-  # its surface was unaffected; on merge_group events nothing is skipped, so
-  # a green queue run is the full cross-surface fan-out.
-  pr_gate:
-    name: Main promotion gate
-    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+  # A merged main commit is already qualified by its pull request, but the
+  # post-merge run still has to prove the merge tree before changing the fleet
+  # image alias. Build on one X64 runner because every deployed voter is X64;
+  # versioned release tags keep their separate multi-architecture publisher.
+  publish_main:
+    name: publish merged image (Forgejo registry)
     needs:
       - scope
       - mobile_version
@@ -1052,7 +1048,89 @@ jobs:
       - apple
       - android_device
       - package_smoke
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    if: >-
+      always() && github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 90
+    concurrency:
+      group: publish-main-image
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Require the post-merge validation fan-out
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}
+          CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}
+          CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}
+          CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}
+          WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
+          VOD_WEB_RESULT: ${{ needs.vod_web.result }}
+          ANDROID_JVM_RESULT: ${{ needs.android_jvm.result }}
+          APPLE_RESULT: ${{ needs.apple.result }}
+          ANDROID_DEVICE_RESULT: ${{ needs.android_device.result }}
+          PACKAGE_SMOKE_RESULT: ${{ needs.package_smoke.result }}
+        run: |
+          for result in \
+            "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
+            "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
+            "$CLUSTER_STORE_RESULT" "$CLUSTER_TOPOLOGY_RESULT" \
+            "$CLUSTER_WAL_RESULT" "$CLUSTER_DAEMON_RESULT" \
+            "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
+            "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
+            "$PACKAGE_SMOKE_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "A post-merge validation job ended with: $result"; exit 1 ;;
+            esac
+          done
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: https://github.com/docker/setup-buildx-action@v3
+        with:
+          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: 192.168.4.7:3000
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Build once and publish the verified fleet image
+        env:
+          PLURX_BUILD_REF: ${{ github.sha }}
+          PLURX_BUILD_SHA: ${{ github.sha }}
+        run: scripts/registry-push
+
+  # Configure this as the single required check for main-bound pull requests
+  # when repository protections become available. Until then it is the
+  # documented "pretty please" promotion verdict.
+  # A conditional job is valid when it either passed or was skipped because
+  # its surface was unaffected.
+  pr_gate:
+    name: Main promotion gate
+    if: always() && github.event_name == 'pull_request'
+    needs:
+      - scope
+      - mobile_version
+      - preflight
+      - check
+      - cluster_store
+      - cluster_topology
+      - cluster_wal
+      - cluster_daemon
+      - web_layout
+      - vod_web
+      - android_jvm
+      - apple
+      - android_device
+      - package_smoke
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     steps:
       - name: Require every selected job to pass
@@ -1086,7 +1164,7 @@ jobs:
               *) echo "A selected validation job ended with: $result"; exit 1 ;;
             esac
           done
-      - uses: actions/checkout@v4
+      - uses: https://data.forgejo.org/actions/checkout@v4
         if: needs.scope.outputs.qualification == 'true'
         with:
           fetch-depth: 0
@@ -1103,7 +1181,7 @@ jobs:
           --output target/validation/qualification-receipt.json
       - name: Retain the effort qualification record
         if: needs.scope.outputs.qualification == 'true'
-        uses: actions/upload-artifact@v4
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
         with:
           name: effort-qualification-${{ github.event.pull_request.number }}
           path: target/validation/qualification-receipt.json

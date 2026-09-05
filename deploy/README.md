@@ -116,7 +116,7 @@ should pull:
 ```bash
 cd deploy
 printf '%s\n' \
-  'PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:latest' >> .env
+  'PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main' >> .env
 docker compose pull plurxd   # downloads without touching the running voter
 docker compose up -d         # swaps this voter only after the pull completes
 curl -fsS http://127.0.0.1:32400/readyz
@@ -126,10 +126,11 @@ On a replicated cluster, run the final two commands on one voter at a time and
 require `/readyz` to return 200 before advancing. A pull is harmless to the
 running process; the `up -d` is the quorum boundary.
 
-The fleet builder runs `scripts/registry-push` from the repository root. It
-stamps `git describe --tags --always --dirty` into the binary and publishes
-both moving `latest` and immutable `sha-<12hex>` tags. Use the immutable tag
-for rollback:
+The post-merge Forgejo job runs `scripts/registry-push` after the complete
+`main` validation fan-out. It publishes the moving `main` tag only after the
+immutable `sha-<12hex>` image passes its registry-side identity and smoke
+checks. Versioned releases keep the separate `latest` alias. Use the immutable
+tag for rollback:
 
 ```bash
 PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<old-sha> \
