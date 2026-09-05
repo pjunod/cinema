@@ -539,21 +539,34 @@ def find_browser(explicit):
     return None
 
 
-def free_port(preferred):
-    """`preferred` if it is free, else whatever the kernel hands out.
+def free_ports(preferred, count):
+    """Reserve `count` distinct loopback ports, preferring the first one.
 
-    The port never reaches the screen, so a fallback cannot cost determinism —
-    but a hard failure on a busy port would cost a run.
+    Holding every socket until the set is complete prevents a concurrent
+    Forgejo job (or the kernel's ephemeral allocator) from handing the same
+    port back for the daemon's HTTP, Raft, and cluster API listeners.
     """
-    with socket.socket() as s:
-        try:
-            s.bind(("127.0.0.1", preferred))
-            return preferred
-        except OSError:
-            pass
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    reservations = []
+    try:
+        for index in range(count):
+            candidate = preferred if index == 0 and preferred else 0
+            listener = socket.socket()
+            try:
+                listener.bind(("127.0.0.1", candidate))
+            except OSError:
+                if candidate == 0:
+                    listener.close()
+                    raise
+                listener.bind(("127.0.0.1", 0))
+            reservations.append(listener)
+        return [listener.getsockname()[1] for listener in reservations]
+    finally:
+        for listener in reservations:
+            listener.close()
+
+
+def free_port(preferred):
+    return free_ports(preferred, 1)[0]
 
 
 def api(base, path, token=None, method="GET", body=None, timeout=60):
@@ -643,7 +656,9 @@ class SelfHost:
         self.media_dir = Path(args.out).resolve() / "media"
         self.config = self.root / "plurx.toml"
         self.log = self.root / "plurxd.log"
-        self.port = free_port(args.port)
+        # The same three ports stay in the config across all three deliberate
+        # boots. A shared runner may already own the daemon defaults 32401/2.
+        self.port, self.raft_port, self.api_port = free_ports(args.port, 3)
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.proc = None
         self.token = None
@@ -711,6 +726,8 @@ class SelfHost:
         self.config.write_text(
             "# Written by scripts/ui-baseline --self-host. Throwaway.\n"
             f'[server]\nname = "plurx"\nbind = "127.0.0.1:{self.port}"\n\n'
+            f'[cluster]\nraft_bind = "127.0.0.1:{self.raft_port}"\n'
+            f'api_bind = "127.0.0.1:{self.api_port}"\n\n'
             f'[storage]\ndata_dir = "{self.data_dir}"\n'
         )
         # Three boots, not two, and the extra one is deliberate. Boot 1 aborts an
@@ -1066,6 +1083,32 @@ def open_player(page, timeout_ms):
         timeout=timeout_ms)
 
 
+# Capture-only instrumentation: keep the first real Activity polling callback,
+# but stop its interval synchronously before another tick can enter the sample.
+# Python/browser round-trip latency must not decide whether the raw request log
+# contains one or two refreshes. Other timers and every actual request remain
+# untouched; the ordinary observation window still detects additional fetches.
+ACTIVITY_CAPTURE_JS = """
+(() => {
+  const schedule = window.setInterval.bind(window);
+  window.__plurxActivityCaptureTick = false;
+  window.setInterval = (callback, delay, ...args) => {
+    if (typeof callback !== "function") return schedule(callback, delay, ...args);
+    const timer = schedule(function (...values) {
+      if (delay === 3000 && location.hash === "#/activity" &&
+          typeof PAGE_TIMER !== "undefined" && PAGE_TIMER === timer) {
+        clearInterval(timer);
+        PAGE_TIMER = null;
+        window.__plurxActivityCaptureTick = true;
+      }
+      return callback.apply(this, values);
+    }, delay, ...args);
+    return timer;
+  };
+})();
+"""
+
+
 def freeze_timers(page):
     """Stop every pending timer, so the page cannot repaint under the recorders.
 
@@ -1343,10 +1386,30 @@ def stress_cluster_metric_containment(page, name, layout_id):
         raise Fail(f"{name}/{layout_id}: cluster hostname did not wrap at the narrow viewport")
 
 
+def counted_api_calls(name, route, api_calls):
+    """Keep exact control-plane counts, including route-owned polling reads."""
+    counted = {}
+    for call in api_calls:
+        if route.get("player") and call == "POST /api/v1/items/<id>/progress":
+            counted[call] = 1
+        # Chromium is free to satisfy one direct-play video with one GET or
+        # several byte-range GETs. The baseline contract is that the real
+        # direct endpoint was used; its transport chunk count changes with
+        # decoder buffering and is not a UI or routing invariant. Control
+        # plane calls remain exact counts.
+        elif route.get("player") and call == "GET /api/v1/files/<id>/direct":
+            counted[call] = 1
+        else:
+            counted[call] = counted.get(call, 0) + 1
+    return dict(sorted(counted.items()))
+
+
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     page = pw_context.new_page()
+    if name == "activity":
+        page.add_init_script(ACTIVITY_CAPTURE_JS)
     problems = []
     # The request log. Four documents cite a "request-log invariant" — converting
     # a route, or wearing a different layout, must not change which endpoints it
@@ -1500,6 +1563,14 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # lands on the same steady state instead of on whichever half of the
         # cycle happened to be showing.
         page.wait_for_timeout(settle_ms)
+        if name == "activity":
+            # The initial render and exactly one shipped timer callback must
+            # both finish. Do not normalize counts: an extra application fetch
+            # remains in api_calls and must still fail the unchanged golden.
+            page.wait_for_function(
+                "() => window.__plurxActivityCaptureTick === true && ACTIVITY_DETAIL_BUSY === 0",
+                timeout=args.timeout,
+            )
         if route.get("player"):
             # The request inventory has already observed one complete activity
             # period above. Player startup includes a real media request and
@@ -1594,20 +1665,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
                 )
             problems = annotations + problems
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
-        counted = {}
-        for call in api_calls:
-            if route.get("player") and call == "POST /api/v1/items/<id>/progress":
-                counted[call] = 1
-            # Chromium is free to satisfy one direct-play video with one GET or
-            # several byte-range GETs. The baseline contract is that the real
-            # direct endpoint was used; its transport chunk count changes with
-            # decoder buffering and is not a UI or routing invariant. Control
-            # plane calls remain exact counts.
-            elif route.get("player") and call == "GET /api/v1/files/<id>/direct":
-                counted[call] = 1
-            else:
-                counted[call] = counted.get(call, 0) + 1
-        return focus, dict(sorted(counted.items())), dom
+        return focus, counted_api_calls(name, route, api_calls), dom
     finally:
         # A context disappearing is not the same lifecycle as a viewer closing
         # the player. Return an HLS capability immediately instead of leaving

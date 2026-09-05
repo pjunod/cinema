@@ -277,15 +277,20 @@ jobs:
           LEGACY_RESULT: ${{ needs.cluster_store_legacy.result }}
           SHARD_RESULT: ${{ needs.cluster_store_shards.result }}
         run: |
+          printf 'Store verdict: mode=%s legacy=%s shards=%s\n' "$EXECUTION_MODE" "$LEGACY_RESULT" "$SHARD_RESULT"
           case "$EXECUTION_MODE" in
-            legacy)
+            legacy|shadow)
               test "$LEGACY_RESULT" = success
-              test "$SHARD_RESULT" = skipped
-              ;;
-            shadow)
-              test "$LEGACY_RESULT" = success
-              test "$SHARD_RESULT" = skipped
-              echo "Store shadow evidence is intentionally outside this gate"
+              # Forgejo reports an unused reusable workflow as success when
+              # all its inner jobs are skipped. Only the non-selected graph
+              # may use either neutral status; the required lane stays strict.
+              case "$SHARD_RESULT" in
+                skipped|success) ;;
+                *) exit 1 ;;
+              esac
+              if [ "$EXECUTION_MODE" = shadow ]; then
+                echo "Store shadow evidence is intentionally outside this gate"
+              fi
               ;;
             accelerated)
               test "$LEGACY_RESULT" = skipped

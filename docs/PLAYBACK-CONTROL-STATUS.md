@@ -33,7 +33,7 @@ one is deleted.
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on all three platforms** and is complete: web and Android `false`, **Apple `true`** after a corrective instrument pass — see §"M5.5 ran, and two thirds of it settled" |
-| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [caller](M6-CALLER-HANDOFF.md) | **building — production stages a successor and Slice A announces it; nothing primes or commits yet.** Slot [#792](https://github.com/pjunod/plurx/pull/792) · executor [#793](https://github.com/pjunod/plurx/pull/793) · outcomes [#796](https://github.com/pjunod/plurx/pull/796) · decision [#798](https://github.com/pjunod/plurx/pull/798) · caller seam [#800](https://github.com/pjunod/plurx/pull/800)/[#802](https://github.com/pjunod/plurx/pull/802) · metrics [#822](https://github.com/pjunod/plurx/pull/822) · durable staging [#894](https://github.com/pjunod/plurx/pull/894) · `Prepare` action [#901](https://github.com/pjunod/plurx/pull/901). No code path consumes an acknowledgement or commits a prepared successor yet. See §"M6 is building, and what it does not yet reach" |
+| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [caller](M6-CALLER-HANDOFF.md) | **building — production stages and announces a successor; the current slice consumes fenced acknowledgements and commits or aborts it.** Slot [#792](https://github.com/pjunod/plurx/pull/792) · executor [#793](https://github.com/pjunod/plurx/pull/793) · outcomes [#796](https://github.com/pjunod/plurx/pull/796) · decision [#798](https://github.com/pjunod/plurx/pull/798) · caller seam [#800](https://github.com/pjunod/plurx/pull/800)/[#802](https://github.com/pjunod/plurx/pull/802) · metrics [#822](https://github.com/pjunod/plurx/pull/822) · durable staging [#894](https://github.com/pjunod/plurx/pull/894) · `Prepare` action [#901](https://github.com/pjunod/plurx/pull/901). The staged route still has no worker, so the Developer page labels the integration path unsafe for viewers and lists the evidence required before enablement. See §"M6 is building, and what it does not yet reach" |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); it merged as [#775](https://github.com/pjunod/plurx/pull/775). R-M2 merged as [#789](https://github.com/pjunod/plurx/pull/789) and R-M3, one live subtitle window per playback, merged as [#830](https://github.com/pjunod/plurx/pull/830); the remainder is complete in source. Physical directed-retry evidence for R-M2 is the only piece left, and it needs a device rather than code. **M4 (burn-join) merged as [#794](https://github.com/pjunod/plurx/pull/794)**, not part of this remediation; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | **partly proven at the store, one bullet built end to end.** Four of five acceptance cases are covered by the store contract and `shared_cache.rs` suites — *at the store*, not end to end — and planned drain (§10.2) is not built at all: it sits on top of M6 §3.4 and is blocked behind the same hardware run. §10.3's no-snapshot fallback is built: a lost owner answers with where to reopen instead of an unbounded retry. See §"M8 is not independent of M6" |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
@@ -698,8 +698,21 @@ successor ([#894](https://github.com/pjunod/plurx/pull/894)), and the next
 accepted exchange can announce it as a replayable `Prepare` transaction
 ([#901](https://github.com/pjunod/plurx/pull/901)). Staging still starts no
 worker: the route remains at the publication sentinel with `encoder:
-"staged"`, the pointer stays on the predecessor, and no acknowledgement is
-consumed yet. The next slice owns prime, acknowledgement, commit, and abort.
+"staged"`. The current slice consumes action-fenced metadata/buffer progress,
+commits on `committed`, aborts on `failed` or `aborted`, and makes exact
+sequence replay idempotent. Commit advances the pointer and retires the
+predecessor; it still does not create the worker behind the staged playlist.
+Settings → Developer therefore names this as an integration-only path and
+lists the worker, client, and fleet receipts required before viewer enablement.
+
+Preparation settlement reserves bounded capacity and serving authority before
+the actor accepts a terminal acknowledgement, then completes independently of
+the HTTP waiter. Exact retries join the canonical receipt, including during a
+transient ledger-read failure. A takeover cleans the departed owner's staged
+row before publishing its worker; both Store backends fence detached staging
+by the predecessor owner node and epoch. The replicated commit transaction
+rolls back every dependent mutation when its pointer CAS loses, then replays
+the winner or conditionally cleans up the refused preparation.
 
 Three rollout facts still matter:
 
@@ -747,7 +760,7 @@ refuses an occupied slot and a terminal playback, `may_commit_preparation`
 still refuses a forgotten successor, and `terminate` still aborts what it
 holds. The exchange proposes; the actor disposes.
 
-### §3.4 stage is merged; `Prepare` is in review — 2026-09-04
+### §3.4 stage and `Prepare` are merged; acknowledgement settlement is in review — 2026-09-04
 
 [#894](https://github.com/pjunod/plurx/pull/894) stages the successor without
 starting an encoder and arms the owner-local deadline cleanup. The staged
@@ -789,11 +802,12 @@ with the extraction map in §3.2.1):
 4. ~~stage on `Prepare`~~ — **done**, as
    [#894](https://github.com/pjunod/plurx/pull/894); action announcement is
    [#901](https://github.com/pjunod/plurx/pull/901);
-5. the commit trigger — **next and unblocked**. It was frozen because
-   `first_frame_ready`'s Apple instrument could not separate a codec change
-   from no change; the corrective pass requires the copied pixel buffer's PTS
-   to fall at or beyond the commit boundary, and the two cases now separate
-   (Apple TV 21–239 ms same-codec against 230–327 ms codec/HDR).
+5. the commit trigger — **implemented in the current slice**. A matching,
+   timely `committed` acknowledgement reserves the actor slot and advances the
+   durable pointer through the owner/deadline-fenced Store CAS; `failed` and
+   `aborted` acknowledgements tear the staged row down. This remains an
+   integration-only mechanism until the real successor worker and qualified
+   client path exist.
 
 **The disconnect-does-not-imply-commit property is already covered**, in
 `plurx-core`'s own contract suite on three voters
@@ -1575,7 +1589,7 @@ not being counted as complete merely because its foundation has landed.
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | Nothing — M4 moved recovery decisions through that owner and merged |
 | M4 — server watchdog removal | **Complete** | #636 merged production startup recovery; #641 merged actor-managed published lifetime, frozen frontier, typed `producer_ended`, and removal of its compatibility watcher; #642 merged actor-owned copy lifetime and removed the copy watchdog, election, request-side exit inference, and copy-owned replacement policy; #663 re-anchored the replacement tests and closed handoff item 5 | Nothing — later lifecycle/observability cleanup is a separate slice |
 | M5 — one client action owner | **Complete in source** | Web, Apple, and Android each ask the server before recovering; a terminal verdict is recipe-scoped, so it gates only the rung that re-prepares the identical recipe | A fleet acceptance run, which is what the budget deletions (M5c, M5h) are gated on |
-| M5.5/M6 — prepared handoff and Auto | **Prepare announcement in review** | Store CAS on both backends ([#726](https://github.com/pjunod/plurx/pull/726)), measured selection policy, production staging without pointer movement ([#894](https://github.com/pjunod/plurx/pull/894)), and stable replayable `Prepare` announcement ([#901](https://github.com/pjunod/plurx/pull/901)) | Prime the unpublished successor, consume acknowledgements, commit or abort through the actor/executor, add explicit Developer-tab enablement guidance, and complete client/fleet acceptance |
+| M5.5/M6 — prepared handoff and Auto | **Commit trigger building** | Store CAS on both backends ([#726](https://github.com/pjunod/plurx/pull/726)), measured selection policy, production staging without pointer movement ([#894](https://github.com/pjunod/plurx/pull/894)), stable replayable `Prepare` announcement ([#901](https://github.com/pjunod/plurx/pull/901)), and the current slice's actor-fenced acknowledgement/commit/abort path plus explicit Developer enablement checklist | Start and prime the unpublished successor under bounded capacity, finish the qualified client path, and complete the realistic-runway fleet acceptance |
 | M7 — semantic indexes/subtitles | **Four of five** | The fragment index, plus ([#700](https://github.com/pjunod/plurx/pull/700)) exact intro/credits annotations with provenance and confidence, manual overrides, force-analysis controls, and queue/current-work visibility with its instrumentation | Subtitle windows; and outside item 8, seek coalescing and a marker prewarm consumer that can report a hit; detection itself is separately gated |
 | M8 — cluster handoff | **Not started** | Control relay and owner fencing exist from M1 | Planned drain, VOD resurrection, rolling successor failover, compatibility-takeover retirement |
 | M9 — cutover/deletion | **Not started** | — | Mixed-fleet evidence, defaults on, compatibility engine and `/status` polling deleted, physical matrix green |

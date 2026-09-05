@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5e8c32b6", "1cb7e948", "b65a02f0", "6dbd98ff"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained playback-control, HLS, VOD, and Store regressions cover mutually exclusive preparation settlement, cancellation-independent canonical replay, owner-epoch fencing and singleflight isolation, invalid-first rollover recovery, status-independent abort cleanup, and VOD End ownership transfer before tombstoning."

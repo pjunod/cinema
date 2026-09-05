@@ -5,7 +5,8 @@ use super::SqliteStore;
 use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{
     MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionActivationSettlement,
-    MediaSessionEnd, MediaSessionPreparation, MediaSessionPreparationCommit,
+    MediaSessionEnd, MediaSessionPreparation, MediaSessionPreparationAbortRequest,
+    MediaSessionPreparationCommit, MediaSessionPreparationCommitRequest,
     MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
     MediaSessionRoute, MediaSessionStagedGeneration, MediaSessionTakeover,
     MediaSessionTakeoverCursor, MediaSessionTerminalAck, OwnedMediaSessionLease,
@@ -165,6 +166,9 @@ fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), Sto
         // A successor staged against itself is not a successor. The pointer
         // CAS below would pass for it, because the pointer would name it.
         && preparation.expected_predecessor_incarnation_id != preparation.incarnation_id
+        && !preparation.expected_predecessor_owner_node_id.is_empty()
+        && preparation.expected_predecessor_owner_node_id.len() <= 256
+        && preparation.expected_predecessor_owner_epoch > 0
         && preparation.user_id > 0
         && !preparation.playback_id.is_empty()
         && preparation.playback_id.len() <= 128
@@ -269,6 +273,30 @@ fn prepare_within(
     tx: &rusqlite::Transaction<'_>,
     preparation: &MediaSessionPreparation,
 ) -> rusqlite::Result<Option<MediaSessionRoute>> {
+    let predecessor_is_authoritative = tx
+        .query_row(
+            "SELECT 1 FROM media_playback_pointers pointer
+              JOIN media_sessions predecessor
+                ON predecessor.incarnation_id = pointer.current_incarnation_id
+             WHERE pointer.user_id = ?1 AND pointer.playback_id = ?2
+               AND pointer.current_incarnation_id = ?3
+               AND predecessor.owner_node_id = ?4
+               AND predecessor.owner_epoch = ?5
+               AND predecessor.state = 'active'",
+            params![
+                preparation.user_id,
+                preparation.playback_id,
+                preparation.expected_predecessor_incarnation_id,
+                preparation.expected_predecessor_owner_node_id,
+                preparation.expected_predecessor_owner_epoch,
+            ],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !predecessor_is_authoritative {
+        return Ok(None);
+    }
     let existing = tx
         .query_row(
             &format!(
@@ -1624,24 +1652,33 @@ impl MediaSessionStore for SqliteStore {
         &self,
         user_id: i64,
         playback_id: &str,
-        staged_incarnation_id: &str,
-        now_ms: i64,
-        lease_expires_at_ms: i64,
+        request: &MediaSessionPreparationCommitRequest,
     ) -> Result<Option<MediaSessionPreparationCommit>, StoreError> {
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
-            || !valid_uuid(staged_incarnation_id)
-            || now_ms <= 0
-            || lease_expires_at_ms <= now_ms
+            || !valid_uuid(&request.staged_incarnation_id)
+            || request.expected_predecessor_owner_node_id.is_empty()
+            || request.expected_predecessor_owner_node_id.len() > 256
+            || request.expected_predecessor_owner_epoch <= 0
+            || request.now_ms <= 0
+            || request.lease_expires_at_ms <= request.now_ms
+            || request.control_receipt.as_ref().is_some_and(|receipt| {
+                !valid_terminal_ack(receipt)
+                    || receipt.owner_node_id != request.expected_predecessor_owner_node_id
+                    || receipt.owner_epoch != request.expected_predecessor_owner_epoch
+            })
         {
             return Err(StoreError::Task(
                 "invalid media-session preparation commit".to_owned(),
             ));
         }
         let playback_id = playback_id.to_owned();
-        let staged_incarnation_id = staged_incarnation_id.to_owned();
+        let request = request.clone();
         self.with_conn(move |conn| {
+            let staged_incarnation_id = request.staged_incarnation_id.as_str();
+            let now_ms = request.now_ms;
+            let lease_expires_at_ms = request.lease_expires_at_ms;
             let tx = conn.unchecked_transaction()?;
             let staged = tx
                 .query_row(
@@ -1672,10 +1709,30 @@ impl MediaSessionStore for SqliteStore {
                         route_from_row,
                     )
                     .optional()?;
+                let control_receipt = if let Some(expected) = &request.control_receipt {
+                    let stored = tx
+                        .query_row(
+                            "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
+                                    client_instance_id, sequence, request_fingerprint, response_json,
+                                    expires_at_ms, updated_at_ms
+                               FROM media_session_terminal_acks WHERE session_id = ?1",
+                            [expected.session_id.as_str()],
+                            terminal_ack_from_row,
+                        )
+                        .optional()?;
+                    if stored.as_ref() != Some(expected) {
+                        tx.rollback()?;
+                        return Ok(None);
+                    }
+                    stored
+                } else {
+                    None
+                };
                 tx.commit()?;
                 return Ok(route.map(|route| MediaSessionPreparationCommit {
                     route,
                     predecessor: None,
+                    control_receipt,
                 }));
             };
             // The CAS this whole milestone exists for. The predecessor comes
@@ -1688,6 +1745,15 @@ impl MediaSessionStore for SqliteStore {
                     SET current_incarnation_id = ?1, updated_at_ms = ?2
                   WHERE user_id = ?3 AND playback_id = ?4
                     AND current_incarnation_id = ?5
+                    AND EXISTS (SELECT 1 FROM media_sessions predecessor
+                      WHERE predecessor.incarnation_id = ?5
+                        AND predecessor.owner_node_id = ?6
+                        AND predecessor.owner_epoch = ?7
+                        AND predecessor.state = 'active')
+                    AND EXISTS (SELECT 1 FROM media_session_preparations preparation
+                      WHERE preparation.user_id = ?3 AND preparation.playback_id = ?4
+                        AND preparation.staged_incarnation_id = ?1
+                        AND preparation.deadline_ms > ?2)
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = ?1 AND user_id = ?3
                         AND playback_id = ?4 AND state = 'active')",
@@ -1697,6 +1763,8 @@ impl MediaSessionStore for SqliteStore {
                     user_id,
                     playback_id,
                     staged.expected_predecessor_incarnation_id,
+                    request.expected_predecessor_owner_node_id,
+                    request.expected_predecessor_owner_epoch,
                 ],
             )?;
             if pointer_advanced != 1 {
@@ -1709,13 +1777,45 @@ impl MediaSessionStore for SqliteStore {
                 // row and dropped the ledger entry but left the successor's
                 // cache pins and job lease behind, which is a divergence from
                 // the replicated twin for the same input.
-                abort_staged_generation(
-                    &tx,
-                    user_id,
-                    &playback_id,
-                    &staged.staged_incarnation_id,
-                    now_ms,
-                )?;
+                let predecessor_still_owned = tx
+                    .query_row(
+                        "SELECT 1 FROM media_playback_pointers pointer
+                          JOIN media_sessions predecessor
+                            ON predecessor.incarnation_id = pointer.current_incarnation_id
+                         WHERE pointer.user_id = ?1 AND pointer.playback_id = ?2
+                           AND pointer.current_incarnation_id = ?3
+                           AND predecessor.owner_node_id = ?4
+                           AND predecessor.owner_epoch = ?5",
+                        params![
+                            user_id,
+                            playback_id,
+                            staged.expected_predecessor_incarnation_id,
+                            request.expected_predecessor_owner_node_id,
+                            request.expected_predecessor_owner_epoch,
+                        ],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                let pointer_moved = tx
+                    .query_row(
+                        "SELECT current_incarnation_id FROM media_playback_pointers
+                          WHERE user_id = ?1 AND playback_id = ?2",
+                        params![user_id, playback_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                    .as_deref()
+                    != Some(staged.expected_predecessor_incarnation_id.as_str());
+                if predecessor_still_owned || pointer_moved {
+                    abort_staged_generation(
+                        &tx,
+                        user_id,
+                        &playback_id,
+                        &staged.staged_incarnation_id,
+                        now_ms,
+                    )?;
+                }
                 tx.commit()?;
                 return Ok(None);
             }
@@ -1789,6 +1889,45 @@ impl MediaSessionStore for SqliteStore {
                   WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
                 params![user_id, playback_id, staged.staged_incarnation_id],
             )?;
+            if let Some(receipt) = &request.control_receipt {
+                if receipt.incarnation_id != staged.expected_predecessor_incarnation_id {
+                    tx.rollback()?;
+                    return Ok(None);
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO media_session_terminal_acks
+                        (incarnation_id, session_id, owner_node_id, owner_epoch,
+                         client_instance_id, sequence, request_fingerprint, response_json,
+                         expires_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        receipt.incarnation_id,
+                        receipt.session_id,
+                        receipt.owner_node_id,
+                        receipt.owner_epoch,
+                        receipt.client_instance_id,
+                        receipt.sequence,
+                        receipt.request_fingerprint,
+                        receipt.response_json,
+                        receipt.expires_at_ms,
+                        receipt.updated_at_ms,
+                    ],
+                )?;
+                let stored = tx
+                    .query_row(
+                        "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
+                                client_instance_id, sequence, request_fingerprint, response_json,
+                                expires_at_ms, updated_at_ms
+                           FROM media_session_terminal_acks WHERE session_id = ?1",
+                        [receipt.session_id.as_str()],
+                        terminal_ack_from_row,
+                    )
+                    .optional()?;
+                if stored.as_ref() != Some(receipt) {
+                    tx.rollback()?;
+                    return Ok(None);
+                }
+            }
             // The exact post-commit projection: the route, and the pointer
             // that now names it. Derived from a re-read rather than from
             // `rows_affected`, so a replay reads the same as a first commit.
@@ -1828,8 +1967,13 @@ impl MediaSessionStore for SqliteStore {
                     .optional()?,
                 None => None,
             };
+            let control_receipt = request.control_receipt.clone();
             tx.commit()?;
-            Ok(Some(MediaSessionPreparationCommit { route, predecessor }))
+            Ok(Some(MediaSessionPreparationCommit {
+                route,
+                predecessor,
+                control_receipt,
+            }))
         })
         .await
     }
@@ -1838,24 +1982,81 @@ impl MediaSessionStore for SqliteStore {
         &self,
         user_id: i64,
         playback_id: &str,
-        staged_incarnation_id: &str,
-        now_ms: i64,
+        request: &MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
-            || !valid_uuid(staged_incarnation_id)
-            || now_ms <= 0
+            || !valid_uuid(&request.staged_incarnation_id)
+            || request.expected_predecessor_owner_node_id.is_empty()
+            || request.expected_predecessor_owner_node_id.len() > 256
+            || request.expected_predecessor_owner_epoch <= 0
+            || request.now_ms <= 0
         {
             return Err(StoreError::Task(
                 "invalid media-session preparation abort".to_owned(),
             ));
         }
         let playback_id = playback_id.to_owned();
-        let staged_incarnation_id = staged_incarnation_id.to_owned();
+        let request = request.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            abort_staged_generation(&tx, user_id, &playback_id, &staged_incarnation_id, now_ms)?;
+            let staged = tx
+                .query_row(
+                    &format!(
+                        "SELECT {STAGED_COLS} FROM media_session_preparations
+                          WHERE user_id = ?1 AND playback_id = ?2
+                            AND staged_incarnation_id = ?3"
+                    ),
+                    params![user_id, playback_id, request.staged_incarnation_id],
+                    staged_from_row,
+                )
+                .optional()?;
+            let authorized = match &staged {
+                Some(staged) => {
+                    let pointer_owner_matches = tx
+                        .query_row(
+                            "SELECT 1 FROM media_playback_pointers pointer
+                              JOIN media_sessions predecessor
+                                ON predecessor.incarnation_id = pointer.current_incarnation_id
+                             WHERE pointer.user_id = ?1 AND pointer.playback_id = ?2
+                               AND pointer.current_incarnation_id = ?3
+                               AND predecessor.owner_node_id = ?4
+                               AND predecessor.owner_epoch = ?5",
+                            params![
+                                user_id,
+                                playback_id,
+                                staged.expected_predecessor_incarnation_id,
+                                request.expected_predecessor_owner_node_id,
+                                request.expected_predecessor_owner_epoch,
+                            ],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some();
+                    let pointer_moved = tx
+                        .query_row(
+                            "SELECT current_incarnation_id FROM media_playback_pointers
+                              WHERE user_id = ?1 AND playback_id = ?2",
+                            params![user_id, playback_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .as_deref()
+                        != Some(staged.expected_predecessor_incarnation_id.as_str());
+                    pointer_owner_matches || pointer_moved
+                }
+                None => true,
+            };
+            if authorized {
+                abort_staged_generation(
+                    &tx,
+                    user_id,
+                    &playback_id,
+                    &request.staged_incarnation_id,
+                    request.now_ms,
+                )?;
+            }
             // The predicate is a second line, not the first: every write above
             // is itself ledger-gated. This reports success only for a row that
             // is ended, carries the abort's own terminal cause, and belongs to
@@ -1863,7 +2064,7 @@ impl MediaSessionStore for SqliteStore {
             let route = tx
                 .query_row(
                     &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
-                    [staged_incarnation_id.as_str()],
+                    [request.staged_incarnation_id.as_str()],
                     route_from_row,
                 )
                 .optional()?

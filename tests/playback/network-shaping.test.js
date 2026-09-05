@@ -2049,6 +2049,8 @@ test("the raw Chromium driver is safe to launch in an unprivileged runner contai
   assert.ok(args.includes("--user-data-dir=/tmp/playback-lab-chrome-profile"));
   assert.equal(args.at(-1), "http://127.0.0.1:41001");
   assert.equal(lab.CDP_DEVTOOLS_TIMEOUT_MS, 90_000, "cold shared hosts need bounded startup headroom");
+  assert.equal(lab.CDP_JSON_TIMEOUT_MS, 5_000, "local DevTools discovery must tolerate a loaded host");
+  assert.equal(lab.CDP_PAGE_TARGET_TIMEOUT_MS, 60_000, "the first page target gets bounded cold-start headroom");
 });
 
 test("the raw Chromium driver creates a page when headless shell exposes none", async () => {
@@ -2079,6 +2081,19 @@ test("the raw Chromium driver creates a page when headless shell exposes none", 
       method: "PUT",
     },
   ]);
+});
+
+test("the isolated playback server reserves distinct HTTP, Raft, and API ports", async () => {
+  const ports = await lab.freePorts(3);
+  assert.equal(ports.length, 3);
+  assert.equal(new Set(ports).size, 3);
+  assert.ok(ports.every((port) => Number.isInteger(port) && port > 0));
+
+  const config = lab.playbackServerConfig("/tmp/playback-data", ...ports);
+  assert.match(config, new RegExp(`bind = "127\\.0\\.0\\.1:${ports[0]}"`));
+  assert.match(config, new RegExp(`raft_bind = "127\\.0\\.0\\.1:${ports[1]}"`));
+  assert.match(config, new RegExp(`api_bind = "127\\.0\\.0\\.1:${ports[2]}"`));
+  assert.doesNotMatch(config, /3240[12]/);
 });
 
 runAll().then(() => {

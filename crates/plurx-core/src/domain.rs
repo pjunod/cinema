@@ -971,6 +971,11 @@ pub struct MediaSessionPreparation {
     /// commit will advance away from. Never optional: a preparation with no
     /// predecessor is a start, and a start is an activation.
     pub expected_predecessor_incarnation_id: String,
+    /// Exact predecessor authority that admitted this staging attempt. A
+    /// takeover keeps the incarnation stable while advancing this tuple, so
+    /// pointer identity alone cannot fence an old detached worker.
+    pub expected_predecessor_owner_node_id: String,
+    pub expected_predecessor_owner_epoch: i64,
     pub request_fingerprint: String,
     pub owner_node_id: String,
     pub recipe_json: String,
@@ -1001,6 +1006,35 @@ pub struct MediaSessionStagedGeneration {
     pub updated_at_ms: i64,
 }
 
+/// Actor-authorized inputs for publishing one prepared successor.
+///
+/// The predecessor owner tuple is part of the durable CAS. A preparation can
+/// outlive an owner lease without changing incarnation, so fencing on the
+/// pointer alone would let the old owner publish after takeover. The optional
+/// control receipt is written in the same transaction as a successful commit
+/// and makes a lost HTTP response replayable after the predecessor is retired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionPreparationCommitRequest {
+    pub staged_incarnation_id: String,
+    pub expected_predecessor_owner_node_id: String,
+    pub expected_predecessor_owner_epoch: i64,
+    pub now_ms: i64,
+    pub lease_expires_at_ms: i64,
+    pub control_receipt: Option<MediaSessionTerminalAck>,
+}
+
+/// Actor-authorized inputs for discarding one prepared successor.
+///
+/// The owner tuple prevents a deadline task from an old owner from destroying
+/// a successor after the predecessor has been adopted by another node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionPreparationAbortRequest {
+    pub staged_incarnation_id: String,
+    pub expected_predecessor_owner_node_id: String,
+    pub expected_predecessor_owner_epoch: i64,
+    pub now_ms: i64,
+}
+
 /// What a committed preparation leaves behind.
 ///
 /// The successor is now current and the predecessor is `ended` with
@@ -1011,6 +1045,10 @@ pub struct MediaSessionStagedGeneration {
 pub struct MediaSessionPreparationCommit {
     pub route: MediaSessionRoute,
     pub predecessor: Option<MediaSessionRoute>,
+    /// The one response receipt committed with the pointer. Replays return
+    /// these exact bytes rather than minting a second response for the same
+    /// client sequence.
+    pub control_receipt: Option<MediaSessionTerminalAck>,
 }
 
 /// Persisted sentinel for a committed successor whose safety boundary has not

@@ -12768,11 +12768,18 @@ function developerPanel(settings){
       ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
       <div class="err" id="dverr"></div>
       ${setCardFoot("saveDeveloper")}`);
+  const prepared=setCard(`${cardHead("Enable prepared quality handoff","The server can announce, acknowledge, commit, and abort a staged successor. It does not yet start or prime that successor's encoder.",`<span class="pill warn">integration only</span>`)}
+      <div class="hint"><b>Do not enable this for viewers yet.</b> The staged route still reports <code>encoder: staged</code> and has no worker behind its playlist. Committing it is useful for protocol and Store integration tests, not playback.</div>
+      <h2 class="section">What must be true first</h2>
+      <div class="tog"><span>Server preparation is real<small>A later build must reserve capacity, start the unpublished successor, bound every Store write and teardown, and prove abort releases both the worker and the actor slot.</small></span></div>
+      <div class="tog"><span>The client owns a measured two-player handoff<small>It must advertise <code>prepare_replacement</code>, align the second timeline with <code>media_origin_ms</code>, report metadata and buffer readiness, switch visibly, then send <code>committed</code> with the first qualifying frame timestamp. Failed setup must send <code>failed</code> or <code>aborted</code>.</small></span></div>
+      <div class="tog"><span>The fleet receipt is complete<small>Require twenty consecutive commits on the corrected realistic-runway instrument with stable memory. Apple is the measured candidate; Android and web remain unqualified.</small></span></div>
+      <div class="hint"><b>Enable path after those checks pass:</b> turn on <b>Advertise playback control protocol v1</b> above and deploy only a qualified client that declares the action. There is no separate hidden server flag.</div>`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${preview}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${preview}${prepared}${experimental}`;
 }
 function usersPanel(users){
   const admins=users.filter(u=>u.is_admin).length;
