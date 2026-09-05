@@ -2,6 +2,7 @@ version = 1
 
 [[contracts]]
 id = "ffmpeg-8.0.1-3ubuntu2-rawvideo-v1"
+host = "nynuc"
 ffmpeg_version = "8.0.1-3ubuntu2"
 binary_sha256 = "bdf6aabffdba7411edff8d36c389d695257fcdf823d196020176e117612862f6"
 buildconf_sha256 = "a6db4aa7f56c4a335b059cd54e0482b91b47d28c4c7629ad7dfdb54e5ceb7f52"

@@ -26,6 +26,12 @@ CONTRACTS_PATH = (
     Path(__file__).resolve().parents[1]
     / "tests/playback/decoder-health/diagnostic-contracts.toml"
 )
+FLEET_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "tests/playback/decoder-health/fleet-ffmpeg-2026-09-05.toml"
+)
+ACTION_STDERR_MODE = "repeat+level+error"
+SHA256 = re.compile(r"[0-9a-f]{64}")
 ADDRESS = r"(?:0x[0-9a-fA-F]+|<address>)"
 PRIMARY_VIDEO_ERROR = re.compile(
     rf"^\[vist#(?P<input>\d+):(?P<stream>\d+)/(?P<codec>[^\]@]+?)"
@@ -49,6 +55,23 @@ LEGACY_REPEAT_PREFIX = re.compile(
 
 class QualificationError(ValueError):
     """A CLI input cannot be interpreted without inventing evidence."""
+
+
+@dataclass(frozen=True)
+class DiagnosticContract:
+    id: str
+    host: str
+    ffmpeg_version: str
+    binary_sha256: str
+    buildconf_sha256: str
+    stderr_mode: str
+    input_codec: str
+    decoder: str
+    require_context_addresses: bool
+    error_detail: str
+    fixture: str
+    fixture_sha256: str
+    scope: str
 
 
 @dataclass(frozen=True)
@@ -83,35 +106,99 @@ def parse_selected_stream(value: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
-def action_contract(contract_id: str | None) -> dict[str, object] | None:
+def action_contract(contract_id: str | None) -> DiagnosticContract | None:
     if contract_id is None:
         return None
     try:
         with CONTRACTS_PATH.open("rb") as document:
-            contracts = tomllib.load(document)["contracts"]
+            contract_document = tomllib.load(document)
+        with FLEET_PATH.open("rb") as document:
+            fleet = tomllib.load(document)
     except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
-        raise QualificationError(f"cannot load diagnostic contracts: {error}") from error
+        raise QualificationError(f"cannot load diagnostic evidence: {error}") from error
+    if contract_document.get("version") != 1:
+        raise QualificationError("unsupported diagnostic contract document version")
+    contracts = contract_document.get("contracts")
+    if not isinstance(contracts, list):
+        raise QualificationError("diagnostic contract list is missing")
+    if not all(isinstance(contract, dict) for contract in contracts):
+        raise QualificationError("diagnostic contract entries must be tables")
     matches = [contract for contract in contracts if contract.get("id") == contract_id]
     if len(matches) != 1:
         raise QualificationError(f"unknown diagnostic contract: {contract_id}")
-    return matches[0]
+    raw = matches[0]
+    fields = set(DiagnosticContract.__dataclass_fields__)
+    if set(raw) != fields:
+        raise QualificationError(
+            f"diagnostic contract {contract_id} must define exactly: "
+            + ", ".join(sorted(fields))
+        )
+    try:
+        contract = DiagnosticContract(**raw)
+    except TypeError as error:
+        raise QualificationError(
+            f"invalid diagnostic contract {contract_id}: {error}"
+        ) from error
+    text_fields = (
+        contract.id,
+        contract.host,
+        contract.ffmpeg_version,
+        contract.stderr_mode,
+        contract.input_codec,
+        contract.decoder,
+        contract.error_detail,
+        contract.fixture,
+        contract.scope,
+    )
+    if not all(isinstance(value, str) and value for value in text_fields):
+        raise QualificationError(f"diagnostic contract {contract_id} has empty fields")
+    if type(contract.require_context_addresses) is not bool:
+        raise QualificationError(
+            f"diagnostic contract {contract_id} has a non-boolean address rule"
+        )
+    if contract.stderr_mode != ACTION_STDERR_MODE:
+        raise QualificationError(
+            f"diagnostic contract {contract_id} has unsupported stderr mode"
+        )
+    for label, value in (
+        ("binary", contract.binary_sha256),
+        ("build configuration", contract.buildconf_sha256),
+        ("fixture", contract.fixture_sha256),
+    ):
+        if not isinstance(value, str) or SHA256.fullmatch(value) is None:
+            raise QualificationError(
+                f"diagnostic contract {contract_id} has invalid {label} hash"
+            )
+    nodes = [node for node in fleet.get("nodes", []) if node.get("name") == contract.host]
+    if len(nodes) != 1:
+        raise QualificationError(
+            f"diagnostic contract {contract_id} host is absent from fleet evidence"
+        )
+    node = nodes[0]
+    if (
+        node.get("host_ffmpeg") != contract.ffmpeg_version
+        or node.get("host_binary_sha256") != contract.binary_sha256
+        or node.get("host_buildconf_sha256") != contract.buildconf_sha256
+    ):
+        raise QualificationError(
+            f"diagnostic contract {contract_id} does not match fleet build evidence"
+        )
+    return contract
 
 
 def matches_action_contract(
     match: re.Match[str],
-    contract: dict[str, object] | None,
-    evidence_qualified: bool,
+    contract: DiagnosticContract | None,
 ) -> bool:
     if contract is None:
         return False
     return (
-        evidence_qualified
-        and match.group("severity") is not None
-        and match.group("codec").strip() == contract.get("input_codec")
-        and match.group("decoder").strip() == contract.get("decoder")
-        and match.group("detail").strip() == contract.get("error_detail")
+        match.group("severity") is not None
+        and match.group("codec").strip() == contract.input_codec
+        and match.group("decoder").strip() == contract.decoder
+        and match.group("detail").strip() == contract.error_detail
         and (
-            not contract.get("require_context_addresses")
+            not contract.require_context_addresses
             or (
                 match.group("stream_address") is not None
                 and match.group("decoder_address") is not None
@@ -120,30 +207,24 @@ def matches_action_contract(
     )
 
 
-def bounded_fixture_lines(path: Path):
+def bounded_fixture_lines(fixture, digest):
     """Yield bounded lines, draining each oversized tail before continuing."""
 
-    with path.open("rb") as fixture:
-        number = 0
-        while True:
-            raw = fixture.readline(MAX_FIXTURE_RECORD_BYTES + 1)
-            if not raw:
-                break
-            number += 1
-            oversized = len(raw) > MAX_FIXTURE_RECORD_BYTES
-            if not raw.endswith(b"\n") and len(raw) == MAX_FIXTURE_RECORD_BYTES + 1:
-                oversized = True
-                while raw and not raw.endswith(b"\n"):
-                    raw = fixture.readline(MAX_FIXTURE_RECORD_BYTES + 1)
-            yield number, raw[:MAX_FIXTURE_RECORD_BYTES], oversized
-
-
-def fixture_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as fixture:
-        while chunk := fixture.read(64 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    number = 0
+    while True:
+        raw = fixture.readline(MAX_FIXTURE_RECORD_BYTES + 1)
+        digest.update(raw)
+        if not raw:
+            break
+        number += 1
+        retained = raw[:MAX_FIXTURE_RECORD_BYTES]
+        oversized = len(raw) > MAX_FIXTURE_RECORD_BYTES
+        if not raw.endswith(b"\n") and len(raw) == MAX_FIXTURE_RECORD_BYTES + 1:
+            oversized = True
+            while raw and not raw.endswith(b"\n"):
+                raw = fixture.readline(MAX_FIXTURE_RECORD_BYTES + 1)
+                digest.update(raw)
+        yield number, retained, oversized
 
 
 def qualify(
@@ -152,11 +233,6 @@ def qualify(
     contract_id: str | None = None,
 ) -> Qualification:
     contract = action_contract(contract_id)
-    contract_evidence_qualified = bool(
-        contract
-        and path.name == contract.get("fixture")
-        and fixture_sha256(path) == contract.get("fixture_sha256")
-    )
     window: deque[tuple[int, bool]] = deque(maxlen=VIDEO_DECODE_ERROR_LIMIT)
     primary = 0
     severity_qualified = 0
@@ -177,94 +253,101 @@ def qualify(
     triggering_window_contract_qualified = False
     fault_at: int | None = None
 
-    for _, raw, oversized in bounded_fixture_lines(path):
-        if oversized:
-            oversized_lines += 1
-            prior_class = None
-            continue
-        raw = raw.rstrip(b"\r\n")
-        if not raw or raw.startswith(b"#"):
-            continue
-        observed, separator, message_bytes = raw.partition(b"\t")
-        if (
-            not separator
-            or len(observed) > MAX_FIXTURE_PREFIX_BYTES
-            or not observed.isascii()
-            or not observed.isdigit()
-        ):
-            malformed_lines += 1
-            prior_class = None
-            continue
-        if len(message_bytes) > MAX_DIAGNOSTIC_LINE_BYTES:
-            oversized_lines += 1
-            prior_class = None
-            continue
-        try:
-            message = message_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            invalid_utf8_lines += 1
-            prior_class = None
-            continue
-        observed_ms = int(observed)
-        if observed_ms < prior_ms:
-            malformed_lines += 1
-            prior_class = None
-            continue
-        prior_ms = observed_ms
-        valid_records += 1
+    digest = hashlib.sha256()
+    with path.open("rb") as fixture:
+        for _, raw, oversized in bounded_fixture_lines(fixture, digest):
+            if oversized:
+                oversized_lines += 1
+                prior_class = None
+                continue
+            raw = raw.rstrip(b"\r\n")
+            if not raw or raw.startswith(b"#"):
+                continue
+            observed, separator, message_bytes = raw.partition(b"\t")
+            if (
+                not separator
+                or len(observed) > MAX_FIXTURE_PREFIX_BYTES
+                or not observed.isascii()
+                or not observed.isdigit()
+            ):
+                malformed_lines += 1
+                prior_class = None
+                continue
+            if len(message_bytes) > MAX_DIAGNOSTIC_LINE_BYTES:
+                oversized_lines += 1
+                prior_class = None
+                continue
+            try:
+                message = message_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                invalid_utf8_lines += 1
+                prior_class = None
+                continue
+            observed_ms = int(observed)
+            if observed_ms < prior_ms:
+                malformed_lines += 1
+                prior_class = None
+                continue
+            prior_ms = observed_ms
+            valid_records += 1
 
-        repeat = LEGACY_REPEAT.fullmatch(message)
-        if repeat is not None:
-            repeated = int(repeat.group("count"))
-            if prior_class == "selected_primary":
-                selected_repeat_summaries += 1
-                selected_repeated_messages += repeated
-            elif prior_class in (None, "repeat_summary"):
-                ambiguous_repeat_summaries += 1
-            else:
-                unrelated_repeat_summaries += 1
-            prior_class = "repeat_summary"
-            continue
-        if LEGACY_REPEAT_PREFIX.match(message):
-            malformed_lines += 1
-            prior_class = None
-            continue
-        if SUBORDINATE_NO_FRAME.match(message):
-            subordinate += 1
-            prior_class = "subordinate"
-            continue
-        match = PRIMARY_VIDEO_ERROR.match(message)
-        if match is None:
-            prior_class = "other"
-            continue
-        stream = (int(match.group("input")), int(match.group("stream")))
-        if stream != selected:
-            prior_class = "other_stream_primary"
-            continue
+            repeat = LEGACY_REPEAT.fullmatch(message)
+            if repeat is not None:
+                repeated = int(repeat.group("count"))
+                if prior_class == "selected_primary":
+                    selected_repeat_summaries += 1
+                    selected_repeated_messages += repeated
+                elif prior_class in (None, "repeat_summary"):
+                    ambiguous_repeat_summaries += 1
+                else:
+                    unrelated_repeat_summaries += 1
+                prior_class = "repeat_summary"
+                continue
+            if LEGACY_REPEAT_PREFIX.match(message):
+                malformed_lines += 1
+                prior_class = None
+                continue
+            if SUBORDINATE_NO_FRAME.match(message):
+                subordinate += 1
+                prior_class = "subordinate"
+                continue
+            match = PRIMARY_VIDEO_ERROR.match(message)
+            if match is None:
+                prior_class = "other"
+                continue
+            stream = (int(match.group("input")), int(match.group("stream")))
+            if stream != selected:
+                prior_class = "other_stream_primary"
+                continue
 
-        primary += 1
-        prior_class = "selected_primary"
-        if match.group("severity") is not None:
-            severity_qualified += 1
-        contract_match = matches_action_contract(
-            match,
-            contract,
-            contract_evidence_qualified,
-        )
-        if contract_match:
-            contract_qualified += 1
-        if first_primary is None:
-            first_primary = observed_ms
-        lower_bound = observed_ms - VIDEO_DECODE_ERROR_WINDOW_MS
-        while window and window[0][0] <= lower_bound:
-            window.popleft()
-        window.append((observed_ms, contract_match))
-        if fault_at is None and len(window) >= VIDEO_DECODE_ERROR_LIMIT:
-            triggering_window_start = window[0][0]
-            triggering_window_contract_qualified = all(
-                qualified for _, qualified in window
-            )
-            fault_at = observed_ms
+            primary += 1
+            prior_class = "selected_primary"
+            if match.group("severity") is not None:
+                severity_qualified += 1
+            contract_match = matches_action_contract(match, contract)
+            if contract_match:
+                contract_qualified += 1
+            if first_primary is None:
+                first_primary = observed_ms
+            lower_bound = observed_ms - VIDEO_DECODE_ERROR_WINDOW_MS
+            while window and window[0][0] <= lower_bound:
+                window.popleft()
+            window.append((observed_ms, contract_match))
+            if fault_at is None and len(window) >= VIDEO_DECODE_ERROR_LIMIT:
+                triggering_window_start = window[0][0]
+                triggering_window_contract_qualified = all(
+                    qualified for _, qualified in window
+                )
+                fault_at = observed_ms
+
+    contract_evidence_qualified = bool(
+        contract
+        and path.name == contract.fixture
+        and digest.hexdigest() == contract.fixture_sha256
+    )
+    if not contract_evidence_qualified:
+        contract_qualified = 0
+        triggering_window_contract_qualified = False
 
     latency = None
     if fault_at is not None and triggering_window_start is not None:

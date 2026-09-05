@@ -1061,11 +1061,12 @@ pub fn heavy_source(source: &MediaFile) -> bool {
     ) && (source.hdr.is_some() || source.height.unwrap_or(0) >= 2160)
 }
 
+fn compatibility_value_forces_software_decode(value: Option<&str>) -> bool {
+    matches!(value, Some("off" | "0" | "false" | "no"))
+}
+
 fn compatibility_forces_software_decode() -> bool {
-    matches!(
-        std::env::var("PLURX_HWDECODE").as_deref(),
-        Ok("off" | "0" | "false" | "no")
-    )
+    compatibility_value_forces_software_decode(std::env::var("PLURX_HWDECODE").ok().as_deref())
 }
 
 fn decode_setup_with_compatibility(
@@ -2068,6 +2069,13 @@ mod tests {
                 false,
             ),
             (
+                "vaapi-light-h264",
+                &light_h264,
+                Encoder::Vaapi,
+                TranscodeOptions::default(),
+                false,
+            ),
+            (
                 "qsv-heavy-hevc-hdr",
                 &heavy_hevc,
                 Encoder::Qsv,
@@ -2181,6 +2189,22 @@ mod tests {
         ))
         .expect("M0 argument fixture is JSON");
         assert_eq!(serde_json::Value::Array(actual), expected);
+    }
+
+    #[test]
+    fn decoder_compatibility_override_values_are_stable() {
+        for value in ["off", "0", "false", "no"] {
+            assert!(
+                compatibility_value_forces_software_decode(Some(value)),
+                "legacy override {value:?} must force software decode"
+            );
+        }
+        for value in [None, Some(""), Some("1"), Some("on"), Some("OFF")] {
+            assert!(
+                !compatibility_value_forces_software_decode(value),
+                "legacy override {value:?} must retain automatic decode selection"
+            );
+        }
     }
 
     #[test]
