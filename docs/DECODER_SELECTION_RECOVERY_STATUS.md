@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 implementation in progress · **Updated:** 2026-09-05 ·
+**Status:** M0 under adversarial review · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -15,7 +15,7 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M0 — capture baseline and freeze diagnostic qualification |
 | Task branch | `codex/decoder-selection-m0` |
-| Task PR | Not opened yet |
+| Task PR | [#914](https://github.com/pjunod/plurx/pull/914) · draft |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | 6 M0 tests and all 192 operations tests pass |
@@ -26,7 +26,7 @@ An unchecked item is not implied by a nearby passing check.
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | In progress | Inventory, fixtures, 6 focused tests, 192 operations tests, catalog lint, and pinned compile pass; review pending |
+| M0 · baseline and diagnostic qualification | In review | [PR #914](https://github.com/pjunod/plurx/pull/914); inventory, fixtures, 6 focused tests, 192 operations tests, catalog lint, and pinned compile pass |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -149,11 +149,11 @@ lane and focused tests provide earlier feedback.
 
 | Commit/tree | Command | Result |
 |---|---|---|
-| M0 pre-review tree | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 6 tests |
-| M0 pre-review tree | `make operations-check` | Pass · 192 tests; rerun outside restricted socket sandbox |
-| M0 pre-review tree | `make validation-lint` | Pass · 23 points, 28 checks, 1,376 files |
-| M0 pre-review tree | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| M0 pre-review tree | `git diff --check` | Pass |
+| `a9cb879b` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 6 tests |
+| `a9cb879b` | `make operations-check` | Pass · 192 tests; rerun outside restricted socket sandbox |
+| `a9cb879b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,376 files |
+| `a9cb879b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `a9cb879b` | `git diff --check` | Pass |
 | Pending | Full PR suite after review fixes | Not run |
 
 ## Remaining evidence before release
