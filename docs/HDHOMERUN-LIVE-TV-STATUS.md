@@ -18,8 +18,8 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | Forgejo main synchronization | merged | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | Astra approved `c4b66e1d`; fresh gate run 61 passed; merge `e8095916` |
 | M2 live HLS and cluster relay | merged | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | Astra approved `fc164045`; pinned fmt/check/clippy and 47 focused tests passed; fresh effort gate 85 passed; merge `f2773ca8` |
 | M3 web client | browser structure passed; final Astra fixes in progress | — | 72 captures at `59bf4932`, no console/page errors; 12 focused tests after fixing ambiguous-start and wall-clock findings; live media acceptance remains |
-| M4 Apple | implemented; exact-candidate review and effort PR pending | — | iOS/tvOS compile; 14 focused tests pass on each simulator; Astra found no remaining source findings after fixes |
-| M4 Android | compiler ready; implementation in progress | — | baseline debug build passed; isolated JDK 25/SDK 37 build image ready |
+| M4 Apple | merged | [#17](http://192.168.4.7:3000/noirr/plurx/pulls/17) | Astra approved `8cfe8cc5`; iOS/tvOS compile and 14 focused tests pass on each simulator; effort gate 95 passed; merge `fc9c8f45` |
+| M4 Android | implemented; final review and native UI acceptance | — | dedicated live player and Developer controls compile; 14 focused tests pass; Astra sliding-window finding fixed using rendered-frame progress; isolated JDK 25/SDK 37 verification pending |
 | M5 docs, hardware, promotion | not started | — | — |
 
 ## Current work — finish client acceptance and effort gates
