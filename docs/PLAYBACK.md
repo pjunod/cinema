@@ -1402,9 +1402,18 @@ is reclaimed by the server whether or not any client ever comes back.
   title, so the finite-media controller is never invoked for it and nothing is
   written to watch state. There is no pause-and-come-back-tomorrow: pausing a
   live session holds a tuner, and a session with no reader is reclaimed in 45 s.
-  Real startup latency, real segment duration, and the real concurrent-session
-  ceiling for a given device are **pending the hardware pass**
-  (`make live-tv-hardware-check DEVICE=<ipv4>`) rather than estimated here.
+- **Measured on a real tuner**, an HDHomeRun FLEX 4K over an antenna: 6.4 s from
+  asking for a channel to a fetchable segment, against the 15 s budget; 4.0 s
+  segments; 1080i MPEG-2 + AC-3 5.1 in, H.264 720p + AAC stereo out. Two
+  concurrent sessions, the third refused `tuner_capacity`.
+- **ATSC 3.0 is refused in practice, by the startup budget rather than by a
+  codec.** An HEVC Main 10 ATSC 3.0 channel on that device publishes its first
+  segment at 18.1 s and `STARTUP_TIMEOUT` is 15 s, so it is listed playable and
+  then always fails `startup_timeout` — while playing fine once started, and
+  while transcoding at 2.37× realtime in software. The ATSC 1.0 control channel
+  on the same device took 7.0 s. Reproduce with
+  `make live-tv-hardware-check DEVICE=<ipv4>` and a `--channel` on an ATSC 3.0
+  mux.
 - **HLS session disk.** A live HLS writer's history grows for its whole life,
   so the reaper keeps 180 s behind the download frontier on both the transcode
   and copy paths. That covers the 120 s fetch lead measured on a physical iPad

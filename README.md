@@ -45,7 +45,9 @@ then run one complete exact-tree qualification before merging to `main`.
 one HDHomeRun tuner as bounded live HLS across the web, Apple, and Android
 clients, with DRM and ATSC 3.0 codec limits stated explicitly, and
 [docs/HDHOMERUN-LIVE-TV-STATUS.md](docs/HDHOMERUN-LIVE-TV-STATUS.md) is what is
-built versus what is proved — the hardware pass has not run.
+built versus what is proved: the hardware pass has now run against a real
+HDHomeRun FLEX 4K, ATSC 1.0 plays end to end, and ATSC 3.0 is refused by the
+startup budget rather than by a codec.
 [docs/AGENT-COMPILE-LOOP.md](docs/AGENT-COMPILE-LOOP.md) is its short
 companion for anyone — contributor or coding agent — whose checkout has no
 Rust toolchain: how to put `cargo check`, Clippy and the unit suite ten

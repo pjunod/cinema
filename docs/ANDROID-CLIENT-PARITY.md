@@ -238,8 +238,11 @@ phone emulator under the exact JDK 25 / SDK 37 build. **Not proved:** the
 television profile. Initial D-pad focus is the 10-foot contract and its
 assertion is scoped to television `uiMode`; the AOSP Android TV system image
 enforces adb authorization, which a headless container cannot grant, so that
-half needs one of the arm64 AVDs on the Mac. Playback against a real tuner is
-the hardware pass and has not run.
+half needs one of the arm64 AVDs on the Mac. The server side is now proved
+against a real HDHomeRun FLEX 4K over an antenna — see
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) — but playback on a
+physical phone or Google TV against that tuner has not been run, so whether
+Media3 holds a 4 s-segment live window on real hardware is still open.
 
 ## Layout verification
 
