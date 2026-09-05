@@ -1471,7 +1471,15 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # publishes after its own answer counted bytes, and what a second viewer of the
 # same immutable rendition publishes instead. No process, producer or timer is
 # created or owned.
-expected_occurrences = 226
+# 226 -> 235 with P1-2's VOD failure classification. None of the nine launches
+# anything; the sentinel's pattern catches `.status(` alongside `.spawn(` and
+# `.output(`. Two are production: `record_failure` logs `decision.status()`, and
+# `status_publication` projects the recorded class onto `VodSessionInfo`. The
+# other seven are in the regressions -- `VodServe::status` registry reads that
+# assert what a session publishes before and after a failure is recorded, and
+# `ProducerDecisionReason::status()` projections that pin each class to its wire
+# name through action selection. No process, producer or timer is created.
+expected_occurrences = 235
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

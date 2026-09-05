@@ -268,6 +268,30 @@ the server's authoritative retryable or terminal reason.
 decision vocabulary as rolling delivery, with tests from rendition failure
 through serialized control action.
 
+**Corrected.** A recorded rendition failure now carries a class alongside its
+prose. `record_failure` takes a `ProducerDecisionReason` and every one of its
+nine production call sites supplies one; `VodSessionInfo` publishes it, and
+`DeliveryView::from_status` fills `producer_decision` from it, so
+`resolve_action` produces the `retry_resource` or `terminal` the clients
+already handle. Nothing ships on the client side for this to take effect — no
+client reads `producer_decision`; they act on the action it produces.
+
+The vocabulary is extended rather than borrowed where borrowing would lie.
+`vodgen::Failure::Stream` maps onto the existing `ReaderFailed`, because it is
+the same fact — reading the producer's output failed — and a producer that
+exits early maps onto `PartialSuccessExit`. The five additions name things
+rolling has no equivalent for: `source_changed`, `engine_changed`,
+`producer_launch_failed` (a producer that never started, as against
+`ProcessExit`, which is one that ran and stopped), `media_landing_failed` and
+`producer_write_failed`.
+
+**None of the five is permanent, deliberately.** `is_permanent` is reserved for
+verdicts about the source itself, and a VOD rendition is planned once against
+an exact source and an exact fragment-index engine — so every way it fails is a
+statement about *this plan*, not about the film, and a fresh create re-plans and
+can succeed. Answering `terminal` would make a client abandon media its own
+reopen would have played.
+
 ### P1-3 — preparation is unreachable on the production VOD observation
 
 Preparation requires a throughput headroom proof. The VOD delivery view always
@@ -774,7 +798,7 @@ are retained in
 | P0-3 | Default feature in [`crates/plurxd/Cargo.toml`](../crates/plurxd/Cargo.toml#L9); production/test default split in [`TranscodeManager::live_hls_recovery_enabled`](../crates/plurxd/src/transcode.rs#L13570); VOD refusal in [`VodServe::try_create_with_release_fence`](../crates/plurxd/src/vodserve.rs#L2307) |
 | P0-4 | Response-before-stage in [`control_session_local`](../crates/plurxd/src/http/hls.rs#L5116); placeholder stage in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L5549); client vocabularies in [`playback-control.js`](../crates/plurxd/src/web/playback-control.js#L14), [`PlaybackControlReporter.swift`](../clients/apple/Sources/PlaybackControlReporter.swift#L316), and [`PlaybackControlReporter.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt#L335); [M6 caller handoff](M6-CALLER-HANDOFF.md) §3.4–3.5 |
 | P1-1 | Watchdog/frontier before admission in [`VodServe::segment`](../crates/plurxd/src/vodserve.rs#L4112); pool cancellation in [`waitpool.rs`](../crates/plurxd/src/waitpool.rs#L126); sticky failure in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L4299); isolated `WaitPool` storm test at `waitpool.rs:405` |
-| P1-2 | VOD mapping in [`DeliveryView::from_status`](../crates/plurxd/src/playback_control.rs#L836); action resolution at `playback_control.rs:1882`; VOD failure status at [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L3315); HTTP 502 mapping at `http/hls.rs:8851` |
+| P1-2 | **Corrected.** `RenditionFailure` and `classify_failure` in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs); five additions to `ProducerDecisionReason` in [`playback_control.rs`](../crates/plurxd/src/playback_control.rs); VOD arm of `DeliveryView::from_status` fills `producer_decision`. Proved by `a_classified_vod_failure_becomes_a_serialized_client_action` (every class, through action selection, to JSON), `an_unclassified_vod_failure_still_says_nothing`, `a_recorded_failure_publishes_its_class_not_only_its_sentence` and `every_generation_failure_names_what_actually_happened` |
 | P1-3 | **Corrected.** Per-session meter on [`vodserve::Session`](../crates/plurxd/src/vodserve.rs); bytes noted after downstream acknowledgement in the VOD body pump in [`http/hls.rs`](../crates/plurxd/src/http/hls.rs); carried by `VodSessionInfo` into `DeliveryView::from_status`. Proved by `a_vod_body_counts_its_delivered_bytes_where_they_leave`, `an_abandoned_vod_body_counts_nothing_it_did_not_hand_over`, `a_measured_vod_delivery_reaches_the_control_view_and_an_unmeasured_one_stays_unknown` and `a_measured_vod_rate_lets_the_headroom_decision_actually_run`. `PreparationConditions::headroom_refusal` is the real function name; the review's `has_throughput_headroom` never existed |
 | P1-4 | Detached spawn at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L5181); asynchronous candidate reads at `http/hls.rs:5409`; preparation slot identity at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L2418) |
 | P1-5 | SQLite commit at [`sessions.rs`](../crates/plurx-core/src/store/sqlite/sessions.rs#L1623), Hiqlite commit at [`hiqlite_sessions.rs`](../crates/plurx-core/src/store/hiqlite_sessions.rs#L1750), and best-effort timer at `http/hls.rs:5707` |

@@ -713,7 +713,7 @@ pub(crate) struct DeliveryView {
     pub hold_reason: Option<String>,
     /// Why the producer stopped, when it stopped for a reason this server has
     /// named. `producer_state` says only `failed`; this says which of the
-    /// fourteen decisions that was, and therefore whether trying again could
+    /// nineteen decisions that was, and therefore whether trying again could
     /// ever work. Optional: an older peer relaying a response has no such
     /// field, and absence means "not classified here", never "healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -859,10 +859,12 @@ impl DeliveryView {
                 recent_producer_speed: None,
                 client_runway_ms,
                 admitted: Some(info.admitted),
-                // VOD's failure is still a prose cause rather than a bounded
-                // decision, so there is nothing honest to put here yet. It is
-                // absent rather than guessed.
-                producer_decision: None,
+                // Classified at the rendition, in the same bounded vocabulary
+                // the rolling arm publishes, so `resolve_action` turns it into
+                // the `terminal` or `retry_resource` the clients already
+                // handle. Absent still means "not classified here", never
+                // "healthy": a VOD session that has not failed has no decision.
+                producer_decision: info.producer_decision.map(str::to_owned),
                 hold_reason: info.producer_hold.map(str::to_owned),
                 subtitle_readiness,
                 owner_node_hash: node_hash(owner_node_id),
@@ -1656,7 +1658,7 @@ pub(crate) enum ControlAction {
     },
     /// Production stopped for a reason that may not recur.
     ///
-    /// Twelve of the fourteen producer decisions are timing, process or
+    /// Seventeen of the nineteen producer decisions are timing, process, plan or
     /// executor facts. The client should try again on the server's own
     /// cadence rather than deciding for itself how hard to retry, which is
     /// what every client does today.
@@ -3881,10 +3883,25 @@ pub(crate) enum ProducerDecisionReason {
     FlowResumeDeadline,
     InstallDeadline,
     ExecutorLost,
+    /// The file this rendition was planned against is no longer the file on
+    /// disk. VOD renditions are immutable and fragment-indexed, so a source
+    /// that changes underneath one invalidates the plan rather than the media.
+    SourceChanged,
+    /// The fragment-index engine moved under a rendition planned by the
+    /// previous one, so this node cannot serve that plan until it restarts.
+    EngineChanged,
+    /// The producer could not be started at all — the spawn failed, or the
+    /// child came up without the stdout the pipeline reads. Distinct from
+    /// `ProcessExit`, which is a process that ran and stopped.
+    ProducerLaunchFailed,
+    /// A produced fragment did not land at the film time the plan requires.
+    MediaLandingFailed,
+    /// The sink refused the bytes a running producer handed it.
+    ProducerWriteFailed,
 }
 
 impl ProducerDecisionReason {
-    fn status(self) -> &'static str {
+    pub(crate) fn status(self) -> &'static str {
         match self {
             Self::StartupDeadline => "startup_deadline",
             Self::ProgressDeadline => "progress_deadline",
@@ -3900,19 +3917,31 @@ impl ProducerDecisionReason {
             Self::FlowResumeDeadline => "flow_resume_deadline",
             Self::InstallDeadline => "install_deadline",
             Self::ExecutorLost => "executor_lost",
+            Self::SourceChanged => "source_changed",
+            Self::EngineChanged => "engine_changed",
+            Self::ProducerLaunchFailed => "producer_launch_failed",
+            Self::MediaLandingFailed => "media_landing_failed",
+            Self::ProducerWriteFailed => "producer_write_failed",
         }
     }
 
     /// Whether retrying this source, unchanged, can ever succeed.
     ///
-    /// Twelve of these fourteen reasons are timing, process, or executor
-    /// facts: the same file on the same pipeline may well work on the next
-    /// attempt. Two are verdicts about the source itself — this container
+    /// Seventeen of these nineteen reasons are timing, process, executor or
+    /// plan facts: the same file on the same pipeline may well work on the
+    /// next attempt. Two are verdicts about the source itself — this container
     /// cannot be carried by this pipeline, or the recipe that was asked for is
     /// not a legal one — and no amount of retrying changes either.
     ///
+    /// The five VOD reasons add no permanent verdict, deliberately. A VOD
+    /// rendition is planned once against an exact source and an exact
+    /// fragment-index engine, so every way it fails is a statement about
+    /// *this plan*, not about the film: a fresh create re-plans and can
+    /// succeed. Telling a client `terminal` would make it abandon media that
+    /// its own reopen would have played.
+    ///
     /// The distinction is the whole reason a client cannot decide for itself.
-    /// `producer_state` flattens all fourteen to the word `failed`, so a
+    /// `producer_state` flattens all nineteen to the word `failed`, so a
     /// client seeing a failure has no way to tell "try again" from "this will
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
@@ -3921,7 +3950,7 @@ impl ProducerDecisionReason {
     }
 
     /// The bounded vocabulary, in the order the wire and metrics use.
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 19] = [
         Self::StartupDeadline,
         Self::ProgressDeadline,
         Self::ExitClassificationDeadline,
@@ -3936,6 +3965,11 @@ impl ProducerDecisionReason {
         Self::FlowResumeDeadline,
         Self::InstallDeadline,
         Self::ExecutorLost,
+        Self::SourceChanged,
+        Self::EngineChanged,
+        Self::ProducerLaunchFailed,
+        Self::MediaLandingFailed,
+        Self::ProducerWriteFailed,
     ];
 
     pub(crate) fn from_status(status: &str) -> Option<Self> {
@@ -12848,6 +12882,98 @@ mod tests {
         vod_status_delivering(published_end_ms, ready_ahead_end_ms, fetched_end_ms, None)
     }
 
+    /// The same VOD status, carrying a recorded producer failure.
+    fn vod_status_failed(decision: ProducerDecisionReason) -> HlsSessionInfo {
+        let mut status = vod_status(Some(120_000), Some(120_000), 60_000);
+        let HlsSessionInfo::Vod(info) = &mut status else {
+            panic!("fixture was not VOD");
+        };
+        info.producer_state = "failed";
+        info.producer_hold = None;
+        info.producer_failed = Some("the producer stopped".to_owned());
+        info.producer_decision = Some(decision.status());
+        status
+    }
+
+    /// P1-2. A VOD failure reaches the client as an action, not as silence.
+    ///
+    /// `vodserve` has always had a failure; what it did not have was a class,
+    /// so `DeliveryView::from_status` set `producer_decision: None` and
+    /// `resolve_action` had nothing to rank. Segment GETs returned a typed 5xx
+    /// while the control plane went on answering `action: none`, and every
+    /// client fell back on its own generic watchdog and reopen budget.
+    ///
+    /// This drives the whole path the review asks for — recorded class, into
+    /// the delivery view, through action selection, out as serialized JSON —
+    /// because the value of the class is entirely in the action it produces.
+    #[test]
+    fn a_classified_vod_failure_becomes_a_serialized_client_action() {
+        let (_, mut request) = stalled_starved();
+        request.buffered_through_ms = request.position_ms;
+        request.supported_actions = Some(vec![
+            HOLD_ACTION.to_owned(),
+            RETRY_RESOURCE_ACTION.to_owned(),
+            TERMINAL_ACTION.to_owned(),
+        ]);
+
+        for decision in ProducerDecisionReason::ALL {
+            let delivery = DeliveryView::from_status(
+                &vod_status_failed(decision),
+                &request,
+                "node",
+                1,
+                0,
+                None,
+            );
+            assert_eq!(
+                delivery.producer_decision.as_deref(),
+                Some(decision.status()),
+                "the class the rendition recorded is the class the view publishes"
+            );
+
+            let action = resolve_action(&ControlAction::None, &delivery, &request);
+            let wire = serde_json::to_value(&action).expect("the action serializes");
+            if decision.is_permanent() {
+                assert_eq!(wire["type"], "terminal");
+                assert_eq!(wire["code"], decision.status());
+            } else {
+                assert_eq!(wire["type"], "retry_resource");
+                assert_eq!(wire["reason"], decision.status());
+                assert!(
+                    wire["after_ms"].as_u64().is_some_and(|after| after > 0),
+                    "a retryable verdict must say when"
+                );
+            }
+        }
+    }
+
+    /// The silence this replaces: an unclassified VOD failure still produces
+    /// no action at all, so the test above cannot be passing on some other
+    /// signal in the fixture.
+    #[test]
+    fn an_unclassified_vod_failure_still_says_nothing() {
+        let (_, mut request) = stalled_starved();
+        request.buffered_through_ms = request.position_ms;
+        request.supported_actions = Some(vec![
+            RETRY_RESOURCE_ACTION.to_owned(),
+            TERMINAL_ACTION.to_owned(),
+        ]);
+
+        let mut status = vod_status_failed(ProducerDecisionReason::ReaderFailed);
+        let HlsSessionInfo::Vod(info) = &mut status else {
+            panic!("fixture was not VOD");
+        };
+        info.producer_decision = None;
+
+        let delivery = DeliveryView::from_status(&status, &request, "node", 1, 0, None);
+        assert_eq!(delivery.producer_decision, None);
+        assert_eq!(
+            resolve_action(&ControlAction::None, &delivery, &request),
+            ControlAction::None,
+            "a failure nobody classified is exactly what P1-2 was"
+        );
+    }
+
     /// The same VOD status, with a measured delivery rate.
     ///
     /// `None` is the honest default and the state every VOD session was stuck
@@ -12872,6 +12998,7 @@ mod tests {
             producer_state: "held",
             producer_hold: Some("working_set"),
             producer_failed: None,
+            producer_decision: None,
             published_end_ms,
             ready_ahead_end_ms,
             fetched_end_ms,
@@ -13257,7 +13384,7 @@ mod tests {
     #[test]
     fn only_a_verdict_about_the_source_itself_is_permanent() {
         // The split that decides whether a client should ever be told to give
-        // up. Twelve of the fourteen are timing, process, or executor facts:
+        // up. Seventeen of the nineteen are timing, process, executor or plan facts:
         // the same file on the same pipeline may work on the next attempt.
         // Two are verdicts about the source, and no retry changes those.
         for reason in ProducerDecisionReason::ALL {
@@ -13292,7 +13419,7 @@ mod tests {
                 Some(reason),
             );
         }
-        assert_eq!(ProducerDecisionReason::ALL.len(), 14);
+        assert_eq!(ProducerDecisionReason::ALL.len(), 19);
         assert_eq!(ProducerDecisionReason::from_status("invented"), None);
         // The names are wire-safe: lowercase, underscored, no spaces.
         for reason in ProducerDecisionReason::ALL {
