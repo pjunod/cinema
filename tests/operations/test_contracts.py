@@ -1211,20 +1211,28 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("run: make cluster-wal-check", workflow)
         wal_commands = make_dry_run_commands("cluster-wal-check")
         hiqlite_snapshot_tests = (
-            "raw_write_frame_stays_idle_until_an_explicit_flush",
+            "raw_write_frame_stays_idle_after_transport_recovers_until_an_explicit_flush",
+            "real_tls_tail_backpressure_completes_for_every_payload_direction",
+            "real_tls_no_backpressure_control_completes_without_an_extra_frame",
             "frame_completion_flushes_the_underlying_transport",
             "flush_failure_is_a_failed_frame_write",
             "permanently_blocked_flush_expires_the_combined_budget",
             "close_frame_uses_the_short_fixed_budget",
             "production_raft_request_writer_flushes_a_snapshot_chunk_through_tls",
+            "production_raft_writer_reports_flush_failure_to_its_supervisor",
             "production_raft_response_writer_flushes_serialized_response_through_tls",
+            "production_raft_response_writer_reports_flush_failure_and_closes",
             "production_api_request_writer_flushes_serialized_request_through_tls",
+            "production_api_writer_reports_flush_failure_to_its_supervisor",
             "production_api_response_writer_flushes_serialized_response_through_tls",
+            "production_api_response_writer_reports_flush_failure_and_closes",
             "production_raft_reader_reports_malformed_frames",
             "production_api_reader_reports_malformed_frames",
             "silent_peer_cannot_hold_the_server_handshake_open",
             "executor_runs_one_queues_one_and_drops_abandoned_queued_work",
             "shutdown_reports_running_work_without_cancelling_it",
+            "cancelled_shutdown_wait_retains_the_executor_handle",
+            "admission_deadline_never_executes_the_timed_out_job",
             "accepted_partial_write_finishes_before_same_offset_retry",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
             "replacement_socket_drops_cancelled_request_after_consuming_reset",
@@ -1236,6 +1244,8 @@ for (const startupDelay of [0, 1600, 7000]) {
             "handler_coordinator_observes_reader_failure_while_writer_is_pending",
             "handler_coordinator_treats_reader_panic_as_terminal",
             "forced_reset_cleanup_does_not_wait_for_full_writer_queue",
+            "dropping_connection_off_runtime_keeps_cleanup_owned",
+            "repeated_connection_failures_return_supervised_tasks_to_baseline",
             "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
             "cache_install_snapshot_preserves_mismatch_for_offset_reset",
         )
@@ -1252,6 +1262,15 @@ for (const startupDelay of [0, 1600, 7000]) {
                 command,
             )
             self.assertIn("--lib -- --exact", command)
+
+        proxy_writer_test = (
+            "server::proxy::stream::tests::"
+            "production_proxy_response_writer_flushes_serialized_response_through_tls"
+        )
+        matching = [command for command in wal_commands if proxy_writer_test in command]
+        self.assertEqual(len(matching), 1)
+        self.assertIn("--no-default-features --features server", matching[0])
+        self.assertIn("--lib -- --exact", matching[0])
 
         openraft_test = (
             "network::snapshot_transport::tests::"

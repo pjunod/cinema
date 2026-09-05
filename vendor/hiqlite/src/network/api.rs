@@ -1,11 +1,11 @@
 use crate::Node;
 use crate::app_state::RaftType;
 use crate::helpers::{deserialize, get_raft_metrics};
-use crate::network::handshake::HandshakeSecret;
 use crate::network::frame_io::{
     CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
     write_socket_close_frame_flushed,
 };
+use crate::network::handshake::HandshakeSecret;
 use crate::network::{AppStateExt, Error, serialize_network, validate_secret};
 use axum::extract::Path;
 use axum::http::HeaderMap;
@@ -40,8 +40,7 @@ use crate::store::state_machine::memory::dlock_handler::{
 #[cfg(feature = "sqlite")]
 use crate::{
     client::{
-        DB_QUORUM_WATERMARK_COMPAT_PROBE, DB_QUORUM_WATERMARK_MARKER,
-        db_quorum_watermark_local,
+        DB_QUORUM_WATERMARK_COMPAT_PROBE, DB_QUORUM_WATERMARK_MARKER, db_quorum_watermark_local,
     },
     migration::Migration,
     query::{query_consistent_local, query_owned_local, rows::RowOwned},
@@ -276,8 +275,8 @@ pub async fn ping() {}
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiStreamResponse, ApiStreamResponsePayload, ensure_ready_member,
-        write_api_response_frame,
+        ApiStreamResponse, ApiStreamResponsePayload, WsWriteMsg, api_response_writer,
+        ensure_ready_member, write_api_response_frame,
     };
     use crate::Node;
     use crate::network::serialize_network;
@@ -300,6 +299,32 @@ mod tests {
             |mut write, bytes| async move { write_api_response_frame(&mut write, &bytes).await },
         )
         .await;
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_api_response_writer_reports_flush_failure_and_closes() {
+        let write = crate::network::frame_io::tests::split_writer(
+            crate::network::frame_io::tests::TestIo::failing_flush(),
+        );
+        let (tx, rx) = flume::bounded(1);
+        let (closed, closed_rx) = tokio::sync::watch::channel(false);
+        let (finished, outcome) = tokio::sync::oneshot::channel();
+        tx.send_async(WsWriteMsg::Payload(ApiStreamResponse {
+            request_id: 17,
+            result: ApiStreamResponsePayload::Query(Ok(Vec::new())),
+        }))
+        .await
+        .expect("queue API response");
+
+        api_response_writer(write, rx, closed, finished).await;
+
+        assert!(*closed_rx.borrow());
+        let error = outcome
+            .await
+            .expect("writer terminal outcome")
+            .expect_err("flush failure must terminate the writer");
+        assert!(error.contains("injected flush failure"));
     }
 
     #[test]
@@ -544,46 +569,19 @@ async fn handle_socket_concurrent(
     let emulate_p3a_watermark_handler =
         std::env::var_os("HQLITE_TEST_P3A_DB_QUORUM_WATERMARK_HANDLER").is_some();
     // TODO splitting needs `unstable-split` feature right now but is about to be stabilized soon
-    let (rx, mut write) = ws.split(tokio::io::split);
+    let (rx, write) = ws.split(tokio::io::split);
     // IMPORTANT: the reader is NOT CANCEL SAFE in v0.8!
     let mut read = FragmentCollectorRead::new(rx);
 
     let (tx_connection_closed, mut rx_connection_closed) = watch::channel(false);
     let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
     let writer_connection_closed = tx_connection_closed.clone();
-    let handle_write = task::spawn(async move {
-        let outcome = loop {
-            let req = match rx_write.recv_async().await {
-                Ok(req) => req,
-                Err(_) => break Ok(()),
-            };
-            match req {
-                WsWriteMsg::Payload(resp) => {
-                    let bytes = serialize_network(&resp);
-                    if let Err(err) = write_api_response_frame(&mut write, &bytes).await {
-                        error!("Error during WebSocket write: {}", err);
-                        break Err(err.to_string());
-                    }
-                }
-                WsWriteMsg::Break => {
-                    // we ignore any errors here since it may be possible that the reader
-                    // has closed already - we just try a graceful connection close
-                    debug!("handle_socket_concurrent -> server stream break message");
-                    break Ok(());
-                }
-            }
-        };
-
-        let _ = write_close_frame_flushed(
-            &mut write,
-            Frame::close(1000, b"Invalid Request"),
-        )
-        .await;
-
-        writer_connection_closed.send_replace(true);
-        let _ = tx_writer_finished.send(outcome);
-        debug!("handle_socket_concurrent -> server stream exiting");
-    });
+    let handle_write = task::spawn(api_response_writer(
+        write,
+        rx_write,
+        writer_connection_closed,
+        tx_writer_finished,
+    ));
 
     let (tx_read, rx_read) = flume::bounded(1);
     let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
@@ -755,9 +753,8 @@ async fn handle_socket_concurrent(
                     let res = if is_watermark_marker && emulate_p3a_watermark_handler {
                         db_quorum_watermark_local(&state.0).await.map(|watermark| {
                             let mut row = RowOwned::from_db_quorum_watermark(watermark);
-                            row.columns.retain(|column| {
-                                column.name != "local_read_protocol_version"
-                            });
+                            row.columns
+                                .retain(|column| column.name != "local_read_protocol_version");
                             vec![row]
                         })
                     } else if is_watermark_marker && !emulate_old_watermark_handler {
@@ -1016,4 +1013,38 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     write_frame_flushed(write, Frame::binary(Payload::Borrowed(bytes))).await
+}
+
+async fn api_response_writer<S>(
+    mut write: fastwebsockets::WebSocketWrite<S>,
+    rx_write: flume::Receiver<WsWriteMsg>,
+    connection_closed: watch::Sender<bool>,
+    finished: oneshot::Sender<Result<(), String>>,
+) where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let outcome = loop {
+        let req = match rx_write.recv_async().await {
+            Ok(req) => req,
+            Err(_) => break Ok(()),
+        };
+        match req {
+            WsWriteMsg::Payload(resp) => {
+                let bytes = serialize_network(&resp);
+                if let Err(err) = write_api_response_frame(&mut write, &bytes).await {
+                    error!("Error during WebSocket write: {}", err);
+                    break Err(err.to_string());
+                }
+            }
+            WsWriteMsg::Break => {
+                debug!("handle_socket_concurrent -> server stream break message");
+                break Ok(());
+            }
+        }
+    };
+
+    let _ = write_close_frame_flushed(&mut write, Frame::close(1000, b"Invalid Request")).await;
+    connection_closed.send_replace(true);
+    let _ = finished.send(outcome);
+    debug!("handle_socket_concurrent -> server stream exiting");
 }

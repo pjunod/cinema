@@ -60,11 +60,16 @@ deployments:
 - Raft and cluster-API connection supervisors own and join both split socket
   tasks. Reader EOF, malformed frames, writer errors, task panics, reset,
   shutdown, and leader handoff all wake admission even when a bounded queue is
-  full. Accepted snapshot receive operations move to one node-owned executor
-  per Raft group with one running and one queued request; disconnecting a
-  socket drops its reply but cannot cancel a partial file write. Queued work
-  whose reply owner disappeared is skipped before execution, and graceful
-  node shutdown reports rather than detaches an unfinished snapshot owner.
+  full. Queue admission uses an ownership-retaining `try_send` loop, so a
+  timeout or handoff cannot claim a mutation was undispatched after a
+  cancellable send future already transferred it. Accepted snapshot receive
+  operations move to one node-owned executor per Raft group with one running
+  and one queued request; disconnecting a socket drops its reply but cannot
+  cancel a partial file write. Queued work whose reply owner disappeared is
+  skipped before execution. Graceful shutdown keeps Raft and its state-machine
+  worker alive until this executor releases accepted work, and cancellation of
+  one shutdown waiter cannot detach the retained task. Connections capture
+  their originating Tokio runtime so an off-runtime drop still owns cleanup.
 - A dropped OpenRaft RPC signals its WebSocket manager through a dedicated
   retained notification instead of best-effort enqueueing `Reset` behind the
   request itself. The old one-slot queue could be full at the hard deadline,

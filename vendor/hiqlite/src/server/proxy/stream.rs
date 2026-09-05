@@ -3,11 +3,11 @@ use crate::network::api::{
     ApiStreamRequest, ApiStreamRequestPayload, ApiStreamResponse, ApiStreamResponsePayload,
     WsWriteMsg,
 };
-use crate::network::handshake::HandshakeSecret;
 use crate::network::frame_io::{
     CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
     write_socket_close_frame_flushed,
 };
+use crate::network::handshake::HandshakeSecret;
 use crate::server::proxy::handlers::AppStateExt;
 use crate::store::state_machine::sqlite::state_machine::Query;
 use crate::{Client, Error};
@@ -25,8 +25,7 @@ pub async fn handle_socket(
 
     if let Err(err) = HandshakeSecret::server(&mut ws, state.secret_api.as_bytes()).await {
         error!("Error during WebSocket handshake: {}", err);
-        write_socket_close_frame_flushed(&mut ws, Frame::close(1000, b"Invalid Handshake"))
-            .await?;
+        write_socket_close_frame_flushed(&mut ws, Frame::close(1000, b"Invalid Handshake")).await?;
         return Ok(());
     };
 
@@ -346,6 +345,28 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     write_frame_flushed(write, Frame::binary(Payload::Borrowed(bytes))).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fastwebsockets::Role;
+
+    #[tokio::test]
+    async fn production_proxy_response_writer_flushes_serialized_response_through_tls() {
+        let response = ApiStreamResponse {
+            request_id: 23,
+            result: ApiStreamResponsePayload::Query(Ok(Vec::new())),
+        };
+        let bytes = serialize(&response).expect("serialize proxy response");
+        crate::network::frame_io::tests::exercise_gated_tls_writer(
+            Role::Server,
+            bytes,
+            true,
+            |mut write, bytes| async move { write_proxy_response_frame(&mut write, &bytes).await },
+        )
+        .await;
+    }
 }
 
 #[inline]

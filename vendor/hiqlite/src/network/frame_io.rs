@@ -103,10 +103,20 @@ pub(crate) mod tests {
     use tokio::io::{AsyncRead, DuplexStream, ReadBuf};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-    struct TestIo {
+    pub(crate) struct TestIo {
         flushes: Arc<AtomicUsize>,
         block_flush: bool,
         fail_flush: bool,
+    }
+
+    impl TestIo {
+        pub(crate) fn failing_flush() -> Self {
+            Self {
+                flushes: Arc::new(AtomicUsize::new(0)),
+                block_flush: false,
+                fail_flush: true,
+            }
+        }
     }
 
     impl AsyncRead for TestIo {
@@ -147,7 +157,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn split_writer(io: TestIo) -> WebSocketWrite<tokio::io::WriteHalf<TestIo>> {
+    pub(crate) fn split_writer(io: TestIo) -> WebSocketWrite<tokio::io::WriteHalf<TestIo>> {
         let socket = WebSocket::after_handshake(io, Role::Client);
         let (_read, write) = socket.split(tokio::io::split);
         write
@@ -337,22 +347,49 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn raw_write_frame_stays_idle_until_an_explicit_flush() {
+    async fn raw_write_frame_stays_idle_after_transport_recovers_until_an_explicit_flush() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let (mut write, mut receive, gate) = gated_tls_parts(Role::Server).await;
-        gate.lock().expect("gate lock").remaining = Some(0);
+        for (surface, role, bytes, accepted_before_tail) in [
+            ("server reply", Role::Server, vec![42; 32], 0),
+            (
+                "client snapshot request",
+                Role::Client,
+                vec![42; 3 * 1024 * 1024],
+                3 * 1024 * 1024 + 4 * 1024,
+            ),
+        ] {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                raw_write_frame_stays_idle_after_transport_recovers(
+                    surface,
+                    role,
+                    bytes,
+                    accepted_before_tail,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{surface} negative probe must finish within five seconds"));
+        }
+    }
+
+    async fn raw_write_frame_stays_idle_after_transport_recovers(
+        surface: &str,
+        role: Role,
+        expected: Vec<u8>,
+        accepted_before_tail: usize,
+    ) {
+        let (mut write, mut receive, sender_reader, gate) = gated_tls_parts(role).await;
+        gate.lock().expect("gate lock").remaining = Some(accepted_before_tail);
 
         write
-            .write_frame(Frame::binary(Payload::Borrowed(b"buffered response")))
+            .write_frame(Frame::binary(Payload::Owned(expected.clone())))
             .await
-            .expect("buffering a frame must succeed");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut receive)
-                .await
-                .is_err(),
-            "the peer must not receive an unflushed frame"
-        );
+            .unwrap_or_else(|error| panic!("{surface} must buffer successfully: {error}"));
 
+        // Restore underlying writability before observing the idle interval.
+        // With no application future polling the TLS writer, an unflushed
+        // ciphertext tail does not make autonomous progress merely because
+        // the transport became writable again.
         {
             let mut state = gate.lock().expect("gate lock");
             state.remaining = None;
@@ -360,8 +397,27 @@ pub(crate) mod tests {
                 waker.wake();
             }
         }
-        write.flush().await.expect("explicit flush");
-        assert_eq!(receive.await.expect("reader task"), b"buffered response");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut receive)
+                .await
+                .is_err(),
+            "{surface} must remain incomplete for 200 ms after writability returns"
+        );
+        assert!(
+            !sender_reader.is_finished(),
+            "{surface} sender reader must remain alive during the idle interval"
+        );
+
+        write
+            .flush()
+            .await
+            .unwrap_or_else(|error| panic!("explicit {surface} flush: {error}"));
+        assert_eq!(
+            receive.await.expect("reader task"),
+            expected,
+            "{surface} must complete on the same connection after flush"
+        );
+        sender_reader.abort();
     }
 
     async fn send_through_gated_tls(role: Role, len: usize, inject_backpressure: bool) {
@@ -386,13 +442,13 @@ pub(crate) mod tests {
         WriterFuture: std::future::Future<Output = Result<(), WebSocketError>> + Send + 'static,
     {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let (sender_write, receive, gate) = gated_tls_parts(role).await;
+        let (sender_write, receive, sender_reader, gate) = gated_tls_parts(role).await;
 
         let len = expected.len();
         if inject_backpressure {
             gate.lock().expect("gate lock").remaining = Some(if len > 64 * 1024 { len } else { 0 });
         }
-        let send = tokio::spawn(writer(sender_write, expected.clone()));
+        let mut send = tokio::spawn(writer(sender_write, expected.clone()));
 
         if inject_backpressure {
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -414,11 +470,17 @@ pub(crate) mod tests {
             }
         }
 
-        send.await
+        tokio::time::timeout(Duration::from_secs(5), &mut send)
+            .await
+            .expect("production writer must finish within five seconds")
             .expect("writer task")
             .expect("write and flush after transport resumes");
-        let received = receive.await.expect("reader task");
+        let received = tokio::time::timeout(Duration::from_secs(5), receive)
+            .await
+            .expect("peer must receive within five seconds")
+            .expect("reader task");
         assert_eq!(received, expected);
+        sender_reader.abort();
     }
 
     async fn gated_tls_parts(
@@ -426,6 +488,7 @@ pub(crate) mod tests {
     ) -> (
         TestWriter,
         tokio::task::JoinHandle<Vec<u8>>,
+        tokio::task::JoinHandle<Result<(), WebSocketError>>,
         Arc<Mutex<Gate>>,
     ) {
         let cert =
@@ -475,8 +538,14 @@ pub(crate) mod tests {
         };
         let sender = WebSocket::after_handshake(sender_tls, role);
         let receiver = WebSocket::after_handshake(receiver_tls, remote_role);
-        let (_sender_read, sender_write) = sender.split(tokio::io::split);
+        let (sender_read, sender_write) = sender.split(tokio::io::split);
         let (receiver_read, _receiver_write) = receiver.split(tokio::io::split);
+        let sender_reader = tokio::spawn(async move {
+            let mut read = FragmentCollectorRead::new(sender_read);
+            read.read_frame(&mut |_| async { Ok::<_, io::Error>(()) })
+                .await
+                .map(|_| ())
+        });
         let receive = tokio::spawn(async move {
             let mut read = FragmentCollectorRead::new(receiver_read);
             read.read_frame(&mut |_| async { Ok::<_, io::Error>(()) })
@@ -486,6 +555,6 @@ pub(crate) mod tests {
                 .to_vec()
         });
 
-        (sender_write, receive, gate)
+        (sender_write, receive, sender_reader, gate)
     }
 }

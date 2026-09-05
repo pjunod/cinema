@@ -90,18 +90,33 @@ where
         }
 
         let (response, response_rx) = oneshot::channel();
-        let admission = self.tx.send_async(Job { request, response });
-        tokio::pin!(admission);
+        let mut pending = Job { request, response };
         let mut shutdown = self.shutdown.subscribe();
-        tokio::select! {
-            biased;
-            _ = connection_closed.changed() => return Err(SubmitError::ConnectionClosed),
-            _ = shutdown.changed() => return Err(SubmitError::ExecutorClosed),
-            result = time::timeout(admission_timeout, &mut admission) => match result {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return Err(SubmitError::ExecutorClosed),
-                Err(_) => return Err(SubmitError::AdmissionTimeout),
-            },
+        let admission_deadline = time::Instant::now() + admission_timeout;
+        loop {
+            // Check the absolute boundary before attempting ownership transfer.
+            // A successful `try_send` is the only point after which execution
+            // is permitted, so AdmissionTimeout can never race an already
+            // queued or running job.
+            if time::Instant::now() >= admission_deadline {
+                return Err(SubmitError::AdmissionTimeout);
+            }
+            match self.tx.try_send(pending) {
+                Ok(()) => break,
+                Err(flume::TrySendError::Disconnected(_)) => {
+                    return Err(SubmitError::ExecutorClosed);
+                }
+                Err(flume::TrySendError::Full(job)) => pending = job,
+            }
+            tokio::select! {
+                biased;
+                _ = connection_closed.changed() => return Err(SubmitError::ConnectionClosed),
+                _ = shutdown.changed() => return Err(SubmitError::ExecutorClosed),
+                _ = time::sleep_until(admission_deadline) => {
+                    return Err(SubmitError::AdmissionTimeout);
+                }
+                () = time::sleep(Duration::from_millis(1)) => {}
+            }
         }
 
         tokio::select! {
@@ -120,19 +135,22 @@ where
     pub(crate) async fn wait_for_shutdown(&self, timeout: Duration) -> bool {
         self.request_shutdown();
         let mut task_slot = self.task.lock().await;
-        let Some(mut task) = task_slot.take() else {
+        let Some(task) = task_slot.as_mut() else {
             return true;
         };
 
-        match time::timeout(timeout, &mut task).await {
-            Ok(Ok(())) => true,
+        match time::timeout(timeout, task).await {
+            Ok(Ok(())) => {
+                task_slot.take();
+                true
+            }
             Ok(Err(join_error)) => {
                 error!("snapshot executor task failed during shutdown: {join_error}");
-                true
+                task_slot.take();
+                false
             }
             Err(_) => {
                 warn!("snapshot executor still owns work after bounded shutdown wait");
-                *task_slot = Some(task);
                 false
             }
         }
@@ -156,8 +174,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use tokio::sync::{Notify, Semaphore};
 
     #[derive(Clone)]
@@ -270,29 +290,183 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_shutdown_wait_retains_the_executor_handle() {
+        let gate = Arc::new(Semaphore::new(0));
+        let started = Arc::new(Notify::new());
+        let executor = Arc::new(NodeOwnedExecutor::start({
+            let gate = Arc::clone(&gate);
+            let started = Arc::clone(&started);
+            move |request: usize| {
+                let gate = Arc::clone(&gate);
+                let started = Arc::clone(&started);
+                async move {
+                    started.notify_one();
+                    gate.acquire().await.expect("test gate").forget();
+                    request
+                }
+            }
+        }));
+        let (_close, mut connection_closed) = watch::channel(false);
+        let caller = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(1, Duration::from_secs(1), &mut connection_closed)
+                    .await
+            }
+        });
+        started.notified().await;
+
+        let waiter = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move { executor.wait_for_shutdown(Duration::from_secs(60)).await }
+        });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        assert!(
+            waiter
+                .await
+                .expect_err("cancel first shutdown wait")
+                .is_cancelled()
+        );
+
+        gate.add_permits(1);
+        assert_eq!(
+            caller.await.expect("caller task"),
+            Err(SubmitError::ExecutorClosed)
+        );
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+        assert!(executor.task.lock().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admission_deadline_never_executes_the_timed_out_job() {
+        let gate = Arc::new(Semaphore::new(0));
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let executor = Arc::new(NodeOwnedExecutor::start({
+            let gate = Arc::clone(&gate);
+            let started = Arc::clone(&started);
+            move |request: usize| {
+                let gate = Arc::clone(&gate);
+                let started = Arc::clone(&started);
+                async move {
+                    started.lock().await.push(request);
+                    gate.acquire().await.expect("test gate").forget();
+                    request
+                }
+            }
+        }));
+
+        let (_close_first, mut first_closed) = watch::channel(false);
+        let first = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(1, Duration::from_secs(1), &mut first_closed)
+                    .await
+            }
+        });
+        while started.lock().await.as_slice() != [1] {
+            tokio::task::yield_now().await;
+        }
+        let (close_second, mut second_closed) = watch::channel(false);
+        let second = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(2, Duration::from_secs(1), &mut second_closed)
+                    .await
+            }
+        });
+        while !executor.tx.is_full() {
+            tokio::task::yield_now().await;
+        }
+
+        let (_close_third, mut third_closed) = watch::channel(false);
+        let third = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(3, Duration::from_millis(10), &mut third_closed)
+                    .await
+            }
+        });
+        tokio::spawn({
+            let gate = Arc::clone(&gate);
+            async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                gate.add_permits(1);
+            }
+        });
+        assert_eq!(
+            third.await.expect("third caller task"),
+            Err(SubmitError::AdmissionTimeout)
+        );
+
+        close_second.send_replace(true);
+        assert_eq!(
+            second.await.expect("second caller task"),
+            Err(SubmitError::ConnectionClosed)
+        );
+        assert_eq!(first.await.expect("first caller task"), Ok(1));
+        gate.add_permits(1);
+        tokio::task::yield_now().await;
+        assert_eq!(started.lock().await.as_slice(), [1, 2]);
+        assert!(!started.lock().await.contains(&3));
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
     async fn accepted_partial_write_finishes_before_same_offset_retry() {
-        let image = b"complete snapshot image".to_vec();
-        let file = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let image = (0..1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let root =
+            std::env::temp_dir().join(format!("hiqlite-partial-snapshot-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("create snapshot test directory");
+        let file = root.join("received.snapshot");
         let partial_written = Arc::new(Notify::new());
         let release = Arc::new(Semaphore::new(0));
         let executor = Arc::new(NodeOwnedExecutor::start({
-            let file = Arc::clone(&file);
+            let file = file.clone();
             let partial_written = Arc::clone(&partial_written);
             let release = Arc::clone(&release);
             move |write: FileWrite| {
-                let file = Arc::clone(&file);
+                let file = file.clone();
                 let partial_written = Arc::clone(&partial_written);
                 let release = Arc::clone(&release);
                 async move {
                     let split = write.data.len() / 2;
-                    {
-                        let mut bytes = file.lock().await;
-                        bytes.truncate(write.offset);
-                        bytes.extend_from_slice(&write.data[..split]);
-                    }
+                    let mut received = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(&file)
+                        .await
+                        .expect("open real snapshot file");
+                    received
+                        .set_len(write.offset as u64)
+                        .await
+                        .expect("truncate to accepted offset");
+                    received
+                        .seek(std::io::SeekFrom::Start(write.offset as u64))
+                        .await
+                        .expect("seek accepted offset");
+                    received
+                        .write_all(&write.data[..split])
+                        .await
+                        .expect("write controlled first half");
+                    received.flush().await.expect("flush controlled first half");
                     partial_written.notify_one();
                     release.acquire().await.expect("write release").forget();
-                    file.lock().await.extend_from_slice(&write.data[split..]);
+                    received
+                        .write_all(&write.data[split..])
+                        .await
+                        .expect("finish accepted snapshot write");
+                    received.flush().await.expect("flush complete snapshot");
                     write.data.len()
                 }
             }
@@ -345,7 +519,14 @@ mod tests {
 
         release.add_permits(2);
         assert_eq!(retry.await.expect("retry caller task"), Ok(image.len()));
-        assert_eq!(*file.lock().await, image);
+        let actual = tokio::fs::read(&file)
+            .await
+            .expect("read final snapshot image");
+        assert_eq!(Sha256::digest(&actual), Sha256::digest(&image));
+        assert_eq!(actual, image);
         assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove snapshot test directory");
     }
 }

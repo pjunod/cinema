@@ -96,10 +96,7 @@ impl LocalDbRaftMetrics {
             node_id: metrics.id,
             current_term: metrics.current_term,
             current_leader: metrics.current_leader,
-            last_applied_term: metrics
-                .last_applied
-                .as_ref()
-                .map(|log| log.leader_id.term),
+            last_applied_term: metrics.last_applied.as_ref().map(|log| log.leader_id.term),
             last_applied_index: metrics.last_applied.as_ref().map(|log| log.index),
         }
     }
@@ -548,7 +545,6 @@ impl Client {
                 .is_raft_stopped
                 .store(true, Ordering::Relaxed);
             state.raft_cache.snapshot_executor.request_shutdown();
-            state.raft_cache.raft.shutdown().await?;
             if !state
                 .raft_cache
                 .snapshot_executor
@@ -559,6 +555,12 @@ impl Client {
                     "cache snapshot executor still owns work during shutdown".into(),
                 ));
             }
+            // Keep the Raft core and state-machine worker alive until every
+            // accepted snapshot operation has relinquished ownership. Core
+            // shutdown can close the install response before the inner
+            // durable apply has finished, which would make a later WAL/cache
+            // shutdown race that still-running work.
+            state.raft_cache.raft.shutdown().await?;
             if let Some(handle) = &state.raft_cache.shutdown_handle {
                 handle.shutdown().await?;
             }
@@ -590,7 +592,6 @@ impl Client {
             state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
 
             state.raft_db.snapshot_executor.request_shutdown();
-            state.raft_db.raft.shutdown().await?;
             if !state
                 .raft_db
                 .snapshot_executor
@@ -601,6 +602,7 @@ impl Client {
                     "sqlite snapshot executor still owns work during shutdown".into(),
                 ));
             }
+            state.raft_db.raft.shutdown().await?;
             info!("Shutting down sqlite logs writer");
             state.raft_db.shutdown_handle.shutdown().await?;
 
@@ -748,7 +750,11 @@ mod tests {
         .into_db_quorum_watermark()
         .expect_err("a malformed advertised protocol is not an old leader");
 
-        assert!(error.to_string().contains("invalid local_read_protocol_version"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid local_read_protocol_version")
+        );
     }
 
     #[tokio::test]

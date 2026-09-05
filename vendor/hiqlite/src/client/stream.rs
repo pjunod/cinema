@@ -1,9 +1,9 @@
 use crate::app_state::RaftType;
 use crate::helpers::deserialize;
+use crate::network::api::{ApiStreamResponse, ApiStreamResponsePayload};
 use crate::network::frame_io::{
     CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
 };
-use crate::network::api::{ApiStreamResponse, ApiStreamResponsePayload};
 use crate::network::{serialize_network, web_socket_connect};
 use crate::{Client, Error, Node, NodeId};
 use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, Payload, WebSocket, WebSocketWrite};
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
@@ -69,10 +69,7 @@ pub(crate) enum ClientStreamReq {
     // the shared AppState queue. Retried Client operations use the dedicated
     // priority control channel below.
     #[cfg(feature = "dashboard")]
-    LeaderChange(
-        (Option<u64>, Option<Node>),
-        Option<oneshot::Sender<()>>,
-    ),
+    LeaderChange((Option<u64>, Option<Node>), Option<oneshot::Sender<()>>),
     /// Advance only within the caller-configured proxy pool. The stream
     /// manager acknowledges after closing the old stream and failing every
     /// in-flight request without replay.
@@ -97,11 +94,7 @@ struct PendingLeaderReady {
 }
 
 impl PendingLeaderReady {
-    fn register(
-        &mut self,
-        target: (NodeId, String),
-        ready: Option<oneshot::Sender<()>>,
-    ) -> bool {
+    fn register(&mut self, target: (NodeId, String), ready: Option<oneshot::Sender<()>>) -> bool {
         self.prune_closed();
         if ready.as_ref().is_some_and(oneshot::Sender::is_closed) {
             // Its bounded caller expired while this control message waited to
@@ -129,7 +122,11 @@ impl PendingLeaderReady {
 
     fn resolve_connected_target(&mut self, connected: &(NodeId, String)) {
         self.prune_closed();
-        if self.target.as_ref().is_some_and(|target| target != connected) {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| target != connected)
+        {
             // The requested target failed and authenticated discovery selected
             // another live leader. Fail the obsolete handoff rather than
             // dropping the valid stream forever or falsely acknowledging it.
@@ -270,6 +267,23 @@ enum WritePayload {
     Close,
 }
 
+enum TryWriterEnqueue {
+    Sent,
+    Full(WritePayload),
+    Disconnected,
+}
+
+fn try_writer_enqueue(
+    writer: &flume::Sender<WritePayload>,
+    payload: WritePayload,
+) -> TryWriterEnqueue {
+    match writer.try_send(payload) {
+        Ok(()) => TryWriterEnqueue::Sent,
+        Err(flume::TrySendError::Full(payload)) => TryWriterEnqueue::Full(payload),
+        Err(flume::TrySendError::Disconnected(_)) => TryWriterEnqueue::Disconnected,
+    }
+}
+
 const CLIENT_STREAM_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 fn reconnect_delay(
@@ -338,11 +352,11 @@ async fn client_stream(
         pending_leader_ready.prune_closed();
         let connecting_target = leader.read().await.clone();
         let connection = try_connect(
-                &leader,
-                &raft_type,
-                client.inner.tls_config.clone(),
-                &secret,
-            );
+            &leader,
+            &raft_type,
+            client.inner.tls_config.clone(),
+            &secret,
+        );
         tokio::pin!(connection);
         let connection = loop {
             select! {
@@ -451,7 +465,7 @@ async fn client_stream(
         let mut terminal_transport_failure = false;
         let mut force_writer_abort = false;
 
-        loop {
+        'connected: loop {
             let res = select! {
                 biased;
                 _ = stream_shutdown.changed() => {
@@ -816,98 +830,116 @@ async fn client_stream(
                     LeaderChange(Result<ClientLeaderChange, flume::RecvError>),
                     ReaderFinished(Result<(), String>),
                     WriterFinished(Result<(), String>),
-                    Sent(Result<(), flume::SendError<WritePayload>>),
+                    Retry,
                 }
-                let enqueue = select! {
-                    biased;
-                    _ = stream_shutdown.changed() => {
-                        EnqueueEvent::Shutdown
-                    }
-                    change = rx_leader.recv_async() => EnqueueEvent::LeaderChange(change),
-                    result = &mut rx_reader_finished => EnqueueEvent::ReaderFinished(
-                        result.unwrap_or_else(|_| Err(
-                            "API reader task exited without reporting an outcome".into()
-                        ))
-                    ),
-                    result = &mut rx_writer_finished => EnqueueEvent::WriterFinished(
-                        result.unwrap_or_else(|_| Err(
-                            "API writer task exited without reporting an outcome".into()
-                        ))
-                    ),
-                    result = tx_write.send_async(payload) => EnqueueEvent::Sent(result),
-                };
-                let write_result = match enqueue {
-                    EnqueueEvent::Shutdown => {
-                        shutdown = true;
-                        let _ = ack.send(Err(Error::Connect(
-                            "client stream manager stopped".into(),
-                        )));
-                        break;
-                    }
-                    EnqueueEvent::LeaderChange(change) => {
-                        let Ok(ClientLeaderChange { leader_id, node, ready }) = change else {
-                            shutdown = true;
-                            let _ = ack.send(Err(Error::Connect(
-                                "client leader control channel closed".into(),
-                            )));
+                // `flume::SendFut` is not cancellation safe at the ownership
+                // boundary: it can transfer the item before being repolled
+                // Ready. Retain `Full(payload)` explicitly so any terminal
+                // branch below can truthfully classify this request as not
+                // dispatched. Once `try_send` succeeds, its application
+                // outcome is treated as unknown until a response arrives.
+                let mut pending_payload = payload;
+                loop {
+                    match try_writer_enqueue(&tx_write, pending_payload) {
+                        TryWriterEnqueue::Sent => {
+                            in_flight.insert(request_id, ack);
                             break;
-                        };
-                        let target = (leader_id, node.addr_api.clone());
-                        if target == connected_leader {
-                            if let Some(ready) = ready {
-                                let _ = ready.send(());
+                        }
+                        TryWriterEnqueue::Disconnected => {
+                            terminal_transport_failure = true;
+                            force_writer_abort = true;
+                            rotate_after_disconnect = client.inner.proxy_mode;
+                            let _ = ack.send(Err(Error::Connect(
+                                "API transport ended before request dispatch".into(),
+                            )));
+                            break 'connected;
+                        }
+                        TryWriterEnqueue::Full(payload) => {
+                            pending_payload = payload;
+                        }
+                    }
+
+                    let enqueue = select! {
+                        biased;
+                        _ = stream_shutdown.changed() => EnqueueEvent::Shutdown,
+                        change = rx_leader.recv_async() => EnqueueEvent::LeaderChange(change),
+                        result = &mut rx_reader_finished => EnqueueEvent::ReaderFinished(
+                            result.unwrap_or_else(|_| Err(
+                                "API reader task exited without reporting an outcome".into()
+                            ))
+                        ),
+                        result = &mut rx_writer_finished => EnqueueEvent::WriterFinished(
+                            result.unwrap_or_else(|_| Err(
+                                "API writer task exited without reporting an outcome".into()
+                            ))
+                        ),
+                        () = tokio::task::yield_now() => EnqueueEvent::Retry,
+                    };
+                    match enqueue {
+                        EnqueueEvent::Retry => continue,
+                        EnqueueEvent::Shutdown => {
+                            shutdown = true;
+                            let _ = ack
+                                .send(Err(Error::Connect("client stream manager stopped".into())));
+                            break 'connected;
+                        }
+                        EnqueueEvent::LeaderChange(change) => {
+                            let Ok(ClientLeaderChange {
+                                leader_id,
+                                node,
+                                ready,
+                            }) = change
+                            else {
+                                shutdown = true;
+                                let _ = ack.send(Err(Error::Connect(
+                                    "client leader control channel closed".into(),
+                                )));
+                                break 'connected;
+                            };
+                            let target = (leader_id, node.addr_api.clone());
+                            if target == connected_leader {
+                                if let Some(ready) = ready {
+                                    let _ = ready.send(());
+                                }
+                                continue;
                             }
-                        } else {
-                            let _ = pending_leader_ready.register(target, ready);
+                            if !pending_leader_ready.register(target, ready) {
+                                continue;
+                            }
                             update_leader(&leader, Some(leader_id), Some(node)).await;
                             for (_, in_flight_ack) in in_flight.drain() {
                                 let _ = in_flight_ack.send(Err(Error::LeaderChange(
                                     "Action not allowed, Raft leader has changed".into(),
                                 )));
                             }
+                            let _ = ack.send(Err(Error::Connect(
+                                "API request was not dispatched before stream handoff".into(),
+                            )));
+                            break 'connected;
                         }
-                        let _ = ack.send(Err(Error::Connect(
-                            "API request was not dispatched before stream handoff".into(),
-                        )));
-                        break;
-                    }
-                    EnqueueEvent::ReaderFinished(outcome) => {
-                        if let Err(err) = outcome {
-                            error!("API WebSocket reader failed while enqueueing: {err}");
+                        EnqueueEvent::ReaderFinished(outcome) => {
+                            if let Err(err) = outcome {
+                                error!("API WebSocket reader failed while enqueueing: {err}");
+                            }
+                            terminal_transport_failure = true;
+                            rotate_after_disconnect = client.inner.proxy_mode;
+                            let _ = ack.send(Err(Error::Connect(
+                                "API transport ended before request dispatch".into(),
+                            )));
+                            break 'connected;
                         }
-                        terminal_transport_failure = true;
-                        rotate_after_disconnect = client.inner.proxy_mode;
-                        let _ = ack.send(Err(Error::Connect(
-                            "API transport ended before request dispatch".into(),
-                        )));
-                        break;
-                    }
-                    EnqueueEvent::WriterFinished(outcome) => {
-                        if let Err(err) = outcome {
-                            error!("API WebSocket writer failed while enqueueing: {err}");
+                        EnqueueEvent::WriterFinished(outcome) => {
+                            if let Err(err) = outcome {
+                                error!("API WebSocket writer failed while enqueueing: {err}");
+                            }
+                            terminal_transport_failure = true;
+                            force_writer_abort = true;
+                            rotate_after_disconnect = client.inner.proxy_mode;
+                            let _ = ack.send(Err(Error::Connect(
+                                "API transport ended before request dispatch".into(),
+                            )));
+                            break 'connected;
                         }
-                        terminal_transport_failure = true;
-                        force_writer_abort = true;
-                        rotate_after_disconnect = client.inner.proxy_mode;
-                        let _ = ack.send(Err(Error::Connect(
-                            "API transport ended before request dispatch".into(),
-                        )));
-                        break;
-                    }
-                    EnqueueEvent::Sent(result) => result,
-                };
-                match write_result {
-                    Ok(_) => {
-                        in_flight.insert(request_id, ack);
-                    }
-                    Err(err) => {
-                        error!("Error sending txn request to writer: {}", err);
-                        terminal_transport_failure = true;
-                        force_writer_abort = true;
-                        let _ =
-                            ack.send(Err(Error::Connect("Connection to Raft leader lost".into())));
-                        rotate_after_disconnect = client.inner.proxy_mode;
-                        break;
                     }
                 }
             }
@@ -1168,14 +1200,14 @@ where
     loop {
         let frame = read
             .read_frame(&mut |frame| async move {
-            // TODO obligated sends should be auto ping / pong / close ? -> verify!
-            debug!(
-                "Received obligated send in stream client: OpCode: {:?}: {:?}",
-                frame.opcode.clone(),
-                frame.payload
-            );
-            Ok::<(), Error>(())
-        })
+                // TODO obligated sends should be auto ping / pong / close ? -> verify!
+                debug!(
+                    "Received obligated send in stream client: OpCode: {:?}: {:?}",
+                    frame.opcode.clone(),
+                    frame.payload
+                );
+                Ok::<(), Error>(())
+            })
             .await
             .map_err(|err| err.to_string())?;
         match frame.opcode {
@@ -1185,8 +1217,7 @@ where
                 let bytes = frame.payload.deref();
                 let payload = deserialize::<ApiStreamResponse>(bytes)
                     .map_err(|err| format!("invalid API stream response: {err}"))?;
-                tx
-                    .send_async(ClientStreamReq::StreamResponse(payload))
+                tx.send_async(ClientStreamReq::StreamResponse(payload))
                     .await
                     .map_err(|err| format!("API reader outcome channel closed: {err}"))?;
             }
@@ -1200,11 +1231,13 @@ where
     Ok(())
 }
 
-async fn stream_writer(
-    mut write: WebSocketWrite<WriteHalf<TokioIo<Upgraded>>>,
+async fn stream_writer<S>(
+    mut write: WebSocketWrite<S>,
     rx: flume::Receiver<WritePayload>,
     finished: oneshot::Sender<Result<(), String>>,
-) {
+) where
+    S: AsyncWrite + Unpin,
+{
     let outcome = loop {
         let payload = match rx.recv_async().await {
             Ok(payload) => payload,
@@ -1219,8 +1252,7 @@ async fn stream_writer(
             }
             WritePayload::Close => {
                 debug!("Received Close request in Client Stream Writer");
-                let _ =
-                    write_close_frame_flushed(&mut write, Frame::close(1000, b"go away")).await;
+                let _ = write_close_frame_flushed(&mut write, Frame::close(1000, b"go away")).await;
                 break Ok(());
             }
         }
@@ -1250,7 +1282,8 @@ async fn try_connect(
         let lock = leader.read().await;
         (lock.0, lock.1.clone())
     };
-    let socket = web_socket_connect::try_connect(node_id, &addr, raft_type, tls_config, secret).await?;
+    let socket =
+        web_socket_connect::try_connect(node_id, &addr, raft_type, tls_config, secret).await?;
     Ok((socket, (node_id, addr)))
 }
 
@@ -1260,8 +1293,7 @@ fn leader_change_matches_connection(
     node_id: Option<NodeId>,
     node: Option<&Node>,
 ) -> bool {
-    node_id == Some(connected.0)
-        && node.is_some_and(|node| node.addr_api == connected.1)
+    node_id == Some(connected.0) && node.is_some_and(|node| node.addr_api == connected.1)
 }
 
 #[cfg(test)]
@@ -1287,6 +1319,49 @@ mod tests {
             |mut write, bytes| async move { write_api_request_frame(&mut write, bytes).await },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn production_api_writer_reports_flush_failure_to_its_supervisor() {
+        let write = crate::network::frame_io::tests::split_writer(
+            crate::network::frame_io::tests::TestIo::failing_flush(),
+        );
+        let (tx, rx) = flume::bounded(1);
+        let (finished, outcome) = oneshot::channel();
+        tx.send_async(WritePayload::Payload(b"API request".to_vec()))
+            .await
+            .expect("queue API request");
+
+        stream_writer(write, rx, finished).await;
+
+        let error = outcome
+            .await
+            .expect("writer terminal outcome")
+            .expect_err("flush failure must terminate the writer");
+        assert!(error.contains("injected flush failure"));
+    }
+
+    #[test]
+    fn full_writer_queue_retains_mutation_until_ownership_transfer_is_certain() {
+        let (tx, rx) = flume::bounded(1);
+        tx.try_send(WritePayload::Close).expect("fill writer queue");
+        let pending = match try_writer_enqueue(
+            &tx,
+            WritePayload::Payload(b"non-idempotent mutation".to_vec()),
+        ) {
+            TryWriterEnqueue::Full(payload) => payload,
+            _ => panic!("full queue must return ownership to the manager"),
+        };
+
+        assert!(matches!(rx.try_recv(), Ok(WritePayload::Close)));
+        assert!(matches!(
+            try_writer_enqueue(&tx, pending),
+            TryWriterEnqueue::Sent
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(WritePayload::Payload(bytes)) if bytes == b"non-idempotent mutation"
+        ));
     }
 
     #[tokio::test]

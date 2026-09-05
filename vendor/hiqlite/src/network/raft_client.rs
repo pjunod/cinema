@@ -10,8 +10,6 @@ use crate::network::raft_server::{
 };
 use crate::network::web_socket_connect;
 use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, Payload, WebSocketWrite};
-use hyper::upgrade::Upgraded;
-use hyper_util::rt::TokioIo;
 use openraft::error::RPCError;
 use openraft::error::RemoteError;
 use openraft::error::Unreachable;
@@ -20,7 +18,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf};
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 use tokio::{select, task, time};
@@ -101,6 +99,7 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
             sender,
             reset,
             shutdown,
+            runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         }
     }
@@ -137,6 +136,7 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
             sender,
             reset,
             shutdown,
+            runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         }
     }
@@ -362,24 +362,33 @@ async fn next_connected_event(
 
 async fn enqueue_write_or_reset(
     tx_write: &flume::Sender<WritePayload>,
-    payload: WritePayload,
+    mut payload: WritePayload,
     reset: &ConnectionResetState,
     socket_epoch: u64,
     shutdown: &ConnectionShutdownState,
     reader_finished: &mut oneshot::Receiver<Result<(), String>>,
     writer_finished: &mut oneshot::Receiver<Result<(), String>>,
 ) -> Result<(), WriteEnqueueError> {
-    select! {
-        biased;
-        _ = shutdown.requested() => Err(WriteEnqueueError::Shutdown),
-        _ = reset.changed_since(socket_epoch) => Err(WriteEnqueueError::Reset),
-        result = reader_finished => Err(WriteEnqueueError::ReaderFinished(
-            result.unwrap_or_else(|_| Err("Raft reader task exited without reporting an outcome".into()))
-        )),
-        result = writer_finished => Err(WriteEnqueueError::WriterFinished(
-            result.unwrap_or_else(|_| Err("Raft writer task exited without reporting an outcome".into()))
-        )),
-        result = tx_write.send_async(payload) => result.map_err(WriteEnqueueError::Disconnected),
+    loop {
+        match tx_write.try_send(payload) {
+            Ok(()) => return Ok(()),
+            Err(flume::TrySendError::Disconnected(payload)) => {
+                return Err(WriteEnqueueError::Disconnected(flume::SendError(payload)));
+            }
+            Err(flume::TrySendError::Full(pending)) => payload = pending,
+        }
+        select! {
+            biased;
+            _ = shutdown.requested() => return Err(WriteEnqueueError::Shutdown),
+            _ = reset.changed_since(socket_epoch) => return Err(WriteEnqueueError::Reset),
+            result = &mut *reader_finished => return Err(WriteEnqueueError::ReaderFinished(
+                result.unwrap_or_else(|_| Err("Raft reader task exited without reporting an outcome".into()))
+            )),
+            result = &mut *writer_finished => return Err(WriteEnqueueError::WriterFinished(
+                result.unwrap_or_else(|_| Err("Raft writer task exited without reporting an outcome".into()))
+            )),
+            () = tokio::task::yield_now() => {}
+        }
     }
 }
 
@@ -765,14 +774,14 @@ impl NetworkStreaming {
         loop {
             let frame = read
                 .read_frame(&mut |frame| async move {
-                // TODO obligated sends should be auto ping / pong / close ? -> verify!
-                debug!(
-                    "Received obligated send in stream client: OpCode: {:?}: {:?}",
-                    frame.opcode.clone(),
-                    frame.payload
-                );
-                Ok::<(), Error>(())
-            })
+                    // TODO obligated sends should be auto ping / pong / close ? -> verify!
+                    debug!(
+                        "Received obligated send in stream client: OpCode: {:?}: {:?}",
+                        frame.opcode.clone(),
+                        frame.payload
+                    );
+                    Ok::<(), Error>(())
+                })
                 .await
                 .map_err(|err| err.to_string())?;
             match frame.opcode {
@@ -796,11 +805,13 @@ impl NetworkStreaming {
         Ok(())
     }
 
-    async fn stream_writer(
-        mut write: WebSocketWrite<WriteHalf<TokioIo<Upgraded>>>,
+    async fn stream_writer<S>(
+        mut write: WebSocketWrite<S>,
         rx: flume::Receiver<WritePayload>,
         finished: oneshot::Sender<Result<(), String>>,
-    ) {
+    ) where
+        S: AsyncWrite + Unpin,
+    {
         let outcome = loop {
             let payload = match rx.recv_async().await {
                 Ok(payload) => payload,
@@ -815,11 +826,8 @@ impl NetworkStreaming {
                 }
                 WritePayload::Close => {
                     debug!("Received Close request in Client Stream Writer");
-                    let _ = write_close_frame_flushed(
-                        &mut write,
-                        Frame::close(1000, b"go away"),
-                    )
-                    .await;
+                    let _ =
+                        write_close_frame_flushed(&mut write, Frame::close(1000, b"go away")).await;
                     break Ok(());
                 }
             }
@@ -846,6 +854,7 @@ pub struct NetworkConnectionStreaming {
     sender: flume::Sender<RaftRequest>,
     reset: Arc<ConnectionResetState>,
     shutdown: Arc<ConnectionShutdownState>,
+    runtime: tokio::runtime::Handle,
     task: Option<JoinHandle<()>>,
 }
 
@@ -887,15 +896,12 @@ impl Drop for NetworkConnectionStreaming {
         let Some(task) = self.task.take() else {
             return;
         };
-        // Drop cannot await, so transfer the retained handle to a runtime-owned
-        // reaper. If no runtime remains, abort instead of silently detaching.
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = task.await;
-            });
-        } else {
-            task.abort();
-        }
+        // Drop cannot await and may run on a non-runtime thread. The handle
+        // captured when this connection was constructed remains the cleanup
+        // owner for its supervisor and split socket tasks.
+        self.runtime.spawn(async move {
+            let _ = task.await;
+        });
     }
 }
 
@@ -1164,6 +1170,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_raft_writer_reports_flush_failure_to_its_supervisor() {
+        let write = crate::network::frame_io::tests::split_writer(
+            crate::network::frame_io::tests::TestIo::failing_flush(),
+        );
+        let (tx, rx) = flume::bounded(1);
+        let (finished, outcome) = oneshot::channel();
+        tx.send_async(WritePayload::Payload(b"raft request".to_vec()))
+            .await
+            .expect("queue Raft request");
+
+        NetworkStreaming::stream_writer(write, rx, finished).await;
+
+        let error = outcome
+            .await
+            .expect("writer terminal outcome")
+            .expect_err("flush failure must terminate the writer");
+        assert!(error.contains("injected flush failure"));
+    }
+
+    #[tokio::test]
     async fn production_raft_reader_reports_malformed_frames() {
         let (client_io, server_io) = tokio::io::duplex(4 * 1024);
         let client = WebSocket::after_handshake(client_io, Role::Client);
@@ -1191,7 +1217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_connection_allows_handler_to_process_shutdown() {
+    async fn dropping_connection_off_runtime_keeps_cleanup_owned() {
         let (sender, receiver) = flume::bounded(1);
         let release = Arc::new(Notify::new());
         let stopped = Arc::new(Notify::new());
@@ -1216,15 +1242,66 @@ mod tests {
             sender,
             reset: Arc::new(ConnectionResetState::default()),
             shutdown: Arc::new(ConnectionShutdownState::default()),
+            runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         };
 
-        drop(connection);
+        std::thread::spawn(move || drop(connection))
+            .join()
+            .expect("drop connection off runtime");
         release.notify_one();
 
         tokio::time::timeout(Duration::from_secs(1), stopped.notified())
             .await
-            .expect("the detached handler must consume shutdown and exit cleanly");
+            .expect("the captured runtime must reap the handler after off-runtime drop");
+    }
+
+    #[tokio::test]
+    async fn repeated_connection_failures_return_supervised_tasks_to_baseline() {
+        let active = Arc::new(AtomicU64::new(0));
+        let completed = Arc::new(AtomicU64::new(0));
+        for id in 0..100 {
+            let (sender, receiver) = flume::bounded(1);
+            let active_for_task = Arc::clone(&active);
+            let completed_for_task = Arc::clone(&completed);
+            let task = tokio::spawn(async move {
+                active_for_task.fetch_add(3, Ordering::SeqCst);
+                let reader = tokio::spawn(std::future::pending::<()>());
+                let writer = tokio::spawn(std::future::pending::<()>());
+                assert!(matches!(
+                    receiver.recv_async().await,
+                    Ok(RaftRequest::Shutdown)
+                ));
+                reader.abort();
+                writer.abort();
+                let _ = reader.await;
+                let _ = writer.await;
+                active_for_task.fetch_sub(3, Ordering::SeqCst);
+                completed_for_task.fetch_add(1, Ordering::SeqCst);
+            });
+            let connection = NetworkConnectionStreaming {
+                node: Node {
+                    id,
+                    addr_raft: "127.0.0.1:32401".to_owned(),
+                    addr_api: "127.0.0.1:32402".to_owned(),
+                },
+                sender,
+                reset: Arc::new(ConnectionResetState::default()),
+                shutdown: Arc::new(ConnectionShutdownState::default()),
+                runtime: tokio::runtime::Handle::current(),
+                task: Some(task),
+            };
+            drop(connection);
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while completed.load(Ordering::SeqCst) != 100 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all connection supervisors must finish");
+        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1593,6 +1670,7 @@ mod tests {
             sender,
             reset: Arc::clone(&reset),
             shutdown: Arc::new(ConnectionShutdownState::default()),
+            runtime: tokio::runtime::Handle::current(),
             task: None,
         };
         let responder = tokio::spawn(async move {
@@ -1618,18 +1696,19 @@ mod tests {
             }
         });
 
-        let error = <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
-            &mut network,
-            InstallSnapshotRequest {
-                vote: Vote::new_committed(1, 1),
-                meta: test_snapshot_meta(),
-                offset: 4,
-                data: b"efgh".to_vec(),
-                done: true,
-            },
-            RPCOption::new(Duration::from_millis(500)),
-        )
-        .await;
+        let error =
+            <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
+                &mut network,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: test_snapshot_meta(),
+                    offset: 4,
+                    data: b"efgh".to_vec(),
+                    done: true,
+                },
+                RPCOption::new(Duration::from_millis(500)),
+            )
+            .await;
         assert!(matches!(
             error,
             Err(RPCError::RemoteError(RemoteError {
@@ -1672,6 +1751,7 @@ mod tests {
             sender,
             reset: Arc::clone(&reset),
             shutdown: Arc::new(ConnectionShutdownState::default()),
+            runtime: tokio::runtime::Handle::current(),
             task: None,
         };
         let responder = tokio::spawn(async move {

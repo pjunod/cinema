@@ -1,8 +1,8 @@
-use crate::network::handshake::HandshakeSecret;
 use crate::network::frame_io::{
     CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
     write_socket_close_frame_flushed,
 };
+use crate::network::handshake::HandshakeSecret;
 use crate::network::{AppStateExt, Error, serialize_network};
 use axum::response::IntoResponse;
 use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, Payload, upgrade};
@@ -173,45 +173,24 @@ async fn handle_socket(
 
     if let Err(err) = HandshakeSecret::server(&mut ws, state.secret_raft.as_bytes()).await {
         error!("Error during WebSocket handshake: {}", err);
-        write_socket_close_frame_flushed(&mut ws, Frame::close(1000, b"Invalid Handshake"))
-            .await?;
+        write_socket_close_frame_flushed(&mut ws, Frame::close(1000, b"Invalid Handshake")).await?;
         return Ok(());
     }
 
     let (tx_write, rx_write) = flume::bounded::<WsWriteMsg>(1);
-    let (rx, mut write) = ws.split(tokio::io::split);
+    let (rx, write) = ws.split(tokio::io::split);
     // IMPORTANT: the reader is NOT CANCEL SAFE in v0.8!
     let mut read = FragmentCollectorRead::new(rx);
 
     let (tx_connection_closed, mut rx_connection_closed) = watch::channel(false);
     let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
     let writer_connection_closed = tx_connection_closed.clone();
-    let handle_write = task::spawn(async move {
-        let outcome = loop {
-            let req = match rx_write.recv_async().await {
-                Ok(req) => req,
-                Err(_) => break Ok(()),
-            };
-            match req {
-                WsWriteMsg::Payload(bytes) => {
-                    if let Err(err) = write_raft_response_frame(&mut write, bytes).await {
-                        error!("Error during WebSocket write: {}", err);
-                        break Err(err.to_string());
-                    }
-                }
-                WsWriteMsg::Break => {
-                    debug!("handle_socket -> server stream break message");
-                    break Ok(());
-                }
-            }
-        };
-
-        debug!("handle_socket -> Raft server WebSocket writer exiting");
-        let _ =
-            write_close_frame_flushed(&mut write, Frame::close(1000, b"go away")).await;
-        writer_connection_closed.send_replace(true);
-        let _ = tx_writer_finished.send(outcome);
-    });
+    let handle_write = task::spawn(raft_response_writer(
+        write,
+        rx_write,
+        writer_connection_closed,
+        tx_writer_finished,
+    ));
 
     let (tx_read, rx_read) = flume::bounded(1);
     let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
@@ -329,12 +308,10 @@ async fn handle_socket(
             }
         };
 
-        let response = WsWriteMsg::Payload(serialize_network(
-                &RaftStreamResponse {
-                    request_id,
-                    payload,
-                },
-            ));
+        let response = WsWriteMsg::Payload(serialize_network(&RaftStreamResponse {
+            request_id,
+            payload,
+        }));
         tokio::select! {
             biased;
             writer = &mut rx_writer_finished => {
@@ -391,6 +368,39 @@ where
     S: tokio::io::AsyncWrite + Unpin,
 {
     write_frame_flushed(write, Frame::binary(Payload::Owned(bytes))).await
+}
+
+async fn raft_response_writer<S>(
+    mut write: fastwebsockets::WebSocketWrite<S>,
+    rx_write: flume::Receiver<WsWriteMsg>,
+    connection_closed: watch::Sender<bool>,
+    finished: oneshot::Sender<Result<(), String>>,
+) where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    let outcome = loop {
+        let req = match rx_write.recv_async().await {
+            Ok(req) => req,
+            Err(_) => break Ok(()),
+        };
+        match req {
+            WsWriteMsg::Payload(bytes) => {
+                if let Err(err) = write_raft_response_frame(&mut write, bytes).await {
+                    error!("Error during WebSocket write: {}", err);
+                    break Err(err.to_string());
+                }
+            }
+            WsWriteMsg::Break => {
+                debug!("handle_socket -> server stream break message");
+                break Ok(());
+            }
+        }
+    };
+
+    debug!("handle_socket -> Raft server WebSocket writer exiting");
+    let _ = write_close_frame_flushed(&mut write, Frame::close(1000, b"go away")).await;
+    connection_closed.send_replace(true);
+    let _ = finished.send(outcome);
 }
 
 async fn execute_raft_request(
@@ -509,5 +519,27 @@ mod tests {
             |mut write, bytes| async move { write_raft_response_frame(&mut write, bytes).await },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn production_raft_response_writer_reports_flush_failure_and_closes() {
+        let write = crate::network::frame_io::tests::split_writer(
+            crate::network::frame_io::tests::TestIo::failing_flush(),
+        );
+        let (tx, rx) = flume::bounded(1);
+        let (closed, closed_rx) = watch::channel(false);
+        let (finished, outcome) = oneshot::channel();
+        tx.send_async(WsWriteMsg::Payload(b"Raft response".to_vec()))
+            .await
+            .expect("queue Raft response");
+
+        raft_response_writer(write, rx, closed, finished).await;
+
+        assert!(*closed_rx.borrow());
+        let error = outcome
+            .await
+            .expect("writer terminal outcome")
+            .expect_err("flush failure must terminate the writer");
+        assert!(error.contains("injected flush failure"));
     }
 }
