@@ -1027,6 +1027,86 @@ jobs:
       contents: read
       packages: write
 
+  # A merged main commit is already qualified by its pull request, but the
+  # post-merge run still has to prove the merge tree before changing the fleet
+  # image alias. Build on one X64 runner because every deployed voter is X64;
+  # versioned release tags keep their separate multi-architecture publisher.
+  publish_main:
+    name: publish merged image (Forgejo registry)
+    needs:
+      - scope
+      - mobile_version
+      - preflight
+      - check
+      - cluster_store
+      - cluster_topology
+      - cluster_wal
+      - cluster_daemon
+      - web_layout
+      - vod_web
+      - android_jvm
+      - apple
+      - android_device
+      - package_smoke
+    if: >-
+      always() && github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 90
+    concurrency:
+      group: publish-main-image
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Require the post-merge validation fan-out
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}
+          CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}
+          CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}
+          CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}
+          WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
+          VOD_WEB_RESULT: ${{ needs.vod_web.result }}
+          ANDROID_JVM_RESULT: ${{ needs.android_jvm.result }}
+          APPLE_RESULT: ${{ needs.apple.result }}
+          ANDROID_DEVICE_RESULT: ${{ needs.android_device.result }}
+          PACKAGE_SMOKE_RESULT: ${{ needs.package_smoke.result }}
+        run: |
+          for result in \
+            "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
+            "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
+            "$CLUSTER_STORE_RESULT" "$CLUSTER_TOPOLOGY_RESULT" \
+            "$CLUSTER_WAL_RESULT" "$CLUSTER_DAEMON_RESULT" \
+            "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
+            "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
+            "$PACKAGE_SMOKE_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "A post-merge validation job ended with: $result"; exit 1 ;;
+            esac
+          done
+      - uses: https://data.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: https://github.com/docker/setup-buildx-action@v3
+        with:
+          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+      - uses: https://github.com/docker/login-action@v3
+        with:
+          registry: 192.168.4.7:3000
+          username: fleet
+          password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
+      - name: Build once and publish the verified fleet image
+        env:
+          PLURX_BUILD_REF: ${{ github.sha }}
+          PLURX_BUILD_SHA: ${{ github.sha }}
+        run: scripts/registry-push
+
   # Configure this as the single required check for main-bound pull requests
   # when repository protections become available. Until then it is the
   # documented "pretty please" promotion verdict.
