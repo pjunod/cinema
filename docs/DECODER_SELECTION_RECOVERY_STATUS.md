@@ -18,7 +18,7 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft; remote state being reconciled |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Fast lane passes for the code committed at `4ec13f3b`; exact media verification passes on `nynuc` |
+| Focused validation | Fast lane passes at `4ec13f3b`; review repair tests and exact media verification pass at `a16db3da` |
 | Full PR validation | Pending final adversarial approval, then unit and one full suite |
 | Blocker | None |
 
@@ -26,7 +26,7 @@ An unchecked item is not implied by a nearby passing check.
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Final adversarial review | [PR #915](https://github.com/pjunod/plurx/pull/915); exact media verifier passes at `4ec13f3b` |
+| M0 · baseline and diagnostic qualification | Final adversarial review | [PR #915](https://github.com/pjunod/plurx/pull/915); exact media verifier passes at `a16db3da` |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -262,8 +262,9 @@ Their initial verdict was request changes; those repairs were committed before
 both agents performed a second pass. Both second passes also requested changes;
 their repairs were committed at `f9d68467`. Both third passes requested the
 additional repairs committed at `195b7574`; both fourth passes approved
-`6009367b` with no actionable findings. The reproducibility repairs at
-`4ec13f3b` are now undergoing the final fifth pass.
+`6009367b` with no actionable findings. The fifth pass found missing direct
+probe-normalization test coverage. That repair is committed at `a16db3da` and
+is undergoing final re-review.
 GitHub had deleted the temporary effort base and closed #914; the same effort
 and task refs were restored, and #915 is the active review record.
 
@@ -298,6 +299,10 @@ and task refs were restored, and #915 is the active review record.
 | `dv_disk` subprocess inventory was incomplete and ambiguous | Capability, bound probe, unbound conversion, and Unix bound conversion have distinct rows; all 67 anchors must occur exactly once |
 | Media evidence was not rerunnable from the ledger | The exact `nynuc` verifier rejected three nondeterminism defects; after repair, two fresh generations matched byte-for-byte and the exact verifier returned `"verified": true` |
 | Image IDs and hardware acceleration lacked exact per-node capture | Exact prefixed image IDs and per-node `-hwaccels` output/hash evidence are retained for all four nodes |
+
+| Fifth-pass finding | Resolution on working tree |
+|---|---|
+| Probe normalization had no direct unit coverage and the ledger overstated the suite | A pure helper now has single, duplicate-identical, empty, and conflicting-row tests; the ledger separates those tests from the remote generation evidence |
 
 ## Decisions and deviations
 
@@ -354,7 +359,9 @@ lane and focused tests provide earlier feedback.
 | `195b7574` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
 | `195b7574` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
 | `195b7574` | `git diff --check` | Pass |
-| `4ec13f3b` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 22 tests, including deterministic media verification and conflicting-probe rejection |
+| `a16db3da` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 23 tests, including direct single/duplicate/empty/conflicting probe-row coverage |
+| `a16db3da` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
+| `a16db3da` | `/tmp/codex-decoder-m0-review5/decoder-media-baseline --verify /tmp/codex-decoder-m0-review5/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review8` on `nynuc` | Pass · `"verified": true` |
 | `4ec13f3b` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
 | `4ec13f3b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
 | `4ec13f3b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
