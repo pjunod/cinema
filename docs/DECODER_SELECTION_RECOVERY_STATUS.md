@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 fourth adversarial review pending · **Updated:** 2026-09-05 ·
+**Status:** M0 locally approved; external transfer approval required · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -15,18 +15,18 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M0 — capture baseline and freeze diagnostic qualification |
 | Task branch | `codex/decoder-selection-m0` |
-| Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft |
+| Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft; remote head awaits approved push |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Fast lane passes at `195b7574`; details in the validation ledger |
-| Full PR validation | Pending adversarial review and fixes |
-| Blocker | None; physical Apple/Android client and original-media runs remain later milestone evidence |
+| Focused validation | Fast lane passes at `195b7574`; both fourth adversarial reviews approve `6009367b` |
+| Full PR validation | Pending exact media-verifier run, then unit and one full suite |
+| Blocker | Environment requires explicit approval to copy the verifier/evidence payload to `nynuc` and push committed source to GitHub |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Fourth review pending | [PR #915](https://github.com/pjunod/plurx/pull/915); third-round findings fixed at `195b7574` |
+| M0 · baseline and diagnostic qualification | Locally approved; external evidence/push pending | [PR #915](https://github.com/pjunod/plurx/pull/915); both fourth reviews approve `6009367b` |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -251,7 +251,8 @@ Two independent agents reviewed the first M0 PR head before the full suite.
 Their initial verdict was request changes; those repairs were committed before
 both agents performed a second pass. Both second passes also requested changes;
 their repairs were committed at `f9d68467`. Both third passes requested the
-additional repairs now committed at `195b7574`; a fourth pass is pending.
+additional repairs committed at `195b7574`; both fourth passes approved
+`6009367b` with no actionable findings.
 GitHub had deleted the temporary effort base and closed #914; the same effort
 and task refs were restored, and #915 is the active review record.
 
