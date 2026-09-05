@@ -5,7 +5,10 @@ import android.os.SystemClock
 import android.util.AtomicFile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -99,6 +102,7 @@ internal class LiveTvLease(
 ) {
     private val mutex = Mutex()
     private var generation = 0L
+    private var recovery: Job? = null
     var current: LiveTvStarted? = null
         private set
 
@@ -135,9 +139,44 @@ internal class LiveTvLease(
     private suspend fun releaseCurrent() {
         val previous = current ?: return
         runCatching { barrier.arm() } // Storage failure must not prevent DELETE.
-        requests.release(previous.session_id)
+        try {
+            requests.release(previous.session_id)
+        } catch (error: Exception) {
+            // Retaining the capability is right, but nothing else will come
+            // back for it: the heartbeat is already cancelled, and on sign-out
+            // the screen that offers "Stop / retry cleanup" is gone. Without
+            // this the tuner is held until the server's idle timeout.
+            scheduleRecovery(previous)
+            throw error
+        }
         current = null
         barrier.confirm()
+    }
+
+    /**
+     * Bounded, self-cancelling cleanup for a capability whose DELETE failed.
+     * It is bound to [target] by identity: a newer capability is never the one
+     * this recovery was scheduled for, so it can only ever release its own.
+     */
+    private fun scheduleRecovery(target: LiveTvStarted) {
+        if (recovery?.isActive == true) return
+        recovery = scope.launch {
+            for (backoff in longArrayOf(2_000L, 8_000L, 30_000L)) {
+                delay(backoff)
+                val settled = mutex.withLock {
+                    if (current !== target) return@withLock true
+                    try {
+                        requests.release(target.session_id)
+                        current = null
+                        barrier.confirm()
+                        true
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                if (settled) return@launch
+            }
+        }
     }
 }
 

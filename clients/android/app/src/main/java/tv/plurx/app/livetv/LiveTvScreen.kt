@@ -52,7 +52,12 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     var fullscreen by remember { mutableStateOf(false) }
     val backFocus = remember { FocusRequester() }
     RequestInitialFocus(backFocus)
-    LaunchedEffect(origin) { controller.load(origin, Session.token.orEmpty()) }
+    // Key on the token as well: `Session.token` is a plain global, not Compose
+    // state, so a profile switch that keeps this screen composed would leave
+    // the application-scoped controller heartbeating the previous profile's
+    // capability under the new profile's session.
+    val token = Session.token.orEmpty()
+    LaunchedEffect(origin, token) { controller.load(origin, token) }
     LaunchedEffect(state.playing) { if (!state.playing) fullscreen = false }
     DisposableEffect(controller) { onDispose { controller.stop() } }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { controller.stop() }
@@ -85,7 +90,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
         } else TextButton(onClick = { controller.stop() }) { Text("Stop / retry cleanup") }
         if (!fullscreen) {
             FlowRow {
-                TextButton(enabled = !state.busy, onClick = { controller.load(origin, Session.token.orEmpty()) }) { Text("Reload channels") }
+                TextButton(enabled = !state.busy, onClick = { controller.load(origin, token) }) { Text("Reload channels") }
             }
             OutlinedTextField(search, onValueChange = { search = it }, label = { Text("Find a channel") }, modifier = Modifier.fillMaxWidth().tvFocusRing(), singleLine = true)
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.weight(1f)) {
