@@ -143,6 +143,23 @@ class DecoderDiagnosticQualificationTests(unittest.TestCase):
         self.assertEqual(result.primary_video_error_records, 0)
         self.assertTrue(result.observation_complete)
 
+    def test_exact_line_limit_is_accepted_and_repeat_count_is_bounded(self) -> None:
+        prefix = b"0\t"
+        exact = prefix + b"x" * CHECKER["MAX_DIAGNOSTIC_LINE_BYTES"] + b"\n"
+        huge_repeat = (
+            b"1\tLast message repeated "
+            + b"9" * 21
+            + b" times\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "bounds.stderr"
+            fixture.write_bytes(exact + huge_repeat)
+            result = CHECKER["qualify"](fixture)
+
+        self.assertEqual(result.oversized_lines, 0)
+        self.assertEqual(result.malformed_lines, 1)
+        self.assertFalse(result.observation_complete)
+
     def test_retained_fixtures_contain_no_incident_identity(self) -> None:
         for fixture in FIXTURES.glob("*.stderr"):
             text = fixture.read_text(encoding="utf-8")
