@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 second-review findings being resolved · **Updated:** 2026-09-05 ·
+**Status:** M0 third adversarial review pending · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -18,7 +18,7 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | 21 diagnostic/inventory checks and the expanded hermetic argument baseline pass on the working tree |
+| Focused validation | Fast lane passes at `f9d68467`; details in the validation ledger |
 | Full PR validation | Pending adversarial review and fixes |
 | Blocker | None; physical Apple/Android client and original-media runs remain later milestone evidence |
 
@@ -26,7 +26,7 @@ An unchecked item is not implied by a nearby passing check.
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Second findings in repair | [PR #915](https://github.com/pjunod/plurx/pull/915) |
+| M0 · baseline and diagnostic qualification | Third review pending | [PR #915](https://github.com/pjunod/plurx/pull/915); second-round findings fixed at `f9d68467` |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -241,8 +241,9 @@ explicitly; they do not silently run an unqualified automatic replacement.
 
 Two independent agents reviewed the first M0 PR head before the full suite.
 Their initial verdict was request changes; those repairs were committed before
-both agents performed a second pass. Both second passes also requested changes,
-which are being repaired now. GitHub had deleted the temporary effort base and
+both agents performed a second pass. Both second passes also requested changes;
+their repairs are committed at `f9d68467` and await a third pass. GitHub had
+deleted the temporary effort base and
 closed #914; the same effort and task refs were restored, and #915 is the
 active review record.
 
@@ -304,6 +305,14 @@ lane and focused tests provide earlier feedback.
 | `2d4900e1` | `git diff --check` | Pass |
 | `6c23d17a` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 15 tests, including exact 16 KiB and bounded repeat-count edges |
 | `6c23d17a` | `git diff --check` | Pass |
+| `f9d68467` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 21 tests |
+| `f9d68467` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
+| `f9d68467` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test; hostile environment cannot alter fixture output |
+| `f9d68467` | `make operations-check` | Pass · 207 tests; run outside restricted socket sandbox |
+| `f9d68467` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files after mapping the media baseline |
+| `f9d68467` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `f9d68467` | `sh -n scripts/decoder-media-baseline` | Pass |
+| `f9d68467` | `git diff --check` | Pass |
 | Pending | Full PR suite after review fixes | Not run |
 
 ## Remaining evidence before release
