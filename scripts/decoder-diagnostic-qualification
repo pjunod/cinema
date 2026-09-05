@@ -15,20 +15,23 @@ VIDEO_DECODE_ERROR_WINDOW_MS = 2_000
 VIDEO_DECODE_ERROR_LIMIT = 5
 DIAGNOSTIC_DRAIN_BUDGET_MS = 2_000
 MAX_DIAGNOSTIC_LINE_BYTES = 16 * 1024
+MAX_FIXTURE_PREFIX_BYTES = 32
+MAX_FIXTURE_RECORD_BYTES = MAX_FIXTURE_PREFIX_BYTES + MAX_DIAGNOSTIC_LINE_BYTES + 1
 
+CONTEXT = r"(?: @ (?:0x[0-9a-fA-F]+|<address>))?"
 PRIMARY_VIDEO_ERROR = re.compile(
-    r"^(?:\[error\]\s+)?"
-    r"\[vist#(?P<input>\d+):(?P<stream>\d+)/[^\]]+\]\s+"
-    r"\[dec:[^\]]+\]\s+Error submitting packet to decoder:"
+    rf"^\[vist#(?P<input>\d+):(?P<stream>\d+)/[^\]@]+{CONTEXT}\]\s+"
+    rf"\[dec:[^\]@]+{CONTEXT}\]\s+"
+    r"(?P<severity>\[error\]\s+)?Error submitting packet to decoder:"
 )
 SUBORDINATE_NO_FRAME = re.compile(
-    r"^(?:\[error\]\s+)?\[[^\]]+\]\s+No frame decoded\?"
+    rf"^\[[^\]@]+{CONTEXT}\]\s+(?:\[error\]\s+)?No frame decoded\?"
 )
 LEGACY_REPEAT = re.compile(r"^\s*Last message repeated (?P<count>\d+) times$")
 
 
 class QualificationError(ValueError):
-    """A fixture cannot be interpreted without inventing evidence."""
+    """A CLI input cannot be interpreted without inventing evidence."""
 
 
 @dataclass(frozen=True)
@@ -37,10 +40,18 @@ class Qualification:
     selected_input: int
     selected_stream: int
     primary_video_error_records: int
+    severity_qualified_primary_records: int
     subordinate_records: int
-    legacy_repeat_summaries: int
-    legacy_repeated_messages: int
+    selected_primary_repeat_summaries: int
+    selected_primary_repeated_messages: int
+    unrelated_repeat_summaries: int
+    ambiguous_repeat_summaries: int
+    observation_complete: bool
+    oversized_lines: int
+    invalid_utf8_lines: int
+    malformed_lines: int
     first_primary_at_ms: int | None
+    triggering_window_started_at_ms: int | None
     fault_at_ms: int | None
     detection_latency_ms: int | None
     automatic_action_qualified: bool
@@ -53,27 +64,22 @@ def parse_selected_stream(value: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
-def fixture_records(path: Path) -> list[tuple[int, str]]:
-    records: list[tuple[int, str]] = []
-    prior_ms = -1
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not raw or raw.startswith("#"):
-            continue
-        observed, separator, message = raw.partition("\t")
-        if not separator or not observed.isascii() or not observed.isdecimal():
-            raise QualificationError(
-                f"{path}:{number}: expected OBSERVATION_MS<TAB>FFMPEG_LINE"
-            )
-        observed_ms = int(observed)
-        if observed_ms < prior_ms:
-            raise QualificationError(f"{path}:{number}: observations moved backward")
-        if len(message.encode("utf-8")) > MAX_DIAGNOSTIC_LINE_BYTES:
-            raise QualificationError(f"{path}:{number}: diagnostic line exceeds 16 KiB")
-        records.append((observed_ms, message))
-        prior_ms = observed_ms
-    if not records:
-        raise QualificationError(f"{path}: fixture has no records")
-    return records
+def bounded_fixture_lines(path: Path):
+    """Yield bounded lines, draining each oversized tail before continuing."""
+
+    with path.open("rb") as fixture:
+        number = 0
+        while True:
+            raw = fixture.readline(MAX_FIXTURE_RECORD_BYTES + 1)
+            if not raw:
+                break
+            number += 1
+            oversized = len(raw) > MAX_FIXTURE_RECORD_BYTES
+            if not raw.endswith(b"\n") and len(raw) == MAX_FIXTURE_RECORD_BYTES + 1:
+                oversized = True
+                while raw and not raw.endswith(b"\n"):
+                    raw = fixture.readline(MAX_FIXTURE_RECORD_BYTES + 1)
+            yield number, raw[:MAX_FIXTURE_RECORD_BYTES], oversized
 
 
 def qualify(
@@ -82,29 +88,87 @@ def qualify(
 ) -> Qualification:
     window: deque[int] = deque(maxlen=VIDEO_DECODE_ERROR_LIMIT)
     primary = 0
+    severity_qualified = 0
     subordinate = 0
-    repeat_summaries = 0
-    repeated_messages = 0
+    selected_repeat_summaries = 0
+    selected_repeated_messages = 0
+    unrelated_repeat_summaries = 0
+    ambiguous_repeat_summaries = 0
+    oversized_lines = 0
+    invalid_utf8_lines = 0
+    malformed_lines = 0
+    valid_records = 0
+    prior_ms = -1
+    prior_class: str | None = None
     first_primary: int | None = None
+    triggering_window_start: int | None = None
     fault_at: int | None = None
 
-    for observed_ms, message in fixture_records(path):
+    for _, raw, oversized in bounded_fixture_lines(path):
+        if oversized:
+            oversized_lines += 1
+            prior_class = None
+            continue
+        raw = raw.rstrip(b"\r\n")
+        if not raw or raw.startswith(b"#"):
+            continue
+        observed, separator, message_bytes = raw.partition(b"\t")
+        if (
+            not separator
+            or len(observed) > MAX_FIXTURE_PREFIX_BYTES
+            or not observed.isascii()
+            or not observed.isdigit()
+        ):
+            malformed_lines += 1
+            prior_class = None
+            continue
+        if len(message_bytes) > MAX_DIAGNOSTIC_LINE_BYTES:
+            oversized_lines += 1
+            prior_class = None
+            continue
+        try:
+            message = message_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            invalid_utf8_lines += 1
+            prior_class = None
+            continue
+        observed_ms = int(observed)
+        if observed_ms < prior_ms:
+            malformed_lines += 1
+            prior_class = None
+            continue
+        prior_ms = observed_ms
+        valid_records += 1
+
         repeat = LEGACY_REPEAT.fullmatch(message)
         if repeat is not None:
-            repeat_summaries += 1
-            repeated_messages += int(repeat.group("count"))
+            repeated = int(repeat.group("count"))
+            if prior_class == "selected_primary":
+                selected_repeat_summaries += 1
+                selected_repeated_messages += repeated
+            elif prior_class in (None, "repeat_summary"):
+                ambiguous_repeat_summaries += 1
+            else:
+                unrelated_repeat_summaries += 1
+            prior_class = "repeat_summary"
             continue
         if SUBORDINATE_NO_FRAME.match(message):
             subordinate += 1
+            prior_class = "subordinate"
             continue
         match = PRIMARY_VIDEO_ERROR.match(message)
         if match is None:
+            prior_class = "other"
             continue
         stream = (int(match.group("input")), int(match.group("stream")))
         if stream != selected:
+            prior_class = "other_stream_primary"
             continue
 
         primary += 1
+        prior_class = "selected_primary"
+        if match.group("severity") is not None:
+            severity_qualified += 1
         if first_primary is None:
             first_primary = observed_ms
         lower_bound = observed_ms - VIDEO_DECODE_ERROR_WINDOW_MS
@@ -112,23 +176,44 @@ def qualify(
             window.popleft()
         window.append(observed_ms)
         if fault_at is None and len(window) >= VIDEO_DECODE_ERROR_LIMIT:
+            triggering_window_start = window[0]
             fault_at = observed_ms
 
     latency = None
-    if fault_at is not None and first_primary is not None:
-        latency = fault_at - first_primary
+    if fault_at is not None and triggering_window_start is not None:
+        latency = fault_at - triggering_window_start
+    observation_complete = (
+        valid_records > 0
+        and oversized_lines == 0
+        and invalid_utf8_lines == 0
+        and malformed_lines == 0
+    )
     return Qualification(
         fixture=path.name,
         selected_input=selected[0],
         selected_stream=selected[1],
         primary_video_error_records=primary,
+        severity_qualified_primary_records=severity_qualified,
         subordinate_records=subordinate,
-        legacy_repeat_summaries=repeat_summaries,
-        legacy_repeated_messages=repeated_messages,
+        selected_primary_repeat_summaries=selected_repeat_summaries,
+        selected_primary_repeated_messages=selected_repeated_messages,
+        unrelated_repeat_summaries=unrelated_repeat_summaries,
+        ambiguous_repeat_summaries=ambiguous_repeat_summaries,
+        observation_complete=observation_complete,
+        oversized_lines=oversized_lines,
+        invalid_utf8_lines=invalid_utf8_lines,
+        malformed_lines=malformed_lines,
         first_primary_at_ms=first_primary,
+        triggering_window_started_at_ms=triggering_window_start,
         fault_at_ms=fault_at,
         detection_latency_ms=latency,
-        automatic_action_qualified=fault_at is not None and repeat_summaries == 0,
+        automatic_action_qualified=(
+            fault_at is not None
+            and selected_repeat_summaries == 0
+            and ambiguous_repeat_summaries == 0
+            and severity_qualified == primary
+            and observation_complete
+        ),
     )
 
 
@@ -142,7 +227,7 @@ def main() -> int:
             arguments.fixture,
             parse_selected_stream(arguments.selected_stream),
         )
-    except (OSError, UnicodeError, QualificationError) as error:
+    except (OSError, QualificationError) as error:
         parser.error(str(error))
     print(json.dumps(asdict(result), indent=2, sort_keys=True))
     return 0

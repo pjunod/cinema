@@ -1,12 +1,12 @@
 # The selected stream has five total primary records, but the record at exactly
 # the lower boundary expires the first. Other stages and streams never count.
-0	[error] [vist#0:0/h264] [dec:h264] Error submitting packet to decoder: corrupt input packet
-200	[error] [aist#0:1/aac] [dec:aac] Error submitting packet to decoder: invalid data
-300	[error] [vist#0:0/h264] [dec:h264] Error submitting packet to decoder: corrupt input packet
-350	[error] [vist#0:2/h264] [dec:h264] Error submitting packet to decoder: corrupt input packet
-400	[error] [vost#0:0/h264] [enc:h264_videotoolbox] Error submitting frame to encoder
-600	[error] [vist#0:0/h264] [dec:h264] Error submitting packet to decoder: corrupt input packet
+0	[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] Error submitting packet to decoder: corrupt input packet
+200	[aist#0:1/aac @ <address>] [dec:aac @ <address>] [error] Error submitting packet to decoder: invalid data
+300	[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] Error submitting packet to decoder: corrupt input packet
+350	[vist#0:2/h264 @ <address>] [dec:h264 @ <address>] [error] Error submitting packet to decoder: corrupt input packet
+400	[vost#0:0/h264 @ <address>] [enc:h264_videotoolbox @ <address>] [error] Error submitting frame to encoder
+600	[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] Error submitting packet to decoder: corrupt input packet
 700	[error] opening <redacted>/green-error-name.mkv: I/O error
-800	[error] [h264] No frame decoded?
-900	[error] [vist#0:0/h264] [dec:h264] Error submitting packet to decoder: corrupt input packet
-2000	[error] [vist#0:0/h264] [dec:h264] Error submitting packet to decoder: corrupt input packet
+800	[h264 @ <address>] [error] No frame decoded?
+900	[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] Error submitting packet to decoder: corrupt input packet
+2000	[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] Error submitting packet to decoder: corrupt input packet

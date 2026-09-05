@@ -1,0 +1,33 @@
+captured_at = "2026-09-05"
+scope = "read-only running-container and host inventory"
+container_binary = "/usr/bin/ffmpeg"
+container_version = "5.1.9-0+deb12u1"
+container_binary_sha256 = "0dafc1360bb07743f76abeb1e4ae16b0aaa1331e9041a0e8d6a8524111dc0cbb"
+container_buildconf_sha256 = "e31fc17f9d365c20f4db873abe6e9ea05ffb394ad8d8c4d7510c274e1461b547"
+relevant_decoder_inventory_sha256 = "4e669d89abc05aa76cc1a4b8ce221bff668ae9b957ffc4bbb8112c59892f8698"
+advertised_hwaccels = ["vdpau", "cuda", "vaapi", "qsv", "drm", "opencl", "vulkan"]
+qualification = "advertised-only"
+
+[[nodes]]
+name = "nynuc"
+host_ffmpeg = "8.0.1 Ubuntu"
+container_image = "plurx/plurxd:latest"
+container_image_id = "sha256:69c15812b493ba918ec9a2bcd29cbbd650746db52f8f47088eb99909c9c5c1e1"
+
+[[nodes]]
+name = "m6"
+host_ffmpeg = "not-on-PATH"
+container_image = "plurx/plurxd:latest"
+container_image_id = "sha256:939f7d0b900e40f3f0f96902ed83a6dbc82feb9e7d576ac040c88106bfb4f174"
+
+[[nodes]]
+name = "nuc4"
+host_ffmpeg = "8.0.1 Ubuntu"
+container_image = "plurx/plurxd:latest"
+container_image_id = "sha256:98b40e77b96db44adb3d7b10b1a801726f739918f0c397f1c12640a4509abfbf"
+
+[[nodes]]
+name = "nuc3"
+host_ffmpeg = "8.0.1 Ubuntu"
+container_image = "plurx/plurxd:latest"
+container_image_id = "sha256:53cb1636fc9d79e9bbf1529345b0959bb3875bd74d35028511381c5fbefdd3f2"

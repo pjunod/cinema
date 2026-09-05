@@ -1,8 +1,0 @@
-# Expected output shape after -loglevel repeat+level+error. Every primary record
-# is explicit, so observation time can qualify the rolling window.
-0	[error] [vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
-1	[error] [vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
-294	[error] [vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
-299	[error] [vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
-361	[error] [vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
-362	[error] [mpeg4] No frame decoded?

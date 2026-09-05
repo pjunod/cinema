@@ -498,9 +498,12 @@ codec name in a pathname.
 | Unattributed or unknown diagnostic | Log as unclassified; preserve existing process/progress failure detection |
 | Truncated, unreadable, or unsupported diagnostic stream | Mark observation incomplete; disallow a qualified cache receipt |
 
-The retained #913 top-level `[vist#…] [dec:mpeg4…] Error submitting packet to
-decoder` records are the initial counted family. Add other families only
-with fixtures demonstrating attribution. A bare `No frame decoded?` without
+The initial automatic-action family is the qualified FFmpeg 8 shape
+`[vist#… @ ADDRESS] [dec:mpeg4… @ ADDRESS] [error] Error submitting packet
+to decoder`. The retained #913 records omit severity and remain useful for
+observation only. The deployed FFmpeg 5.1 top-level stream error does not name
+the selected stream and is likewise unqualified. Add other families only with
+fixtures demonstrating attribution. A bare `No frame decoded?` without
 reliable context is supporting evidence, not an independent auto-retry trigger.
 
 For legacy captures containing `Last message repeated N times`, attach the
@@ -881,9 +884,11 @@ Put decoder controls in **Settings → Developer → Decoder selection and
 recovery**. They are persisted settings, apply to newly prepared work without
 a binary rebuild or daemon restart, and are never compile features or hidden
 environment gates. The card shows current qualification, missing prerequisites,
-the effect of each mode, and the last refusal. An unsafe transition is rejected
-with those same bounded reasons instead of displaying an enabled control that
-the server silently ignores.
+the effect of each mode, and the last refusal. A saved value is the operator's
+fleet-wide upper bound, not a claim that every node and client currently
+qualify. The server computes a visible effective value for each node and
+playback, and refuses unsupported work explicitly instead of silently
+pretending the requested mode ran.
 
 Introduce the following settings through the existing common settings/store
 contracts. Names are new contracts to add, not existing configuration options:
@@ -894,15 +899,25 @@ contracts. Names are new contracts to add, not existing configuration options:
 | `decoder.recovery` | `observe` (initial), `prepublication`, `full` | Controls automatic action on new decoder-health faults; existing non-decoder failure handling remains |
 | Existing `PLURX_HWDECODE` compatibility input | Existing values | Snapshot as an operator software requirement while migrating; it cannot enable this work or bypass the visible Developer controls |
 
-The Developer card may select `enforce` only when the node has a current
-FFmpeg/build capability receipt for every hardware class it will select and a
-qualified diagnostic grammar. It may select `prepublication` only when owned
+The store accepts a syntactically valid requested value without using the node
+that happened to receive the settings request as fleet authority. For newly
+prepared work, each node derives its effective plan policy by intersecting the
+requested upper bound with its current FFmpeg/build capability and diagnostic
+grammar receipts. It derives `prepublication` recovery only when owned
 observation, health receipts, mixed-resource admission, and the durable
-one-shot reservation pass. It may select `full` only when those checks plus the
-current client's prepare/readiness/commit/retirement qualification pass. The
-card names each unmet condition. This is runtime safety validation of a
-requested mode, not feature gating: one shipping binary contains the behavior,
-and an operator enables qualified combinations from the UI.
+one-shot reservation pass locally. Each playback derives `full` only when
+those server checks and the actual client's advertised, implemented, and
+qualified prepare/readiness/commit/retirement behavior pass. The Developer
+card shows the requested value, every node's current effective value and
+bounded prerequisite gaps, and the effective value for active sessions.
+
+An unqualified node or client does not make the persisted operator request
+invalid for qualified peers. It receives a typed refusal or terminal action at
+the unsafe boundary, never silent downgrade after claiming automatic recovery.
+This is runtime capability intersection, not feature gating: one shipping
+binary contains the behavior, and the visible Developer controls set its upper
+bound. Qualification receipts are first-class runtime status, not hidden
+environment switches.
 
 Recovery mode does not disable diagnostic collection or requalify a failed
 artifact. The new qualified-cache namespace always enforces its receipt
@@ -910,8 +925,10 @@ contract. Observation-only rollout uses explicit unqualified/legacy output
 identity until qualification is enabled; there is no shadow mode that writes
 old-quality artifacts under new-qualified keys.
 
-Gate postpublication recovery by both `full` mode and client capability plus
-qualified end-to-end behavior. Apply equivalent gates to offline job recovery.
+Authorize postpublication recovery only when the requested upper bound is
+`full` and the session-effective capability intersection includes qualified
+end-to-end client behavior. Apply the equivalent node-effective check to
+offline job recovery.
 Keep backend diagnostic grammar qualification separate from selection
 qualification: a backend can decode a fixture correctly while its log format
 is not yet suitable for automatic fault classification.
