@@ -6014,7 +6014,11 @@ async fn control_local_with_settlement_capacity(
             ),
         );
     }
-    if result.selection.changed {
+    // Not `selection.changed`: an ask that arrived while the preparation slot
+    // was busy is "changed" for exactly one exchange and then never again, so
+    // the successor the viewer actually asked for was built once, refused, and
+    // forgotten. This stays true until the ask has been dispatched.
+    if result.selection.dispatch_preparation {
         crate::playback_control::record_preparation_observation(
             crate::playback_control::PreparationSeam::InSession,
         );

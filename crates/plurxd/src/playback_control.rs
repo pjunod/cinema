@@ -3019,6 +3019,16 @@ pub(crate) struct SelectionObservation {
     /// The selection differs from the last accepted one. `false` on a replay
     /// and on the first accepted exchange.
     pub changed: bool,
+    /// A preparation candidate should be evaluated for the current ask.
+    ///
+    /// Not the same question as `changed`, and the difference is the point.
+    /// `changed` asks whether this packet differs from the last one, so an ask
+    /// that arrives while the preparation slot is busy is true exactly once
+    /// and then never again — which is how the successor a viewer actually
+    /// wants gets dropped and never rebuilt. This asks whether the *current*
+    /// ask has been dispatched yet, which stays true across every exchange
+    /// until it has been.
+    pub dispatch_preparation: bool,
     /// The document the **session** is holding, not this exchange's.
     pub capabilities: Option<DynamicCapabilities>,
 }
@@ -3056,6 +3066,15 @@ pub(crate) struct ControlState {
     /// sequence space restarts, and a selection from before the advance is not
     /// something this client has since departed from.
     last_selection: Option<ClientSelection>,
+    /// The ask a preparation candidate was last dispatched for.
+    ///
+    /// Together with `desired_digest` this is the whole of retain-and-coalesce.
+    /// Retention is the two disagreeing: an ask that has not been dispatched
+    /// stays undispatched across exchanges rather than being forgotten after
+    /// the one packet that introduced it. Coalescing is free, because only the
+    /// latest ask is ever in `desired_digest` — three quality changes while the
+    /// slot is busy leave one candidate to build, not three.
+    dispatched_digest: Option<String>,
     /// The ask acceptance has seen, which is not always the ask `observe` has
     /// recorded.
     ///
@@ -3118,6 +3137,7 @@ impl Default for ControlState {
             prepared_action: None,
             last_selection: None,
             desired_digest: None,
+            dispatched_digest: None,
             last_capabilities: None,
             preparation: PreparationSlot::Empty,
         }
@@ -3336,6 +3356,7 @@ impl ControlState {
             // would let the same staged incarnation mint a second action id.
             self.last_selection = None;
             self.desired_digest = None;
+            self.dispatched_digest = None;
             self.last_capabilities = None;
             inherited.map(|staged_incarnation_id| PreparationDirective::Abort {
                 staged_incarnation_id,
@@ -3645,14 +3666,51 @@ impl ControlState {
             .last_selection
             .as_ref()
             .is_some_and(|previous| previous.desired() != desired);
+        let dispatch_preparation = self.take_preparation_dispatch(&desired.digest());
         self.last_selection = Some(selection.clone());
         if let Some(capabilities) = capabilities {
             self.last_capabilities = Some(capabilities.clone());
         }
         SelectionObservation {
             changed,
+            dispatch_preparation,
             capabilities: self.last_capabilities.clone(),
         }
+    }
+
+    /// Whether to build a candidate for this ask now, recording it if so.
+    ///
+    /// Three answers, and the middle one is the fix.
+    ///
+    /// The first accepted exchange dispatches nothing: its ask is what the
+    /// session was created for, so there is no change to prepare for. It is
+    /// recorded as dispatched so the *next* different ask is the first real
+    /// one — which is exactly the first-exchange behaviour the old
+    /// `selection.changed` gate had, kept deliberately.
+    ///
+    /// An ask that has already been dispatched dispatches nothing. Candidates
+    /// cost two store reads and the exchange runs about once a second per
+    /// client, so the steady state has to be silent.
+    ///
+    /// An undispatched ask arriving while the slot is occupied is **left
+    /// undispatched**. That is the whole change. Staging would be refused —
+    /// the slot takes one successor — and under the old gate the ask was
+    /// reported changed exactly once, so the candidate was built, refused, and
+    /// never rebuilt: a viewer who changed quality while a successor was in
+    /// flight simply never got the one they asked for. Leaving it undispatched
+    /// means the first exchange after the slot frees picks it up, without a
+    /// wake-up path, a retained input struct, or a queue that could hold
+    /// something stale — the only ask that survives is the current one.
+    fn take_preparation_dispatch(&mut self, desired_digest: &str) -> bool {
+        let Some(dispatched) = self.dispatched_digest.as_deref() else {
+            self.dispatched_digest = Some(desired_digest.to_owned());
+            return false;
+        };
+        if dispatched == desired_digest || !matches!(self.preparation, PreparationSlot::Empty) {
+            return false;
+        }
+        self.dispatched_digest = Some(desired_digest.to_owned());
+        true
     }
 
     /// Record that a successor has been staged.
@@ -14517,6 +14575,76 @@ mod tests {
             }),
             "a successor built for an ask the viewer has left is not published by their own \
              acknowledgement"
+        );
+    }
+
+    /// An ask that arrives while the slot is busy is not lost.
+    ///
+    /// The old gate asked "did this packet differ from the last one", which is
+    /// true for exactly one exchange. A viewer who changed quality while a
+    /// successor was already in flight therefore had their candidate built,
+    /// refused by the occupied slot, and never rebuilt — they simply never got
+    /// the thing they asked for, and nothing said so.
+    ///
+    /// The gate now asks "has the current ask been dispatched", which stays
+    /// true across exchanges until it has been. Coalescing falls out for free:
+    /// only the latest ask is ever held, so three changes while the slot is
+    /// busy leave one candidate to build rather than three.
+    #[test]
+    fn an_ask_arriving_while_the_slot_is_busy_is_dispatched_once_it_frees() {
+        let mut state = ControlState::default();
+        let first = selection_at(QualitySelection::Auto);
+        let second = selection_at(QualitySelection::Manual { height: 720 });
+        let third = selection_at(QualitySelection::Manual { height: 1080 });
+
+        // The session's own ask dispatches nothing: there is no change to
+        // prepare for, and this is the first-exchange behaviour the old gate
+        // had too.
+        assert!(!state.observe(&first, None).dispatch_preparation);
+        assert!(
+            !state.observe(&first, None).dispatch_preparation,
+            "an unchanged steady state stays silent"
+        );
+
+        // A real change, with the slot free.
+        assert!(state.observe(&second, None).dispatch_preparation);
+        assert!(
+            !state.observe(&second, None).dispatch_preparation,
+            "and is dispatched once, not on every exchange after it"
+        );
+
+        // That candidate takes the slot, and the viewer changes their mind
+        // again — three times, to prove the coalescing.
+        assert!(state.stage_preparation(
+            uuid::Uuid::new_v4().to_string(),
+            "predecessor".to_owned(),
+            i64::MAX,
+            Some(second.desired().digest()),
+        ));
+        for _ in 0..3 {
+            assert!(
+                !state.observe(&third, None).dispatch_preparation,
+                "an occupied slot cannot take a successor, so nothing is dispatched into it"
+            );
+        }
+
+        // The slot frees. The next exchange picks up the ask that has been
+        // waiting — without a wake-up path, and without having queued three
+        // copies of it.
+        let staged = state
+            .preparation
+            .staged_incarnation_id()
+            .expect("the fixture staged one")
+            .to_owned();
+        assert!(state.abort_preparation(&staged));
+        state.preparation = PreparationSlot::Empty;
+        assert!(
+            state.observe(&third, None).dispatch_preparation,
+            "the ask the viewer has been waiting on is built once the slot can take it"
+        );
+        assert!(
+            !state.observe(&third, None).dispatch_preparation,
+            "and only once"
         );
     }
 

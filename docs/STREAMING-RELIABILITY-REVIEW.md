@@ -1149,9 +1149,24 @@ says why: the durable desired-ownership row is read *outside* acceptance, and at
 that point a rejected packet advancing this becomes a rejected packet changing
 what the system believes the viewer wants.
 
-**Still open** in this thread: the successor a changed ask should have staged is
-still dropped when the slot is occupied, so the viewer waits out the aborted
-one's deadline. Retain-and-coalesce is the next lane.
+**Also corrected: an ask arriving while the slot was busy was dropped.** The
+dispatch gate asked whether this packet differed from the last one, which is
+true for exactly one exchange. A viewer who changed quality while a successor
+was already in flight had their candidate built, refused by the occupied slot,
+and never rebuilt — they simply never got the thing they asked for, and nothing
+said so.
+
+The gate now asks whether the *current* ask has been dispatched, which stays
+true across exchanges until it has been. Retention and coalescing both fall out
+of that one change rather than needing machinery: an undispatched ask survives
+because it is still undispatched, and only the latest ask is ever held, so three
+changes while the slot is busy leave one candidate to build rather than three.
+The wake is the next exchange after the slot frees, which is a client heartbeat
+away and only matters to a client that is still sending them.
+
+**Still open** in this thread: the durable half. Desired ownership is not
+persisted, so none of the three admission points can compare it, and nothing
+survives a restart or an owner change.
 
 **Partly corrected: a failed rendition now gives its producer back.** Reading
 the teardown paths rather than the finding turned up one leak that was
