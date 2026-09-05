@@ -620,17 +620,33 @@ of what was found, with this note as the correction.
   *foreground*. So an abandoned request outranked a present viewer's and aimed
   production at media nobody was watching, until its HTTP deadline expired.
   Detach now retires that session's waits, waking them `Gone` — the same answer
-  their own disconnect would have produced.
-- **A window-locked working set lied about why it was stuck.**
-  `Manifest::has_evictable` answered without looking at what reader windows
-  protect, so `decide` returned `MakeRoom`, the sweep skipped every protected
-  index and freed nothing, and the driver terminated the producer as one that
-  had made no progress. The viewer's control plane saw a producer stop and
-  never saw `no_room` — the one fact that explains why nothing is arriving.
-  `has_evictable` now applies the same guard the sweep does, so the decision is
-  `NoRoom` up front. The eviction window's ahead reach also truncated where the
-  production horizon rounds up, leaving the protected range shorter than the
-  range the producer may run into.
+  their own disconnect would have produced. Reattachment removes the reader
+  inline rather than through `detach_reader`, so it retires them too; the
+  adversarial review found that path still live after the first fix.
+- **A window-locked working set asked for a sweep that could not free
+  anything.** `Manifest::has_evictable` answered without looking at what reader
+  windows protect, so `decide` returned `MakeRoom`, the sweep skipped every
+  protected index and freed nothing, and only then did the driver terminate the
+  producer. `has_evictable` now applies the same guard the sweep does, so the
+  decision is the stall up front. On its own this changes no published state —
+  which the adversarial review of this change caught, after the first version
+  of this note claimed it did.
+- **A capacity stall genuinely did not say why, and now does.** A hold with no
+  scheduled end terminates its producer — a stopped one goes on holding
+  everything a running one held — so the belief becomes `Absent` and takes the
+  reason with it. `Producer::Stopped { reason: NoRoom }` is unreachable:
+  `next_step` routes it to `Terminate`, and `after` hard-codes `Ahead` for the
+  only `Stop` that survives. The status therefore read `waiting` with no hold
+  at all, and `DeliveryView::hold_reason` — whose only feed this is — could
+  never carry `no_room`. The rendition now records the hold from each pass's
+  own decision and the status projects it across the terminated producer, so a
+  viewer's control plane can finally distinguish "nothing is arriving because
+  there is no room" from "nothing is arriving". It is cleared by the first pass
+  that decides anything else, so it cannot outlive the condition.
+- **The eviction window's ahead reach truncated** where the production horizon
+  rounds up, leaving the protected range shorter than the range the producer
+  may run into — so a sweep under pressure could evict the segment the
+  ahead-fill was about to write again.
 
 **Still open.** The hard-coded global cap against §2.3's promised setting
 (tracked as P2-10), and fair service at the global limit — no test distributes

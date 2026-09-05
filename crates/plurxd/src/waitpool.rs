@@ -664,6 +664,18 @@ mod tests {
             "a shared index must not take another session's waiter with it"
         );
 
+        // Retirement answers the waiter; it does not hand back the admission
+        // slot. Retention is released by the response dropping its guard, and
+        // an implementation that cleared it here would leak both the
+        // per-session and the global cap for the life of the pool.
+        assert_eq!(pool.len(), 3, "retiring answers waiters, it does not unpin");
+        drop(leaving);
+        assert_eq!(
+            pool.len(),
+            2,
+            "the retired request's slot comes back on drop"
+        );
+
         pool.satisfy("abcd1234", 1);
         assert_eq!(
             same_index.wait(secs(1)).await,
@@ -672,6 +684,12 @@ mod tests {
         );
         pool.satisfy("abcd1234", 2);
         assert_eq!(staying.wait(secs(1)).await, WaitOutcome::Ready);
+        drop(same_index);
+        drop(staying);
+        assert!(
+            pool.is_empty(),
+            "every slot returns once its request is done"
+        );
     }
 
     #[tokio::test]

@@ -520,7 +520,12 @@ struct Reader {
     /// Before control arrives, successful media commits are the fallback.
     frontier: u32,
     control_sequence: Option<u64>,
-    /// The last segment actually served — the eviction window's playhead.
+    /// The last segment actually served. Telemetry only: the observed runway
+    /// the status publishes is measured from here, while both the eviction
+    /// window and the production target are anchored on `frontier`, which
+    /// accepted control owns. Reading this as the playhead would put a
+    /// viewer's protected range back where their bytes came from rather than
+    /// where they are now.
     last_served: Option<u32>,
     /// Per-playback provenance for speculative marker production. This is
     /// deliberately separate from the ordinary reader frontier: moving the
@@ -1222,6 +1227,18 @@ struct Rendition {
     /// guesses toward retry — reopening, getting the same verdict, reopening
     /// again.
     failed: StdMutex<Option<RenditionFailure>>,
+    /// The capacity hold this rendition is under, if any, retained across the
+    /// producer that was terminated for it.
+    ///
+    /// A hold that cannot clear on its own terminates the producer — a stopped
+    /// one goes on holding everything a running one held — which leaves the
+    /// belief `Absent` and takes the reason with it. So the status said
+    /// `waiting` with no hold: the viewer's control plane saw a producer that
+    /// had stopped and never saw *why*, which for a capacity stall is the only
+    /// fact that explains why nothing is arriving. Recorded from each pass's
+    /// own decision and cleared by the first pass that decides anything else,
+    /// so it cannot outlive the condition.
+    capacity_hold: StdMutex<Option<crate::prodsched::Hold>>,
     /// Woken when `init.mp4` lands, for GETs waiting on the identity.
     init_notify: Notify,
     /// The driver's kick: wait registration, segment GETs, attach/detach,
@@ -2066,6 +2083,7 @@ impl VodServe {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -2750,6 +2768,16 @@ impl VodServe {
                 if let Some(previous) = previous_rendition.as_ref() {
                     *previous.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
                 }
+            }
+            // Reattachment removes the reader here rather than through
+            // `detach_reader`, so it needs the same wait retirement: this
+            // viewer has moved to another rendition, and any request still
+            // parked on the one they left has no reader to be ranked against.
+            // `playback_demands` would mark it foreground on exactly that
+            // absence and keep the old rendition producing for somebody who
+            // is no longer watching it.
+            if let Some(previous) = previous_rendition.as_ref() {
+                self.shared.pool.retire_session(&previous.key, &session_id);
             }
         }
         replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
@@ -3563,7 +3591,19 @@ impl VodServe {
                     }),
                     true,
                 ),
-                Producer::Absent { .. } => ("waiting", None, false),
+                // A capacity hold outlives the producer it terminated, so a
+                // rendition that wants to produce and cannot still says why.
+                Producer::Absent { .. } => {
+                    match *rendition.capacity_hold.lock().expect("capacity hold") {
+                        Some(crate::prodsched::Hold::NoRoom { .. }) => {
+                            ("waiting", Some("no_room"), false)
+                        }
+                        Some(crate::prodsched::Hold::WorkingSetFull { .. }) => {
+                            ("waiting", Some("working_set"), false)
+                        }
+                        _ => ("waiting", None, false),
+                    }
+                }
             }
         };
         let fetched_end_ms = last_served
@@ -5237,6 +5277,7 @@ impl Shared {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -5500,6 +5541,18 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     let windows = eviction_windows(shared, rendition).await;
     let decision =
         decide_with_marker_prewarm(&manifest, &demands, position, &windows, &prewarm_ledgers);
+    // Recorded from this pass's own decision, before the step that acts on it.
+    // A hold with no scheduled end terminates its producer, so the belief that
+    // would otherwise carry the reason is gone by the time anyone reads the
+    // status; a hold that clears on its own is still carried by the stopped
+    // producer and needs nothing here. Any other decision clears it, so the
+    // record cannot outlive the condition that produced it.
+    *rendition.capacity_hold.lock().expect("capacity hold") = match decision.action {
+        Action::Suspend { reason, .. } if !crate::prodexec::clears_on_its_own(reason) => {
+            Some(reason)
+        }
+        _ => None,
+    };
     let step = retire_completed_marker_prewarm(
         rendition,
         belief,
@@ -7577,6 +7630,7 @@ mod tests {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -9819,6 +9873,129 @@ mod tests {
             .expect("playlist bytes")
             .0;
         assert_eq!(first, second, "the playlist is immutable (plan §2.1)");
+    }
+
+    /// A capacity stall says why, after the producer it terminated is gone.
+    ///
+    /// A hold with no scheduled end terminates its producer — a stopped one
+    /// goes on holding everything a running one held — which leaves the belief
+    /// `Absent` and takes the reason with it. The status then said `waiting`
+    /// with no hold at all, so a viewer's control plane saw a producer stop
+    /// and never saw that the working set was full. `hold_reason` is the only
+    /// fact that distinguishes "nothing is arriving because there is no room"
+    /// from "nothing is arriving".
+    #[tokio::test]
+    async fn a_capacity_stall_still_says_no_room_after_its_producer_is_gone() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        assert_eq!(
+            serve.status("sess-a").await.expect("status").producer_hold,
+            None,
+            "a healthy rendition is not holding"
+        );
+
+        *rendition.capacity_hold.lock().expect("capacity hold") =
+            Some(crate::prodsched::Hold::NoRoom { wanted: 4_096 });
+        let held = serve.status("sess-a").await.expect("status");
+        assert_eq!(
+            held.producer_hold,
+            Some("no_room"),
+            "the reason outlives the producer it terminated"
+        );
+
+        // And it is cleared by the first pass that decides anything else,
+        // rather than being latched for the life of the rendition.
+        *rendition.capacity_hold.lock().expect("capacity hold") = None;
+        assert_eq!(
+            serve.status("sess-a").await.expect("status").producer_hold,
+            None
+        );
+    }
+
+    /// Reattachment removes a reader without going through `detach_reader`,
+    /// so it needs the same wait retirement.
+    ///
+    /// A viewer who creates again lands on a different rendition; anything
+    /// still parked on the one they left has no reader to be ranked against,
+    /// and `playback_demands` marks a session's oldest wait foreground on
+    /// exactly that absence — keeping the abandoned rendition producing for
+    /// somebody who is no longer watching it.
+    #[tokio::test]
+    async fn reattaching_elsewhere_retires_the_waits_left_behind() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let first = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("the first rendition");
+
+        let _parked = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: first.key.clone(),
+                    index: 40,
+                },
+                "sess-a",
+            )
+            .expect("a parked request on the rendition being left");
+        assert_eq!(serve.shared.pool.demands(&first.key).len(), 1);
+
+        // Same session, a different recipe: a different rendition key, and the
+        // reader moves to it.
+        let mut moved = request("play-a", 0.0);
+        moved.kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        serve
+            .try_create(
+                &moved,
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "sess-a".to_string(),
+            )
+            .await
+            .expect("the replacement is VOD-presentable");
+        let second = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("the replacement rendition");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "the fixture must actually move the viewer to another rendition"
+        );
+
+        assert!(
+            serve.shared.pool.demands(&first.key).is_empty(),
+            "the request left behind goes with the reader that made it"
+        );
     }
 
     /// A detached viewer stops being demand at the moment their reader goes,

@@ -1492,7 +1492,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # permanent reason carries its own terminal sentence and in the per-arm
 # permanence check. Projections of an enum onto its wire name; nothing is
 # launched.
-expected_occurrences = 239
+# 239 -> 242 with the capacity-hold and reattach regressions: three more
+# `VodServe::status` reads, in the proof that a stall still says `no_room` after
+# the producer it terminated is gone (healthy, held, and cleared again). Registry
+# reads; they launch nothing.
+expected_occurrences = 242
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
