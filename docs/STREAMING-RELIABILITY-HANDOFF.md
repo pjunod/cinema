@@ -87,6 +87,15 @@ calling the effort complete, including smaller validation/operations defects.
 
 ### 1. Accepted film time and durable desired intent
 
+**Landed — do not implement again.** The correction below shipped as `ee4dfbe3`
+(PR #24, merged into `effort/streaming-reliability` at `6f09ffa5`).
+`accepted_film_time_ms` is computed at the control-to-staging seam, carried on
+`PreparationCandidateInputs`, and consumed as `resume_ms` without re-adding the
+route origin; the doc comment there records the old shape so it cannot come
+back. The paragraph is kept as written because the closing sentence is still
+true: it did **not** close stale-intent ordering or physical cutover, which is
+what the durable fix below is for.
+
 **Independent small correction ready to implement:**
 `http/hls.rs::stage_prepared_successor` currently computes resume from
 `route.media_origin_ms + route.fetched_through_ms`. This skips buffered but

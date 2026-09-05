@@ -326,6 +326,54 @@ pub(crate) struct ClientSelection {
 }
 
 impl ClientSelection {
+    /// The normalized policy this wire selection expresses.
+    ///
+    /// Total by construction, which the wire type is not: the subtitle track
+    /// moves inside the mode that uses it, so the two pairings `validate`
+    /// rejects at runtime — off with a track, and a rendering mode without one
+    /// — cannot survive the conversion as values. A validated selection always
+    /// converts faithfully; an unvalidated one converts to the nearest legal
+    /// reading rather than panicking, because a decision this feeds must not be
+    /// able to take the process down.
+    pub(crate) fn desired(&self) -> plurx_core::playback::DesiredSelection {
+        use plurx_core::playback::{
+            DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,
+        };
+        DesiredSelection {
+            quality: match self.quality {
+                QualitySelection::Auto => DesiredQuality::Auto,
+                QualitySelection::Original => DesiredQuality::Original,
+                QualitySelection::Manual { height } => DesiredQuality::Manual { height },
+            },
+            codec: match self.codec {
+                CodecPolicy::Auto => DesiredCodec::Auto,
+                CodecPolicy::H264 => DesiredCodec::H264,
+                CodecPolicy::Hevc => DesiredCodec::Hevc,
+                CodecPolicy::Av1 => DesiredCodec::Av1,
+            },
+            dynamic_range: match self.dynamic_range {
+                DynamicRangePolicy::Auto => DesiredDynamicRange::Auto,
+                DynamicRangePolicy::DolbyVision => DesiredDynamicRange::DolbyVision,
+                DynamicRangePolicy::Hdr10 => DesiredDynamicRange::Hdr10,
+                DynamicRangePolicy::Hlg => DesiredDynamicRange::Hlg,
+                DynamicRangePolicy::Sdr => DesiredDynamicRange::Sdr,
+            },
+            audio_track: self.audio_track,
+            audio_offset_ms: self.audio_offset_ms,
+            subtitles: match (self.subtitle.mode, self.subtitle.track) {
+                (SubtitleMode::Off, _) => DesiredSubtitles::Off,
+                (SubtitleMode::Native, Some(track)) => DesiredSubtitles::Native { track },
+                (SubtitleMode::Overlay, Some(track)) => DesiredSubtitles::Overlay { track },
+                (SubtitleMode::Burn, Some(track)) => DesiredSubtitles::Burn { track },
+                // A rendering mode with no track is the shape `validate`
+                // refuses, so this arm is unreachable for anything accepted.
+                // Reading it as "no subtitles" is the closest legal answer and
+                // the only one that cannot mislabel a track the viewer chose.
+                (_, None) => DesiredSubtitles::Off,
+            },
+        }
+    }
+
     fn validate(&self) -> Result<(), &'static str> {
         if let QualitySelection::Manual { height } = self.quality {
             if !(crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(&height) {
@@ -2509,12 +2557,14 @@ pub(crate) trait PreparationGate: Send + Sync {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        desired_digest: Option<String>,
     ) -> GateAnswer<'a> {
         self.stage_preparation_for_owner(
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
             1,
+            desired_digest,
         )
     }
 
@@ -2529,6 +2579,7 @@ pub(crate) trait PreparationGate: Send + Sync {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> GateAnswer<'a>;
 
     #[cfg(test)]
@@ -2588,6 +2639,7 @@ impl PreparationGate for RollingControlHandle {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> GateAnswer<'a> {
         Box::pin(RollingControlHandle::stage_preparation_for_owner(
             self,
@@ -2595,6 +2647,7 @@ impl PreparationGate for RollingControlHandle {
             predecessor_incarnation_id,
             deadline_ms,
             expected_owner_epoch,
+            desired_digest,
         ))
     }
 
@@ -2966,6 +3019,16 @@ pub(crate) struct SelectionObservation {
     /// The selection differs from the last accepted one. `false` on a replay
     /// and on the first accepted exchange.
     pub changed: bool,
+    /// A preparation candidate should be evaluated for the current ask.
+    ///
+    /// Not the same question as `changed`, and the difference is the point.
+    /// `changed` asks whether this packet differs from the last one, so an ask
+    /// that arrives while the preparation slot is busy is true exactly once
+    /// and then never again — which is how the successor a viewer actually
+    /// wants gets dropped and never rebuilt. This asks whether the *current*
+    /// ask has been dispatched yet, which stays true across every exchange
+    /// until it has been.
+    pub dispatch_preparation: bool,
     /// The document the **session** is holding, not this exchange's.
     pub capabilities: Option<DynamicCapabilities>,
 }
@@ -3003,6 +3066,24 @@ pub(crate) struct ControlState {
     /// sequence space restarts, and a selection from before the advance is not
     /// something this client has since departed from.
     last_selection: Option<ClientSelection>,
+    /// The ask a preparation candidate was last dispatched for.
+    ///
+    /// Together with `desired_digest` this is the whole of retain-and-coalesce.
+    /// Retention is the two disagreeing: an ask that has not been dispatched
+    /// stays undispatched across exchanges rather than being forgotten after
+    /// the one packet that introduced it. Coalescing is free, because only the
+    /// latest ask is ever in `desired_digest` — three quality changes while the
+    /// slot is busy leave one candidate to build, not three.
+    dispatched_digest: Option<String>,
+    /// The ask acceptance has seen, which is not always the ask `observe` has
+    /// recorded.
+    ///
+    /// Advanced inside acceptance, before any decision acceptance takes, so a
+    /// request carrying a new selection alongside an acknowledgement for the
+    /// successor staged under the old one is judged against the new ask. It is
+    /// the digest rather than the selection because the only question asked of
+    /// it is whether two asks are the same one.
+    desired_digest: Option<String>,
     /// The capability document this session was told, on any exchange.
     ///
     /// Here for the same reason as `last_selection`: the rolling actor has its
@@ -3055,6 +3136,8 @@ impl Default for ControlState {
             prior_preparation_directive: None,
             prepared_action: None,
             last_selection: None,
+            desired_digest: None,
+            dispatched_digest: None,
             last_capabilities: None,
             preparation: PreparationSlot::Empty,
         }
@@ -3068,6 +3151,16 @@ pub(crate) struct ControlAcceptance {
     acknowledgement: Option<ActionAcknowledgement>,
     now_unix_ms: Option<i64>,
     request_fingerprint: Option<String>,
+    /// What this exchange asks for, carried into acceptance rather than read
+    /// after it.
+    ///
+    /// `observe` runs after `accept` in both engines, so the desired state it
+    /// records is always one exchange behind any decision `accept` takes. That
+    /// is fine for every decision except one: a single request may carry a new
+    /// selection *and* an acknowledgement committing the successor staged for
+    /// the previous one, and acceptance must see the new ask first or it
+    /// commits media the viewer has already moved off.
+    desired_digest: Option<String>,
 }
 
 impl ControlAcceptance {
@@ -3085,6 +3178,7 @@ impl ControlAcceptance {
             acknowledgement: None,
             now_unix_ms: None,
             request_fingerprint: None,
+            desired_digest: None,
         }
     }
 
@@ -3093,6 +3187,7 @@ impl ControlAcceptance {
         prepared_successor: &PreparedSuccessorObservation,
         acknowledgement: Option<&ActionAcknowledgement>,
         request_fingerprint: Option<&str>,
+        selection: &ClientSelection,
     ) -> Self {
         Self {
             platform,
@@ -3100,6 +3195,7 @@ impl ControlAcceptance {
             acknowledgement: acknowledgement.cloned(),
             now_unix_ms: None,
             request_fingerprint: request_fingerprint.map(str::to_owned),
+            desired_digest: Some(selection.desired().digest()),
         }
     }
 
@@ -3111,6 +3207,7 @@ impl ControlAcceptance {
             acknowledgement: None,
             now_unix_ms: None,
             request_fingerprint: None,
+            desired_digest: None,
         }
     }
 
@@ -3129,6 +3226,12 @@ impl ControlAcceptance {
     #[cfg(test)]
     fn fingerprinted(mut self, fingerprint: &str) -> Self {
         self.request_fingerprint = Some(fingerprint.to_owned());
+        self
+    }
+
+    #[cfg(test)]
+    fn asking(mut self, selection: &ClientSelection) -> Self {
+        self.desired_digest = Some(selection.desired().digest());
         self
     }
 }
@@ -3191,6 +3294,7 @@ impl ControlState {
             platform,
             prepared_successor,
             acknowledgement,
+            desired_digest,
             now_unix_ms,
             request_fingerprint,
         } = acceptance;
@@ -3251,6 +3355,8 @@ impl ControlState {
             // action identity must survive too. Clearing only the binding
             // would let the same staged incarnation mint a second action id.
             self.last_selection = None;
+            self.desired_digest = None;
+            self.dispatched_digest = None;
             self.last_capabilities = None;
             inherited.map(|staged_incarnation_id| PreparationDirective::Abort {
                 staged_incarnation_id,
@@ -3315,6 +3421,27 @@ impl ControlState {
                         .max(1),
                 ));
             }
+        }
+        // The ask lands before anything decides on it, and only for an
+        // exchange that has survived every fence above.
+        //
+        // This is the ordering §1 names. Both engines call `observe` after
+        // `accept`, so the desired state `observe` records is always one
+        // exchange behind — harmless for every decision except the one
+        // immediately below. A single request may carry a new selection *and*
+        // an acknowledgement committing the successor staged for the previous
+        // one, and reading the ask afterwards means that commit is decided
+        // against a selection the viewer has already replaced. Extending
+        // `observe` cannot fix it: by the time `observe` runs the directive
+        // exists.
+        //
+        // Everything that returns earlier deliberately does not reach here. A
+        // replay is the same exchange arriving twice and advanced the ask the
+        // first time or not at all; a rate-limited, out-of-sequence or
+        // wrong-instance packet was never accepted, and a rejected packet must
+        // not be able to move what the viewer is understood to want.
+        if let Some(desired_digest) = desired_digest {
+            self.desired_digest = Some(desired_digest);
         }
         let terminal_directive = rollover_preparation.or_else(|| {
             self.record_terminal_preparation_acknowledgement(acknowledgement.as_ref(), now_unix_ms)
@@ -3478,6 +3605,23 @@ impl ControlState {
         }
     }
 
+    /// The ask acceptance has recorded.
+    ///
+    /// Test-only, and deliberately so. Nothing outside acceptance reads this
+    /// yet — `reserve_preparation_commit` is the only consumer and runs inside
+    /// the same call that writes it — so the placement of the write relative to
+    /// the fences has no consequence a test can observe from behaviour alone.
+    /// It will: the durable desired-ownership row §1 asks for is read outside
+    /// acceptance, and at that point a rejected packet that had advanced this
+    /// would be a rejected packet that had changed what the system believes the
+    /// viewer wants. The accessor exists so that property can be pinned now,
+    /// while the placement is being established, rather than after something
+    /// depends on it.
+    #[cfg(test)]
+    pub(crate) fn desired_digest_for_test(&self) -> Option<&str> {
+        self.desired_digest.as_deref()
+    }
+
     pub(crate) fn preparation_directive(&self) -> Option<PreparationDirective> {
         self.prior_preparation_directive.clone()
     }
@@ -3503,23 +3647,70 @@ impl ControlState {
     /// Both answers together, because a consumer that wants to know what the
     /// viewer changed also wants to know what the device can do about it —
     /// and reading either off the live exchange is wrong for the same reason.
+    /// Record what the viewer is asking for, and say whether it changed.
+    ///
+    /// "Changed" is answered on the normalized selection rather than on the
+    /// wire struct. Today the two agree exactly — the conversion is total and
+    /// injective, and a test pins that — so this changes no decision. What it
+    /// changes is what the word means: the comparison is now against a policy
+    /// that preserves Auto, Original and Manual as different asks, rather than
+    /// against a transport-shaped struct that happens not to carry transport
+    /// yet. Everything §1 needs to compare durably compares *this*.
     pub(crate) fn observe(
         &mut self,
         selection: &ClientSelection,
         capabilities: Option<&DynamicCapabilities>,
     ) -> SelectionObservation {
+        let desired = selection.desired();
         let changed = self
             .last_selection
             .as_ref()
-            .is_some_and(|previous| previous != selection);
+            .is_some_and(|previous| previous.desired() != desired);
+        let dispatch_preparation = self.take_preparation_dispatch(&desired.digest());
         self.last_selection = Some(selection.clone());
         if let Some(capabilities) = capabilities {
             self.last_capabilities = Some(capabilities.clone());
         }
         SelectionObservation {
             changed,
+            dispatch_preparation,
             capabilities: self.last_capabilities.clone(),
         }
+    }
+
+    /// Whether to build a candidate for this ask now, recording it if so.
+    ///
+    /// Three answers, and the middle one is the fix.
+    ///
+    /// The first accepted exchange dispatches nothing: its ask is what the
+    /// session was created for, so there is no change to prepare for. It is
+    /// recorded as dispatched so the *next* different ask is the first real
+    /// one — which is exactly the first-exchange behaviour the old
+    /// `selection.changed` gate had, kept deliberately.
+    ///
+    /// An ask that has already been dispatched dispatches nothing. Candidates
+    /// cost two store reads and the exchange runs about once a second per
+    /// client, so the steady state has to be silent.
+    ///
+    /// An undispatched ask arriving while the slot is occupied is **left
+    /// undispatched**. That is the whole change. Staging would be refused —
+    /// the slot takes one successor — and under the old gate the ask was
+    /// reported changed exactly once, so the candidate was built, refused, and
+    /// never rebuilt: a viewer who changed quality while a successor was in
+    /// flight simply never got the one they asked for. Leaving it undispatched
+    /// means the first exchange after the slot frees picks it up, without a
+    /// wake-up path, a retained input struct, or a queue that could hold
+    /// something stale — the only ask that survives is the current one.
+    fn take_preparation_dispatch(&mut self, desired_digest: &str) -> bool {
+        let Some(dispatched) = self.dispatched_digest.as_deref() else {
+            self.dispatched_digest = Some(desired_digest.to_owned());
+            return false;
+        };
+        if dispatched == desired_digest || !matches!(self.preparation, PreparationSlot::Empty) {
+            return false;
+        }
+        self.dispatched_digest = Some(desired_digest.to_owned());
+        true
     }
 
     /// Record that a successor has been staged.
@@ -3537,6 +3728,7 @@ impl ControlState {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         if !matches!(self.preparation, PreparationSlot::Empty) {
             return false;
@@ -3545,6 +3737,7 @@ impl ControlState {
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
+            desired_digest,
         };
         self.prepared_action = None;
         true
@@ -3556,6 +3749,7 @@ impl ControlState {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         let Some(expected_owner_epoch) = u64::try_from(expected_owner_epoch)
             .ok()
@@ -3575,6 +3769,7 @@ impl ControlState {
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
+            desired_digest,
         )
     }
 
@@ -3602,11 +3797,30 @@ impl ControlState {
         now_unix_ms: i64,
     ) -> bool {
         match &self.preparation {
+            // The ask is compared as well as the identity and the deadline.
+            // Acceptance has already advanced `desired_digest` for this
+            // exchange, so a request carrying a new selection *and* this
+            // acknowledgement is judged against the new selection — which is
+            // the whole point, because committing here publishes media the
+            // viewer has just moved off and does it with the client's own
+            // acknowledgement as the authority.
+            //
+            // A slot staged before this state knew any ask carries `None` and
+            // is not second-guessed: an absent record is not evidence of a
+            // change, and refusing on it would strand successors that nothing
+            // is wrong with.
             PreparationSlot::Staged {
                 staged_incarnation_id: staged,
                 deadline_ms,
+                desired_digest,
                 ..
-            } if staged == staged_incarnation_id && now_unix_ms < *deadline_ms => {
+            } if staged == staged_incarnation_id
+                && now_unix_ms < *deadline_ms
+                && desired_digest
+                    .as_ref()
+                    .zip(self.desired_digest.as_ref())
+                    .is_none_or(|(staged_for, wanted)| staged_for == wanted) =>
+            {
                 self.preparation = PreparationSlot::Committing {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
                     deadline_ms: *deadline_ms,
@@ -4360,6 +4574,11 @@ pub(crate) struct PreparationExecutor {
     playback_id: String,
     expected_predecessor_owner_node_id: String,
     expected_predecessor_owner_epoch: i64,
+    /// The ask this staging is for, recorded on the slot so a later
+    /// acknowledgement can be judged against the ask that is current then.
+    /// `None` from the paths that stage without an observed selection; the
+    /// slot treats an absent record as no evidence rather than as a change.
+    desired_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4385,7 +4604,14 @@ impl PreparationExecutor {
             playback_id,
             expected_predecessor_owner_node_id,
             expected_predecessor_owner_epoch,
+            desired_digest: None,
         }
+    }
+
+    /// Record the ask this executor is staging for.
+    pub(crate) fn asking(mut self, desired_digest: Option<String>) -> Self {
+        self.desired_digest = desired_digest;
+        self
     }
 
     /// Stage a successor: durable row first, then the slot.
@@ -4415,6 +4641,7 @@ impl PreparationExecutor {
                 preparation.expected_predecessor_incarnation_id.clone(),
                 preparation.deadline_ms,
                 self.expected_predecessor_owner_epoch,
+                self.desired_digest.clone(),
             )
             .await
         {
@@ -4642,6 +4869,13 @@ pub(crate) enum PreparationSlot {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        /// The ask this successor was built for.
+        ///
+        /// Recorded at staging rather than re-derived at commit time, for the
+        /// same reason `predecessor_incarnation_id` is: what matters is what
+        /// was true when the work was started, and a successor whose ask has
+        /// since been replaced is media nobody is waiting for.
+        desired_digest: Option<String>,
     },
     /// A matching, timely client acknowledgement won the actor race. Deadline
     /// and terminal cleanup may no longer abort this successor; the Store CAS
@@ -6407,6 +6641,7 @@ enum RollingControlCommand {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     /// Ask whether this exact successor may still be committed, immediately
@@ -7998,6 +8233,7 @@ impl RollingControlActor {
                     &request.prepared_successor,
                     request.snapshot.acknowledgement.as_ref(),
                     request.snapshot.request_fingerprint.as_deref(),
+                    &request.snapshot.selection,
                 ),
             )?;
         let preparation_directive = self.control.preparation_directive();
@@ -8350,6 +8586,7 @@ impl RollingControlActor {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         if self.retired || self.terminal.is_some() {
             return false;
@@ -8358,6 +8595,7 @@ impl RollingControlActor {
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
+            desired_digest,
         )
     }
 
@@ -8367,6 +8605,7 @@ impl RollingControlActor {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         if self.retired || self.terminal.is_some() {
             return false;
@@ -8376,6 +8615,7 @@ impl RollingControlActor {
             predecessor_incarnation_id,
             deadline_ms,
             expected_owner_epoch,
+            desired_digest,
         )
     }
 
@@ -9983,6 +10223,7 @@ impl RollingControlActor {
                     predecessor_incarnation_id,
                     deadline_ms,
                     expected_owner_epoch,
+                    desired_digest,
                     reply,
                 } => {
                     let staged = self.stage_preparation_for_owner(
@@ -9990,6 +10231,7 @@ impl RollingControlActor {
                         predecessor_incarnation_id,
                         deadline_ms,
                         expected_owner_epoch,
+                        desired_digest,
                     );
                     let _ = reply.send(staged);
                 }
@@ -11375,12 +11617,14 @@ impl RollingControlHandle {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         self.stage_preparation_for_owner(
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
             1,
+            desired_digest,
         )
         .await
     }
@@ -11391,6 +11635,7 @@ impl RollingControlHandle {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
@@ -11399,6 +11644,7 @@ impl RollingControlHandle {
                 predecessor_incarnation_id,
                 deadline_ms,
                 expected_owner_epoch,
+                desired_digest,
                 reply,
             })
             .await
@@ -14218,6 +14464,383 @@ mod tests {
         }
     }
 
+    /// One request carrying a new ask and the old ask's commit does not commit
+    /// the old one.
+    ///
+    /// This is the ordering §1 names, and the reason it cannot be fixed by
+    /// extending `observe`. Both engines call `observe` *after* `accept`, so
+    /// the desired state `observe` records is one exchange behind every
+    /// decision `accept` takes — harmless everywhere except here. A client that
+    /// changes quality and, in the same packet, acknowledges the successor
+    /// staged for the previous quality, used to have that acknowledgement
+    /// accepted as authority to commit: the viewer's own message publishing
+    /// media the viewer had, in that same message, moved off. By the time
+    /// `observe` saw the new ask the commit directive already existed.
+    ///
+    /// So acceptance learns the ask first, and the slot records what it was
+    /// staged for. The acknowledgement is then judged against the ask that is
+    /// current at that instant, and a successor nobody is waiting for is torn
+    /// down rather than published — with `acknowledgement_rejected`, so the
+    /// response tells the client its commit did not happen instead of
+    /// reporting a success it did not get.
+    #[test]
+    fn a_new_ask_in_the_same_packet_refuses_the_old_asks_commit() {
+        let request = request();
+        let asked_for = selection_at(QualitySelection::Manual { height: 720 });
+        let moved_to = selection_at(QualitySelection::Manual { height: 1080 });
+        assert_ne!(
+            asked_for.desired().digest(),
+            moved_to.desired().digest(),
+            "the fixture must actually change the ask"
+        );
+
+        let commit_for = |staged_for: &ClientSelection, asking: &ClientSelection| {
+            let mut state = ControlState::default();
+            let started = Instant::now();
+            let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+            assert!(state.stage_preparation(
+                staged_incarnation_id.clone(),
+                request.generation.clone(),
+                i64::MAX,
+                Some(staged_for.desired().digest()),
+            ));
+            let prepared_session_id = uuid::Uuid::new_v4().to_string();
+            let successor = PreparedSuccessorAction {
+                staged_incarnation_id: staged_incarnation_id.clone(),
+                deadline_ms: i64::MAX,
+                session_id: prepared_session_id.clone(),
+                playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+                media_origin_ms: 42_000,
+                effective_selection: prepared_selection(),
+            };
+
+            // The exchange that announces the successor, under the ask it was
+            // staged for.
+            let announced = state
+                .accept_at(
+                    started,
+                    &request.generation,
+                    1,
+                    &request.client_instance_id,
+                    1,
+                    ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                        .asking(staged_for),
+                )
+                .expect("the successor is announced");
+            let ControlAction::Prepare { action_id, .. } = &announced.2 else {
+                panic!("an occupied preparation slot announces its successor");
+            };
+
+            // And the next exchange: the client acknowledges that Prepare as
+            // committed, while asking for `asking`.
+            state
+                .accept_at(
+                    started + MIN_CONTROL_INTERVAL,
+                    &request.generation,
+                    1,
+                    &request.client_instance_id,
+                    2,
+                    ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                        .asking(asking)
+                        .acknowledging(ActionAcknowledgement {
+                            action_id: action_id.clone(),
+                            state: AcknowledgementState::Committed,
+                            buffered_through_ms: None,
+                            first_frame_unix_ms: None,
+                        }),
+                )
+                .expect("the acknowledgement is accepted as an exchange");
+            (state.preparation_directive(), staged_incarnation_id)
+        };
+
+        // Unchanged ask: this is the ordinary handover and it must still work.
+        let (directive, staged) = commit_for(&asked_for, &asked_for);
+        assert_eq!(
+            directive,
+            Some(PreparationDirective::Commit {
+                staged_incarnation_id: staged
+            }),
+            "a viewer who has not changed their mind still gets the successor they waited for"
+        );
+
+        // Changed ask in the same packet: the commit is refused and the
+        // successor torn down, and the client is told its acknowledgement was
+        // rejected rather than being reported a success.
+        let (directive, staged) = commit_for(&asked_for, &moved_to);
+        assert_eq!(
+            directive,
+            Some(PreparationDirective::Abort {
+                staged_incarnation_id: staged,
+                acknowledgement_rejected: true,
+            }),
+            "a successor built for an ask the viewer has left is not published by their own \
+             acknowledgement"
+        );
+    }
+
+    /// An ask that arrives while the slot is busy is not lost.
+    ///
+    /// The old gate asked "did this packet differ from the last one", which is
+    /// true for exactly one exchange. A viewer who changed quality while a
+    /// successor was already in flight therefore had their candidate built,
+    /// refused by the occupied slot, and never rebuilt — they simply never got
+    /// the thing they asked for, and nothing said so.
+    ///
+    /// The gate now asks "has the current ask been dispatched", which stays
+    /// true across exchanges until it has been. Coalescing falls out for free:
+    /// only the latest ask is ever held, so three changes while the slot is
+    /// busy leave one candidate to build rather than three.
+    #[test]
+    fn an_ask_arriving_while_the_slot_is_busy_is_dispatched_once_it_frees() {
+        let mut state = ControlState::default();
+        let first = selection_at(QualitySelection::Auto);
+        let second = selection_at(QualitySelection::Manual { height: 720 });
+        let third = selection_at(QualitySelection::Manual { height: 1080 });
+
+        // The session's own ask dispatches nothing: there is no change to
+        // prepare for, and this is the first-exchange behaviour the old gate
+        // had too.
+        assert!(!state.observe(&first, None).dispatch_preparation);
+        assert!(
+            !state.observe(&first, None).dispatch_preparation,
+            "an unchanged steady state stays silent"
+        );
+
+        // A real change, with the slot free.
+        assert!(state.observe(&second, None).dispatch_preparation);
+        assert!(
+            !state.observe(&second, None).dispatch_preparation,
+            "and is dispatched once, not on every exchange after it"
+        );
+
+        // That candidate takes the slot, and the viewer changes their mind
+        // again — three times, to prove the coalescing.
+        assert!(state.stage_preparation(
+            uuid::Uuid::new_v4().to_string(),
+            "predecessor".to_owned(),
+            i64::MAX,
+            Some(second.desired().digest()),
+        ));
+        for _ in 0..3 {
+            assert!(
+                !state.observe(&third, None).dispatch_preparation,
+                "an occupied slot cannot take a successor, so nothing is dispatched into it"
+            );
+        }
+
+        // The slot frees. The next exchange picks up the ask that has been
+        // waiting — without a wake-up path, and without having queued three
+        // copies of it.
+        let staged = state
+            .preparation
+            .staged_incarnation_id()
+            .expect("the fixture staged one")
+            .to_owned();
+        assert!(state.abort_preparation(&staged));
+        state.preparation = PreparationSlot::Empty;
+        assert!(
+            state.observe(&third, None).dispatch_preparation,
+            "the ask the viewer has been waiting on is built once the slot can take it"
+        );
+        assert!(
+            !state.observe(&third, None).dispatch_preparation,
+            "and only once"
+        );
+    }
+
+    /// A packet the server refused cannot move what the viewer is understood
+    /// to want.
+    ///
+    /// The ask is advanced inside acceptance, downstream of every fence. A
+    /// replay is the same exchange arriving twice and advanced the ask the
+    /// first time or not at all; a rate-limited packet was never accepted.
+    ///
+    /// This reads the field rather than a consequence, and the first version of
+    /// it did the opposite and proved nothing. Today the only consumer of the
+    /// ask — `reserve_preparation_commit` — runs inside the same call that
+    /// writes it, so a rejected packet advancing it is immediately overwritten
+    /// by the next accepted one and no behaviour differs. Moving the write
+    /// above the rate-limit fence passed that test. It fails this one.
+    ///
+    /// The property is worth pinning now anyway, because it stops being
+    /// unobservable the moment §1's durable desired-ownership row exists: that
+    /// row is read outside acceptance, and a rejected packet that had advanced
+    /// this would be a rejected packet that had changed what the system
+    /// believes the viewer wants. Establishing the placement before something
+    /// depends on it is cheaper than discovering it afterwards.
+    #[test]
+    fn a_refused_packet_cannot_advance_the_ask_and_strand_a_successor() {
+        let request = request();
+        let asked_for = selection_at(QualitySelection::Manual { height: 720 });
+        let never_asked = selection_at(QualitySelection::Manual { height: 1080 });
+
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            i64::MAX,
+            Some(asked_for.desired().digest()),
+        ));
+        let prepared_session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id: staged_incarnation_id.clone(),
+            deadline_ms: i64::MAX,
+            session_id: prepared_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+
+        let announced = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&asked_for),
+            )
+            .expect("announced");
+        let ControlAction::Prepare { action_id, .. } = &announced.2 else {
+            panic!("an occupied preparation slot announces its successor");
+        };
+        let action_id = action_id.clone();
+
+        // A replay of that same sequence, claiming a different ask.
+        let replay = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&never_asked),
+            )
+            .expect("a replay is answered, not errored");
+        assert_eq!(replay.0, ControlDisposition::Replay);
+
+        // And a rate-limited packet, also claiming it.
+        assert!(matches!(
+            state.accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&never_asked),
+            ),
+            Err(ControlStateError::RateLimited(_))
+        ));
+
+        // Neither refused packet moved the ask.
+        assert_eq!(
+            state.desired_digest_for_test(),
+            Some(asked_for.desired().digest().as_str()),
+            "a replayed or rate-limited packet is not the viewer changing their mind"
+        );
+
+        // And the successor they are waiting for still commits.
+        state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&asked_for)
+                    .acknowledging(ActionAcknowledgement {
+                        action_id,
+                        state: AcknowledgementState::Committed,
+                        buffered_through_ms: None,
+                        first_frame_unix_ms: None,
+                    }),
+            )
+            .expect("accepted");
+        assert_eq!(
+            state.preparation_directive(),
+            Some(PreparationDirective::Commit {
+                staged_incarnation_id
+            }),
+            "a duplicated or throttled packet must not be able to strand a successor"
+        );
+    }
+
+    /// A slot staged before any ask was recorded is not second-guessed.
+    ///
+    /// Several paths stage without an observed selection — the plain
+    /// `stage_preparation`, and any staging that precedes the first control
+    /// exchange. An absent record is not evidence that the ask changed, and
+    /// refusing on it would strand successors with nothing wrong with them, so
+    /// the comparison is skipped rather than failed.
+    #[test]
+    fn a_successor_staged_without_a_recorded_ask_still_commits() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            i64::MAX,
+            None,
+        ));
+        let prepared_session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id: staged_incarnation_id.clone(),
+            deadline_ms: i64::MAX,
+            session_id: prepared_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+        let announced = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&selection_at(QualitySelection::Auto)),
+            )
+            .expect("announced");
+        let ControlAction::Prepare { action_id, .. } = &announced.2 else {
+            panic!("an occupied preparation slot announces its successor");
+        };
+        state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    // A different ask, and still no record of what the slot was
+                    // staged for.
+                    .asking(&selection_at(QualitySelection::Manual { height: 480 }))
+                    .acknowledging(ActionAcknowledgement {
+                        action_id: action_id.clone(),
+                        state: AcknowledgementState::Committed,
+                        buffered_through_ms: None,
+                        first_frame_unix_ms: None,
+                    }),
+            )
+            .expect("accepted");
+        assert_eq!(
+            state.preparation_directive(),
+            Some(PreparationDirective::Commit {
+                staged_incarnation_id
+            }),
+            "an absent record is no evidence, and must not strand a successor"
+        );
+    }
+
     fn prepared_selection() -> EffectiveSelection {
         EffectiveSelection {
             quality_auto: false,
@@ -14470,6 +15093,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -14566,6 +15190,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -14720,6 +15345,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -14802,6 +15428,7 @@ mod tests {
                 staged_incarnation_id.clone(),
                 request.generation.clone(),
                 preparation_deadline,
+                None,
             ));
             let prepared_session_id = uuid::Uuid::new_v4().to_string();
             let successor = PreparedSuccessorAction {
@@ -14886,6 +15513,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             preparation_deadline,
+            None,
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -14960,6 +15588,7 @@ mod tests {
             request.generation.clone(),
             i64::MAX,
             1,
+            None,
         ));
         state
             .accept_at(
@@ -15010,6 +15639,7 @@ mod tests {
             request.generation,
             i64::MAX,
             2,
+            None,
         ));
     }
 
@@ -15023,6 +15653,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15075,6 +15706,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15134,6 +15766,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15186,6 +15819,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             10_000,
+            None,
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15797,6 +16431,7 @@ mod tests {
             "successor-1".to_owned(),
             "current-1".to_owned(),
             i64::MAX,
+            None,
         ));
         (actor, started)
     }
@@ -15809,7 +16444,12 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX)
+                .stage_preparation(
+                    "successor-1".to_owned(),
+                    "current-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         assert!(
@@ -15881,7 +16521,12 @@ mod tests {
         assert!(handle.settle_preparation("successor-1", true).await);
         assert!(
             handle
-                .stage_preparation("successor-2".to_owned(), "successor-1".to_owned(), i64::MAX,)
+                .stage_preparation(
+                    "successor-2".to_owned(),
+                    "successor-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await,
             "a committed successor frees the slot for the next preparation"
         );
@@ -15899,6 +16544,7 @@ mod tests {
                     staged_incarnation_id.clone(),
                     request.generation.clone(),
                     i64::MAX,
+                    None,
                 )
                 .await
         );
@@ -15984,7 +16630,12 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX,)
+                .stage_preparation(
+                    "successor-1".to_owned(),
+                    "current-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         assert!(handle.settle_preparation("successor-1", false).await);
@@ -15994,7 +16645,12 @@ mod tests {
         );
         assert!(
             handle
-                .stage_preparation("successor-2".to_owned(), "current-1".to_owned(), i64::MAX,)
+                .stage_preparation(
+                    "successor-2".to_owned(),
+                    "current-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         handle.abort_actor_for_test();
@@ -16007,7 +16663,12 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX,)
+                .stage_preparation(
+                    "successor-1".to_owned(),
+                    "current-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         assert!(
@@ -16036,6 +16697,7 @@ mod tests {
             "successor-2".to_owned(),
             "current-1".to_owned(),
             i64::MAX,
+            None,
         ));
         assert_eq!(
             actor.control.preparation.staged_incarnation_id(),
@@ -16131,6 +16793,7 @@ mod tests {
                 "successor-2".to_owned(),
                 "current-1".to_owned(),
                 i64::MAX,
+                None,
             ));
         }
     }
@@ -20465,6 +21128,117 @@ mod tests {
         })
     }
 
+    /// The normalized selection loses nothing the wire struct distinguishes.
+    ///
+    /// `observe` now answers "did the viewer ask for something else" by
+    /// comparing normalized selections rather than wire structs, so that claim
+    /// has to be proved rather than asserted in a comment: if the conversion
+    /// collapsed any two distinct legal asks, a real change would be reported
+    /// as unchanged and the successor it should have staged would never be
+    /// staged at all.
+    ///
+    /// Proved by injectivity over every legal shape rather than by a handful
+    /// of examples. The cross product below is exhaustive per axis — three
+    /// quality policies including Original beside a manual pick, every codec,
+    /// every dynamic range, the default audio track beside two named ones, a
+    /// zero and two signed offsets, and every subtitle mode with each of two
+    /// track numbers — and every member is validated first, so the claim is
+    /// scoped to exactly the selections this server accepts. Distinct wire
+    /// selections must produce distinct normalized ones, and distinct digests;
+    /// the converse is free, because the conversion is a function.
+    #[test]
+    fn the_normalized_selection_distinguishes_every_ask_the_wire_does() {
+        let qualities = [
+            QualitySelection::Auto,
+            QualitySelection::Original,
+            QualitySelection::Manual { height: 720 },
+        ];
+        let codecs = [
+            CodecPolicy::Auto,
+            CodecPolicy::H264,
+            CodecPolicy::Hevc,
+            CodecPolicy::Av1,
+        ];
+        let ranges = [
+            DynamicRangePolicy::Auto,
+            DynamicRangePolicy::DolbyVision,
+            DynamicRangePolicy::Hdr10,
+            DynamicRangePolicy::Hlg,
+            DynamicRangePolicy::Sdr,
+        ];
+        let audio_tracks = [None, Some(0), Some(2)];
+        let offsets = [0, -250, 1_000];
+        let subtitles = {
+            let mut shapes = vec![SubtitleSelection {
+                mode: SubtitleMode::Off,
+                track: None,
+            }];
+            for mode in [
+                SubtitleMode::Native,
+                SubtitleMode::Overlay,
+                SubtitleMode::Burn,
+            ] {
+                for track in [0, 3] {
+                    shapes.push(SubtitleSelection {
+                        mode,
+                        track: Some(track),
+                    });
+                }
+            }
+            shapes
+        };
+
+        let mut wire = Vec::new();
+        for quality in qualities {
+            for codec in codecs {
+                for dynamic_range in ranges {
+                    for audio_track in audio_tracks {
+                        for audio_offset_ms in offsets {
+                            for subtitle in &subtitles {
+                                wire.push(ClientSelection {
+                                    quality,
+                                    audio_track,
+                                    subtitle: subtitle.clone(),
+                                    audio_offset_ms,
+                                    codec,
+                                    dynamic_range,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            wire.len(),
+            qualities.len()
+                * codecs.len()
+                * ranges.len()
+                * audio_tracks.len()
+                * offsets.len()
+                * subtitles.len()
+        );
+
+        let mut normalized = std::collections::BTreeSet::new();
+        let mut digests = std::collections::BTreeSet::new();
+        for selection in &wire {
+            selection
+                .validate()
+                .expect("every shape in the cross product is one the server accepts");
+            let desired = selection.desired();
+            assert!(
+                normalized.insert(desired.canonical_form()),
+                "two distinct asks normalized to the same policy: {selection:?}"
+            );
+            assert!(
+                digests.insert(desired.digest()),
+                "two distinct policies digested the same: {selection:?}"
+            );
+        }
+        assert_eq!(normalized.len(), wire.len());
+        assert_eq!(digests.len(), wire.len());
+    }
+
     fn selection_at(quality: QualitySelection) -> ClientSelection {
         ClientSelection {
             quality,
@@ -21194,6 +21968,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     successor.clone(),
                     i64::MAX,
+                    None,
                 )
                 .await,
             "the slot is free again, so the next preparation can take it",
@@ -21315,7 +22090,7 @@ mod tests {
         assert_eq!(abandoned.terminal_reason.as_deref(), Some("replaced"));
         assert!(
             control
-                .stage_preparation(uuid::Uuid::new_v4().to_string(), winner, i64::MAX)
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), winner, i64::MAX, None)
                 .await,
             "and the actor's slot with it",
         );
@@ -21374,7 +22149,7 @@ mod tests {
         let replacement = uuid::Uuid::new_v4().to_string();
         assert!(
             control
-                .stage_preparation(replacement.clone(), predecessor, i64::MAX)
+                .stage_preparation(replacement.clone(), predecessor, i64::MAX, None)
                 .await,
             "the slot is free, so the next preparation can take it",
         );

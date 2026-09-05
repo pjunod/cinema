@@ -1740,6 +1740,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1762,6 +1763,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                     predecessor_incarnation_id,
                     deadline_ms,
                     expected_owner_epoch,
+                    desired_digest,
                 );
             staged
         })
@@ -3959,6 +3961,7 @@ impl VodServe {
                         &control.prepared_successor,
                         control.snapshot.acknowledgement.as_ref(),
                         control.snapshot.request_fingerprint.as_deref(),
+                        &control.snapshot.selection,
                     ),
                 );
                 // Only for an accepted exchange: a replay is the same exchange
@@ -9258,7 +9261,7 @@ mod tests {
         let successor = uuid::Uuid::new_v4().to_string();
         let predecessor = uuid::Uuid::new_v4().to_string();
         assert!(
-            gate.stage_preparation(successor.clone(), predecessor.clone(), i64::MAX)
+            gate.stage_preparation(successor.clone(), predecessor.clone(), i64::MAX, None)
                 .await
         );
         assert!(
@@ -9270,7 +9273,12 @@ mod tests {
         // engine that believed in two could commit the wrong one.
         assert!(
             !gate
-                .stage_preparation(uuid::Uuid::new_v4().to_string(), predecessor, i64::MAX)
+                .stage_preparation(
+                    uuid::Uuid::new_v4().to_string(),
+                    predecessor,
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         assert!(gate.settle_preparation(&successor, true).await);
@@ -9300,6 +9308,7 @@ mod tests {
                 abandoned.clone(),
                 uuid::Uuid::new_v4().to_string(),
                 i64::MAX,
+                None,
             )
             .await
         );
@@ -9315,6 +9324,7 @@ mod tests {
                 uuid::Uuid::new_v4().to_string(),
                 uuid::Uuid::new_v4().to_string(),
                 i64::MAX,
+                None,
             )
             .await
         );
@@ -9348,6 +9358,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
                     i64::MAX,
+                    None,
                 )
                 .await,
             "the stale gate must not take the replacement's slot",
@@ -9361,6 +9372,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
                     i64::MAX,
+                    None,
                 )
                 .await
         );
@@ -9383,8 +9395,13 @@ mod tests {
         let gate = serve.preparation_gate(&session_id).await.expect("gate");
         let staged = uuid::Uuid::new_v4().to_string();
         assert!(
-            gate.stage_preparation(staged.clone(), uuid::Uuid::new_v4().to_string(), i64::MAX,)
-                .await
+            gate.stage_preparation(
+                staged.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                i64::MAX,
+                None
+            )
+            .await
         );
 
         serve.begin_end(&session_id, Terminal::Deleted).await;
@@ -9431,6 +9448,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
                     i64::MAX,
+                    None,
                 )
                 .await,
             "a tombstoned session takes no successor",
@@ -9447,6 +9465,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
                     i64::MAX,
+                    None,
                 )
                 .await,
             "nor does a gate outliving its session",
@@ -12087,6 +12106,7 @@ mod tests {
                     generation.clone(),
                     i64::MAX,
                     1,
+                    None,
                 ));
         }
 

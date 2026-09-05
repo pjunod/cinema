@@ -1122,6 +1122,52 @@ Session-detach cleanup, total serving admission, typed scoped timeout/NoRoom
 actions, disjoint-viewer capacity, and transition transactions remain separate
 open architecture work.
 
+**Corrected: an acknowledgement could commit a successor the viewer had already
+left.** Both engines call `observe` after `accept`, so the desired state
+`observe` records is one exchange behind every decision `accept` takes. That is
+harmless for all but one decision. A single request may carry a new selection
+*and* an acknowledgement committing the successor staged for the previous one,
+and reading the ask afterwards meant that commit was decided against a
+selection the viewer had, in the same message, replaced — their own
+acknowledgement publishing media they had moved off. Extending `observe` cannot
+fix it, because by the time `observe` runs the directive already exists.
+
+Acceptance now learns the ask first, and the preparation slot records the ask it
+was staged for, so an acknowledgement is judged against what is current when it
+arrives. A stale successor is aborted with `acknowledgement_rejected` rather
+than committed, so the client is told its commit did not happen instead of being
+reported a success it did not get. A slot staged with no recorded ask is not
+second-guessed: an absent record is not evidence of a change, and refusing on it
+would strand successors that nothing is wrong with.
+
+The ask is advanced downstream of every fence, so a replayed or rate-limited
+packet cannot move it. That property is currently unobservable from behaviour —
+its only consumer runs inside the same call that writes it — and the first
+version of the test claimed a consequence that did not exist and passed with the
+write moved above the rate-limit fence. It now pins the placement directly, and
+says why: the durable desired-ownership row is read *outside* acceptance, and at
+that point a rejected packet advancing this becomes a rejected packet changing
+what the system believes the viewer wants.
+
+**Also corrected: an ask arriving while the slot was busy was dropped.** The
+dispatch gate asked whether this packet differed from the last one, which is
+true for exactly one exchange. A viewer who changed quality while a successor
+was already in flight had their candidate built, refused by the occupied slot,
+and never rebuilt — they simply never got the thing they asked for, and nothing
+said so.
+
+The gate now asks whether the *current* ask has been dispatched, which stays
+true across exchanges until it has been. Retention and coalescing both fall out
+of that one change rather than needing machinery: an undispatched ask survives
+because it is still undispatched, and only the latest ask is ever held, so three
+changes while the slot is busy leave one candidate to build rather than three.
+The wake is the next exchange after the slot frees, which is a client heartbeat
+away and only matters to a client that is still sending them.
+
+**Still open** in this thread: the durable half. Desired ownership is not
+persisted, so none of the three admission points can compare it, and nothing
+survives a restart or an owner change.
+
 **Partly corrected: a failed rendition now gives its producer back.** Reading
 the teardown paths rather than the finding turned up one leak that was
 physical rather than architectural. A recorded rendition failure is permanent

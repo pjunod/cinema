@@ -6014,7 +6014,11 @@ async fn control_local_with_settlement_capacity(
             ),
         );
     }
-    if result.selection.changed {
+    // Not `selection.changed`: an ask that arrived while the preparation slot
+    // was busy is "changed" for exactly one exchange and then never again, so
+    // the successor the viewer actually asked for was built once, refused, and
+    // forgotten. This stays true until the ask has been dispatched.
+    if result.selection.dispatch_preparation {
         crate::playback_control::record_preparation_observation(
             crate::playback_control::PreparationSeam::InSession,
         );
@@ -6438,7 +6442,10 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
             &recipe,
             &candidate,
             source.as_ref(),
-            accepted_film_time_ms,
+            AcceptedAsk {
+                film_time_ms: accepted_film_time_ms,
+                desired_digest: Some(selection.desired().digest()),
+            },
         )
         .await;
     }
@@ -6476,6 +6483,23 @@ const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_
 /// successor that appears when it should not costs a saturated user real
 /// admission headroom, which is why every refusal below returns rather than
 /// retries.
+/// What the accepted control exchange said the viewer wants.
+///
+/// The two travel together because they are facts about the same exchange and
+/// are both wrong if taken from different ones: staging at the film time from
+/// one exchange under the ask from another builds a successor for a moment and
+/// a selection that never coexisted.
+struct AcceptedAsk {
+    /// The absolute film time the accepted envelope settled on — the viewer's
+    /// seek target where they asked for one, their playhead otherwise.
+    film_time_ms: i64,
+    /// The normalized ask, recorded on the preparation slot so an
+    /// acknowledgement arriving later is judged against the ask that is
+    /// current then. `None` where the caller stages without an observed
+    /// selection.
+    desired_digest: Option<String>,
+}
+
 async fn stage_prepared_successor(
     state: &AppState,
     session_id: &str,
@@ -6483,8 +6507,12 @@ async fn stage_prepared_successor(
     predecessor: &RemoteStartRequest,
     candidate: &crate::transcode::SessionRequest,
     source: Option<&plurx_core::domain::MediaFile>,
-    accepted_film_time_ms: i64,
+    accepted: AcceptedAsk,
 ) {
+    let AcceptedAsk {
+        film_time_ms: accepted_film_time_ms,
+        desired_digest,
+    } = accepted;
     // The actor owns the slot. No live local worker means no slot to take, and
     // an expired, remote-owned or retired playback stages nothing.
     let Some(gate) = state.transcode.session_preparation_gate(session_id).await else {
@@ -6589,7 +6617,11 @@ async fn stage_prepared_successor(
         route.playback_id.clone(),
         route.owner_node_id.clone(),
         route.owner_epoch,
-    );
+    )
+    // The ask this successor is being built for, recorded on the slot so an
+    // acknowledgement arriving later is judged against the ask that is current
+    // then rather than against the one that started the work.
+    .asking(desired_digest);
     let preparation = plurx_core::domain::MediaSessionPreparation {
         incarnation_id: staged_incarnation_id,
         session_id: staged_session_id,
@@ -14785,7 +14817,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
 
@@ -14837,7 +14872,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged = fixture
@@ -15053,7 +15091,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let mut request = control_request(route.incarnation_id.clone());
@@ -15143,7 +15184,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
 
@@ -15507,7 +15551,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let first = fixture
@@ -15526,7 +15573,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         assert_eq!(
@@ -15558,7 +15608,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         assert!(
@@ -15587,7 +15640,10 @@ mod tests {
             &staged_predecessor_recipe(route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15767,7 +15823,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15852,7 +15911,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15979,7 +16041,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged_incarnation_id = fixture
@@ -16063,7 +16128,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged = fixture
@@ -16149,7 +16217,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         assert!(
@@ -16201,7 +16272,10 @@ mod tests {
                     &staged_predecessor_recipe(&route),
                     &staged_candidate_request(),
                     Some(&staged_source_file()),
-                    STAGED_ACCEPTED_FILM_TIME_MS,
+                    AcceptedAsk {
+                        film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                        desired_digest: None,
+                    },
                 )
                 .await;
                 let mut request = control_request(route.incarnation_id.clone());
@@ -16325,7 +16399,10 @@ mod tests {
                 &staged_predecessor_recipe(&route),
                 &staged_candidate_request(),
                 Some(&staged_source_file()),
-                STAGED_ACCEPTED_FILM_TIME_MS,
+                AcceptedAsk {
+                    film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                    desired_digest: None,
+                },
             )
             .await;
             let staged = fixture
@@ -16457,7 +16534,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &candidate,
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged = fixture
@@ -16607,7 +16687,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged = fixture
@@ -16746,7 +16829,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let first_staged = fixture
@@ -16860,7 +16946,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            STAGED_ACCEPTED_FILM_TIME_MS,
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let replacement = fixture
@@ -16961,7 +17050,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
-            RESUME_ACCEPTED_PLAYHEAD_MS,
+            AcceptedAsk {
+                film_time_ms: RESUME_ACCEPTED_PLAYHEAD_MS,
+                desired_digest: None,
+            },
         )
         .await;
 
