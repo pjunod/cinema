@@ -73,6 +73,11 @@ recorded on the status page; do not redo them.
    Recompute after fixes and current-effort integration; neither is approval.
    The VOD author is now implementing that bounded diagnostic/reap correction;
    the prior frozen manifest is only a checkpoint, not current-source proof.
+   A second final-review issue is `driver_pass` awaiting capacity policy while
+   holding `rendition.manifest`: a slow settings read then blocks already-cached
+   segment pin/open/publication. Move policy I/O outside that lock, revalidate
+   the exact epoch/demand before acting, and prove cached GET responsiveness
+   and single-permit restart safety through the real driver boundary.
 
 ## Remaining implementation — in dependency order
 
@@ -293,6 +298,10 @@ formatting and all-target compilation. Historical anchors must be remapped
 to their real renamed helpers in the code commit. A new hash-based regression
 bridge belongs in a subsequent commit; a client code hash has one bridge row,
 not three platform duplicates. Never use `--no-verify`.
+Run `make history-check` again **after** a commit before pushing: the pre-commit
+hook cannot classify its not-yet-created hash. Corrective-worded documentation
+commits also need the established explicit non-runtime ledger entry (with a
+truthful documentation-only reason); PR #21 initially exposed that omission.
 
 Existing FFmpeg Full at `/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg` is 9.0.1
 with libass; the default 8.1.2 lacks libass. Existing Homebrew x265 needs
