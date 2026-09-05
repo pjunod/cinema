@@ -572,6 +572,18 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "h264-sdr.source_sha256"):
             MEDIA_CHECKER["verify"](path, build, controls)
 
+    def test_media_probe_rows_are_unambiguous(self) -> None:
+        normalize = MEDIA_CHECKER["normalize_probe_rows"]
+        path = Path("control.mp4")
+        fact = "codec_name=h264|profile=High"
+
+        self.assertEqual(normalize(fact, path), fact)
+        self.assertEqual(normalize(f"{fact}\n\n {fact} \n", path), fact)
+        for output in ("", "\n  \n", f"{fact}\ncodec_name=hevc|profile=Main"):
+            with self.subTest(output=output):
+                with self.assertRaisesRegex(ValueError, "ambiguous video probe"):
+                    normalize(output, path)
+
 
 if __name__ == "__main__":
     unittest.main()
