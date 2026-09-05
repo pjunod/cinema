@@ -1,7 +1,7 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** backend merged; web media acceptance and native completion in progress · **Effort:** `effort/hdhomerun-live-tv` ·
-**Updated:** 2026-09-04 · **Historical issue:**
+**Status:** backend and Apple merged; web acceptance passed; Android qualification in progress · **Effort:** `effort/hdhomerun-live-tv` ·
+**Updated:** 2026-09-05 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
 Companion to [HDHOMERUN-LIVE-TV-PLAN.md](HDHOMERUN-LIVE-TV-PLAN.md) (the
@@ -17,8 +17,9 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
 | Forgejo main synchronization | merged | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | Astra approved `c4b66e1d`; fresh gate run 61 passed; merge `e8095916` |
 | M2 live HLS and cluster relay | merged | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | Astra approved `fc164045`; exact pinned fmt/check/clippy and 47 focused tests passed; effort gate run 85 passed; merge `f2773ca8` |
-| M3 web client | Astra findings closed; browser media acceptance pending | — | 72 captures at `59bf4932`, no console/page errors; 17 focused tests pass after persistent ownership fixes; new real-HLS browser fixture awaits execution |
-| M4 Apple and Android | Apple tests pass; Android implementation remains | — | Apple API, lease, player and Developer settings compile on iOS/tvOS; all 14 focused tests pass on both platforms; Astra findings closed pending exact commit review |
+| M3 web client | browser media acceptance passed; final baseline and effort PR pending | — | 17 focused tests; `36090562` passed real decoded H.264/AAC frames, controls, switch, fault cleanup, paused timeout and lost-unload reload quarantine; final structural captures running |
+| M4 Apple | merged | [#17](http://192.168.4.7:3000/noirr/plurx/pulls/17) | Astra approved `8cfe8cc5`; iOS/tvOS compile and 14 focused tests pass on each simulator; effort gate 95 passed; merge `fc9c8f45` |
+| M4 Android | implemented; final review and native UI acceptance | — | dedicated live player and Developer controls compile; 14 focused tests pass; Astra sliding-window finding fixed using rendered-frame progress; isolated JDK 25/SDK 37 verification pending |
 | M5 docs, hardware, promotion | not started | — | — |
 
 ## Current work — finish client acceptance and effort gates
@@ -89,8 +90,14 @@ barrier across profile switches, explicit live controls, and the runtime-only
 Developer card. Token-free ownership markers now persist before POST and during
 active playback, surviving page/app restart until confirmed release. Immutable
 web marker keys prevent expiry from deleting another tab's fresh recovery wait;
-marker IDs work on LAN HTTP. Hardware playback and Android implementation remain
-outstanding.
+marker IDs work on LAN HTTP. The real-HLS browser fixture now proves advancing
+decoded frames, explicit controls, channel switch, active owner/producer/expiry
+failures, paused release and reload quarantine after deliberately lost unload
+DELETE. It does not claim unload delivery is guaranteed or substitute a fake
+reaper for the backend's orphan cleanup. Apple merged after its exact review
+and effort gate. Android is implemented with rendered-frame progress because
+Media3 live-window position can move backward during healthy playback; 14
+focused tests pass. Native UI and hardware playback acceptance remain.
 
 Browser access has resumed after the Mac was unlocked. Forgejo is the only
 mutable remote after migration; no authentication bypass or credential
@@ -139,6 +146,7 @@ node access.
 | One tuner HTTP GET and one FFmpeg process per session | retries can double-lease physical tuners and split lifecycle ownership | a device-native resumable lease protocol exists |
 | DRM and captions unsupported | plurx has no licensed DRM path; captions lack end-to-end proof | a lawful DRM path or 608/708 fixture exists |
 | All first-party clients are in scope | a living-room feature is not complete as a web-only API | owner explicitly narrows the product surface |
+| Separate Apple and Android task PRs within M4 | each platform gets an independently reviewed, compiled and tested candidate; neither blocks review of the other | both merge before final promotion |
 
 ## Known limits — honest until evidence changes them
 
