@@ -1,0 +1,700 @@
+#!/usr/bin/env python3
+"""Accept Live TV against a real HDHomeRun, and measure what only hardware knows.
+
+Run: python3 scripts/live-tv-hardware --self-host \
+         --device 192.168.4.20 --tuners 2 --out target/live-tv-hardware
+
+Every other Live TV check in this repo runs against a fixture. The fixture is
+honest about the protocol -- it answers discover.json and lineup.json on port
+80 and the stream on 5004, exactly as `pinned_url` addresses a real device --
+but it is not honest about a tuner. It has no signal, its lineup has no
+encrypted channels, its encode starts the instant it is asked, its
+`TunerCount` is whatever the fixture says, and it cannot report from its own
+side whether plurx actually holds a tuner. Those five things are the whole
+content of a hardware pass, and no amount of fixture work substitutes for it.
+
+So this script asserts the properties a fixture cannot, and MEASURES the
+limits the documentation currently marks as pending this pass:
+
+  * the device's real tuner count, and that `live_tv_max_sessions` above it is
+    refused by the session_limit readiness check rather than tried;
+  * real startup latency from POST to first playable segment, against the
+    15 s STARTUP_TIMEOUT budget;
+  * real segment duration and real signal strength for the tuned channel;
+  * that the device itself reports our host holding exactly the tuners we
+    opened, and reports them free again after release -- proof from the other
+    side of the wire, which is the one thing a fixture can only claim;
+  * that every DRM-flagged channel in a real lineup is unplayable and its
+    start is turned away with `drm_unsupported`;
+  * that the real broadcast codec survives the graph, read back with ffprobe
+    from a segment the daemon actually published;
+  * that filling the configured tuners makes the next start answer
+    `tuner_capacity`, and that the device agrees about how many are busy.
+
+WHAT THIS DOES TO YOUR HARDWARE. It occupies up to `--tuners` tuners on the
+named device for a few minutes, so anyone recording or watching on that device
+at the same time may be turned away. It defaults to one tuner. It reads
+`/discover.json`, `/lineup.json` and `/status.json` and opens
+`/auto/vN` streams; it writes nothing to the device and changes no device
+setting.
+
+WHAT THIS DOES NOT TOUCH. Nothing that is already running. `--self-host`
+boots a throwaway plurxd with its own data directory under `--out`, and the
+Live TV settings it writes are that daemon's own. Pointing this at a
+production server is refused: production servers are not test fixtures.
+
+Nothing here invents a device. `--device` is required, is validated by the
+same rule the runtime applies (private or link-local IPv4, never loopback),
+and a device that does not answer stops the run before a server is booted.
+
+The evidence file redacts the device serial to a digest, because a run's
+output gets attached to reviews. Model, firmware and the private LAN address
+stay in the clear -- they are what makes the measurements meaningful.
+
+A failed assertion exits nonzero. A property this device cannot exercise --
+no DRM channels in the lineup, four tuners so no over-count to refuse,
+firmware without /status.json -- is recorded as `not_exercisable` with the
+reason, and is never counted as a pass.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import runpy
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from urllib.parse import urljoin
+
+ROOT = Path(__file__).resolve().parents[1]
+HARNESS = runpy.run_path(str(ROOT / "scripts/ui-baseline"), run_name="live_tv_hardware_harness")
+
+DEVICE_PORT = 80             # discover.json, lineup.json, status.json
+TUNER_PORT = 5004            # the stream, per pinned_url in crates/plurxd/src/live_tv.rs
+LISTED_SEGMENTS = 6          # MAX_LISTED_SEGMENTS
+STARTUP_BUDGET = 15          # STARTUP_TIMEOUT
+MAX_CONFIGURABLE_SESSIONS = 4  # LiveTvConfig::validate rejects outside 1..=4
+READY_DEADLINE = 180         # a real device is probed over the LAN, not in-process
+SEGMENT_DEADLINE = 90
+RELEASE_DEADLINE = 60
+
+
+class Unexercisable(Exception):
+    """This device cannot show the property. Say so; never call it a pass."""
+
+
+def validate_device_ipv4(text: str) -> str:
+    """The runtime's rule, applied here so the operator hears it immediately.
+
+    `validate_device_ipv4` in crates/plurxd/src/live_tv.rs accepts a private or
+    link-local IPv4 and rejects loopback. Finding that out from a readiness
+    failure three minutes in, after a server boot, is a worse way to learn it.
+    """
+    try:
+        socket.inet_aton(text)
+    except OSError:
+        raise SystemExit("--device %r is not an IPv4 address" % text) from None
+    octets = [int(part) for part in text.split(".")]
+    if len(octets) != 4 or any(o < 0 or o > 255 for o in octets):
+        raise SystemExit("--device %r is not an IPv4 address" % text)
+    first, second = octets[0], octets[1]
+    if first == 127:
+        raise SystemExit(
+            "--device %s is loopback; the runtime refuses it. A hardware pass needs the\n"
+            "  tuner's own LAN address -- the one your router or the HDHomeRun app shows." % text)
+    private = (first == 10
+               or (first == 172 and 16 <= second <= 31)
+               or (first == 192 and second == 168)
+               or (first == 169 and second == 254))
+    if not private:
+        raise SystemExit(
+            "--device %s is not private or link-local; the runtime refuses it, so plurx\n"
+            "  will never reach a tuner at that address." % text)
+    return text
+
+
+def device_json(address: str, path: str, timeout: int = 6):
+    url = "http://%s:%d%s" % (address, DEVICE_PORT, path)
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.loads(response.read().decode())
+
+
+def host_lan_address(device: str) -> str:
+    """The address the device will see us from, so /status.json can be read.
+
+    A UDP connect assigns a local address without sending a packet, and routing
+    to the device picks the interface the daemon's stream will actually leave
+    by -- which is the address that shows up in the device's TargetIP.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect((device, DEVICE_PORT))
+        return probe.getsockname()[0]
+    finally:
+        probe.close()
+
+
+def tuner_status(address: str):
+    """Per-tuner state from the device's own side, or None on firmware without it.
+
+    Not every HDHomeRun firmware serves /status.json. Its absence costs the
+    strongest assertion in this script, so it is reported as unexercisable
+    rather than quietly skipped -- but it does not stop the rest.
+    """
+    try:
+        rows = device_json(address, "/status.json")
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    return rows
+
+
+def busy_tuners(rows, host: str):
+    """Tuners this host is holding, per the device."""
+    if rows is None:
+        return None
+    return [row for row in rows
+            if str(row.get("TargetIP") or "").strip() == host]
+
+
+def await_busy_count(address: str, host: str, expected: int, deadline_seconds: int):
+    """The device's own count of tuners we hold, settled.
+
+    A tuner is acquired and released asynchronously from the API call that
+    caused it, so a single read races. Returns (count, rows) at the first
+    reading that matches, else the last reading taken.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    rows = tuner_status(address)
+    if rows is None:
+        raise Unexercisable("this firmware does not serve /status.json")
+    while True:
+        held = busy_tuners(rows, host)
+        if len(held) == expected or time.monotonic() >= deadline:
+            return len(held), rows
+        time.sleep(1)
+        rows = tuner_status(address) or rows
+
+
+class Client:
+    def __init__(self, base_url, token):
+        self.base = base_url.rstrip("/")
+        self.token = token
+
+    def api(self, path, method="GET", body=None, timeout=60):
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + self.token}
+        request = urllib.request.Request(
+            self.base + "/api/v1" + path, method=method,
+            data=json.dumps(body).encode() if body is not None else None, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode()
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors="replace")[:400]
+            raise ApiRefusal(error.code, detail, "%s %s" % (method, path)) from None
+
+    def raw(self, url, timeout=30):
+        """Capability resources carry their own authority and never the bearer."""
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as response:
+            return response.status, response.read()
+
+
+class ApiRefusal(Exception):
+    def __init__(self, status, detail, where):
+        super().__init__("%s -> %s %s" % (where, status, detail))
+        self.status = status
+        self.detail = detail
+        try:
+            self.code = json.loads(detail).get("code")
+        except Exception:
+            self.code = None
+
+
+def wait_ready(client, expect_enabled=True):
+    """Refresh readiness until every check the current state can satisfy passes.
+
+    Before Live TV is enabled the enablement check is expected to fail; the
+    device, configuration and graph checks are the ones that must come up. This
+    deadline is longer than the fixture script's because the probes cross a real
+    network to a device that may be finishing a channel scan.
+    """
+    deadline = time.monotonic() + READY_DEADLINE
+    last = None
+    while time.monotonic() < deadline:
+        readiness = client.api("/live-tv/readiness/refresh", "POST")
+        failing = [c for c in readiness.get("checks", []) if not c.get("ready")]
+        if readiness.get("ready"):
+            return readiness
+        if not expect_enabled and failing and all(
+                "enabl" in (c.get("id", "") + c.get("message", "")).lower() for c in failing):
+            return readiness
+        last = readiness
+        time.sleep(3)
+    failing = [c for c in (last or {}).get("checks", []) if not c.get("ready")]
+    raise AssertionError("readiness never came up against the real device: %s"
+                         % json.dumps(failing, indent=2))
+
+
+def enable(client):
+    """Enabling is generation-fenced; a conflict is refetched, never forced."""
+    for attempt in range(5):
+        generation = client.api("/settings")["live_tv_config_generation"]
+        try:
+            client.api("/settings", "PUT",
+                       {"live_tv_config_generation": generation, "live_tv_enabled": True})
+            return
+        except ApiRefusal as conflict:
+            if conflict.status != 409 or attempt == 4:
+                raise
+            time.sleep(1)
+
+
+def playlist_facts(text):
+    sequence = int(re.search(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", text)[1])
+    segments = [line.strip() for line in text.splitlines()
+                if line.strip() and not line.startswith("#")]
+    durations = [float(m) for m in re.findall(r"#EXTINF:([0-9.]+)", text)]
+    return sequence, segments, (sum(durations) / len(durations) if durations else 0.0)
+
+
+def await_first_segment(client, playlist_url, deadline_seconds):
+    """Time from a started session to a segment a player could actually fetch."""
+    started = time.monotonic()
+    deadline = started + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            status, body = client.raw(playlist_url, timeout=15)
+        except urllib.error.HTTPError as error:
+            if error.code in (404, 409, 503):
+                time.sleep(0.25)
+                continue
+            raise
+        if status == 200:
+            sequence, segments, seconds = playlist_facts(body.decode())
+            if segments:
+                name = segments[-1]
+                code, chunk = client.raw(urljoin(playlist_url, name), timeout=30)
+                if code == 200 and chunk:
+                    return time.monotonic() - started, sequence, segments, seconds, name, chunk
+        time.sleep(0.25)
+    raise AssertionError("no playable segment within %ds of starting the session"
+                         % deadline_seconds)
+
+
+def probe_streams(ffprobe, segment_path):
+    """What the graph actually produced, read back rather than assumed."""
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-print_format", "json", "-show_streams",
+         "-show_format", str(segment_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        raise AssertionError("ffprobe could not read the published segment: %s"
+                            % result.stderr.decode(errors="replace")[:400])
+    document = json.loads(result.stdout.decode())
+    return document.get("streams", []), document.get("format", {})
+
+
+def split_own_args(argv):
+    """Take this script's arguments; hand the rest to the shared harness parser.
+
+    The harness's parse_args is shared with scripts/ui-baseline and knows
+    nothing about tuners, so its options are parsed there and these here.
+    """
+    own = argparse.ArgumentParser(add_help=False)
+    own.add_argument("--device", help="the real HDHomeRun's private IPv4 (required)")
+    own.add_argument("--tuners", type=int, default=1,
+                     help="how many of the device's tuners this run may occupy (default 1)")
+    own.add_argument("--channel", help="pin a guide number instead of taking the first playable one")
+    mine, rest = own.parse_known_args(argv)
+    # Before the shared parser sees the rest: it would refuse `--base-url`
+    # without a `--token` and name ui-baseline in the error, which sends the
+    # operator to the wrong script for a decision this one has already made.
+    if "--self-host" not in rest:
+        raise SystemExit(
+            "preflight failed, nothing was run:\n"
+            "  - only --self-host is accepted; a production server is not a test fixture.\n"
+            "    This boots a throwaway plurxd under --out and points it at --device.")
+    return mine, rest
+
+
+def preflight(mine, args):
+    """Everything knowable before a server is booted, named with its fix.
+
+    The shared harness preflight also demands playwright and a chromium, which
+    this script never opens: making someone install a browser next to a tuner to
+    prove a tuner works is a barrier for nothing. So the parts that apply are
+    checked here instead.
+    """
+    problems = []
+    if not mine.device:
+        problems.append("--device is required; this script will not guess which box is your tuner")
+    if not args.self_host:
+        problems.append("only --self-host is accepted; a production server is not a test fixture")
+    if mine.tuners < 1 or mine.tuners > MAX_CONFIGURABLE_SESSIONS:
+        problems.append("--tuners must be between 1 and %d (live_tv_max_sessions is validated to"
+                        " that range)" % MAX_CONFIGURABLE_SESSIONS)
+    if shutil.which(args.ffmpeg) is None:
+        problems.append("ffmpeg not found on PATH as %r\n"
+                        "      brew install ffmpeg | apt install ffmpeg | --ffmpeg /path/to/ffmpeg"
+                        % args.ffmpeg)
+    if shutil.which("ffprobe") is None:
+        problems.append("ffprobe not found on PATH; it is what reads the real codec back out of a\n"
+                        "      published segment. It ships with ffmpeg.")
+    if args.server_bin and not Path(args.server_bin).exists():
+        problems.append("--server-bin %s does not exist" % args.server_bin)
+    elif not args.server_bin and shutil.which("cargo") is None \
+            and not HARNESS["default_server_bin"]().exists():
+        problems.append("no %s and no cargo to build one\n"
+                        "      cargo build -p plurxd | --server-bin /path/to/plurxd"
+                        % HARNESS["default_server_bin"]())
+    if problems:
+        raise SystemExit("preflight failed, nothing was run:\n  - " + "\n  - ".join(problems))
+
+
+def main(argv):
+    mine, rest = split_own_args(argv)
+    args = HARNESS["parse_args"](rest)
+    preflight(mine, args)
+    device = validate_device_ipv4(mine.device)
+
+    out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+
+    # Before a server is booted: a device that does not answer is the operator's
+    # problem, and finding out after a two-minute fixture build wastes it.
+    try:
+        discover = device_json(device, "/discover.json")
+    except Exception as error:
+        raise SystemExit(
+            "the HDHomeRun at %s did not answer /discover.json (%s).\n"
+            "  Check the address, that the device is powered, and that this machine is on the\n"
+            "  same network: curl http://%s/discover.json" % (device, error, device)) from None
+
+    tuner_count = int(discover.get("TunerCount") or 0)
+    if tuner_count < 1:
+        raise SystemExit("the device at %s reports TunerCount %r; nothing can be tuned"
+                         % (device, discover.get("TunerCount")))
+    sessions = min(mine.tuners, tuner_count, MAX_CONFIGURABLE_SESSIONS)
+    host = host_lan_address(device)
+
+    serial = str(discover.get("DeviceID") or "")
+    evidence = {
+        "device": {
+            # The serial identifies someone's hardware and a run's output gets
+            # attached to reviews; the digest is enough to tell two runs apart.
+            "device_id_sha256_prefix": hashlib.sha256(serial.encode()).hexdigest()[:12],
+            "friendly_name": discover.get("FriendlyName"),
+            "model_number": discover.get("ModelNumber"),
+            "firmware_name": discover.get("FirmwareName"),
+            "firmware_version": discover.get("FirmwareVersion"),
+            "tuner_count": tuner_count,
+            "address": device,
+        },
+        "host_address_seen_by_device": host,
+        "tuners_this_run_may_occupy": sessions,
+        "not_exercisable": {},
+    }
+    print("device %s %s firmware %s, %d tuners; this run may occupy %d, seen from %s"
+          % (discover.get("ModelNumber"), discover.get("FriendlyName"),
+             discover.get("FirmwareVersion"), tuner_count, sessions, host))
+
+    baseline = tuner_status(device)
+    if baseline is None:
+        evidence["not_exercisable"]["device_side_tuner_proof"] = (
+            "this firmware does not serve /status.json, so the device cannot be asked whether "
+            "plurx holds a tuner; every tuner count below is plurx's own account of itself")
+    else:
+        already = busy_tuners(baseline, host)
+        assert not already, (
+            "this host already holds %d tuner(s) on the device before the run started: %s. "
+            "Something else here is streaming from it; stop that first or the counts below "
+            "mean nothing." % (len(already), json.dumps(already)))
+        evidence["device_busy_tuners_before_run"] = len(
+            [r for r in baseline if str(r.get("TargetIP") or "").strip()])
+
+    server = HARNESS["SelfHost"](args)
+    server.start()
+    client = Client(server.base_url, server.token)
+    data_root = Path(server.data_dir) if getattr(server, "data_dir", None) else None
+    opened = []
+
+    try:
+        settings = client.api("/settings")
+        node = client.api("/server")["node_id"]
+
+        # --- the device's real tuner count bounds the configuration ----------
+        if tuner_count < MAX_CONFIGURABLE_SESSIONS:
+            over = tuner_count + 1
+            refused = None
+            try:
+                client.api("/settings", "PUT", {
+                    "live_tv_config_generation": settings["live_tv_config_generation"],
+                    "live_tv_device_ipv4": device, "live_tv_owner_node_id": node,
+                    "live_tv_max_sessions": over, "live_tv_output_height": 720,
+                })
+            except ApiRefusal as error:
+                refused = error
+            if refused is None:
+                # The write may be accepted and the conflict surfaced by
+                # readiness instead; either is a refusal to use a tuner that
+                # does not exist, and both are recorded as what happened.
+                readiness = client.api("/live-tv/readiness/refresh", "POST")
+                limit = next((c for c in readiness.get("checks", [])
+                              if c.get("id") == "session_limit"), None)
+                assert limit is not None and not limit.get("ready"), (
+                    "configuring %d sessions on a %d-tuner device was accepted and readiness did "
+                    "not object: %s" % (over, tuner_count, json.dumps(readiness.get("checks"))))
+                evidence["over_count_refused_by"] = "session_limit readiness check"
+                evidence["over_count_message"] = limit.get("message")
+            else:
+                evidence["over_count_refused_by"] = "settings write"
+                evidence["over_count_message"] = refused.detail[:200]
+            settings = client.api("/settings")
+        else:
+            evidence["not_exercisable"]["over_count_refusal"] = (
+                "this device reports %d tuners and live_tv_max_sessions is validated to 1..=%d, so "
+                "there is no configurable value above the device's count to refuse"
+                % (tuner_count, MAX_CONFIGURABLE_SESSIONS))
+
+        saved = client.api("/settings", "PUT", {
+            "live_tv_config_generation": settings["live_tv_config_generation"],
+            "live_tv_device_ipv4": device, "live_tv_owner_node_id": node,
+            "live_tv_max_sessions": sessions, "live_tv_output_height": 720,
+        })
+        evidence["configured_generation"] = saved["live_tv_config_generation"]
+
+        # The server rechecks readiness when asked to enable, so ask for it
+        # first: this is the order the Developer screen walks an operator
+        # through, and enabling a device nobody has probed tests nothing.
+        wait_ready(client, expect_enabled=False)
+        enable(client)
+        readiness = wait_ready(client)
+        evidence["readiness_checks"] = [
+            {"id": c.get("id"), "ready": c.get("ready"), "message": c.get("message")}
+            for c in readiness.get("checks", [])]
+
+        # --- a real lineup ---------------------------------------------------
+        lineup = client.api("/live-tv/channels")["channels"]
+        assert lineup, ("the device's lineup is empty. Run a channel scan on the HDHomeRun "
+                        "itself first; there is nothing here to accept.")
+        playable = [c for c in lineup if c.get("support") == "ready" and not c.get("drm")]
+        protected = [c for c in lineup if c.get("drm")]
+        unready = [c for c in lineup if c.get("support") != "ready"]
+        evidence["lineup"] = {
+            "channels": len(lineup),
+            "playable": len(playable),
+            "drm_flagged": len(protected),
+            "not_ready": len(unready),
+        }
+        assert playable, (
+            "every one of the %d channels this device reports is DRM-flagged or unsupported, so no "
+            "session can be started. That is a real result about this lineup, not a plurx defect, "
+            "but it cannot accept the streaming path." % len(lineup))
+
+        # Every protected channel must be unplayable in the listing AND refused
+        # at the door. A lineup with none of them cannot show it.
+        for channel in protected:
+            assert channel.get("support") != "ready", (
+                "channel %s is DRM-flagged and still reports support=ready"
+                % channel.get("guide_number"))
+        if protected:
+            victim = protected[0]
+            try:
+                client.api("/live-tv/channels/%s/sessions" % victim["id"], "POST")
+                raise AssertionError(
+                    "starting DRM-flagged channel %s was accepted" % victim.get("guide_number"))
+            except ApiRefusal as refusal:
+                assert refusal.code == "drm_unsupported", (
+                    "starting DRM-flagged channel %s was turned away with %r, not "
+                    "'drm_unsupported'" % (victim.get("guide_number"), refusal.code))
+            evidence["drm_refusal_code"] = "drm_unsupported"
+        else:
+            evidence["not_exercisable"]["drm_boundary"] = (
+                "this lineup has no DRM-flagged channel, so the refusal path has nothing to "
+                "refuse here; the unit fixtures cover the classification")
+
+        # --- real startup, real segment, real codec --------------------------
+        wanted = mine.channel
+        if wanted:
+            channel = next((c for c in playable if c.get("guide_number") == wanted), None)
+            assert channel is not None, (
+                "--channel %s is not a playable channel on this device; playable: %s"
+                % (wanted, ", ".join(c.get("guide_number", "?") for c in playable[:20])))
+        else:
+            channel = playable[0]
+
+        started_at = time.monotonic()
+        started = client.api("/live-tv/channels/%s/sessions" % channel["id"], "POST")
+        capability = started["session_id"]
+        opened.append(capability)
+        accept_seconds = time.monotonic() - started_at
+
+        playlist_url = "%s/api/v1/live-tv/sessions/%s/index.m3u8" % (server.base_url, capability)
+        startup, sequence, segments, segment_seconds, name, chunk = await_first_segment(
+            client, playlist_url, SEGMENT_DEADLINE)
+
+        segment_path = out / "first-segment.ts"
+        segment_path.write_bytes(chunk)
+        streams, container = probe_streams("ffprobe", segment_path)
+        video = [s for s in streams if s.get("codec_type") == "video"]
+        audio = [s for s in streams if s.get("codec_type") == "audio"]
+        assert video, ("the published segment carries no video stream: %s"
+                       % json.dumps(streams)[:400])
+        assert audio, ("the published segment carries no audio stream. Live TV requires audio; a "
+                       "silent picture is a defect, not a degraded mode: %s"
+                       % json.dumps(streams)[:400])
+
+        evidence["session"] = {
+            "guide_number": channel.get("guide_number"),
+            "accept_seconds": round(accept_seconds, 3),
+            "seconds_to_first_playable_segment": round(startup, 3),
+            "startup_budget_seconds": STARTUP_BUDGET,
+            "first_media_sequence": sequence,
+            "published_window_segments": len(segments),
+            "segment_seconds": round(segment_seconds, 3),
+            "first_segment_bytes": len(chunk),
+            "container": container.get("format_name"),
+            "video_codec": video[0].get("codec_name"),
+            "video_height": video[0].get("height"),
+            "audio_codec": audio[0].get("codec_name"),
+            "audio_channels": audio[0].get("channels"),
+        }
+        assert len(segments) <= LISTED_SEGMENTS, (
+            "the live window published %d segments; at most %d may be listed"
+            % (len(segments), LISTED_SEGMENTS))
+        assert startup <= STARTUP_BUDGET, (
+            "the first playable segment took %.1fs; STARTUP_TIMEOUT is %ds, so a real tune on "
+            "this device does not fit the budget the runtime enforces"
+            % (startup, STARTUP_BUDGET))
+        # Configured output_height is a ceiling, not a promise to upscale: an SD
+        # channel legitimately arrives shorter. Exceeding it is the defect.
+        assert int(video[0].get("height") or 0) <= 720, (
+            "output_height was configured to 720 and the published segment carries %r"
+            % video[0].get("height"))
+
+        # --- the device's own account of who holds its tuners ----------------
+        try:
+            held, rows = await_busy_count(device, host, 1, 30)
+            assert held == 1, (
+                "the device reports %d tuner(s) held by this host during one session: %s"
+                % (held, json.dumps(busy_tuners(rows, host))))
+            mine_rows = busy_tuners(rows, host)
+            evidence["session"]["device_reported_vct"] = mine_rows[0].get("VctNumber")
+            evidence["session"]["signal_strength_percent"] = mine_rows[0].get(
+                "SignalStrengthPercent")
+            evidence["session"]["signal_quality_percent"] = mine_rows[0].get(
+                "SignalQualityPercent")
+            evidence["session"]["device_resource"] = mine_rows[0].get("Resource")
+            # A device that names the channel it is on lets us prove we tuned
+            # what we asked for. Not every source populates VctNumber (a QAM
+            # lineup may not), so its absence is recorded, not asserted away.
+            reported = str(mine_rows[0].get("VctNumber") or "").strip()
+            if reported:
+                assert reported == str(channel.get("guide_number") or ""), (
+                    "the device says it is tuned to %r while plurx says it started %r"
+                    % (reported, channel.get("guide_number")))
+            else:
+                evidence["not_exercisable"]["tuned_channel_confirmed_by_device"] = (
+                    "this device reports no VctNumber for the busy tuner, so it can confirm that "
+                    "we hold a tuner but not which channel it is on")
+        except Unexercisable as reason:
+            evidence["not_exercisable"]["device_side_tuner_proof"] = str(reason)
+
+        # --- filling the tuners, and the refusal after that ------------------
+        others = [c for c in playable if c["id"] != channel["id"]]
+        if sessions < 2:
+            evidence["not_exercisable"]["tuner_capacity"] = (
+                "this run was allowed one tuner (--tuners 1), so there is no full state to be "
+                "refused from; rerun with --tuners 2 or more when the device is free")
+        elif len(others) < sessions:
+            # Two readers of one channel is a different question from two
+            # tuners, and whether the runtime folds them is not something to
+            # guess at from here. Without enough distinct channels, say so.
+            evidence["not_exercisable"]["tuner_capacity"] = (
+                "filling %d tuners needs %d distinct playable channels and this lineup has %d; "
+                "one channel opened twice would not distinguish a second tuner from a second "
+                "reader" % (sessions, sessions, len(playable)))
+        else:
+            for index in range(sessions - 1):
+                more = client.api("/live-tv/channels/%s/sessions" % others[index]["id"], "POST")
+                assert more["session_id"] not in opened, (
+                    "starting channel %s returned the capability already open for another "
+                    "channel" % others[index].get("guide_number"))
+                opened.append(more["session_id"])
+            try:
+                client.api("/live-tv/channels/%s/sessions" % others[sessions - 1]["id"], "POST")
+                raise AssertionError(
+                    "a %dth session was accepted with live_tv_max_sessions=%d"
+                    % (sessions + 1, sessions))
+            except ApiRefusal as refusal:
+                assert refusal.code == "tuner_capacity", (
+                    "the session past the configured limit was turned away with %r, not "
+                    "'tuner_capacity'" % refusal.code)
+            evidence["capacity"] = {
+                "configured_sessions": sessions,
+                "sessions_open": len(opened),
+                "refusal_code": "tuner_capacity",
+            }
+            try:
+                held, rows = await_busy_count(device, host, sessions, 45)
+                assert held == sessions, (
+                    "plurx holds %d sessions and the device reports %d tuner(s) for this host: %s"
+                    % (len(opened), held, json.dumps(busy_tuners(rows, host))))
+                evidence["capacity"]["device_reported_busy"] = held
+            except Unexercisable as reason:
+                evidence["not_exercisable"]["capacity_confirmed_by_device"] = str(reason)
+
+        # --- release, and the device agreeing it is free ---------------------
+        for capability in opened:
+            client.api("/live-tv/sessions/%s" % capability, "DELETE")
+        opened.clear()
+        try:
+            held, rows = await_busy_count(device, host, 0, RELEASE_DEADLINE)
+            assert held == 0, (
+                "%ds after every session was released the device still reports %d tuner(s) held "
+                "by this host: %s" % (RELEASE_DEADLINE, held, json.dumps(busy_tuners(rows, host))))
+            evidence["device_tuners_after_release"] = 0
+        except Unexercisable as reason:
+            evidence["not_exercisable"]["release_confirmed_by_device"] = str(reason)
+
+        leftover = 0
+        if data_root and data_root.exists():
+            live = [p for p in data_root.rglob("*") if p.is_dir() and "live" in p.name.lower()]
+            leftover = sum(f.stat().st_size for d in live for f in d.rglob("*") if f.is_file())
+        evidence["scratch_bytes_after_release"] = leftover
+        assert leftover == 0, "%d bytes of live scratch survived an explicit release" % leftover
+
+        (out / "hardware.json").write_text(json.dumps(evidence, indent=2) + "\n")
+        capacity = evidence.get("capacity")
+        print("PASS real %s: first playable segment in %.1fs of a %ds budget, %.1fs segments, "
+              "%s/%s at %sp, window never past %d, %s, every tuner handed back"
+              % (evidence["device"]["model_number"], startup, STARTUP_BUDGET, segment_seconds,
+                 evidence["session"]["video_codec"], evidence["session"]["audio_codec"],
+                 evidence["session"]["video_height"], LISTED_SEGMENTS,
+                 "%d session(s) filled and the next refused" % capacity["sessions_open"]
+                 if capacity else "capacity not exercised"))
+        for key, reason in evidence["not_exercisable"].items():
+            print("  NOT EXERCISABLE %s: %s" % (key, reason))
+        print("  evidence: %s" % (out / "hardware.json"))
+        return 0
+    finally:
+        # A tuner left open is somebody's recording turned away later. Give
+        # every one back even when an assertion above stopped the run.
+        for capability in opened:
+            try:
+                client.api("/live-tv/sessions/%s" % capability, "DELETE", timeout=15)
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -217,6 +217,14 @@ cluster-daemon-check: ## Run real-daemon activation and activity contracts
 	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
 	  --test cluster_activity -- --nocapture
 
+.PHONY: live-tv-hardware-check
+live-tv-hardware-check: ## Accept Live TV against a real HDHomeRun (set DEVICE=<tuner ipv4>, optional TUNERS=n)
+	test -n "$(DEVICE)" || { \
+	  echo "set DEVICE to your HDHomeRun's private IPv4, e.g. make live-tv-hardware-check DEVICE=192.168.4.20"; \
+	  exit 2; }
+	python3 scripts/live-tv-hardware --self-host --device "$(DEVICE)" \
+	  --tuners "$(or $(TUNERS),1)" --out target/live-tv-hardware
+
 .PHONY: live-tv-two-node-check
 live-tv-two-node-check: ## Run the two-node Live TV acceptance cases (needs a host that can bind ports 80 and 5004)
 	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \

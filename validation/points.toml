@@ -306,6 +306,22 @@ missing = "fail"
 timeout_seconds = 600
 
 [[checks]]
+id = "live-tv-hardware"
+title = "A real HDHomeRun tunes, reports its own busy tuners, and hands them back"
+command = "scripts/live-tv-hardware --self-host --device \"$PLURX_LIVE_TV_DEVICE\" --tuners \"${PLURX_LIVE_TV_TUNERS:-1}\" --out target/live-tv-hardware"
+profiles = ["nightly"]
+platforms = ["darwin", "linux"]
+requires = ["python3", "cargo", "ffmpeg", "ffprobe"]
+requires_files = ["scripts/live-tv-hardware"]
+# Nothing here can be faked, which is the point, and nothing here can run
+# without hardware. PLURX_LIVE_TV_DEVICE names the tuner and is the operator
+# saying its tuners may be occupied for a few minutes; without it this skips
+# rather than pretending a fixture pass covers a tuner.
+preflight = "test -n \"$PLURX_LIVE_TV_DEVICE\""
+missing = "skip"
+timeout_seconds = 1800
+
+[[checks]]
 id = "live-tv-two-node"
 title = "Two real daemons relay one tuner and never take it over on elapsed time alone"
 command = "make live-tv-two-node-check"
@@ -646,9 +662,10 @@ paths = [
   "scripts/live-tv-browser",
   "scripts/live-tv-endless",
   "crates/plurxd/tests/live_tv_two_node.rs",
+  "scripts/live-tv-hardware",
   "docs/HDHOMERUN-LIVE-TV-*.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node"]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node", "live-tv-hardware"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]
