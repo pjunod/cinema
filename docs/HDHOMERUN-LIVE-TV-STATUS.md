@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** backend and Apple merged; web acceptance passed; Android qualification in progress · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** backend, web, Apple and Android merged; M5 acceptance scripts and documentation merged; **the hardware pass has not run** · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-05 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -20,7 +20,12 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | M3 web client | reviewed; merged with M4 Apple; effort PR pending | — | 18 focused tests; `70607d14` passed pinned static checks, decoded H.264/AAC media acceptance, and 72 structural captures against the committed baseline |
 | M4 Apple | merged | [#17](http://192.168.4.7:3000/noirr/plurx/pulls/17) | Astra approved `8cfe8cc5`; iOS/tvOS compile and 14 focused tests pass on each simulator; effort gate 95 passed; merge `fc9c8f45` |
 | M4 Android | reviewed; effort PR open and green | [#23](http://192.168.4.7:3000/noirr/plurx/pulls/23) | dedicated live player and Developer controls; 15 focused tests and both instrumentation tests pass on an API 36 phone emulator; exact JDK 25 / SDK 37 build passes; adversarial review closed a shared critical double-allocation path. Television instrumentation is still outstanding |
-| M5 docs, hardware, promotion | not started | — | — |
+| M5 endless-source acceptance | merged | [#28](http://192.168.4.7:3000/noirr/plurx/pulls/28) | `scripts/live-tv-endless` drives ten real window rollovers against an endless FFmpeg source: one tuner GET, window never past six, 29.9 MB peak scratch, orphan expiry in 65 s, zero bytes left |
+| M5 carried-forward review closeout | merged | [#30](http://192.168.4.7:3000/noirr/plurx/pulls/30) | 25 web tests, 16 Android unit tests, 4 instrumentation tests (2 `LiveTvUiTest`, 2 `LiveTvFileBarrierStoreTest`) pass |
+| M5 two-node acceptance | merged | [#31](http://192.168.4.7:3000/noirr/plurx/pulls/31) | three cases written and compiled clean behind `cluster-integration-tests`; `make live-tv-two-node-check`. **Never executed** — no reachable host can bind port 80 for the fixture device and run two daemons |
+| M5 hardware acceptance | script written; never pointed at a device | [#32](http://192.168.4.7:3000/noirr/plurx/pulls/32) | `scripts/live-tv-hardware` plus `make live-tv-hardware-check DEVICE=<ipv4>`; argument, address, bound and unreachable-device paths exercised. **The hardware path has never run** |
+| M5 documentation | written | this change | Live TV now appears in FEATURES §4a, ROADMAP, ARCHITECTURE §3a, PLAYBACK, OPERATIONS (runbook + problems + ports), CHEATSHEET §5, SECURITY, both client-parity docs, REQUIREMENTS §3a and the README, whose live-TV non-goal is narrowed to "no DVR" rather than deleted |
+| M5 promotion | blocked on hardware | — | the household numbers the docs are waiting for come from `make live-tv-hardware-check`, and it has not run |
 
 ## Current work — finish client acceptance and effort gates
 
@@ -165,11 +170,25 @@ node access.
 | All first-party clients are in scope | a living-room feature is not complete as a web-only API | owner explicitly narrows the product surface |
 | Separate Apple and Android task PRs within M4 | each platform gets an independently reviewed, compiled and tested candidate; neither blocks review of the other | both merge before final promotion |
 
+## What remains
+
+1. **Run the hardware pass.** `make live-tv-hardware-check DEVICE=<tuner ipv4> TUNERS=2` on a machine on the tuner's network. It writes `target/live-tv-hardware/hardware.json` with the device's real tuner count, real time to a playable segment against the 15 s budget, real segment length, signal strength and quality, the codec that survived the graph, and the device's own `/status.json` account of which tuners plurx held and that they came back. Every "pending the hardware pass" in the documentation points here.
+2. **Run the two-node cases.** `make live-tv-two-node-check` on a Linux host that can bind ports 80 and 5004. They compile and have never executed; expect to debug the harness as well as the product on the first run.
+3. **Android television instrumentation.** The AOSP Android TV system image enforces adb authorization, which a headless container cannot grant, so the television half of `LiveTvUiTest` needs one of the arm64 AVDs on the Mac.
+4. **Promotion.** Only after 1–3.
+
 ## Known limits — honest until evidence changes them
 
 - HDHomeRun HTTP behavior differs by model and firmware; the hardware pass
   must record `discover.json`, sanitized lineup facts, headers, and FFmpeg
-  result from the actual device.
+  result from the actual device. `scripts/live-tv-hardware` now exists to do
+  exactly that and has not been pointed at a device. Firmware that does not
+  serve `/status.json` costs the strongest assertion in it — that the device
+  itself agrees which tuners plurx holds — and it reports that as
+  `not_exercisable` rather than skipping quietly.
+- The default two concurrent sessions, the real startup latency and the real
+  segment length in the documentation are **defaults and budgets, not
+  measurements**. Nothing in this tree has measured them against a tuner.
 - ATSC 3.0 commonly needs HEVC and AC-4. Device reception does not prove the
   installed FFmpeg can decode either.
 - Owner failure ends the current live session. Reconfiguration remains possible

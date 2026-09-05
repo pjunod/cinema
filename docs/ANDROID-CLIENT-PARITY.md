@@ -212,6 +212,35 @@ focused `LiveTvTest` cases cover these contracts; physical decode and remote
 navigation remain separate acceptance evidence. DRM, DVR, rewind, captions and
 guide scheduling are deliberately unsupported in the first profile.
 
+### Live TV
+
+The Android Live TV surface is a dedicated Media3 player rather than the finite
+-media controller: channel selection, pause/resume, mute, fullscreen and stop,
+with no scrubber, no resume point and no progress write. It renews its session
+on **rendered frame count** rather than playback position, because a Media3 live
+window's position can move backwards during healthy playback — a frozen picture
+expires, a shuffling live edge does not.
+
+`LiveTvLease` carries the same uncertainty barrier as the other clients: only a
+failure decided before a tuner can open (`live_tv_disabled`,
+`live_tv_protocol_unready`, `drm_unsupported`, `channel_not_found`,
+`settings_conflict`, `tuner_capacity`, `admin_required`, `invalid_settings`)
+clears the durable ownership marker; anything else holds it for 90 s, because
+an unrecognised failure may mean a tuner did open. The marker is an `AtomicFile`
+written before the POST and refreshed in-process during playback — the
+heartbeat deliberately does **not** rewrite it, since an `fsync` every five
+seconds on the main thread during live video costs frames and buys nothing an
+observer could see.
+
+**Proved:** 16 focused unit tests and four instrumentation tests (two
+`LiveTvUiTest`, two `LiveTvFileBarrierStoreTest`) pass on an API 36 x86_64
+phone emulator under the exact JDK 25 / SDK 37 build. **Not proved:** the
+television profile. Initial D-pad focus is the 10-foot contract and its
+assertion is scoped to television `uiMode`; the AOSP Android TV system image
+enforces adb authorization, which a headless container cannot grant, so that
+half needs one of the arm64 AVDs on the Mac. Playback against a real tuner is
+the hardware pass and has not run.
+
 ## Layout verification
 
 The shared Compose UI has compact, expanded, and television form factors. The
