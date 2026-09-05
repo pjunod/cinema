@@ -444,25 +444,90 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn(f"PLURX_DISCOVERY_SERVER_URL: {configured_origin}", discovery)
         self.assertIn(f"PLURX_BIND: {configured_bind}", discovery)
 
+    def _run_rollout_recipe(self, proof_exit: int) -> tuple[int, Path]:
+        """Run the real `docker-up` recipe with the checker and Docker stubbed."""
+
+        rollout = [
+            line
+            for line in make_dry_run_commands("docker-up")
+            if "docker compose up -d --build" in line
+        ][0]
+        directory = Path(tempfile.mkdtemp())
+        marker = directory / "compose-up-ran"
+        stubs = directory / "bin"
+        stubs.mkdir()
+        (stubs / "python3").write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            "  *--emit-start-period*) echo 1335s ;;\n"
+            f"  *) exit {proof_exit} ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (stubs / "docker").write_text(
+            "#!/bin/sh\n"
+            f'printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{marker}"\n',
+            encoding="utf-8",
+        )
+        for stub in stubs.iterdir():
+            stub.chmod(0o755)
+        environment = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}")
+        result = subprocess.run(
+            ["sh", "-c", rollout],
+            cwd=ROOT,
+            check=False,
+            text=True,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.returncode, marker
+
+    def test_a_failed_budget_proof_stops_the_rollout_before_it_touches_a_container(
+        self,
+    ):
+        # The proof used to be a make prerequisite, so make itself guaranteed a
+        # failed check stopped the deploy. It is now `&&` inside one recipe, so
+        # the guarantee is shell-level and has to be exercised: a `;` here
+        # would let a refused budget deploy anyway, and no assertion about the
+        # recipe's text catches that.
+        code, marker = self._run_rollout_recipe(proof_exit=2)
+        self.assertNotEqual(code, 0)
+        self.assertFalse(
+            marker.exists(), "compose up ran after the budget proof failed"
+        )
+
+        code, marker = self._run_rollout_recipe(proof_exit=0)
+        self.assertEqual(code, 0)
+        self.assertTrue(marker.exists())
+        # The period that was proved is the period that gets applied.
+        self.assertEqual(marker.read_text(encoding="utf-8"), "1335s")
+
     def test_docker_up_preserves_override_discovery_and_stamps_the_build(self):
         commands = make_dry_run_commands("docker-up")
         command = "\n".join(commands)
-        preflight_commands = [
-            index
-            for index, line in enumerate(commands)
-            if line == "cd deploy && python3 ../scripts/validate-docker-startup-budget"
+        rollouts = [
+            line for line in commands if "docker compose up -d --build" in line
         ]
-        mutation_commands = [
-            index
-            for index, line in enumerate(commands)
-            if "docker compose up -d --build" in line
-        ]
-        self.assertEqual(preflight_commands, [0])
-        self.assertEqual(len(mutation_commands), 1)
-        self.assertLess(preflight_commands[0], mutation_commands[0])
-        self.assertIn("cd deploy && PLURX_BUILD_REF=", command)
-        self.assertIn("PLURX_NODE_HOSTNAME=", command)
-        self.assertIn("docker compose up -d --build", command)
+        self.assertEqual(len(rollouts), 1)
+        rollout = rollouts[0]
+        self.assertTrue(rollout.startswith("cd deploy && "))
+        self.assertEqual(rollout.count("--emit-start-period"), 1)
+        # Derive once, prove that period, then apply the period that was
+        # proved. A preflight proving a number the mutation does not use is
+        # not a preflight, so the proof and the mutation must read the same
+        # shell variable and must not each derive their own.
+        proof = (
+            'PLURX_HEALTH_START_PERIOD="$period" python3 '
+            "../scripts/validate-docker-startup-budget"
+        )
+        self.assertIn(proof, rollout)
+        self.assertLess(rollout.index("--emit-start-period"), rollout.index(proof))
+        self.assertLess(
+            rollout.index(proof), rollout.index("docker compose up -d --build")
+        )
+        self.assertIn('PLURX_HEALTH_START_PERIOD="$period" PLURX_BUILD_REF=', rollout)
+        self.assertIn("PLURX_NODE_HOSTNAME=", rollout)
         self.assertNotIn("-f deploy/docker-compose.yml", command)
 
         makefile = read("Makefile")

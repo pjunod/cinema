@@ -63,13 +63,26 @@ services:
     image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurxd
     restart: unless-stopped
-    # Keep this paired with PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS when a
-    # deployment raises the default 120s snapshot deadline. The start period
-    # must cover that value plus the three startup allowances (135s total).
-    # `make docker-up` proves the resolved pair before changing containers;
-    # invoking `docker compose up` directly bypasses that safety check. Five
-    # minutes covers the default without hiding a broken build for the
-    # one-hour maximum; `.env.example` shows the maximum pair.
+    # This must cover the effective snapshot deadline plus the three startup
+    # allowances (135s total). Keeping that pair in step used to be an
+    # operator's job, and it does not work: the deadline commonly lives in a
+    # bind-mounted plurx.toml that `.env` never mentions, so the two halves are
+    # in different files on different machines and the first report of a
+    # mismatch is a refused deploy. `make docker-up` now derives this value
+    # from the same deadline its preflight reads, so leaving it unset is always
+    # the right number rather than a number somebody has to maintain.
+    #
+    # Set it in `.env` only to *choose* a grace — a longer one, or a
+    # deliberately short one that surfaces a broken build fast. Anything that
+    # resolves to something other than the default written below was chosen by
+    # somebody, wherever they wrote it, and is used exactly as Compose resolved
+    # it: nothing here re-reads `.env` and second-guesses that. It is never
+    # raised past you; if it cannot cover the deadline the preflight refuses it
+    # by name. Five minutes is the unset default for a deployment
+    # that never resolves anything longer: it covers the 120s default without
+    # hiding a broken build for the one-hour maximum, and `.env.example` shows
+    # the maximum pair. Invoking `docker compose up` directly derives nothing
+    # and proves nothing.
     healthcheck:
       test: ["CMD", "plurxd", "healthcheck"]
       interval: 30s

@@ -1,8 +1,29 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-03 · Kept current by the working agent in the same
+**Updated:** 2026-09-05 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## A deploy that refused itself over an unmaintainable pair
+
+**PR [#37](http://192.168.4.7:3000/noirr/plurx/pulls/37) — open against
+`main`.** `make
+docker-up` on nynuc refused to change a container: the health start period was
+the tracked five minutes, and `/srv/plurx/plurx.toml` sets
+`install_snapshot_timeout_secs = 1200`, which with the three named startup
+phases requires 1,335 seconds. The preflight was right. The design was not: the
+two halves of that budget live in different files on different machines — the
+deadline in a production TOML this repository never sees, the grace in
+`deploy/.env` — and nothing paired them, so the pairing rule existed only in
+prose and the first report of a mismatch was a refused deploy on the host.
+
+`make docker-up` now derives the grace from the same resolved deadline the
+refusal is computed from, proves that value, and applies the value it proved. A
+grace an operator wrote is passed through untouched and still refused by name
+if it is too short, because a deliberately short grace is how a permanently
+broken build gets reported instead of waited out. Verified on nynuc itself:
+the same command that refused now reports `health=1335s, snapshot=1200s
+(/srv/plurx/plurx.toml)`. `make operations-check` — 185 tests — passes.
 
 ## The fragment-index queue built nothing for three days
 

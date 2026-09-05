@@ -506,15 +506,23 @@ runbook is in
 
 The image and Compose default to a five-minute startup health grace: enough for
 the default 120-second snapshot deadline and the three 45-second startup phases,
-without hiding a permanently broken build for an hour. If `.env` raises
-`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS`, also set
-`PLURX_HEALTH_START_PERIOD` to at least that timeout plus 135 seconds. The
-maximum supported pair is shown in `.env.example`.
+without hiding a permanently broken build for an hour. A deployment that raises
+`cluster.install_snapshot_timeout_secs` — in `.env`, or in a production TOML
+this repository never sees — needs a longer grace, and does not have to
+maintain one: leave `PLURX_HEALTH_START_PERIOD` unset and `make docker-up`
+derives it from the resolved timeout plus 135 seconds. Set the variable only to
+choose a grace deliberately. Any resolved grace other than the tracked
+five-minute default counts as chosen — wherever you wrote it — and is used
+exactly as Compose resolved it, refused by name rather than overruled if it
+cannot cover the timeout. The maximum supported pair is shown in
+`.env.example`.
 
 Run `make docker-up` from the repository root for every Compose rollout. Its
-read-only `docker-startup-budget-check` prerequisite resolves shell variables,
-`deploy/.env`, Compose defaults and overrides, and a readable bind-mounted
-production TOML before `docker compose up` can replace a container. If a named
+first step derives the grace only if the deployment has not chosen one, its
+second proves the budget it is about to apply — shell variables, `deploy/.env`,
+Compose defaults and overrides, and a readable bind-mounted production TOML all
+at their usual precedence — and only then does `docker compose up` replace a
+container, with the same period that was proved. If a named
 volume or another opaque mount hides the production config, the check assumes
 the source maximum unless the resolved
 `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` is explicit. This conservative

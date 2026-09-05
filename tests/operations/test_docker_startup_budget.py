@@ -240,6 +240,122 @@ class DockerStartupBudgetTests(unittest.TestCase):
         self.assertIn("nothing was changed", result.stderr)
         self.assertNotIn(secret, result.stdout + result.stderr)
 
+    def test_an_unset_health_grace_derives_the_period_the_deploy_needs(self):
+        document = compose_document(
+            environment={"PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "1200"}
+        )
+
+        value, explanation = CHECKER["start_period_for_deployment"](document)
+
+        self.assertEqual(value, "1335s")
+        self.assertIn("derived", explanation)
+        self.assertIn("1200s", explanation)
+
+    def test_a_deadline_only_a_production_toml_knows_still_derives_the_grace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "plurx.toml"
+            config.write_text(
+                "[cluster]\ninstall_snapshot_timeout_secs = 1200\n",
+                encoding="utf-8",
+            )
+            document = compose_document(
+                environment={"PLURX_CONFIG": "/var/lib/plurx/plurx.toml"},
+                volumes=[
+                    {
+                        "type": "bind",
+                        "source": directory,
+                        "target": "/var/lib/plurx",
+                    }
+                ],
+            )
+            value, explanation = CHECKER["start_period_for_deployment"](document)
+
+        # The failure this closes: the deadline lives in a bind-mounted file
+        # `.env` never mentions, so nothing paired the readiness grace to it
+        # and the first report was a refused deploy on the host.
+        self.assertEqual(value, "1335s")
+        self.assertIn(str(config), explanation)
+
+    def test_a_default_deployment_keeps_the_compose_default_untouched(self):
+        value, _ = CHECKER["start_period_for_deployment"](compose_document())
+
+        self.assertEqual(value, "300s")
+
+    def test_a_grace_this_deployment_chose_is_left_as_written_and_refused(self):
+        # Anything other than the tracked interpolation default was chosen by
+        # somebody -- a shell variable, deploy/.env, or a literal pinned in an
+        # override -- at Compose's own precedence. A deliberately short grace
+        # reports a build that can never become ready, so it is refused by
+        # name rather than raised past the operator who wrote it.
+        document = compose_document(
+            start_period="1m0s",
+            environment={"PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "1200"},
+        )
+
+        value, explanation = CHECKER["start_period_for_deployment"](document)
+
+        self.assertEqual(value, "60s")
+        self.assertIn("chosen by this deployment", explanation)
+        with self.assertRaisesRegex(BudgetError, r"60s.*requires at least 1335s"):
+            CHECKER["validate_document"](document)
+
+    def test_a_longer_grace_than_the_budget_needs_is_kept(self):
+        document = compose_document(
+            start_period="40m0s",
+            environment={"PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "1200"},
+        )
+
+        value, explanation = CHECKER["start_period_for_deployment"](document)
+
+        self.assertEqual(value, "2400s")
+        self.assertIn("covers the budget", explanation)
+        CHECKER["validate_document"](document)
+
+    def test_the_tracked_default_is_read_from_compose_not_hard_coded(self):
+        # Nothing here re-implements Compose's env-file or interpolation rules:
+        # "did anybody choose?" is answered by comparing what Compose resolved
+        # against the default this repository ships. A checker that disagreed
+        # with Compose about `.env` would export a period that silently
+        # outranks the operator's own file.
+        self.assertEqual(
+            CHECKER["tracked_default_health_seconds"](),
+            CHECKER["parse_duration"]("5m", "expected tracked default"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            pinned = Path(directory) / "docker-compose.yml"
+            pinned.write_text(
+                "services:\n  plurxd:\n    healthcheck:\n"
+                '      start_period: "90s"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(BudgetError, "tracked default"):
+                CHECKER["tracked_default_health_seconds"](pinned)
+
+    def test_emit_start_period_prints_only_the_value_on_stdout(self):
+        document = compose_document(
+            environment={"PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "1200"}
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            resolved = Path(directory) / "compose.json"
+            resolved.write_text(json.dumps(document), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--compose-json",
+                    str(resolved),
+                    "--emit-start-period",
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "1335s")
+        self.assertIn("start period", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
