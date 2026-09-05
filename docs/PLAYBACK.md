@@ -1344,8 +1344,68 @@ both side by side. On a touch screen the two still take turns, because a phone
 has room for one of them and no keyboard shortcut to escape whichever is
 covering the other.
 
+## Live TV — the one stream with no file behind it
+
+Every verdict above starts from a file: ffprobe tells the truth about it, the
+fragment index says where its keyframes are, and a client can seek in it. A
+tuner has none of that. There is one of it, it has no beginning to seek to, and
+its "duration" is however long you keep watching. Live TV therefore does not
+enter the routing inventory at all — it is its own path, with its own
+refusals — and the parts of it that belong here are what a *client* has to do
+differently.
+
+**One shape, three players.** The owner node publishes a rolling six-segment
+HLS window (see [ARCHITECTURE.md §3a](ARCHITECTURE.md)) and every first-party
+client consumes exactly that: the web app through the same MSE/HLS path it uses
+for copy-video, Apple through AVPlayer, Android through a dedicated Media3
+player. Live TV never invokes the finite-media controller on any client — no
+resume point, no progress write, no watch state. A live channel is not a title
+you are partway through.
+
+**Progress is decoded frames, not position.** The obvious health check —
+"has the playback position advanced?" — is wrong for live. A live window's
+position can legitimately move *backwards* during healthy playback when the
+window slides underneath the player. So each client renews its session on
+decoded frames advancing (`getVideoPlaybackQuality().totalVideoFrames` in the
+browser, rendered-frame count on Android) and falls back to position only where
+frame counts are unavailable. A frozen picture with a ticking clock expires; a
+moving picture with a shuffling clock does not.
+
+**An unknown outcome is not a refusal.** This is the sharpest client rule in
+Live TV, and it exists because the failure it prevents is invisible. When a
+start attempt fails, a client may only clear its durable ownership marker and
+retry immediately if the failure is one that is *decided before a tuner can
+open*: `live_tv_disabled`, `live_tv_protocol_unready`, `drm_unsupported`,
+`channel_not_found`, `settings_conflict`, `tuner_capacity`, `admin_required`,
+`invalid_settings`. That list is an allowlist, not a denylist. Anything else —
+a transport error, a code a newer server added, `tuner_unavailable`, whose own
+message admits a tuner *may* be unavailable — might mean a tuner did open and
+the answer got lost, so the client holds the marker and refuses to start again
+for 90 s. A denylist here means one viewer quietly holding two physical tuners.
+
+**The marker outlives the page.** The ownership marker is written before the
+POST and refreshed during playback, token-free, and survives a page or app
+restart until a release is confirmed. A tab that dies mid-session, a phone that
+backgrounds and gets killed, a browser that never delivers its unload request —
+each comes back to a client that knows it may still own a tuner. Keys are
+immutable per session so one tab's expiry cannot delete another tab's fresh
+recovery wait, and release is a real DELETE whose failure is treated as "still
+possibly mine".
+
+**What the backend still owes.** The client barrier bounds a *client's* damage;
+it is not the reaper. Idle expiry (45 s with no read), producer-progress timeout
+(30 s), and startup timeout (15 s) are the server's, and an orphaned capability
+is reclaimed by the server whether or not any client ever comes back.
+
 ## Non-goals & known limits
 
+- **Live TV has no seek, no resume, and no progress.** A channel is not a
+  title, so the finite-media controller is never invoked for it and nothing is
+  written to watch state. There is no pause-and-come-back-tomorrow: pausing a
+  live session holds a tuner, and a session with no reader is reclaimed in 45 s.
+  Real startup latency, real segment duration, and the real concurrent-session
+  ceiling for a given device are **pending the hardware pass**
+  (`make live-tv-hardware-check DEVICE=<ipv4>`) rather than estimated here.
 - **HLS session disk.** A live HLS writer's history grows for its whole life,
   so the reaper keeps 180 s behind the download frontier on both the transcode
   and copy paths. That covers the 120 s fetch lead measured on a physical iPad

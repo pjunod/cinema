@@ -5,13 +5,15 @@
 [![unit coverage](http://192.168.4.7:3000/noirr/plurx/raw/branch/badges/coverage.svg)](http://192.168.4.7:3000/noirr/plurx/actions)
 
 A self-hosted media server and player in the spirit of **old-school Plex** —
-before the streaming tiles, live TV, ads, and cloud accounts. Your media, your
+before the streaming tiles, the ads, and the cloud accounts. Your media, your
 hardware, your network: one lean Rust binary, a web app that doubles as the admin
 UI, first-class ebook and audiobook libraries, a Plex-compatible API so existing
 clients just work, and the thing no media server has ever shipped — **real
-high-availability clustering**. Music, photos, and live TV are out of scope on
-purpose (see [non-goals](#non-goals)); books are not — text books and audiobooks
-are both supported.
+high-availability clustering**. Music is out of scope on purpose (see
+[non-goals](#non-goals)); books are not — text books and audiobooks are both
+supported, photos live in `home` libraries, and *live* television from one
+locally configured HDHomeRun tuner is supported and off by default. Recording
+it is not: plurx is not a DVR.
 
 > **Self-hosted and pre-1.0.** plurx runs on your LAN with no cloud dependency and
 > never phones home. Media mounts are **read-only by default**. The one explicit
@@ -39,9 +41,11 @@ commit, CI, and full depth, and how to add a regression without losing it.
 [docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md) explains the
 effort-branch lane for large projects: compile quickly during task integration,
 then run one complete exact-tree qualification before merging to `main`.
-[docs/HDHOMERUN-LIVE-TV-PLAN.md](docs/HDHOMERUN-LIVE-TV-PLAN.md) is the active
-plan for adding one HDHomeRun tuner as bounded live HLS across the web, Apple,
-and Android clients, with DRM and ATSC 3.0 codec limits stated explicitly.
+[docs/HDHOMERUN-LIVE-TV-PLAN.md](docs/HDHOMERUN-LIVE-TV-PLAN.md) is the plan for
+one HDHomeRun tuner as bounded live HLS across the web, Apple, and Android
+clients, with DRM and ATSC 3.0 codec limits stated explicitly, and
+[docs/HDHOMERUN-LIVE-TV-STATUS.md](docs/HDHOMERUN-LIVE-TV-STATUS.md) is what is
+built versus what is proved — the hardware pass has not run.
 [docs/AGENT-COMPILE-LOOP.md](docs/AGENT-COMPILE-LOOP.md) is its short
 companion for anyone — contributor or coding agent — whose checkout has no
 Rust toolchain: how to put `cargo check`, Clippy and the unit suite ten
@@ -363,8 +367,14 @@ and [docs/FEATURES.md](docs/FEATURES.md#11-what-plurx-does-not-do):
   mounts; plurx does not organize or rename files. The sole opt-in exception is
   the admin-only, per-library, off-by-default Dolby Vision on-disk conversion
   documented in [Operations](docs/OPERATIONS.md).
-- **Not a streaming aggregator.** No ads, no live TV, no rentals, no "discover"
-  feeds.
+- **Not a streaming aggregator.** No ads, no rentals, no "discover" feeds, no
+  channel services. One over-the-air HDHomeRun tuner plays live on every
+  first-party client, off by default — see
+  [Features §4a](docs/FEATURES.md) and the
+  [runbook](docs/OPERATIONS.md).
+- **Not a DVR.** Live TV records nothing: no recording, no scheduling, no
+  retention, no series rules. DRM-flagged channels are listed and refused,
+  because there is no licensed DRM path.
 - **No general music library** in v1 (the data model won't preclude it later).
   Audiobooks are supported in Books libraries; photos are supported in Home.
 - **No transcode-by-default.** On demand only, when a device forces it.
