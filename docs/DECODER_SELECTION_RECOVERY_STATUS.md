@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 unit qualification · **Updated:** 2026-09-05 ·
+**Status:** M0 full PR qualification · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -19,14 +19,14 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | Both final adversarial reviews approve `7649ccdd`; repaired fast lane and exact media verification pass |
-| Full PR validation | Unit suite starting; one full suite follows on the corrected head |
+| Full PR validation | Unit suite passes; one `validate-full` run is starting on the corrected head |
 | Blocker | None |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Unit qualification | [PR #915](https://github.com/pjunod/plurx/pull/915); both final adversarial reviews approve `7649ccdd` |
+| M0 · baseline and diagnostic qualification | Full PR qualification | [PR #915](https://github.com/pjunod/plurx/pull/915); unit suite and both final adversarial reviews pass |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -374,6 +374,8 @@ lane and focused tests provide earlier feedback.
 | `4ec13f3b` | two fresh `scripts/decoder-media-baseline` generations on `nynuc` | Pass · every retained artifact digest matches byte-for-byte |
 | `4ec13f3b` | `/tmp/codex-decoder-m0-review4/decoder-media-baseline --verify /tmp/codex-decoder-m0-review4/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review7` on `nynuc` | Pass · `"verified": true` |
 | `4ec13f3b` | `git diff --check` | Pass |
+| `3fe6a6ca` | `CARGO='rustup run 1.97.1 cargo' make unit` | Invalid environment run · 143 FFmpeg-backed tests failed because Homebrew FFmpeg could not load retained `libx265.216.dylib`; no non-loader failure observed |
+| `3fe6a6ca` | `PLURX_FFMPEG=/private/tmp/codex-ffmpeg-abi216 PLURX_FFPROBE=/private/tmp/codex-ffprobe-abi216 CARGO='rustup run 1.97.1 cargo' make unit` | Pass · 2,785 tests; 3 declared ignores; task-scoped wrappers use the retained installed x265 ABI 216 library without modifying the host |
 | Pending | Full PR suite after review fixes | Not run |
 
 ## Remaining evidence before release
