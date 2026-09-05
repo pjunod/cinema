@@ -26,6 +26,12 @@ const ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
 // host while Chromium initializes SwiftShader. Keep startup bounded, but give
 // the browser the same one-minute-plus budget used by CDP commands themselves.
 const CDP_DEVTOOLS_TIMEOUT_MS = 90_000;
+// DevTools can announce its socket before the first page target is responsive.
+// The local Forgejo runner shares a host with compile and browser lanes, so a
+// one-second discovery request and ten-second total wait can expire during a
+// healthy cold start. Keep both waits bounded while allowing that contention.
+const CDP_JSON_TIMEOUT_MS = 5_000;
+const CDP_PAGE_TARGET_TIMEOUT_MS = 60_000;
 
 // How long the shaper waits, after the first presented frame, before it drops
 // the link. Long enough that a healthy session has proven itself at the high
@@ -590,6 +596,30 @@ async function freePort() {
       server.close(() => resolve(port));
     });
   });
+}
+
+async function freePorts(count) {
+  const reservations = [];
+  try {
+    for (let index = 0; index < count; index += 1) {
+      const server = net.createServer();
+      server.unref();
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      reservations.push(server);
+    }
+    return reservations.map((server) => server.address().port);
+  } finally {
+    await Promise.all(reservations.map((server) => new Promise((resolve) => server.close(resolve))));
+  }
+}
+
+function playbackServerConfig(dataDir, serverPort, raftPort, apiPort) {
+  return `[server]\nname = "plurx playback lab"\nbind = "127.0.0.1:${serverPort}"\n\n` +
+    `[cluster]\nraft_bind = "127.0.0.1:${raftPort}"\napi_bind = "127.0.0.1:${apiPort}"\n\n` +
+    `[storage]\ndata_dir = ${tomlString(dataDir)}\n`;
 }
 
 // A bucket wide enough to keep TCP moving, narrow enough that it cannot fund a
@@ -1438,7 +1468,10 @@ function fragmentIndexPassBuiltFile(entry, fileId) {
 }
 
 async function startServer(options, fixtureDirectory) {
-  const port = await freePort();
+  // A throwaway daemon owns three listeners. Reserving all three together
+  // prevents concurrent Forgejo jobs from sharing the default Raft/API ports
+  // or receiving the same just-released ephemeral port.
+  const [port, raftPort, apiPort] = await freePorts(3);
   const runtime = await fsp.mkdtemp(path.join(os.tmpdir(), "plurx-playback-lab-"));
   const logFile = path.join(runtime, "plurxd.log");
   let log = null;
@@ -1448,9 +1481,11 @@ async function startServer(options, fixtureDirectory) {
   await fsp.mkdir(dataDir, { recursive: true });
   const baseUrl = `http://127.0.0.1:${port}`;
   const config = path.join(runtime, "plurx.toml");
-  await fsp.writeFile(config,
-    `[server]\nname = "plurx playback lab"\nbind = "127.0.0.1:${port}"\n\n` +
-    `[storage]\ndata_dir = ${tomlString(dataDir)}\n`, "utf8");
+  await fsp.writeFile(
+    config,
+    playbackServerConfig(dataDir, port, raftPort, apiPort),
+    "utf8",
+  );
   const serverBin = path.resolve(options.server || defaultServerBin());
   if (!fs.existsSync(serverBin)) {
     if (options.server) throw new Error(`server binary does not exist: ${serverBin}`);
@@ -1590,7 +1625,7 @@ function cdpBrowserArgs(options, baseUrl, profile) {
 
 async function findOrCreateCdpPageTarget(jsonBase, baseUrl, request = fetch) {
   const response = await request(`${jsonBase}/json/list`, {
-    signal: AbortSignal.timeout(1000),
+    signal: AbortSignal.timeout(CDP_JSON_TIMEOUT_MS),
   });
   const targets = await response.json();
   const existing = targets.find((candidate) => candidate.type === "page");
@@ -1603,7 +1638,7 @@ async function findOrCreateCdpPageTarget(jsonBase, baseUrl, request = fetch) {
   // endpoint is local to this freshly spawned, isolated browser profile.
   const created = await request(
     `${jsonBase}/json/new?${encodeURIComponent(baseUrl)}`,
-    { method: "PUT", signal: AbortSignal.timeout(1000) },
+    { method: "PUT", signal: AbortSignal.timeout(CDP_JSON_TIMEOUT_MS) },
   );
   if (!created.ok) return null;
   const candidate = await created.json();
@@ -1658,7 +1693,7 @@ class CdpDriver {
     const jsonBase = `http://${parsed.host}`;
     const target = await waitFor(
       () => findOrCreateCdpPageTarget(jsonBase, this.baseUrl),
-      10_000,
+      CDP_PAGE_TARGET_TIMEOUT_MS,
       `${this.browserName} page target`,
     );
     this.ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -3984,6 +4019,8 @@ async function main() {
 // the shaping, scoring, and normalization logic without a browser.
 module.exports = {
   CDP_DEVTOOLS_TIMEOUT_MS,
+  CDP_JSON_TIMEOUT_MS,
+  CDP_PAGE_TARGET_TIMEOUT_MS,
   NETWORK_PROFILES,
   SHAPER_SLICE_BYTES,
   ShapingProxy,
@@ -3991,6 +4028,7 @@ module.exports = {
   automaticSwitchesAfter,
   cdpBrowserArgs,
   findOrCreateCdpPageTarget,
+  freePorts,
   completedFragmentIndexPass,
   diagnosticPath,
   deviceRunCommand,
@@ -4008,6 +4046,7 @@ module.exports = {
   normalizeTrace,
   parseApiJson,
   parseNetworkProfile,
+  playbackServerConfig,
   peakUpgradeRate,
   performOperation,
   playerSnapshotExpression,

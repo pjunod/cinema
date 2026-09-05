@@ -895,14 +895,32 @@ scoped ownership proof, not a physical continuity receipt or completion of
 all cold pre-decision quality/track/seek inputs. Exact committed and integrated
 PR-head approval remains required.
 
-One additional P2 audit lead belongs to the canonical intent work below:
-Apple and Android reporters sample an observation and an intent generation
-separately across concurrency boundaries. A split capture could associate old
-payload A with newer authority B. The required fix is an immutable,
-atomically captured `(snapshot, desired revision)` envelope retained through
-enqueue and retry. This is a source-identified interleaving risk; a
-deterministic split-capture regression is still required before calling it a
-reproduced incident.
+### Atomic control captures — payload and local authority travel together
+
+Commit `fc544fad` corrects the split observation/intent audit lead with one
+immutable source capture across Apple, Android, and web reporters. The envelope
+retains the snapshot, desired generation, and local lifecycle/attachment owner
+through enqueue, urgent coalescing, exact-sequence retry, and exchange callbacks.
+Native source revisions reject reversed async enqueue order, including older
+periodic observations of the same intent. Cadence reads the published capture,
+not AVPlayer or Media3 from a reporter executor.
+
+Adversarial review added deterministic regressions for old attachment reporters
+borrowing a new attachment's capture, a cleared source slot during `409` reset,
+stale subtitle-ready callbacks consuming the new intent's retry edge, and a
+terminal response stopping reporting after a newer same-attachment intent.
+Fresh admission requires the reporter's bound local owner at enqueue and send;
+already-started retries keep their original envelope. Terminal-only suspension
+can yield to newer intent, while explicit End and protocol failure stay final.
+The regression bridge is retained separately in `7d5f959a`.
+
+The frozen source passed scoped independent review. After integrating foundation
+task [#19](http://192.168.4.7:3000/noirr/plurx/pulls/19) at `12be7b5b`, the exact
+tree again passed 103 Apple tests, 102 Android tests, tvOS compilation, and
+complete web checks. Exact integrated-head approval and the development gate
+remain required before merge. These captures do not implement cold
+desired-input ownership on every platform, executable prepared handoff, or
+physical continuity/performance qualification.
 
 ### Apple initial-decision ownership — desired input precedes metadata
 
@@ -947,12 +965,15 @@ and native-selection ownership tests remain in the focused run.
 
 ### Executable handoff audit — durable settlement is not a running successor
 
-The fresh audit uses Forgejo main `4ce33f95` and concurrent
-[PR #5](http://192.168.4.7:3000/noirr/plurx/pulls/5) at `20951a9`. PR #5 owns
-durable, cancellation-independent acknowledgement settlement and exact
-predecessor compare-and-swap. This effort will extend that implementation
-after integration, not create a second ledger. The anchors below identify
-functions rather than line numbers that move as the branches merge.
+The initial audit used Forgejo main `4ce33f95` and concurrent
+[PR #5](http://192.168.4.7:3000/noirr/plurx/pulls/5) at `20951a9`. It was
+rechecked after that PR merged into main `15f88e53`: durable,
+cancellation-independent acknowledgement settlement and exact predecessor
+compare-and-swap are implemented, but `stage_prepared_successor` still writes
+`encoder: staged` without starting a worker. The effort's local integration
+preserves this ledger and its own accepted-demand publication; it does not
+create a second transaction. The anchors below identify functions rather than
+line numbers that move as the branches merge.
 
 | Boundary | Observed implementation | Required completion |
 |---|---|---|
@@ -1000,12 +1021,15 @@ documentation debt:
    grade, and burn settings belong in rendition identity. Real FFmpeg tests
    must generate and decode transcode/burn output across 0→90→3 seeks and
    producer restarts.
-4. **Original is not source-height Manual.** `QualitySelection` currently
-   has Auto and Manual only, and `candidate_request` keeps an existing
-   transcode in transcode mode. Add explicit Original semantics to the
-   authoritative resolver. Audio conversion need not re-encode video; burn
-   and incompatible HDR requirements must be reported honestly. Test
-   Original→720p→Original, including source-height Manual as a distinct case.
+4. **Original is not source-height Manual.** The effort already added an
+   explicit `QualitySelection::Original` wire value before `ad79ae81`;
+   the earlier statement that this enum was absent is superseded. The
+   remaining defect is in the producer resolver: `candidate_request` still
+   keeps an existing transcode in transcode mode for every quality value.
+   Finish Original semantics there rather than add another wire enum. Audio
+   conversion need not re-encode video; burn and incompatible HDR requirements
+   must be reported honestly. Test Original→720p→Original, including
+   source-height Manual as a distinct case.
 5. **Truthful capacity and delivery.** `DeliveryView::from_status` drops VOD
    producer decisions and delivered throughput, while
    `PreparationConditions::headroom_refusal` requires measured headroom.
