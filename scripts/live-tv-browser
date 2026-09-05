@@ -50,7 +50,8 @@ def main(argv: list[str]) -> int:
                 "--autoplay-policy=no-user-gesture-required", "--disable-features=HardwareMediaKeyHandling",
             ])
             context = browser.new_context(viewport={"width": 1280, "height": 860})
-            context.add_init_script("localStorage.setItem('plurx_token', %s);" % json.dumps(host.token))
+            context.add_init_script("if (location.origin === %s) localStorage.setItem('plurx_token', %s);" %
+                                    (json.dumps(host.base_url.rstrip('/')), json.dumps(host.token)))
             channels = [
                 {"id": "one", "guide_number": "7.1", "guide_name": "Fixture News", "drm": False, "favorite": True, "support": "ready"},
                 {"id": "two", "guide_number": "10.2", "guide_name": "Fixture Public TV", "drm": False, "favorite": False, "support": "ready"},
