@@ -25,6 +25,13 @@ obligation = "resolve once from the held source for command, identity, and admis
 # Process owners and consumers. Support-only subprocesses remain explicit so
 # their success cannot be mistaken for decoded-video producer health.
 [[surfaces]]
+id = "process.settings_ffmpeg_version"
+kind = "support_process"
+source = "crates/plurxd/src/main.rs"
+anchor = "async fn ffmpeg_version("
+obligation = "show the probed binary version as readiness evidence without treating it as qualification"
+
+[[surfaces]]
 id = "process.observed_ffmpeg"
 kind = "process_owner"
 source = "crates/plurxd/src/transcode.rs"
@@ -66,13 +73,146 @@ source = "crates/plurxd/src/pgs_overlay.rs"
 anchor = "async fn prepare_stage("
 obligation = "remain subtitle demux support and never attest video decode health"
 
+[[surfaces]]
+id = "process.fragment_index"
+kind = "copy_process"
+source = "crates/plurxd/src/fragindex.rs"
+anchor = "async fn build_with_args("
+obligation = "own the FFmpeg copy/index child without claiming decoded-video health"
+
+[[surfaces]]
+id = "process.progressive_remux"
+kind = "copy_process"
+source = "crates/plurxd/src/http/stream.rs"
+anchor = "async fn remux("
+obligation = "own the progressive copy/remux child and classify audio-only transcode separately"
+
+[[surfaces]]
+id = "process.subtitle_extract"
+kind = "support_process"
+source = "crates/plurxd/src/subtitles.rs"
+anchor = "async fn extract_vtt("
+obligation = "remain whole-track subtitle extraction, not video qualification"
+
+[[surfaces]]
+id = "process.subtitle_window"
+kind = "support_process"
+source = "crates/plurxd/src/subtitles.rs"
+anchor = "async fn extract_vtt_window("
+obligation = "remain bounded subtitle extraction, not video qualification"
+
+[[surfaces]]
+id = "process.pipe_probe"
+kind = "support_process"
+source = "crates/plurxd/src/pipeprobe.rs"
+anchor = "impl Tools for Spawn"
+obligation = "keep capability/test probing distinct from producer health"
+
+[[surfaces]]
+id = "process.ffmpeg_engine_identity"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "async fn fragment_index_engine_inner("
+obligation = "identify the binary and dependency graph without qualifying media output"
+
+[[surfaces]]
+id = "process.ffmpeg_capability_query"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "async fn probe_ffmpeg("
+obligation = "treat help/list output as advertised capability only"
+
+[[surfaces]]
+id = "process.dovi_reshape_graph_probe"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "async fn probe_dovi_reshape_graph("
+obligation = "retain graph-probe evidence without attesting an arbitrary source"
+
+[[surfaces]]
+id = "process.dovi_passthrough_probe"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "pub async fn has_dovi_passthrough("
+obligation = "keep synthetic filter capability separate from per-file RPU evidence"
+
+[[surfaces]]
+id = "process.hdr10_passthrough_probe"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "pub async fn has_hdr10_passthrough("
+obligation = "record synthetic Main10 capability without claiming producer completion"
+
+[[surfaces]]
+id = "process.hdr10_qsv_probe"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "pub async fn has_hdr10_passthrough_qsv("
+obligation = "record the QSV upload/encode probe as node capability only"
+
+[[surfaces]]
+id = "process.dovi_qsv_probe"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "pub async fn has_dovi_passthrough_with("
+obligation = "record QSV pairing evidence without replacing real Dolby media evidence"
+
+[[surfaces]]
+id = "process.dovi_pixel_probe"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "async fn dovi_probe_output("
+obligation = "bind the per-file pixel probe to source identity and never to cache completion"
+
+[[surfaces]]
+id = "process.pacing_probe"
+kind = "support_process"
+source = "crates/plurxd/src/ffmpeg.rs"
+anchor = "async fn probe_burst("
+obligation = "keep startup pacing measurement outside decoder qualification"
+
+[[surfaces]]
+id = "process.media_origin_probe"
+kind = "support_process"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "pub(crate) async fn probe_media_origin("
+obligation = "keep FFprobe timeline evidence distinct from decoded-video health"
+
+[[surfaces]]
+id = "process.chapter_probe"
+kind = "support_process"
+source = "crates/plurxd/src/http/stream.rs"
+anchor = "async fn run_chapter_probe("
+obligation = "keep bounded FFprobe chapter discovery outside producer qualification"
+
+[[surfaces]]
+id = "process.dv_disk_tool"
+kind = "offline_process"
+source = "crates/plurxd/src/dv_disk.rs"
+anchor = "async fn run_tool_with_bound_media("
+obligation = "retain its independent conversion/verification receipt and source fence"
+
 # Renderer constraints that the future candidate validator must consume.
+[[surfaces]]
+id = "renderer.candidates"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub const CANDIDATES: &[Pipeline]"
+obligation = "preserve deterministic candidate order in explicit plan selection"
+
 [[surfaces]]
 id = "renderer.pairing"
 kind = "renderer_contract"
 source = "crates/plurx-core/src/transcode/pipeline.rs"
 anchor = "pub fn pairs_with("
 obligation = "validate encoder and surface-family pairing"
+
+[[surfaces]]
+id = "renderer.residency"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn on_gpu("
+obligation = "describe frame residency and required transfers"
 
 [[surfaces]]
 id = "renderer.dynamic_range"
@@ -89,6 +229,20 @@ anchor = "pub fn decode_args("
 obligation = "fold required surface flags into the resolved decoder"
 
 [[surfaces]]
+id = "renderer.device_initialization"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn init_args("
+obligation = "freeze Vulkan/OpenCL device initialization in the plan"
+
+[[surfaces]]
+id = "renderer.filters"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn filters("
+obligation = "validate exact graph, pixel format, and transfer composition"
+
+[[surfaces]]
 id = "renderer.software_requirement"
 kind = "renderer_contract"
 source = "crates/plurx-core/src/transcode/pipeline.rs"
@@ -103,13 +257,48 @@ anchor = "pub fn for_session("
 obligation = "replace legacy session inference with candidate validation"
 
 [[surfaces]]
+id = "renderer.output_grade"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn output_grade("
+obligation = "bind SDR or HDR10 output identity and encoder arguments"
+
+[[surfaces]]
 id = "renderer.fallback"
 kind = "renderer_contract"
 source = "crates/plurx-core/src/transcode/pipeline.rs"
 anchor = "pub fn fallback("
 obligation = "map only presentation-compatible alternatives"
 
+[[surfaces]]
+id = "renderer.declined"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn declined("
+obligation = "retain bounded refusal reasons when candidate constraints reject a graph"
+
 # Local and shared transcode cache boundaries.
+[[surfaces]]
+id = "cache.shared_mount_io"
+kind = "cache_lookup"
+source = "crates/plurxd/src/shared_cache.rs"
+anchor = "pub(crate) async fn run_mount_io"
+obligation = "keep blocking shared-cache access inside its bounded mount operation"
+
+[[surfaces]]
+id = "cache.shared_root_identity"
+kind = "cache_lookup"
+source = "crates/plurxd/src/shared_cache.rs"
+anchor = "async fn open_verified_root"
+obligation = "bind reads to the verified shared filesystem root before receipt validation"
+
+[[surfaces]]
+id = "cache.shared_root_admission"
+kind = "cache_write"
+source = "crates/plurxd/src/shared_cache.rs"
+anchor = "async fn publish_verified_root"
+obligation = "admit publication only through the verified shared root and preserve receipt identity"
+
 [[surfaces]]
 id = "cache.local_publish"
 kind = "cache_write"
@@ -193,6 +382,13 @@ kind = "cache_serve"
 source = "crates/plurx-core/src/transcode/manifest.rs"
 anchor = "pub async fn open_verified_object("
 obligation = "serve the same object handle that was authenticated"
+
+[[surfaces]]
+id = "cache.decoded_manifest"
+kind = "cache_lookup"
+source = "crates/plurxd/src/manifest_cache.rs"
+anchor = "pub async fn load("
+obligation = "cache decoded manifests only under their fenced digest and receipt identity"
 
 # Offline lookup and delivery are separate call paths over the transcode cache.
 [[surfaces]]

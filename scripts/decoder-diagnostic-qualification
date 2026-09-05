@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
+import tomllib
 
 
 VIDEO_DECODE_ERROR_WINDOW_MS = 2_000
@@ -20,19 +22,29 @@ MAX_FIXTURE_RECORD_BYTES = (
     MAX_FIXTURE_PREFIX_BYTES + 1 + MAX_DIAGNOSTIC_LINE_BYTES + 1
 )
 
-CONTEXT = r"(?: @ (?:0x[0-9a-fA-F]+|<address>))?"
+CONTRACTS_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "tests/playback/decoder-health/diagnostic-contracts.toml"
+)
+ADDRESS = r"(?:0x[0-9a-fA-F]+|<address>)"
 PRIMARY_VIDEO_ERROR = re.compile(
-    rf"^\[vist#(?P<input>\d+):(?P<stream>\d+)/[^\]@]+{CONTEXT}\]\s+"
-    rf"\[dec:[^\]@]+{CONTEXT}\]\s+"
+    rf"^\[vist#(?P<input>\d+):(?P<stream>\d+)/(?P<codec>[^\]@]+?)"
+    rf"(?: @ (?P<stream_address>{ADDRESS}))?\]\s+"
+    rf"\[dec:(?P<decoder>[^\]@]+?)"
+    rf"(?: @ (?P<decoder_address>{ADDRESS}))?\]\s+"
     r"(?P<severity>\[error\]\s+)?Error submitting packet to decoder:"
+    r"(?P<detail>.*)$"
 )
 SUBORDINATE_NO_FRAME = re.compile(
-    rf"^\[[^\]@]+{CONTEXT}\]\s+(?:\[error\]\s+)?No frame decoded\?"
+    rf"^\[[^\]@]+(?: @ {ADDRESS})?\]\s+(?:\[error\]\s+)?No frame decoded\?"
 )
 LEGACY_REPEAT = re.compile(
-    r"^\s*Last message repeated (?P<count>[0-9]{1,20}) times$"
+    r"^\s*(?:\[(?:error|warning|fatal|info|verbose|debug|trace)\]\s+)?"
+    r"Last message repeated (?P<count>[0-9]{1,20}) times$"
 )
-LEGACY_REPEAT_PREFIX = re.compile(r"^\s*Last message repeated ")
+LEGACY_REPEAT_PREFIX = re.compile(
+    r"^\s*(?:\[[a-z]+\]\s+)?Last message repeated "
+)
 
 
 class QualificationError(ValueError):
@@ -42,10 +54,12 @@ class QualificationError(ValueError):
 @dataclass(frozen=True)
 class Qualification:
     fixture: str
+    diagnostic_contract_id: str | None
     selected_input: int
     selected_stream: int
     primary_video_error_records: int
     severity_qualified_primary_records: int
+    contract_qualified_primary_records: int
     subordinate_records: int
     selected_primary_repeat_summaries: int
     selected_primary_repeated_messages: int
@@ -69,6 +83,43 @@ def parse_selected_stream(value: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
+def action_contract(contract_id: str | None) -> dict[str, object] | None:
+    if contract_id is None:
+        return None
+    try:
+        with CONTRACTS_PATH.open("rb") as document:
+            contracts = tomllib.load(document)["contracts"]
+    except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
+        raise QualificationError(f"cannot load diagnostic contracts: {error}") from error
+    matches = [contract for contract in contracts if contract.get("id") == contract_id]
+    if len(matches) != 1:
+        raise QualificationError(f"unknown diagnostic contract: {contract_id}")
+    return matches[0]
+
+
+def matches_action_contract(
+    match: re.Match[str],
+    contract: dict[str, object] | None,
+    evidence_qualified: bool,
+) -> bool:
+    if contract is None:
+        return False
+    return (
+        evidence_qualified
+        and match.group("severity") is not None
+        and match.group("codec").strip() == contract.get("input_codec")
+        and match.group("decoder").strip() == contract.get("decoder")
+        and match.group("detail").strip() == contract.get("error_detail")
+        and (
+            not contract.get("require_context_addresses")
+            or (
+                match.group("stream_address") is not None
+                and match.group("decoder_address") is not None
+            )
+        )
+    )
+
+
 def bounded_fixture_lines(path: Path):
     """Yield bounded lines, draining each oversized tail before continuing."""
 
@@ -87,13 +138,29 @@ def bounded_fixture_lines(path: Path):
             yield number, raw[:MAX_FIXTURE_RECORD_BYTES], oversized
 
 
+def fixture_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fixture:
+        while chunk := fixture.read(64 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def qualify(
     path: Path,
     selected: tuple[int, int] = (0, 0),
+    contract_id: str | None = None,
 ) -> Qualification:
-    window: deque[int] = deque(maxlen=VIDEO_DECODE_ERROR_LIMIT)
+    contract = action_contract(contract_id)
+    contract_evidence_qualified = bool(
+        contract
+        and path.name == contract.get("fixture")
+        and fixture_sha256(path) == contract.get("fixture_sha256")
+    )
+    window: deque[tuple[int, bool]] = deque(maxlen=VIDEO_DECODE_ERROR_LIMIT)
     primary = 0
     severity_qualified = 0
+    contract_qualified = 0
     subordinate = 0
     selected_repeat_summaries = 0
     selected_repeated_messages = 0
@@ -107,6 +174,7 @@ def qualify(
     prior_class: str | None = None
     first_primary: int | None = None
     triggering_window_start: int | None = None
+    triggering_window_contract_qualified = False
     fault_at: int | None = None
 
     for _, raw, oversized in bounded_fixture_lines(path):
@@ -178,14 +246,24 @@ def qualify(
         prior_class = "selected_primary"
         if match.group("severity") is not None:
             severity_qualified += 1
+        contract_match = matches_action_contract(
+            match,
+            contract,
+            contract_evidence_qualified,
+        )
+        if contract_match:
+            contract_qualified += 1
         if first_primary is None:
             first_primary = observed_ms
         lower_bound = observed_ms - VIDEO_DECODE_ERROR_WINDOW_MS
-        while window and window[0] <= lower_bound:
+        while window and window[0][0] <= lower_bound:
             window.popleft()
-        window.append(observed_ms)
+        window.append((observed_ms, contract_match))
         if fault_at is None and len(window) >= VIDEO_DECODE_ERROR_LIMIT:
-            triggering_window_start = window[0]
+            triggering_window_start = window[0][0]
+            triggering_window_contract_qualified = all(
+                qualified for _, qualified in window
+            )
             fault_at = observed_ms
 
     latency = None
@@ -199,10 +277,12 @@ def qualify(
     )
     return Qualification(
         fixture=path.name,
+        diagnostic_contract_id=contract_id,
         selected_input=selected[0],
         selected_stream=selected[1],
         primary_video_error_records=primary,
         severity_qualified_primary_records=severity_qualified,
+        contract_qualified_primary_records=contract_qualified,
         subordinate_records=subordinate,
         selected_primary_repeat_summaries=selected_repeat_summaries,
         selected_primary_repeated_messages=selected_repeated_messages,
@@ -218,9 +298,10 @@ def qualify(
         detection_latency_ms=latency,
         automatic_action_qualified=(
             fault_at is not None
+            and triggering_window_contract_qualified
             and selected_repeat_summaries == 0
+            and unrelated_repeat_summaries == 0
             and ambiguous_repeat_summaries == 0
-            and severity_qualified == primary
             and observation_complete
         ),
     )
@@ -230,11 +311,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture", type=Path)
     parser.add_argument("--selected-stream", default="0:0", metavar="INPUT:STREAM")
+    parser.add_argument("--diagnostic-contract", metavar="CONTRACT_ID")
     arguments = parser.parse_args()
     try:
         result = qualify(
             arguments.fixture,
             parse_selected_stream(arguments.selected_stream),
+            arguments.diagnostic_contract,
         )
     except (OSError, QualificationError) as error:
         parser.error(str(error))

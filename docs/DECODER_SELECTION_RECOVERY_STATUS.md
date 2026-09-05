@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 adversarial findings being resolved · **Updated:** 2026-09-05 ·
+**Status:** M0 second-review findings being resolved · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -18,7 +18,7 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | 15 diagnostic/inventory tests pass at `6c23d17a`; 1 normalized argument-baseline test passes at `2d4900e1` |
+| Focused validation | 21 diagnostic/inventory checks and the expanded hermetic argument baseline pass on the working tree |
 | Full PR validation | Pending adversarial review and fixes |
 | Blocker | None; physical Apple/Android client and original-media runs remain later milestone evidence |
 
@@ -26,7 +26,7 @@ An unchecked item is not implied by a nearby passing check.
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Second review | [PR #915](https://github.com/pjunod/plurx/pull/915); first-round findings fixed at `cae1aa43` |
+| M0 · baseline and diagnostic qualification | Second findings in repair | [PR #915](https://github.com/pjunod/plurx/pull/915) |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -64,28 +64,39 @@ The distinction between owner, consumer, and support process is deliberate:
 | `process.vod_head_regeneration` | `vodserve::regenerate_init_head` owns a bounded FFmpeg head probe | Keep it probe/head-only; it cannot attest a complete producer |
 | `process.vod_pipe_consumer` | `vodgen::run` consumes the pipe; it does not spawn production FFmpeg | Do not create a second child or health owner here |
 | `process.pgs_demux` | `pgs_overlay::prepare_stage` copies one subtitle stream to SUP | Keep this support process out of video health evidence |
-| `copyseg` / `fragindex` | Copy segmentation and indexing do not decode video | Never claim decoded-video qualification |
-| Detection and extraction helpers | `ffmpeg.rs`, `pipeprobe`, `subtitles`, `http/stream`, `http/offline`, and `dv_disk` probe, extract, serve, or validate | A successful helper is not producer health evidence |
+| `process.fragment_index`, `process.progressive_remux` | `fragindex::build_with_args` and `http::stream::remux` own copy/remux FFmpeg children | Never claim decoded-video qualification; classify audio-only transcode separately |
+| `process.subtitle_extract`, `process.subtitle_window` | Whole-track and bounded-window subtitle FFmpeg extraction | Keep support output outside video qualification |
+| `process.settings_ffmpeg_version`, `process.pipe_probe` | Settings version display and `pipeprobe::Spawn` capability runs | A successful version/probe query is not producer completion |
+| `process.ffmpeg_*`, `process.dovi_*`, `process.hdr10_*`, `process.pacing_probe` | Exact build, graph, pixel, and pacing probes in `ffmpeg.rs` | Retain node/per-file capability evidence without promoting arbitrary media |
+| `process.media_origin_probe`, `process.chapter_probe` | Bounded FFprobe timeline/metadata helpers | Keep facts distinct from decoded-video health |
+| `process.dv_disk_tool` | Bound-source offline Dolby conversion tools | Retain their independent source fence and verification receipt |
 
-Renderer correctness is distributed across six existing methods. Candidate
-validation must consume all six rather than duplicating their decisions:
+Renderer correctness is distributed across the candidate order and eleven
+existing methods. Candidate validation must consume all twelve contracts
+rather than duplicating their decisions:
 
 | Inventory ID | Frozen constraint |
 |---|---|
+| `renderer.candidates` | `CANDIDATES` defines the deterministic graph order |
 | `renderer.pairing` | `Pipeline::pairs_with` restricts vendor graphs and measured HDR10 encoders |
+| `renderer.residency` | `Pipeline::on_gpu` distinguishes GPU-resident and system-memory frames |
 | `renderer.dynamic_range` | `Pipeline::handles` restricts HDR, HLG, and Dolby Vision inputs |
 | `renderer.decode_arguments` | `Pipeline::decode_args` claims QSV or VA-API input surfaces for vendor graphs |
+| `renderer.device_initialization` | `Pipeline::init_args` supplies Vulkan/OpenCL device setup |
+| `renderer.filters` | `Pipeline::filters` owns exact graph, pixel format, and transfer composition |
 | `renderer.software_requirement` | `Pipeline::requires_software_decode` preserves Dolby Vision frame side data |
 | `renderer.session_selection` | `Pipeline::for_session` applies source, encoder, and workload constraints |
+| `renderer.output_grade` | `Pipeline::output_grade` binds SDR/HDR10 filter and encoder arguments |
 | `renderer.fallback` | `Pipeline::fallback` refuses grade- or Dolby-incompatible fallback |
+| `renderer.declined` | `Pipeline::declined` records bounded graph-refusal reasons |
 
 Cache identity and delivery cross distinct write, lookup, and serve paths:
 
 | Path class | Frozen owners | M7 obligation |
 |---|---|---|
 | Node-local write | `cache.local_publish`, `cache.manifest_publish`, `cache.manifest_capability_publish` | Publish decoder plan and completed health receipt with the generation |
-| Shared write | `cache.shared_publish` | Copy and reverify that same receipt; never mint qualification during replication |
-| Local/shared lookup | `cache.location_read`, `cache.local_location_read`, `cache.speculative_hit`, `cache.offer_verification`, `cache.shared_read_prepare` | Require compatible plan and complete receipt before calling bytes reusable |
+| Shared root and write | `cache.shared_mount_io`, `cache.shared_root_identity`, `cache.shared_root_admission`, `cache.shared_publish` | Enter the verified root, copy, and reverify the same receipt; never mint qualification during replication |
+| Local/shared lookup | `cache.location_read`, `cache.local_location_read`, `cache.speculative_hit`, `cache.offer_verification`, `cache.shared_read_prepare`, `cache.decoded_manifest` | Require compatible plan and complete receipt before calling bytes reusable |
 | Live cache serving | `cache.session_serve`, `cache.playlist_read`, `cache.object_read` | Install and serve the exact authenticated generation under its read fence |
 | Offline ownership | `offline.prepare`, `offline.publish_ready` | Keep one job-scoped recovery budget and refuse `ready` without producer evidence |
 | Offline lookup | `offline.generation_cache`, `offline.location_validation` | Cache decoded manifests without bypassing local/shared receipt checks |
@@ -101,27 +112,40 @@ producer-health receipt, or durable one-shot decoder-recovery budget.
 The test-only snapshot
 [`decoder-selection-m0-args.json`](../tests/playback/decoder-selection-m0-args.json)
 freezes normalized token arrays from the current `hls_args` builder. It
-normalizes only the source and output paths; option order and every other token
-remain exact.
+normalizes source/output paths and the configured VA-API device path; option
+order and every other token remain exact. The test injects the legacy
+`PLURX_HWDECODE` compatibility choice, so it is hermetic while freezing both
+default and forced-software behavior.
 
-| Case | Decoder/renderer/encoder baseline frozen |
+| Cases | Decoder/renderer/encoder baseline frozen |
 |---|---|
 | `software-sdr-h264` | Software input, CPU renderer, x264 |
 | `qsv-light-h264` | Software input, CPU renderer/upload, QSV encoder |
-| `qsv-heavy-hevc-hdr` | QSV input, CPU HDR renderer/download-upload, QSV encoder |
-| `qsv-vendor-renderer` | QSV input and `vpp_qsv`, QSV encoder |
-| `nvenc-light-h264` | CUDA input, CPU renderer, NVENC encoder |
-| `videotoolbox-avi-mpeg4` | VideoToolbox input, CPU renderer, VideoToolbox encoder; this is the incident-sensitive legacy behavior |
+| `qsv-heavy-hevc-hdr`, `vaapi-heavy-hevc-hdr` | Heavy hardware input, CPU HDR renderer/download-upload, matching encoder |
+| `qsv-vendor-renderer`, `vaapi-vendor-renderer` | Vendor input surface and renderer, matching encoder |
+| `nvenc-libplacebo-renderer`, `vaapi-opencl-renderer` | Vulkan/OpenCL device initialization and neutral GPU graphs |
+| `nvenc-light-h264`, `videotoolbox-sdr-h264` | Normal CUDA and VideoToolbox input with CPU renderer |
+| `videotoolbox-avi-mpeg4` | Incident-sensitive legacy VideoToolbox input behavior |
+| `qsv-heavy-hevc-hdr-forced-software` | Legacy operator software-decode override while retaining QSV encode |
+| `dovi-tonemapx-videotoolbox` | Required software decode, Dolby reshape, SDR VideoToolbox output |
+| `dovi-passthrough-qsv`, `hdr10-passthrough-qsv` | Grade-preserving Main10/PQ output and their distinct decode rules |
 
-Real-media controls are evidence, not inferred success. Missing rows remain
-prerequisites for M8 rather than being filled with synthetic claims.
+The reproducible
+[`decoder-media-baseline`](../scripts/decoder-media-baseline) ran three actual
+encoded sources through the baseline software HLS command on `nynuc` FFmpeg
+8.0.1. Source hashes, probe facts, playlist/segment hashes, decoded-frame
+digests, output facts, generator hash, and binary identity are retained in
+[`decoder-media-baseline-2026-09-05.toml`](../tests/playback/decoder-media-baseline-2026-09-05.toml).
+Generated controls cover unaffected behavior without pretending to replace the
+unavailable incident media or hardware qualification.
 
 | Control | Available evidence | M0 result / prerequisite |
 |---|---|---|
 | #913 MPEG-4 Part 2 ASP/XVID AVI, MP3 audio, 624×352 at 25 fps | Sanitized FFmpeg 7.1.4-Jellyfin diagnostic capture | Five explicit selected-video primaries in 361 ms; original media is not present, so VideoToolbox/software output comparison remains required |
-| Synthetic malformed rawvideo on host FFmpeg 8.0.1 | Exact `repeat+level+error` replay fixture | Structured stream/decoder/severity grammar is action-qualified for the retained shape only |
+| Generated H.264 SDR, MPEG-4 Simple Profile AVI, and HEVC Main10 HDR10 | Actual encoded source → HLS runs with retained probe and pixel digests | All three baseline software runs completed; MPEG-4 is not the #913 ASP/XVID file |
+| Malformed rawvideo on host FFmpeg 8.0.1 | Exact `repeat+level+error` grammar plus version/binary/build hash | Only the addressed `rawvideo` contract is action-qualified; replayed #913 offsets are a separate timing control |
 | Synthetic malformed rawvideo in deployed FFmpeg 5.1.9 container | Exact retained replay fixture | Top-level stream error lacks selected-stream attribution; observation-only, not automatic action |
-| Representative H.264, HEVC/HDR, Dolby Vision, subtitles, and multi-stream files | Existing repository tests do not constitute decoder-backend qualification | Preserve source facts and add pixel/metadata/startup controls in M8 |
+| Hardware decode, Dolby Vision, subtitles, and multi-stream source controls | No M0 output evidence | Preserve source facts and add backend/pixel/metadata/startup controls in M8 |
 
 ## M0 diagnostic contract v1
 
@@ -142,27 +166,35 @@ The harness streams bounded binary records instead of loading a capture into
 memory. An oversize, malformed, invalid-UTF-8, or non-monotonic record marks
 the observation incomplete but is drained so later diagnostics remain
 visible. A repeat summary belongs only to the immediately preceding classified
-record; a repeat after another repeat is ambiguous and cannot authorize action.
-Detection latency begins at the oldest record in the window that actually
-triggered the fifth error, not at a stale earlier error.
+record; any repeat summary, including a severity-prefixed or unrelated one,
+proves the stream is compressed and blocks automatic action. Detection latency
+begins at the oldest record in the window that actually triggered the fifth
+error, not at a stale earlier error.
 
 The retained #913 capture supplies five explicit primary MPEG-4 video decoder
 records in 361 ms, plus 49 messages hidden behind two legacy repeat summaries.
 The explicit records meet the proposed threshold, but the capture has neither
 severity markers nor uncompressed repeat timing and is deliberately not
-eligible for automatic action. The qualified FFmpeg 8 companion preserves the
-observed five timestamps in the verified grammar and latches at 361 ms. The
+eligible for automatic action. The FFmpeg 8 rawvideo companion replays the
+observed offsets `0, 0, 294, 299, 361` in that build's verified rawvideo
+grammar and latches at 361 ms. This composes a real grammar capture with a
+deterministic timing control; it does not claim the rawvideo errors happened at
+those times. The
 tolerant control contains audio, unselected-video, encoder, filename, and
 subordinate messages; its five selected primaries never place five timestamps
 in the open-lower-bound window.
 
-Known action grammar coverage is intentionally narrow:
-`[vist#INPUT:STREAM/codec @ ADDRESS] [dec:decoder @ ADDRESS] [error] Error
-submitting packet to decoder` is a counted primary. Addresses are sanitized to
-`<address>` in retained fixtures. `No frame decoded?` is supporting evidence.
-The deployed FFmpeg 5.1 shape, fatal backend initialization grammars, and every
-additional build/backend grammar remain observation-only until retained
-fixtures prove selected-stream attribution and severity.
+Tolerant observation matching recognizes the structured stream/decoder shape.
+Automatic action additionally requires an explicit versioned contract from
+[`diagnostic-contracts.toml`](../tests/playback/decoder-health/diagnostic-contracts.toml)
+that binds FFmpeg version, binary/build hashes, codec, decoder, context
+addresses, severity, exact error detail, and retained fixture hash. The sole
+M0 action contract is host
+FFmpeg 8.0.1 `rawvideo`; it is not deployed-producer or MPEG-4 qualification.
+`No frame decoded?` is supporting evidence. The #913 FFmpeg 7.1.4 MPEG-4
+capture, deployed FFmpeg 5.1 shape, fatal backend initialization grammars, and
+every additional build/backend grammar remain observation-only until retained
+fixtures prove their exact attribution.
 
 ## FFmpeg and client qualification gaps
 
@@ -170,7 +202,7 @@ Read-only inventory captured 2026-09-05. The running container is the producer
 that matters; a host binary is diagnostic context only.
 
 Exact image IDs and hashes of the container binary, build configuration, and
-relevant decoder inventory are retained in
+complete decoder-list output are retained per node in
 [`fleet-ffmpeg-2026-09-05.toml`](../tests/playback/decoder-health/fleet-ffmpeg-2026-09-05.toml).
 
 | Node | Host FFmpeg | Running `plurxd` FFmpeg | Advertised container acceleration | Qualification |
@@ -208,21 +240,33 @@ explicitly; they do not silently run an unqualified automatic replacement.
 ## Adversarial review ledger
 
 Two independent agents reviewed the first M0 PR head before the full suite.
-Their initial verdict was request changes; the listed repairs are committed
-and in second-pass review on PR #915. GitHub had deleted the temporary effort
-base and closed #914; the same effort and task refs were restored, and #915 is
-the active review record.
+Their initial verdict was request changes; those repairs were committed before
+both agents performed a second pass. Both second passes also requested changes,
+which are being repaired now. GitHub had deleted the temporary effort base and
+closed #914; the same effort and task refs were restored, and #915 is the
+active review record.
 
 | Finding | Resolution on working tree |
 |---|---|
 | Severity token was matched in the wrong position and addresses were omitted | Grammar and fixtures now preserve FFmpeg 8 context/address/severity order; FFmpeg 5 is explicitly unqualified |
 | Fixture reader allocated the whole input | Bounded streaming reader drains oversize tails and records coverage loss |
 | Latency began at the first historical error | Latency begins at the oldest record in the triggering window |
-| Normalized baseline argv and media controls were absent | Six exact argv snapshots plus explicit real-media/prerequisite matrix added |
+| Normalized baseline argv and media controls were absent | Fifteen exact argv snapshots plus explicit real-media/prerequisite matrix added |
 | Client replacement support was overstated | Web/Apple/Android capability matrix records parse-only and physical-evidence gaps |
 | Activation semantics depended on “the node/current client” | Persisted values are requested upper bounds; effective mode is node/session-local and visible |
 | Legacy repeats were counted without provenance | Only an immediately preceding classified record owns a repeat summary; ambiguous summaries refuse action |
 | Producer/cache inventory was inaccurate and not auditable | Machine-checked owner/consumer/renderer/local/shared/offline inventory added; `vodgen` corrected to consumer |
+
+| Second-pass finding | Resolution on working tree |
+|---|---|
+| An unrelated repeat summary still allowed automatic action | Every repeat provenance now blocks action; severity-prefixed summaries and threshold controls are covered |
+| Tolerant grammar was mistaken for build/codec qualification | Automatic action requires an explicit versioned contract; M0 qualifies only the captured FFmpeg 8 rawvideo family |
+| Rawvideo timing replay changed the second #913 offset from 0 to 1 ms | Fixture now preserves `0, 0, 294, 299, 361` and labels grammar versus synthetic timing provenance |
+| Argument baseline inherited `PLURX_HWDECODE` | Compatibility input is injected into the internal builder; default and forced-software cases are both frozen and pass under hostile process environment |
+| VA-API and materially distinct renderers/output grades were absent | Baseline expanded to 15 cases covering every renderer family, normal VideoToolbox, VA-API, and forced software decode |
+| Process/renderer/manifest-cache inventory remained incomplete | Inventory expanded to 64 exact IDs with an equality/count assertion and the missing subprocess/method/cache owners |
+| No actual media baseline existed | Reproducible H.264, MPEG-4 AVI, and HEVC HDR10 source-to-HLS evidence captured on a build-bound FFmpeg 8 host |
+| Fleet hashes were global and lacked canonical commands | Binary/build/decoder/image hashes are now stored per node with exact capture and byte-canonicalization commands |
 
 ## Decisions and deviations
 
@@ -235,6 +279,8 @@ the active review record.
 | 2026-09-05 | Treat container FFmpeg 5.1.9 as deployed evidence | It runs the producer; host 8.0.1 does not define container diagnostics |
 | 2026-09-05 | Keep the proposed 2 s / 5-record threshold | #913 reaches five explicit records in 361 ms; tolerant controls do not trigger |
 | 2026-09-05 | Do not expand legacy repeat summaries into timestamps | Their timing is unknowable, so expansion would manufacture recovery evidence |
+| 2026-09-05 | Use generated encoded controls for M0 while preserving the original-media gap | This creates reproducible source-to-HLS evidence without pretending the controls are the #913 ASP/XVID asset |
+| 2026-09-05 | Bind automatic diagnostic action to one exact build/codec grammar | Structural matching remains useful for observation, but cannot safely authorize recovery across unqualified FFmpeg builds |
 
 ## Validation ledger
 

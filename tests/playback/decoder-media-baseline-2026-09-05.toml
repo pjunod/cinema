@@ -1,0 +1,39 @@
+captured_at = "2026-09-05"
+host = "nynuc"
+ffmpeg_version = "8.0.1-3ubuntu2"
+ffmpeg_binary_sha256 = "bdf6aabffdba7411edff8d36c389d695257fcdf823d196020176e117612862f6"
+ffmpeg_buildconf_sha256 = "a6db4aa7f56c4a335b059cd54e0482b91b47d28c4c7629ad7dfdb54e5ceb7f52"
+generator = "scripts/decoder-media-baseline"
+generator_sha256 = "5cba1eca0254e4e0dfda4c70b9a72f4d75d9ce1dd60380d73be8f6cb0f17781b"
+source_kind = "deterministic encoded media generated from lavfi video and audio"
+argument_contract = "software hls_args baseline: unpaced, 1080p ceiling, x264/AAC, 2-second MPEG-TS HLS"
+result = "all three actual source-to-HLS runs exited successfully"
+incident_media_available = false
+incident_gap = "#913 original MPEG-4 ASP/XVID media and Apple VideoToolbox comparison remain unavailable"
+
+[[controls]]
+id = "h264-sdr"
+source_sha256 = "59bb47ba37e2d71dec9b91746e00bed92f3fbb95cb7efedfb81fb70ff9f70c8e"
+source_probe = "codec_name=h264|profile=High|width=320|height=180|pix_fmt=yuv420p|color_range=unknown|color_space=unknown|color_transfer=unknown|color_primaries=unknown|r_frame_rate=24/1"
+playlist_sha256 = "e8a308d35ece2dc10b3fda198ca078c8100a60f243820a62dcf5cff15e2fe7f2"
+segment_sha256 = "0a64e34bf6c97d767d73dcba5b954f215a59aaace67967fdf2d3e101def76b53"
+decoded_framemd5_sha256 = "00f741a9757504275db035cb0d9b25882dcc1766e584a5ede0334ff8fe74e2c9"
+output_probe = "codec_name=h264|profile=High|width=320|height=180|pix_fmt=yuv420p|color_range=unknown|color_space=unknown|color_transfer=unknown|color_primaries=unknown|r_frame_rate=24/1"
+
+[[controls]]
+id = "mpeg4-simple-avi"
+source_sha256 = "a2f1b53e4c4eb54e111f721521e8bc10bf72aa44e7fe13fcfdc093777b57e30e"
+source_probe = "codec_name=mpeg4|profile=Simple Profile|width=320|height=180|pix_fmt=yuv420p|color_range=unknown|color_space=unknown|color_transfer=unknown|color_primaries=unknown|r_frame_rate=25/1"
+playlist_sha256 = "5ddae7e34b70cf67e87b5c1d2f3dc3d1c4bc6c2299da63a8bc7875620b3c69a2"
+segment_sha256 = "82568712ee0f1dc170b3dc9c1abfc6605f841ced7f085a0363514e6abc0df79c"
+decoded_framemd5_sha256 = "93989bf7f27843e6f1f1b1ca2e5d70914e3d8bf967a153b7b56083103e133979"
+output_probe = "codec_name=h264|profile=High|width=320|height=180|pix_fmt=yuv420p|color_range=unknown|color_space=unknown|color_transfer=unknown|color_primaries=unknown|r_frame_rate=25/1"
+
+[[controls]]
+id = "hevc-main10-hdr10"
+source_sha256 = "78279b469ad83d68970dfb4aa53aad7a91081e947da88d8cacbee638df3e8822"
+source_probe = "codec_name=hevc|profile=Main 10|width=320|height=180|pix_fmt=yuv420p10le|color_range=tv|color_space=bt2020nc|color_transfer=smpte2084|color_primaries=bt2020|r_frame_rate=24/1"
+playlist_sha256 = "e8a308d35ece2dc10b3fda198ca078c8100a60f243820a62dcf5cff15e2fe7f2"
+segment_sha256 = "89740d9bd54b6162518eb4947949c67b3961cc6e720874a5f71b4a603353df07"
+decoded_framemd5_sha256 = "331bd58e1e9328665f64c5dec3b459ad7e1edd5b5b63190e8e30faa1dbdb7cf5"
+output_probe = "codec_name=h264|profile=High|width=320|height=180|pix_fmt=yuv420p|color_range=tv|color_space=bt709|color_transfer=bt709|color_primaries=bt709|r_frame_rate=24/1"

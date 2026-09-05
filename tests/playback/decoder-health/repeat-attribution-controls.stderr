@@ -1,7 +1,7 @@
 # Repeat summaries attach only to the immediately preceding classified record.
 0	    Last message repeated 8 times
 1	[aist#0:1/aac @ <address>] [dec:aac @ <address>] [error] Error submitting packet to decoder: invalid data
-2	    Last message repeated 7 times
+2	[error] Last message repeated 7 times
 3	[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] Error submitting packet to decoder: corrupt input packet
 4	    Last message repeated 6 times
 5	[h264 @ <address>] [error] No frame decoded?

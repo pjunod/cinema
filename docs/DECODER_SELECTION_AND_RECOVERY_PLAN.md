@@ -467,6 +467,10 @@ from compressing repeated messages, while `level` supplies severity labels.
 [FFmpeg logging documentation](https://ffmpeg.org/ffmpeg.html).
 Qualify the arguments against the deployed Jellyfin builds before enabling
 this parser; do not assume upstream documentation proves fork behavior.
+Automatic action must name a versioned diagnostic contract bound to the exact
+FFmpeg version, binary/build identity, codec/decoder family, log flags,
+selected-stream contexts, severity position, and retained fixture. A tolerant
+structural match without that external build receipt is observation only.
 
 Keep raw diagnostic logging redacted through the existing logger. Rate-limit
 displayed logs after classification so log suppression cannot erase health
@@ -498,20 +502,25 @@ codec name in a pathname.
 | Unattributed or unknown diagnostic | Log as unclassified; preserve existing process/progress failure detection |
 | Truncated, unreadable, or unsupported diagnostic stream | Mark observation incomplete; disallow a qualified cache receipt |
 
-The initial automatic-action family is the qualified FFmpeg 8 shape
-`[vist#… @ ADDRESS] [dec:mpeg4… @ ADDRESS] [error] Error submitting packet
-to decoder`. The retained #913 records omit severity and remain useful for
-observation only. The deployed FFmpeg 5.1 top-level stream error does not name
-the selected stream and is likewise unqualified. Add other families only with
-fixtures demonstrating attribution. A bare `No frame decoded?` without
-reliable context is supporting evidence, not an independent auto-retry trigger.
+The sole M0 automatic-action family is the build-bound host FFmpeg 8 rawvideo
+shape `[vist#…/rawvideo @ ADDRESS] [dec:rawvideo @ ADDRESS] [error] Error
+submitting packet to decoder`. It qualifies the parser boundary, not a deployed
+producer. The retained #913 FFmpeg 7.1.4 MPEG-4 records omit severity and remain
+useful for observation only. The deployed FFmpeg 5.1 top-level stream error
+does not name the selected stream and is likewise unqualified. Add other
+families only with exact build/codec contracts and fixtures demonstrating
+attribution. A bare `No frame decoded?` without reliable context is supporting
+evidence, not an independent auto-retry trigger.
 
-For legacy captures containing `Last message repeated N times`, attach the
-summary only to an unambiguous preceding qualified record and label its
-timing/count provenance. Do not synthesize N distinct failure timestamps
-or double-count an expanded capture. Live automatic enforcement requires
-the uncompressed grammar; legacy compressed fixtures exercise observation
-and diagnosis but do not pretend to supply precise window timing.
+For legacy captures containing `Last message repeated N times`, including a
+severity-prefixed form, attach the summary only to an unambiguous preceding
+qualified record and label its timing/count provenance. Do not synthesize N
+distinct failure timestamps or double-count an expanded capture. Any repeat
+summary proves the stream is compressed and disqualifies the entire attempt
+from automatic action, even when the repeated record was audio, unselected,
+or subordinate. Live automatic enforcement requires the uncompressed grammar;
+legacy compressed fixtures exercise observation and diagnosis but do not
+pretend to supply precise window timing.
 
 FFmpeg `-progress` frame/time values describe output progress, not a reliable
 denominator of attempted input decodes. Do not report a decoder error

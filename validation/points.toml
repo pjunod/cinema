@@ -622,6 +622,7 @@ paths = [
   "docs/PLAYBACK*.md",
   "docs/STUTTER-4K.md",
   "scripts/dv-evidence",
+  "scripts/decoder-media-baseline",
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
   "scripts/playback-lab",
