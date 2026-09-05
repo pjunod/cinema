@@ -1,8 +1,9 @@
 # Decoder selection and recovery — an explicit plan for each producer
 
-**Status:** proposed architecture and implementation handoff; no code or
-deployment performed · **Written:** 2026-09-05 · **Code baseline:**
-`main` at `9c9343911f4f5d355289365dcd542b640f32bca8`
+**Status:** implementation in progress; follow the live evidence and PR ledger
+in [DECODER_SELECTION_RECOVERY_STATUS.md](DECODER_SELECTION_RECOVERY_STATUS.md)
+· **Written:** 2026-09-05 · **Implementation baseline:** `main` at
+`3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
 Companion to [AVI_VIDEOTOOLBOX_REVIEW_DECISION.md](AVI_VIDEOTOOLBOX_REVIEW_DECISION.md)
 (the bounded MPEG-4 compatibility fix),
@@ -874,17 +875,34 @@ under its claim fence. Do not complete the original recipe's queue row with
 different bytes without updating the typed result contract. A cancelled,
 yielded, or superseded job cannot publish a late artifact.
 
-## 9. Operational controls — observe first, enforce only qualified paths
+## 9. Operational controls — visible enablement, qualified paths only
 
-Introduce the following proposed settings, parsed at startup with explicit
-errors for unrecognized values. Names are new contracts to add, not existing
-configuration options:
+Put decoder controls in **Settings → Developer → Decoder selection and
+recovery**. They are persisted settings, apply to newly prepared work without
+a binary rebuild or daemon restart, and are never compile features or hidden
+environment gates. The card shows current qualification, missing prerequisites,
+the effect of each mode, and the last refusal. An unsafe transition is rejected
+with those same bounded reasons instead of displaying an enabled control that
+the server silently ignores.
+
+Introduce the following settings through the existing common settings/store
+contracts. Names are new contracts to add, not existing configuration options:
 
 | Setting | Values and initial default | Effect |
 |---|---|---|
-| `PLURX_DECODE_POLICY` | `legacy` (initial), `enforce` | Both resolve explicit plans; legacy preserves marked inherited preferences, enforce requires qualified candidates |
-| `PLURX_DECODER_RECOVERY` | `observe` (initial), `prepublication`, `full` | Controls automatic action on new decoder-health faults; existing non-decoder failure handling remains |
-| `PLURX_HWDECODE` | Existing values | Software requirement integrated into the complete pipeline constraint solver |
+| `decoder.plan_policy` | `legacy` (initial), `enforce` | Both resolve explicit plans; legacy preserves marked inherited preferences, enforce requires qualified candidates |
+| `decoder.recovery` | `observe` (initial), `prepublication`, `full` | Controls automatic action on new decoder-health faults; existing non-decoder failure handling remains |
+| Existing `PLURX_HWDECODE` compatibility input | Existing values | Snapshot as an operator software requirement while migrating; it cannot enable this work or bypass the visible Developer controls |
+
+The Developer card may select `enforce` only when the node has a current
+FFmpeg/build capability receipt for every hardware class it will select and a
+qualified diagnostic grammar. It may select `prepublication` only when owned
+observation, health receipts, mixed-resource admission, and the durable
+one-shot reservation pass. It may select `full` only when those checks plus the
+current client's prepare/readiness/commit/retirement qualification pass. The
+card names each unmet condition. This is runtime safety validation of a
+requested mode, not feature gating: one shipping binary contains the behavior,
+and an operator enables qualified combinations from the UI.
 
 Recovery mode does not disable diagnostic collection or requalify a failed
 artifact. The new qualified-cache namespace always enforces its receipt
