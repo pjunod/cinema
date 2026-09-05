@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["64e3e674"]
+points = ["live-tv.integration"]
+checks = ["rust-gate"]
+reason = "Every ATSC 3.0 channel on a real HDHomeRun FLEX 4K was listed playable and could never start: the live filter chain pinned no pixel format, so an HEVC Main 10 broadcast reached libx264 as yuv420p10le while the software encoder pins -profile:v high, and x264 refused with 'high profile doesn't support a bit depth of 10' so FFmpeg exited before publishing. The coverage asserts the conversion lands on exactly the paths that do not already pin a format -- software and NVENC gain it, VAAPI and QSV keep their own hardware-upload formats and must not gain a trailing system-memory conversion. It was executed against the unfixed filter and observed to fail there, and the underlying failure and its repair were both reproduced outside the test by running the exact producer argument list against a four-second capture of the real channel, with and without the conversion, plus the same pair against an 8-bit MPEG-2 capture to show the conversion costs that path nothing."
