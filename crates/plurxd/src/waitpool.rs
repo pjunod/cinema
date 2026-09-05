@@ -41,7 +41,7 @@
 // nothing outside the tests calls it yet.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -74,12 +74,130 @@ pub enum WaitOutcome {
 /// Why a wait was refused at the door. A refused wait touched no state:
 /// nothing was registered, nothing needs releasing, the caller answers a
 /// typed 503 immediately.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitRefused {
     /// The session already has its cap of blocked GETs in flight.
     SessionBusy,
     /// The pool as a whole is at its cap.
     PoolFull,
+}
+
+/// The refusal classes, in [`WaitRefused::index`] order.
+///
+/// Two fixed strings for two enum variants: the label set cannot grow with
+/// traffic, which is the property that lets these be counted per reason at
+/// all. Session ids and rendition keys are the labels an attribution counter
+/// invites and the ones it must never carry.
+const REFUSAL_REASONS: [&str; 2] = ["session_busy", "pool_full"];
+
+impl WaitRefused {
+    fn index(self) -> usize {
+        match self {
+            Self::SessionBusy => 0,
+            Self::PoolFull => 1,
+        }
+    }
+}
+
+/// Blocked-GET admission counters, readable without the pool's lock.
+///
+/// Separated from `State` rather than derived from it, because that lock is
+/// taken on every blocked segment GET and on every driver pass that reads
+/// demand, and this node's metrics surface is deliberately free of anything a
+/// live request can hold — the same rule that keeps the session map out of the
+/// transcode snapshot, and that has its own regression. Every field here is
+/// read with a plain atomic load.
+///
+/// Owned by the pool and handed out as a handle rather than kept in a module
+/// static, so a test can drive a pool of its own and read exactly what that
+/// pool did. The statics this replaced could not be asserted at all under a
+/// parallel suite.
+#[derive(Debug, Default)]
+pub struct BlockedGetMetrics {
+    waiting: AtomicUsize,
+    cap: AtomicUsize,
+    admitted: AtomicU64,
+    refused: [AtomicU64; 2],
+}
+
+impl BlockedGetMetrics {
+    /// The node's blocked-GET picture, read whole.
+    ///
+    /// Answered whole because no subset answers the question. A refusal count
+    /// without the ceiling it is against cannot tell a node at its limit from
+    /// one nowhere near it; a ceiling without refusals cannot tell one that is
+    /// doing its job from one sized for a different machine; and the two
+    /// classes summed cannot tell one client's seek storm from a full node —
+    /// which is the entire question this exists to answer.
+    pub fn snapshot(&self) -> BlockedGets {
+        BlockedGets {
+            waiting: self.waiting.load(Relaxed),
+            cap: self.cap.load(Relaxed),
+            admitted: self.admitted.load(Relaxed),
+            refused: [self.refused[0].load(Relaxed), self.refused[1].load(Relaxed)],
+        }
+    }
+
+    /// Prometheus text for blocked-GET admission.
+    pub fn prometheus(&self) -> String {
+        render_blocked_gets(self.snapshot())
+    }
+}
+
+/// What blocked-GET admission looks like right now, and what it has done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockedGets {
+    /// Parked right now.
+    pub waiting: usize,
+    /// The node-wide ceiling those waits are against.
+    pub cap: usize,
+    /// Admitted since boot.
+    pub admitted: u64,
+    /// Refused since boot, in [`REFUSAL_REASONS`] order.
+    pub refused: [u64; 2],
+}
+
+impl BlockedGets {
+    /// Refusals for one class, by name — so a caller naming a class cannot
+    /// silently read the other one's counter off a wrong index.
+    pub fn refused(&self, reason: WaitRefused) -> u64 {
+        self.refused[reason.index()]
+    }
+}
+
+fn render_blocked_gets(snapshot: BlockedGets) -> String {
+    use std::fmt::Write;
+    let mut out = String::from(
+        "# HELP plurx_vod_blocked_gets_waiting Segment GETs parked waiting for media right now.\n\
+         # TYPE plurx_vod_blocked_gets_waiting gauge\n",
+    );
+    let _ = writeln!(out, "plurx_vod_blocked_gets_waiting {}", snapshot.waiting);
+    out.push_str(
+        "# HELP plurx_vod_blocked_get_cap Node-wide ceiling those waits are admitted against.\n\
+         # TYPE plurx_vod_blocked_get_cap gauge\n",
+    );
+    let _ = writeln!(out, "plurx_vod_blocked_get_cap {}", snapshot.cap);
+    out.push_str(
+        "# HELP plurx_vod_blocked_gets_admitted_total Segment GETs admitted to the wait pool.\n\
+         # TYPE plurx_vod_blocked_gets_admitted_total counter\n",
+    );
+    let _ = writeln!(
+        out,
+        "plurx_vod_blocked_gets_admitted_total {}",
+        snapshot.admitted
+    );
+    out.push_str(
+        "# HELP plurx_vod_blocked_get_refusals_total Segment GETs refused at admission, by bounded cap class.\n\
+         # TYPE plurx_vod_blocked_get_refusals_total counter\n",
+    );
+    for (index, reason) in REFUSAL_REASONS.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "plurx_vod_blocked_get_refusals_total{{reason=\"{reason}\"}} {}",
+            snapshot.refused[index]
+        );
+    }
+    out
 }
 
 /// One registered waiter: who to wake, and whose session slot to release.
@@ -126,6 +244,9 @@ impl State {
 /// guard, and both cap slots come back synchronously — no sweeper, no delay.
 struct SlotGuard {
     state: Arc<Mutex<State>>,
+    /// Carried so the gauge falls on every path a slot comes back, the
+    /// disconnect one included — this destructor is that path.
+    metrics: Arc<BlockedGetMetrics>,
     key: WaitKey,
     id: u64,
     session: String,
@@ -136,6 +257,10 @@ impl Drop for SlotGuard {
         let mut state = self.state.lock().expect(POISONED);
         if state.retained.remove(&self.id).is_some() {
             state.release(&self.session);
+            // The gauge's only decrement, paired with the only increment, and
+            // taken under the same lock that owns `total` so the two cannot
+            // drift.
+            self.metrics.waiting.fetch_sub(1, Relaxed);
         }
         // The caller now has its file or has abandoned the request. If the
         // notification already arrived, only its pin/slot needed releasing.
@@ -192,6 +317,11 @@ pub struct WaitPool {
     /// Fixed, because it bounds one viewer rather than the node. A viewer who
     /// could raise their own ceiling is not capped.
     per_session_cap: usize,
+    /// What the operator surfaces read. An `Arc` so a scrape holds the
+    /// counters directly rather than reaching back through whichever
+    /// `VodServe` the transcode manager currently owns — it replaces its own
+    /// on the cluster boot path.
+    metrics: Arc<BlockedGetMetrics>,
 }
 
 impl WaitPool {
@@ -200,7 +330,16 @@ impl WaitPool {
             state: Arc::new(Mutex::new(State::default())),
             global_cap: AtomicUsize::new(global_cap),
             per_session_cap,
+            metrics: Arc::new(BlockedGetMetrics {
+                cap: AtomicUsize::new(global_cap),
+                ..BlockedGetMetrics::default()
+            }),
         }
+    }
+
+    /// A cheap clone of the counters, for the metrics and system surfaces.
+    pub fn metrics_handle(&self) -> Arc<BlockedGetMetrics> {
+        Arc::clone(&self.metrics)
     }
 
     /// Apply the configured node-wide cap.
@@ -211,15 +350,20 @@ impl WaitPool {
     /// number an operator has just changed would turn a settings edit into a
     /// visible playback failure.
     pub fn set_global_cap(&self, cap: usize) {
-        self.global_cap.store(cap.max(1), Relaxed);
+        let cap = cap.max(1);
+        self.global_cap.store(cap, Relaxed);
+        // Published with the same store, so the ceiling an operator reads is
+        // the one the next admission will actually use rather than the one
+        // the settings row happens to hold.
+        self.metrics.cap.store(cap, Relaxed);
     }
 
-    /// The ceiling currently in force.
+    /// The ceiling currently in force, for the tests that pin the floor.
     ///
-    /// Test-only for now: nothing on the status surface reports it, which is
-    /// a gap worth closing — an operator reading `pool_full` refusals cannot
-    /// see the number those refusals are against — but publishing it is its
-    /// own plumbing and does not belong in the change that made it settable.
+    /// Still test-only, and no longer a gap: the number an operator needs is
+    /// published by `BlockedGetMetrics`, beside the refusals it explains,
+    /// rather than by an accessor on the pool that a scrape would have to take
+    /// a request-path lock to reach.
     #[cfg(test)]
     pub fn global_cap(&self) -> usize {
         self.global_cap.load(Relaxed)
@@ -247,10 +391,20 @@ impl WaitPool {
 
     pub fn register(&self, key: WaitKey, session: &str) -> Result<RegisteredWait, WaitRefused> {
         let mut state = self.lock();
+        // Counted at the door, where the answer is exact: a refused wait
+        // touches no state, so there is no later path on which the refusal
+        // could be undone and no double-count to guard against. The two
+        // classes are counted apart deliberately — folding them together is
+        // what makes "was that one storm or a full node" unanswerable, and
+        // the per-session refusal deliberately wins even on a full node, so
+        // conflating them would inflate the very number an operator sizes the
+        // node cap from.
         if state.per_session.get(session).copied().unwrap_or(0) >= self.per_session_cap {
+            self.metrics.refused[WaitRefused::SessionBusy.index()].fetch_add(1, Relaxed);
             return Err(WaitRefused::SessionBusy);
         }
         if state.total >= self.global_cap.load(Relaxed) {
+            self.metrics.refused[WaitRefused::PoolFull.index()].fetch_add(1, Relaxed);
             return Err(WaitRefused::PoolFull);
         }
         let id = state.next_id;
@@ -264,9 +418,16 @@ impl WaitPool {
         state.retained.insert(id, key.clone());
         *state.per_session.entry(session.to_string()).or_insert(0) += 1;
         state.total += 1;
+        // Mirrored under the same lock that owns `total`, so the gauge cannot
+        // drift from it: every increment here is matched by the release in
+        // `State::release`, which runs under this lock too and on every path
+        // a slot comes back — including the disconnect one, through the guard.
+        self.metrics.waiting.fetch_add(1, Relaxed);
+        self.metrics.admitted.fetch_add(1, Relaxed);
         drop(state);
         let guard = SlotGuard {
             state: Arc::clone(&self.state),
+            metrics: Arc::clone(&self.metrics),
             key,
             id,
             session: session.to_string(),
@@ -837,6 +998,126 @@ mod tests {
         assert_eq!(pool.blocked_on("abcd1234"), Some(7));
         drop((a, c));
         assert!(pool.is_empty());
+    }
+
+    /// The node can say which cap turned a request away, and against what.
+    ///
+    /// This is the operator's question — *was that 503 one seek storm, many
+    /// healthy viewers, or a ceiling sized for a different node* — and until
+    /// these counters existed nothing on the node could answer any part of it.
+    /// The refusal reached a log line that named neither cap, and both classes
+    /// answered the same typed code.
+    ///
+    /// The five numbers are asserted together because no subset is an answer.
+    /// Refusals without the ceiling cannot tell a node at its limit from one
+    /// nowhere near it; the ceiling without refusals cannot tell one that is
+    /// working from one sized for a smaller machine; and the classes summed
+    /// cannot tell a single client asking for too much from a full node —
+    /// which is the distinction that decides whether raising the setting helps
+    /// at all.
+    #[test]
+    fn refusals_are_attributed_to_the_cap_that_produced_them() {
+        let pool = WaitPool::new(3, 2);
+        let metrics = pool.metrics_handle();
+        assert_eq!(
+            metrics.snapshot(),
+            BlockedGets {
+                waiting: 0,
+                cap: 3,
+                admitted: 0,
+                refused: [0, 0],
+            },
+            "a fresh pool publishes its ceiling before anything has happened"
+        );
+
+        let storm = vec![
+            pool.register(key(1), "storm").expect("first"),
+            pool.register(key(2), "storm").expect("second"),
+        ];
+        assert!(matches!(
+            pool.register(key(3), "storm"),
+            Err(WaitRefused::SessionBusy)
+        ));
+        let quiet = pool.register(key(4), "quiet").expect("node room remains");
+        assert!(matches!(
+            pool.register(key(5), "third"),
+            Err(WaitRefused::PoolFull)
+        ));
+
+        let after = metrics.snapshot();
+        assert_eq!(
+            after,
+            BlockedGets {
+                waiting: 3,
+                cap: 3,
+                admitted: 3,
+                refused: [1, 1],
+            },
+            "three admitted against a ceiling of three, and one refusal of each class"
+        );
+        assert_eq!(after.refused(WaitRefused::SessionBusy), 1);
+        assert_eq!(after.refused(WaitRefused::PoolFull), 1);
+
+        // The gauge follows release, including the path a disconnect takes:
+        // dropping a registered wait is what a dropped request future does.
+        drop(quiet);
+        assert_eq!(metrics.snapshot().waiting, 2);
+        drop(storm);
+        let idle = metrics.snapshot();
+        assert_eq!(idle.waiting, 0, "an idle pool is parking nothing");
+        assert_eq!(
+            (idle.admitted, idle.refused),
+            (3, [1, 1]),
+            "and the counters are cumulative, not a picture of right now"
+        );
+
+        pool.set_global_cap(9);
+        assert_eq!(
+            metrics.snapshot().cap,
+            9,
+            "an operator's change is published with the store that applies it"
+        );
+    }
+
+    /// The counters name classes, never sessions or renditions.
+    ///
+    /// Those are exactly the labels an attribution counter invites and the
+    /// ones that make a metrics endpoint a cardinality bomb, so the render is
+    /// held to the two fixed reason strings and nothing else.
+    #[test]
+    fn the_blocked_get_render_carries_only_bounded_labels() {
+        let pool = WaitPool::new(1, 1);
+        let metrics = pool.metrics_handle();
+        let admitted = pool
+            .register(key(1), "a-very-distinctive-session-id")
+            .expect("first");
+        assert!(matches!(
+            pool.register(
+                WaitKey {
+                    rendition: "a-very-distinctive-rendition-key".into(),
+                    index: 2
+                },
+                // The same session, so the per-session cap answers first —
+                // with a global cap of one, any other session would be refused
+                // for the node instead and this would be testing a different
+                // class than it says.
+                "a-very-distinctive-session-id"
+            ),
+            Err(WaitRefused::SessionBusy)
+        ));
+
+        let text = metrics.prometheus();
+        assert!(text.contains("plurx_vod_blocked_gets_waiting 1"));
+        assert!(text.contains("plurx_vod_blocked_get_cap 1"));
+        assert!(text.contains("plurx_vod_blocked_gets_admitted_total 1"));
+        assert!(text.contains("plurx_vod_blocked_get_refusals_total{reason=\"session_busy\"} 1"));
+        assert!(text.contains("plurx_vod_blocked_get_refusals_total{reason=\"pool_full\"} 0"));
+        assert!(
+            !text.contains("distinctive"),
+            "session ids and rendition keys must never become labels"
+        );
+        assert!(!text.contains("session=") && !text.contains("rendition="));
+        drop(admitted);
     }
 
     #[tokio::test]

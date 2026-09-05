@@ -10048,6 +10048,19 @@ impl TranscodeManager {
             .expect("test eviction claim")
     }
 
+    /// Blocked-GET admission counters for the operator surfaces.
+    ///
+    /// Read through `self.vod` at call time rather than captured once. This
+    /// manager replaces its own `VodServe` on the cluster boot path, so a
+    /// handle taken at construction can address a pool nothing serves from —
+    /// and an admission counter that quietly stops moving is worse than no
+    /// counter, because it reads as a quiet node.
+    pub(crate) fn blocked_get_metrics_handle(
+        &self,
+    ) -> std::sync::Arc<crate::waitpool::BlockedGetMetrics> {
+        self.vod.blocked_get_metrics_handle()
+    }
+
     /// Narrow process-metrics handle with no session map or Store access.
     pub(crate) fn metrics_handle(&self) -> TranscodeMetrics {
         TranscodeMetrics {

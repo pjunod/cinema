@@ -9774,12 +9774,30 @@ fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiError {
                 format!("the segment is being produced; retry in {secs}s"),
             )
         }
-        VodError::Busy => {
-            log("segment_wait_busy", "blocked-GET caps reached");
+        // Two caps, two answers. The client can act on the difference — one
+        // says this player is asking for too much at once and should slow its
+        // own requests, the other says the node has no parked-request capacity
+        // left and retrying harder makes it worse — and an operator reading
+        // these refusals needs them apart to tell one seek storm from a
+        // ceiling sized for a smaller deployment. They were one code, so
+        // neither could.
+        VodError::Busy(crate::waitpool::WaitRefused::SessionBusy) => {
+            log(
+                "segment_wait_busy",
+                "this session's blocked-GET cap reached",
+            );
             ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "segment_wait_busy",
                 "too many blocked fetches for this session; retry shortly",
+            )
+        }
+        VodError::Busy(crate::waitpool::WaitRefused::PoolFull) => {
+            log("node_wait_capacity", "the node's blocked-GET cap reached");
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "node_wait_capacity",
+                "this server is at its limit for waiting fetches; retry shortly",
             )
         }
         VodError::ProducerFailed(reason) => {
@@ -17497,6 +17515,58 @@ mod tests {
         let (status, body) = control_body(control_owner_answer(&route, Some(3), NOW_MS)).await;
         assert_eq!(status, StatusCode::TOO_EARLY);
         assert_eq!(body["code"], "owner_transition");
+    }
+
+    /// The two blocked-GET caps answer a client differently, because they mean
+    /// different things to it.
+    ///
+    /// Both used to answer `segment_wait_busy` with a message about "this
+    /// session", which was wrong for half of them: a node at its own ceiling is
+    /// not this player asking for too much, and a client told to slow its own
+    /// requests does the wrong thing about it. Both still answer 503 — the
+    /// retry ladder is unchanged — but the code and the sentence say which
+    /// limit was reached.
+    #[tokio::test]
+    async fn the_two_blocked_get_caps_answer_a_client_apart() {
+        use crate::waitpool::WaitRefused;
+
+        let (viewer_status, viewer) = error_body(vod_error(
+            "sess-a",
+            crate::vodserve::VodError::Busy(WaitRefused::SessionBusy),
+        ))
+        .await;
+        assert_eq!(viewer_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(viewer["code"], "segment_wait_busy");
+        assert!(
+            viewer["message"]
+                .as_str()
+                .expect("a message")
+                .contains("this session"),
+            "the per-viewer refusal says whose limit it was"
+        );
+
+        let (node_status, node) = error_body(vod_error(
+            "sess-a",
+            crate::vodserve::VodError::Busy(WaitRefused::PoolFull),
+        ))
+        .await;
+        assert_eq!(
+            node_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "still retryable — the ladder does not change"
+        );
+        assert_eq!(node["code"], "node_wait_capacity");
+        assert_ne!(
+            node["code"], viewer["code"],
+            "a client cannot act on a distinction it cannot see"
+        );
+        assert!(
+            node["message"]
+                .as_str()
+                .expect("a message")
+                .contains("server"),
+            "and the node refusal does not blame the player for it"
+        );
     }
 
     /// The detail object is data. A route that somehow carried a `code` field
