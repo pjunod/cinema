@@ -3,7 +3,7 @@ use crate::{Error, NodeId};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize};
-use stream::{ClientLeaderChange, ClientStreamReq};
+use stream::{ClientStreamControl, ClientStreamReq};
 use tokio::sync::{RwLock, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -70,11 +70,11 @@ pub(crate) struct DbClient {
     #[cfg(feature = "cache")]
     pub(crate) tx_client_cache: flume::Sender<ClientStreamReq>,
     #[cfg(feature = "cache")]
-    pub(crate) tx_leader_cache: flume::Sender<ClientLeaderChange>,
+    pub(crate) tx_leader_cache: flume::Sender<ClientStreamControl>,
     #[cfg(feature = "sqlite")]
     pub(crate) tx_client_db: flume::Sender<ClientStreamReq>,
     #[cfg(feature = "sqlite")]
-    pub(crate) tx_leader_db: flume::Sender<ClientLeaderChange>,
+    pub(crate) tx_leader_db: flume::Sender<ClientStreamControl>,
     pub(crate) tls_config: Option<Arc<rustls::ClientConfig>>,
     #[cfg(feature = "cache")]
     pub(crate) tls_no_verify: bool,

@@ -10,6 +10,7 @@ use tokio::sync::{RwLock, watch};
 #[cfg(feature = "listen_notify")]
 use crate::client::listen_notify::remote::RemoteListener;
 
+use crate::client::stream::ClientStreamControl;
 #[cfg(feature = "sqlite")]
 use crate::client::stream::ClientStreamReq;
 
@@ -25,6 +26,8 @@ impl Client {
         tls_no_verify: bool,
         #[cfg(feature = "sqlite")] tx_client_db: flume::Sender<ClientStreamReq>,
         #[cfg(feature = "sqlite")] rx_client_db: flume::Receiver<ClientStreamReq>,
+        #[cfg(feature = "sqlite")] tx_leader_db: flume::Sender<ClientStreamControl>,
+        #[cfg(feature = "sqlite")] rx_leader_db: flume::Receiver<ClientStreamControl>,
         tx_shutdown: watch::Sender<bool>,
         #[cfg(feature = "cache")] rate_limit_cache: Option<RateLimitConfig>,
         #[cfg(feature = "sqlite")] rate_limit_db: Option<RateLimitConfig>,
@@ -48,9 +51,6 @@ impl Client {
         let (tx_client_cache, rx_client_cache) = flume::bounded(1);
         #[cfg(feature = "cache")]
         let (tx_leader_cache, rx_leader_cache) = flume::bounded(1);
-        #[cfg(feature = "sqlite")]
-        let (tx_leader_db, rx_leader_db) = flume::bounded(1);
-
         #[allow(unused_variables)]
         let (rate_limit_cache_await, rx_cache_await) =
             crossbeam::channel::bounded(RATE_LIMIT_AWAIT_SIZE);

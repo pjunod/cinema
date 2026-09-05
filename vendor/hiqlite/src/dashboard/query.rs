@@ -55,8 +55,8 @@ pub(crate) async fn dashboard_query_dynamic(
             Err(err) => {
                 if let Some((id, node)) = err.is_forward_to_leader() {
                     state
-                        .tx_client_stream
-                        .send_async(crate::client::stream::ClientStreamReq::LeaderChange(
+                        .tx_client_control
+                        .send_async(crate::client::stream::ClientStreamControl::DashboardLeader(
                             (id, node.clone()),
                             None,
                         ))

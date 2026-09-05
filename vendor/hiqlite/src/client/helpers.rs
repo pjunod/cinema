@@ -1,6 +1,6 @@
 use crate::app_state::AppState;
 use crate::client::LeaderRecovery;
-use crate::client::stream::{ClientLeaderChange, ClientStreamReq};
+use crate::client::stream::{ClientLeaderChange, ClientStreamControl, ClientStreamReq};
 use crate::{Client, Error, LEADER_DISCOVERY_TIMEOUT, LEADER_STREAM_HANDOFF_TIMEOUT, Node, NodeId};
 use openraft::RaftMetrics;
 use std::clone::Clone;
@@ -33,18 +33,18 @@ async fn first_some<T: Send + 'static>(mut probes: JoinSet<Option<T>>) -> Option
 }
 
 async fn change_leader_and_wait(
-    tx: &flume::Sender<ClientLeaderChange>,
+    tx: &flume::Sender<ClientStreamControl>,
     leader_id: NodeId,
     node: Node,
 ) -> bool {
     let (ready, reopened) = tokio::sync::oneshot::channel();
     time::timeout(LEADER_STREAM_HANDOFF_TIMEOUT, async {
         if tx
-            .send_async(ClientLeaderChange {
+            .send_async(ClientStreamControl::Leader(ClientLeaderChange {
                 leader_id,
                 node,
                 ready: Some(ready),
-            })
+            }))
             .await
             .is_err()
         {
@@ -359,7 +359,7 @@ impl Client {
     fn leader_change_sender(
         &self,
         leader: &Arc<RwLock<(NodeId, String)>>,
-    ) -> Option<flume::Sender<ClientLeaderChange>> {
+    ) -> Option<flume::Sender<ClientStreamControl>> {
         #[cfg(feature = "sqlite")]
         if Arc::ptr_eq(leader, &self.inner.leader_db) {
             return Some(self.inner.tx_leader_db.clone());
@@ -436,9 +436,13 @@ impl Client {
         &self,
         err: &Error,
         lock: &Arc<RwLock<(NodeId, String)>>,
-        tx: &flume::Sender<ClientStreamReq>,
+        _tx: &flume::Sender<ClientStreamReq>,
     ) -> bool {
         let Some((leader_id, node)) = err.is_forward_to_leader() else {
+            return false;
+        };
+
+        let Some(leader_tx) = self.leader_change_sender(lock) else {
             return false;
         };
 
@@ -449,8 +453,8 @@ impl Client {
             // caller's network and trust boundary.
             let (ack, rotated) = tokio::sync::oneshot::channel();
             return time::timeout(PROXY_ROTATION_TIMEOUT, async {
-                if tx
-                    .send_async(ClientStreamReq::RotateProxy(ack))
+                if leader_tx
+                    .send_async(ClientStreamControl::RotateProxy(ack))
                     .await
                     .is_err()
                 {
@@ -462,9 +466,6 @@ impl Client {
             .unwrap_or(false);
         }
 
-        let Some(leader_tx) = self.leader_change_sender(lock) else {
-            return false;
-        };
         if let (Some(leader_id), Some(node)) = (leader_id, node.clone()) {
             if !change_leader_and_wait(&leader_tx, leader_id, node).await {
                 return false;
@@ -665,7 +666,11 @@ mod tests {
             addr_api: "node-nine:21000".to_owned(),
         };
         let recovery = tokio::spawn(async move { change_leader_and_wait(&tx, 9, node).await });
-        let request = rx.recv_async().await.expect("leader change request");
+        let ClientStreamControl::Leader(request) =
+            rx.recv_async().await.expect("leader change request")
+        else {
+            panic!("expected leader control");
+        };
         let Some(ready) = request.ready else {
             panic!("expected an acknowledged leader change");
         };
@@ -683,7 +688,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn full_control_channel_is_inside_the_handoff_deadline() {
         let (tx, _rx) = flume::bounded(1);
-        tx.send_async(ClientLeaderChange {
+        tx.send_async(ClientStreamControl::Leader(ClientLeaderChange {
             leader_id: 1,
             node: Node {
                 id: 1,
@@ -691,7 +696,7 @@ mod tests {
                 addr_api: "queued:21000".to_owned(),
             },
             ready: None,
-        })
+        }))
         .await
         .expect("fill control channel");
         let node = Node {
@@ -708,7 +713,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn queued_handoff_allows_a_near_boundary_successful_connect() {
         let (tx, rx) = flume::bounded(1);
-        tx.send_async(ClientLeaderChange {
+        tx.send_async(ClientStreamControl::Leader(ClientLeaderChange {
             leader_id: 1,
             node: Node {
                 id: 1,
@@ -716,7 +721,7 @@ mod tests {
                 addr_api: "queued:21000".to_owned(),
             },
             ready: None,
-        })
+        }))
         .await
         .expect("fill control channel");
         let node = Node {
@@ -728,7 +733,11 @@ mod tests {
         tokio::task::yield_now().await;
         time::advance(Duration::from_millis(500)).await;
         let _queued = rx.recv_async().await.expect("drain queued control message");
-        let request = rx.recv_async().await.expect("receive leader handoff");
+        let ClientStreamControl::Leader(request) =
+            rx.recv_async().await.expect("receive leader handoff")
+        else {
+            panic!("expected leader control");
+        };
         let Some(ready) = request.ready else {
             panic!("expected handoff acknowledgement");
         };

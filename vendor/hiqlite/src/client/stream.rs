@@ -64,16 +64,6 @@ pub(crate) enum ClientStreamReq {
     // coming from the WebSocket reader
     StreamResponse(ApiStreamResponse),
     CleanupBuffer,
-
-    // The embedded dashboard still reports a local ForwardToLeader through
-    // the shared AppState queue. Retried Client operations use the dedicated
-    // priority control channel below.
-    #[cfg(feature = "dashboard")]
-    LeaderChange((Option<u64>, Option<Node>), Option<oneshot::Sender<()>>),
-    /// Advance only within the caller-configured proxy pool. The stream
-    /// manager acknowledges after closing the old stream and failing every
-    /// in-flight request without replay.
-    RotateProxy(oneshot::Sender<()>),
 }
 
 /// Priority control message consumed even while the manager is opening its
@@ -85,6 +75,19 @@ pub(crate) struct ClientLeaderChange {
     pub(crate) leader_id: NodeId,
     pub(crate) node: Node,
     pub(crate) ready: Option<oneshot::Sender<()>>,
+}
+
+/// Recovery controls have a dedicated queue so application FIFO traffic
+/// cannot hide a handoff while the writer queue is full.
+#[derive(Debug)]
+pub(crate) enum ClientStreamControl {
+    Leader(ClientLeaderChange),
+    #[cfg(feature = "dashboard")]
+    DashboardLeader((Option<NodeId>, Option<Node>), Option<oneshot::Sender<()>>),
+    /// Advance only within the caller-configured proxy pool. The stream
+    /// manager acknowledges after closing the old stream and failing every
+    /// unresolved in-flight request without replay.
+    RotateProxy(oneshot::Sender<()>),
 }
 
 #[derive(Default)]
@@ -194,12 +197,7 @@ impl ClientStreamReq {
             Self::Notify(payload) => {
                 let _ = payload.ack.send(Err(error()));
             }
-            Self::Shutdown
-            | Self::StreamResponse(_)
-            | Self::CleanupBuffer
-            | Self::RotateProxy(_) => {}
-            #[cfg(feature = "dashboard")]
-            Self::LeaderChange(_, _) => {}
+            Self::Shutdown | Self::StreamResponse(_) | Self::CleanupBuffer => {}
         }
     }
 }
@@ -288,15 +286,14 @@ enum ClientConnectedEvent {
     Shutdown,
     ReaderFinished(Result<(), String>),
     WriterFinished(Result<(), String>),
-    Leader(Result<ClientLeaderChange, flume::RecvError>),
+    Control(Result<ClientStreamControl, flume::RecvError>),
     Incoming(Result<ClientStreamReq, flume::RecvError>),
 }
 
 enum ClientEnqueueEvent {
     Shutdown,
     Reader(Result<ClientStreamReq, flume::RecvError>),
-    LeaderChange(Result<ClientLeaderChange, flume::RecvError>),
-    Manager(Result<ClientStreamReq, flume::RecvError>),
+    Control(Result<ClientStreamControl, flume::RecvError>),
     ReaderFinished(Result<(), String>),
     WriterFinished(Result<(), String>),
     Retry,
@@ -307,8 +304,7 @@ fn latched_client_enqueue_event(
     reader_finished: &mut oneshot::Receiver<Result<(), String>>,
     writer_finished: &mut oneshot::Receiver<Result<(), String>>,
     reader: &flume::Receiver<ClientStreamReq>,
-    leaders: &flume::Receiver<ClientLeaderChange>,
-    requests: Option<&flume::Receiver<ClientStreamReq>>,
+    controls: &flume::Receiver<ClientStreamControl>,
 ) -> Option<ClientEnqueueEvent> {
     if *stream_shutdown.borrow() {
         return Some(ClientEnqueueEvent::Shutdown);
@@ -340,25 +336,12 @@ fn latched_client_enqueue_event(
         }
         Err(flume::TryRecvError::Empty) => {}
     }
-    match leaders.try_recv() {
-        Ok(change) => return Some(ClientEnqueueEvent::LeaderChange(Ok(change))),
-        Err(flume::TryRecvError::Disconnected) => {
-            return Some(ClientEnqueueEvent::LeaderChange(Err(
-                flume::RecvError::Disconnected,
-            )));
-        }
-        Err(flume::TryRecvError::Empty) => {}
-    }
-    if let Some(requests) = requests {
-        match requests.try_recv() {
-            Ok(request) => Some(ClientEnqueueEvent::Manager(Ok(request))),
-            Err(flume::TryRecvError::Disconnected) => Some(ClientEnqueueEvent::Manager(Err(
-                flume::RecvError::Disconnected,
-            ))),
-            Err(flume::TryRecvError::Empty) => None,
-        }
-    } else {
-        None
+    match controls.try_recv() {
+        Ok(control) => Some(ClientEnqueueEvent::Control(Ok(control))),
+        Err(flume::TryRecvError::Disconnected) => Some(ClientEnqueueEvent::Control(Err(
+            flume::RecvError::Disconnected,
+        ))),
+        Err(flume::TryRecvError::Empty) => None,
     }
 }
 
@@ -366,7 +349,7 @@ async fn next_client_connected_event(
     stream_shutdown: &mut tokio::sync::watch::Receiver<bool>,
     reader_finished: &mut oneshot::Receiver<Result<(), String>>,
     writer_finished: &mut oneshot::Receiver<Result<(), String>>,
-    leaders: &flume::Receiver<ClientLeaderChange>,
+    controls: &flume::Receiver<ClientStreamControl>,
     reader: &flume::Receiver<ClientStreamReq>,
     requests: &flume::Receiver<ClientStreamReq>,
 ) -> ClientConnectedEvent {
@@ -384,7 +367,7 @@ async fn next_client_connected_event(
             ))
         ),
         result = reader.recv_async() => ClientConnectedEvent::Incoming(result),
-        change = leaders.recv_async() => ClientConnectedEvent::Leader(change),
+        control = controls.recv_async() => ClientConnectedEvent::Control(control),
         result = requests.recv_async() => ClientConnectedEvent::Incoming(result),
     }
 }
@@ -402,13 +385,71 @@ fn reconnect_delay(
     }
 }
 
+async fn apply_disconnected_control(
+    client: &Client,
+    leader: &Arc<RwLock<(NodeId, String)>>,
+    pending_leader_ready: &mut PendingLeaderReady,
+    proxy_index: &mut usize,
+    connecting_target: Option<&(NodeId, String)>,
+    control: ClientStreamControl,
+) -> bool {
+    match control {
+        ClientStreamControl::Leader(ClientLeaderChange {
+            leader_id,
+            node,
+            ready,
+        }) => {
+            let target = (leader_id, node.addr_api.clone());
+            if !pending_leader_ready.register(target.clone(), ready) {
+                return false;
+            }
+            if connecting_target.is_some_and(|connecting_target| {
+                !leader_handoff_restarts_connection(connecting_target, &target)
+            }) {
+                // A duplicate for the stream already being opened shares that
+                // handshake instead of resetting its five-second attempt near
+                // the recovery deadline.
+                return false;
+            }
+            update_leader(leader, Some(leader_id), Some(node)).await;
+            true
+        }
+        #[cfg(feature = "dashboard")]
+        ClientStreamControl::DashboardLeader((node_id, node), ready) => {
+            let target = node_id
+                .zip(node.as_ref())
+                .map(|(node_id, node)| (node_id, node.addr_api.clone()));
+            if let Some(target) = target {
+                if !pending_leader_ready.register(target.clone(), ready) {
+                    return false;
+                }
+                if connecting_target.is_some_and(|connecting_target| {
+                    !leader_handoff_restarts_connection(connecting_target, &target)
+                }) {
+                    return false;
+                }
+            }
+            update_leader(leader, node_id, node).await;
+            true
+        }
+        ClientStreamControl::RotateProxy(ack) => {
+            if ack.is_closed() {
+                return false;
+            }
+            rotate_proxy_endpoint(client, leader, proxy_index).await;
+            let _ = ack.send(());
+            true
+        }
+    }
+}
+
 impl Client {
     pub(crate) fn open_stream(
         &self,
         secret: Vec<u8>,
         leader: Arc<RwLock<(NodeId, String)>>,
         rx_client_stream: flume::Receiver<ClientStreamReq>,
-        rx_leader_change: flume::Receiver<ClientLeaderChange>,
+        rx_control: flume::Receiver<ClientStreamControl>,
         raft_type: RaftType,
     ) {
         let handle = task::spawn(Box::pin(client_stream(
@@ -416,7 +457,7 @@ impl Client {
             secret,
             leader,
             rx_client_stream,
-            rx_leader_change,
+            rx_control,
             raft_type,
             self.inner.stream_shutdown.subscribe(),
         )));
@@ -435,7 +476,7 @@ async fn client_stream(
     secret: Vec<u8>,
     leader: Arc<RwLock<(NodeId, String)>>,
     rx_req: flume::Receiver<ClientStreamReq>,
-    rx_leader: flume::Receiver<ClientLeaderChange>,
+    rx_control: flume::Receiver<ClientStreamControl>,
     raft_type: RaftType,
     mut stream_shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -445,12 +486,6 @@ async fn client_stream(
         usize,
         oneshot::Sender<Result<ApiStreamResponsePayload, Error>>,
     > = HashMap::new();
-    // A normal request inspected while the current request owns backpressured
-    // writer admission stays manager-owned and keeps its FIFO position across
-    // reconnects. Recovery controls at the head of the shared queue can then
-    // preempt the stale socket without losing this request.
-    let mut deferred_request = None;
-
     let mut shutdown = false;
     let mut pending_leader_ready = PendingLeaderReady::default();
     // DB and cache managers each own their cursor. An index, rather than an
@@ -474,33 +509,29 @@ async fn client_stream(
                     fail_client_stream_shutdown(
                         &mut in_flight,
                         &mut in_flight_buf,
-                        &mut deferred_request,
                         &rx_req,
                     );
                     return;
                 }
-                change = rx_leader.recv_async() => {
-                    let Ok(ClientLeaderChange { leader_id, node, ready }) = change else {
+                control = rx_control.recv_async() => {
+                    let Ok(control) = control else {
                         fail_client_stream_shutdown(
                             &mut in_flight,
                             &mut in_flight_buf,
-                            &mut deferred_request,
                             &rx_req,
                         );
                         return;
                     };
-                    let target = (leader_id, node.addr_api.clone());
-                    if !pending_leader_ready.register(target.clone(), ready) {
-                        continue;
+                    if apply_disconnected_control(
+                        &client,
+                        &leader,
+                        &mut pending_leader_ready,
+                        &mut proxy_index,
+                        Some(&connecting_target),
+                        control,
+                    ).await {
+                        continue 'manager;
                     }
-                    if !leader_handoff_restarts_connection(&connecting_target, &target) {
-                        // A duplicate for the stream already being opened
-                        // shares that handshake instead of resetting its
-                        // five-second attempt near the deadline.
-                        continue;
-                    }
-                    update_leader(&leader, Some(leader_id), Some(node)).await;
-                    continue 'manager;
                 }
                 connection = &mut connection => break connection,
             }
@@ -521,34 +552,82 @@ async fn client_stream(
                     // error is safe to recover at the next configured proxy.
                     rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
                 } else if let Error::Connect(_) = &err {
-                    select! {
-                        _ = stream_shutdown.changed() => {
-                            fail_client_stream_shutdown(
-                                &mut in_flight,
-                                &mut in_flight_buf,
-                                &mut deferred_request,
-                                &rx_req,
-                            );
-                            return;
+                    let discovery = client.find_set_active_leader();
+                    tokio::pin!(discovery);
+                    loop {
+                        select! {
+                            biased;
+                            _ = stream_shutdown.changed() => {
+                                fail_client_stream_shutdown(
+                                    &mut in_flight,
+                                    &mut in_flight_buf,
+                                    &rx_req,
+                                );
+                                return;
+                            }
+                            control = rx_control.recv_async() => {
+                                let Ok(control) = control else {
+                                    fail_client_stream_shutdown(
+                                        &mut in_flight,
+                                        &mut in_flight_buf,
+                                        &rx_req,
+                                    );
+                                    return;
+                                };
+                                if apply_disconnected_control(
+                                    &client,
+                                    &leader,
+                                    &mut pending_leader_ready,
+                                    &mut proxy_index,
+                                    None,
+                                    control,
+                                ).await {
+                                    continue 'manager;
+                                }
+                            }
+                            () = &mut discovery => break,
                         }
-                        () = client.find_set_active_leader() => {}
                     }
                     let current_leader = leader.read().await.clone();
                     retry_delay = reconnect_delay(&previous_leader, &current_leader);
                 }
 
                 if !retry_delay.is_zero() {
-                    select! {
-                        _ = stream_shutdown.changed() => {
-                            fail_client_stream_shutdown(
-                                &mut in_flight,
-                                &mut in_flight_buf,
-                                &mut deferred_request,
-                                &rx_req,
-                            );
-                            return;
+                    let delay = time::sleep(retry_delay);
+                    tokio::pin!(delay);
+                    loop {
+                        select! {
+                            biased;
+                            _ = stream_shutdown.changed() => {
+                                fail_client_stream_shutdown(
+                                    &mut in_flight,
+                                    &mut in_flight_buf,
+                                    &rx_req,
+                                );
+                                return;
+                            }
+                            control = rx_control.recv_async() => {
+                                let Ok(control) = control else {
+                                    fail_client_stream_shutdown(
+                                        &mut in_flight,
+                                        &mut in_flight_buf,
+                                        &rx_req,
+                                    );
+                                    return;
+                                };
+                                if apply_disconnected_control(
+                                    &client,
+                                    &leader,
+                                    &mut pending_leader_ready,
+                                    &mut proxy_index,
+                                    None,
+                                    control,
+                                ).await {
+                                    continue 'manager;
+                                }
+                            }
+                            () = &mut delay => break,
                         }
-                        () = time::sleep(retry_delay) => {}
                     }
                 }
                 error!(
@@ -590,19 +669,15 @@ async fn client_stream(
         let mut proxy_handoff_ack = None;
 
         'connected: loop {
-            let event = if let Some(request) = deferred_request.take() {
-                ClientConnectedEvent::Incoming(Ok(request))
-            } else {
-                next_client_connected_event(
-                    &mut stream_shutdown,
-                    &mut rx_reader_finished,
-                    &mut rx_writer_finished,
-                    &rx_leader,
-                    &rx_read,
-                    &rx_req,
-                )
-                .await
-            };
+            let event = next_client_connected_event(
+                &mut stream_shutdown,
+                &mut rx_reader_finished,
+                &mut rx_writer_finished,
+                &rx_control,
+                &rx_read,
+                &rx_req,
+            )
+            .await;
             let res = match event {
                 ClientConnectedEvent::Shutdown => {
                     shutdown = true;
@@ -627,31 +702,65 @@ async fn client_stream(
                     rotate_after_disconnect = client.inner.proxy_mode;
                     None
                 }
-                ClientConnectedEvent::Leader(change) => {
-                    let Ok(ClientLeaderChange {
-                        leader_id,
-                        node,
-                        ready,
-                    }) = change
-                    else {
+                ClientConnectedEvent::Control(control) => {
+                    let Ok(control) = control else {
                         let _ = tx_write.try_send(WritePayload::Close);
                         shutdown = true;
                         break;
                     };
-                    let target = (leader_id, node.addr_api.clone());
-                    if target == connected_leader {
-                        if let Some(ready) = ready {
-                            let _ = ready.send(());
+                    match control {
+                        ClientStreamControl::Leader(ClientLeaderChange {
+                            leader_id,
+                            node,
+                            ready,
+                        }) => {
+                            let target = (leader_id, node.addr_api.clone());
+                            if target == connected_leader {
+                                if let Some(ready) = ready {
+                                    let _ = ready.send(());
+                                }
+                                continue;
+                            }
+                            if !pending_leader_ready.register(target, ready) {
+                                continue;
+                            }
+                            let _ = tx_write.try_send(WritePayload::Close);
+                            update_leader(&leader, Some(leader_id), Some(node)).await;
+                            leader_handoff = true;
+                            break;
                         }
-                        continue;
+                        #[cfg(feature = "dashboard")]
+                        ClientStreamControl::DashboardLeader((node_id, node), ready) => {
+                            if leader_change_matches_connection(
+                                &connected_leader,
+                                node_id,
+                                node.as_ref(),
+                            ) {
+                                if let Some(ready) = ready {
+                                    let _ = ready.send(());
+                                }
+                                continue;
+                            }
+                            let _ = tx_write.try_send(WritePayload::Close);
+                            let ready_target = node_id
+                                .zip(node.as_ref())
+                                .map(|(node_id, node)| (node_id, node.addr_api.clone()));
+                            update_leader(&leader, node_id, node).await;
+                            if let (Some(target), Some(ready)) = (ready_target, ready) {
+                                let _ = pending_leader_ready.register(target, Some(ready));
+                            }
+                            leader_handoff = true;
+                            break;
+                        }
+                        ClientStreamControl::RotateProxy(ack) => {
+                            if ack.is_closed() {
+                                continue;
+                            }
+                            let _ = tx_write.try_send(WritePayload::Close);
+                            proxy_handoff_ack = Some(ack);
+                            break;
+                        }
                     }
-                    if !pending_leader_ready.register(target, ready) {
-                        continue;
-                    }
-                    let _ = tx_write.try_send(WritePayload::Close);
-                    update_leader(&leader, Some(leader_id), Some(node)).await;
-                    leader_handoff = true;
-                    break;
                 }
                 ClientConnectedEvent::Incoming(result) => Some(result),
             };
@@ -879,49 +988,6 @@ async fn client_stream(
                     ))
                 }
 
-                #[cfg(feature = "dashboard")]
-                ClientStreamReq::LeaderChange((node_id, node), ready) => {
-                    if leader_change_matches_connection(&connected_leader, node_id, node.as_ref()) {
-                        // A detached recovery from an earlier timed-out request
-                        // may finish after this stream already reached the same
-                        // leader. Closing it would fail unrelated in-flight
-                        // work and turn successful recovery into LeaderChange.
-                        if let Some(ready) = ready {
-                            let _ = ready.send(());
-                        }
-                        continue;
-                    }
-                    // ignore result just in case the writer has already exited anyway
-                    let _ = tx_write.try_send(WritePayload::Close);
-
-                    // If we don't receive a value here, we expect the lock to
-                    // have been updated already somewhere else
-                    let ready_target = node_id
-                        .zip(node.as_ref())
-                        .map(|(node_id, node)| (node_id, node.addr_api.clone()));
-                    update_leader(&leader, node_id, node).await;
-                    if let (Some(target), Some(ready)) = (ready_target, ready) {
-                        let _ = pending_leader_ready.register(target, Some(ready));
-                    }
-
-                    // Preserve acknowledgements until teardown drains every
-                    // response the reader decoded before the handoff.
-                    leader_handoff = true;
-                    break;
-                }
-
-                ClientStreamReq::RotateProxy(ack) => {
-                    // ForwardToLeader proves the triggering request was not
-                    // accepted. This stream task owns its DB/cache cursor:
-                    // close the old connection, fail other in-flight work
-                    // without replay, then advance inside the configured pool.
-                    // Closing is best effort: acknowledgement and rotation
-                    // must not queue behind a writer blocked on the old link.
-                    let _ = tx_write.try_send(WritePayload::Close);
-                    proxy_handoff_ack = Some(ack);
-                    break;
-                }
-
                 ClientStreamReq::StreamResponse(resp) => {
                     try_forward_response(
                         &mut in_flight,
@@ -962,8 +1028,7 @@ async fn client_stream(
                         &mut rx_reader_finished,
                         &mut rx_writer_finished,
                         &rx_read,
-                        &rx_leader,
-                        deferred_request.is_none().then_some(&rx_req),
+                        &rx_control,
                     ) {
                         event
                     } else {
@@ -1000,10 +1065,7 @@ async fn client_stream(
                                 ))
                             ),
                             result = rx_read.recv_async() => ClientEnqueueEvent::Reader(result),
-                            change = rx_leader.recv_async() => ClientEnqueueEvent::LeaderChange(change),
-                            result = rx_req.recv_async(), if deferred_request.is_none() => {
-                                ClientEnqueueEvent::Manager(result)
-                            },
+                            control = rx_control.recv_async() => ClientEnqueueEvent::Control(control),
                             () = time::sleep(Duration::from_millis(1)) => ClientEnqueueEvent::Retry,
                         }
                     };
@@ -1048,19 +1110,13 @@ async fn client_stream(
                             }
                             continue;
                         }
-                        ClientEnqueueEvent::LeaderChange(change) => {
-                            let Ok(ClientLeaderChange {
+                        ClientEnqueueEvent::Control(Ok(ClientStreamControl::Leader(
+                            ClientLeaderChange {
                                 leader_id,
                                 node,
                                 ready,
-                            }) = change
-                            else {
-                                shutdown = true;
-                                let _ = ack.send(Err(Error::Connect(
-                                    "client leader control channel closed".into(),
-                                )));
-                                break 'connected;
-                            };
+                            },
+                        ))) => {
                             let target = (leader_id, node.addr_api.clone());
                             if target == connected_leader {
                                 if let Some(ready) = ready {
@@ -1078,61 +1134,52 @@ async fn client_stream(
                             )));
                             break 'connected;
                         }
-                        ClientEnqueueEvent::Manager(result) => {
-                            let Ok(manager_request) = result else {
-                                shutdown = true;
-                                let _ = ack.send(Err(Error::Connect(
-                                    "client request channel closed before dispatch".into(),
-                                )));
-                                break 'connected;
-                            };
-                            match manager_request {
-                                ClientStreamReq::RotateProxy(proxy_ack) => {
-                                    proxy_handoff_ack = Some(proxy_ack);
-                                    let _ = ack.send(Err(Error::Connect(
-                                        "API request was not dispatched before proxy handoff"
-                                            .into(),
-                                    )));
-                                    break 'connected;
-                                }
-                                #[cfg(feature = "dashboard")]
-                                ClientStreamReq::LeaderChange((node_id, node), ready) => {
-                                    if leader_change_matches_connection(
-                                        &connected_leader,
-                                        node_id,
-                                        node.as_ref(),
-                                    ) {
-                                        if let Some(ready) = ready {
-                                            let _ = ready.send(());
-                                        }
-                                        continue;
-                                    }
-                                    let ready_target = node_id
-                                        .zip(node.as_ref())
-                                        .map(|(node_id, node)| (node_id, node.addr_api.clone()));
-                                    update_leader(&leader, node_id, node).await;
-                                    if let (Some(target), Some(ready)) = (ready_target, ready) {
-                                        let _ = pending_leader_ready.register(target, Some(ready));
-                                    }
-                                    leader_handoff = true;
-                                    let _ = ack.send(Err(Error::Connect(
-                                        "API request was not dispatched before stream handoff"
-                                            .into(),
-                                    )));
-                                    break 'connected;
-                                }
-                                ClientStreamReq::Shutdown => {
-                                    shutdown = true;
-                                    let _ = ack.send(Err(Error::Connect(
-                                        "client stream manager stopped".into(),
-                                    )));
-                                    break 'connected;
-                                }
-                                request => {
-                                    deferred_request = Some(request);
+                        ClientEnqueueEvent::Control(Ok(control)) => match control {
+                            ClientStreamControl::RotateProxy(proxy_ack) => {
+                                if proxy_ack.is_closed() {
                                     continue;
                                 }
+                                proxy_handoff_ack = Some(proxy_ack);
+                                let _ = ack.send(Err(Error::Connect(
+                                    "API request was not dispatched before proxy handoff".into(),
+                                )));
+                                break 'connected;
                             }
+                            #[cfg(feature = "dashboard")]
+                            ClientStreamControl::DashboardLeader((node_id, node), ready) => {
+                                if leader_change_matches_connection(
+                                    &connected_leader,
+                                    node_id,
+                                    node.as_ref(),
+                                ) {
+                                    if let Some(ready) = ready {
+                                        let _ = ready.send(());
+                                    }
+                                    continue;
+                                }
+                                let ready_target = node_id
+                                    .zip(node.as_ref())
+                                    .map(|(node_id, node)| (node_id, node.addr_api.clone()));
+                                update_leader(&leader, node_id, node).await;
+                                if let (Some(target), Some(ready)) = (ready_target, ready) {
+                                    let _ = pending_leader_ready.register(target, Some(ready));
+                                }
+                                leader_handoff = true;
+                                let _ = ack.send(Err(Error::Connect(
+                                    "API request was not dispatched before stream handoff".into(),
+                                )));
+                                break 'connected;
+                            }
+                            ClientStreamControl::Leader(_) => {
+                                unreachable!("leader control is handled by the preceding match arm")
+                            }
+                        },
+                        ClientEnqueueEvent::Control(Err(_)) => {
+                            shutdown = true;
+                            let _ = ack.send(Err(Error::Connect(
+                                "client control channel closed before dispatch".into(),
+                            )));
+                            break 'connected;
                         }
                         ClientEnqueueEvent::ReaderFinished(outcome) => {
                             if let Err(err) = outcome {
@@ -1249,19 +1296,6 @@ async fn client_stream(
                 ClientStreamReq::Shutdown => {
                     unreachable!("we should never receive ClientStreamReq::Shutdown from WS reader")
                 }
-                #[cfg(feature = "dashboard")]
-                ClientStreamReq::LeaderChange((node_id, node), ready) => {
-                    let ready_target = node_id
-                        .zip(node.as_ref())
-                        .map(|(node_id, node)| (node_id, node.addr_api.clone()));
-                    update_leader(&leader, node_id, node).await;
-                    if let (Some(target), Some(ready)) = (ready_target, ready) {
-                        let _ = pending_leader_ready.register(target, Some(ready));
-                    }
-                }
-                ClientStreamReq::RotateProxy(_) => {
-                    unreachable!("we should never receive RotateProxy from WS reader")
-                }
                 ClientStreamReq::StreamResponse(resp) => {
                     try_forward_response(&mut in_flight, &mut in_flight_buf, false, resp).await;
                 }
@@ -1272,20 +1306,24 @@ async fn client_stream(
         }
 
         if shutdown {
-            fail_client_stream_shutdown(
-                &mut in_flight,
-                &mut in_flight_buf,
-                &mut deferred_request,
-                &rx_req,
-            );
+            fail_client_stream_shutdown(&mut in_flight, &mut in_flight_buf, &rx_req);
             debug!("Shutting down Client stream receiver");
             break;
         }
 
         if let Some(proxy_ack) = proxy_handoff_ack {
-            fail_client_stream_proxy_handoff(&mut in_flight, &mut in_flight_buf);
-            rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
-            let _ = proxy_ack.send(());
+            if proxy_ack.is_closed() {
+                for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
+                    let _ = ack.send(Err(Error::Connect(
+                        "API connection ended after dispatch; outcome unknown and request was not replayed"
+                            .into(),
+                    )));
+                }
+            } else {
+                fail_client_stream_proxy_handoff(&mut in_flight, &mut in_flight_buf);
+                rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
+                let _ = proxy_ack.send(());
+            }
         } else if leader_handoff {
             fail_client_stream_leader_handoff(&mut in_flight, &mut in_flight_buf);
         } else if terminal_transport_failure {
@@ -1319,14 +1357,10 @@ async fn client_stream(
 fn fail_client_stream_shutdown(
     in_flight: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
     in_flight_buf: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
-    deferred_request: &mut Option<ClientStreamReq>,
     rx_req: &flume::Receiver<ClientStreamReq>,
 ) {
     for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
         let _ = ack.send(Err(Error::Connect("client stream manager stopped".into())));
-    }
-    if let Some(request) = deferred_request.take() {
-        request.fail_on_shutdown();
     }
     while let Ok(request) = rx_req.try_recv() {
         request.fail_on_shutdown();
@@ -1627,7 +1661,7 @@ mod tests {
         let (_socket_reader_tx, socket_reader_rx) = flume::bounded(1);
         let (request_tx, request_rx) = flume::bounded(1);
         leader_tx
-            .send_async(ClientLeaderChange {
+            .send_async(ClientStreamControl::Leader(ClientLeaderChange {
                 leader_id: 8,
                 node: Node {
                     id: 8,
@@ -1635,7 +1669,7 @@ mod tests {
                     addr_api: "node-eight:21001".into(),
                 },
                 ready: None,
-            })
+            }))
             .await
             .expect("queue leader change");
         request_tx
@@ -1655,7 +1689,10 @@ mod tests {
 
         assert!(matches!(
             event,
-            ClientConnectedEvent::Leader(Ok(ClientLeaderChange { leader_id: 8, .. }))
+            ClientConnectedEvent::Control(Ok(ClientStreamControl::Leader(ClientLeaderChange {
+                leader_id: 8,
+                ..
+            })))
         ));
         assert!(matches!(
             request_rx.try_recv(),
@@ -1680,7 +1717,7 @@ mod tests {
             .await
             .expect("queue decoded API response");
         leader_tx
-            .send_async(ClientLeaderChange {
+            .send_async(ClientStreamControl::Leader(ClientLeaderChange {
                 leader_id: 8,
                 node: Node {
                     id: 8,
@@ -1688,7 +1725,7 @@ mod tests {
                     addr_api: "node-eight:21001".into(),
                 },
                 ready: None,
-            })
+            }))
             .await
             .expect("queue leader change");
 
@@ -1710,7 +1747,10 @@ mod tests {
         ));
         assert!(matches!(
             leader_rx.try_recv(),
-            Ok(ClientLeaderChange { leader_id: 8, .. })
+            Ok(ClientStreamControl::Leader(ClientLeaderChange {
+                leader_id: 8,
+                ..
+            }))
         ));
     }
 
@@ -1730,7 +1770,7 @@ mod tests {
             .await
             .expect("queue decoded API response");
         leader_tx
-            .send_async(ClientLeaderChange {
+            .send_async(ClientStreamControl::Leader(ClientLeaderChange {
                 leader_id: 9,
                 node: Node {
                     id: 9,
@@ -1738,7 +1778,7 @@ mod tests {
                     addr_api: "node-nine:21001".into(),
                 },
                 ready: None,
-            })
+            }))
             .await
             .expect("queue leader change");
 
@@ -1748,7 +1788,6 @@ mod tests {
             &mut writer_finished_rx,
             &socket_reader_rx,
             &leader_rx,
-            None,
         )
         .expect("a queued response must wake backpressured admission");
 
@@ -1761,23 +1800,30 @@ mod tests {
         ));
         assert!(matches!(
             leader_rx.try_recv(),
-            Ok(ClientLeaderChange { leader_id: 9, .. })
+            Ok(ClientStreamControl::Leader(ClientLeaderChange {
+                leader_id: 9,
+                ..
+            }))
         ));
     }
 
     #[tokio::test]
-    async fn queued_proxy_handoff_prevents_backpressured_writer_ownership_transfer() {
+    async fn dedicated_proxy_control_bypasses_application_backlog_during_writer_backpressure() {
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reader_finished_tx, mut reader_finished_rx) = oneshot::channel();
         let (_writer_finished_tx, mut writer_finished_rx) = oneshot::channel();
-        let (_leader_tx, leader_rx) = flume::bounded(1);
+        let (control_tx, control_rx) = flume::bounded(1);
         let (_socket_reader_tx, socket_reader_rx) = flume::bounded(1);
         let (request_tx, request_rx) = flume::bounded(1);
         let (proxy_ack, _proxy_ack_rx) = oneshot::channel();
         request_tx
-            .send_async(ClientStreamReq::RotateProxy(proxy_ack))
+            .send_async(ClientStreamReq::Shutdown)
             .await
-            .expect("queue proxy handoff");
+            .expect("fill application queue");
+        control_tx
+            .send_async(ClientStreamControl::RotateProxy(proxy_ack))
+            .await
+            .expect("queue priority proxy handoff");
 
         let (writer_tx, writer_rx) = flume::bounded(1);
         writer_tx
@@ -1790,14 +1836,17 @@ mod tests {
             &mut reader_finished_rx,
             &mut writer_finished_rx,
             &socket_reader_rx,
-            &leader_rx,
-            Some(&request_rx),
+            &control_rx,
         )
         .expect("queued proxy handoff must wake backpressured admission");
 
         assert!(matches!(
             event,
-            ClientEnqueueEvent::Manager(Ok(ClientStreamReq::RotateProxy(_)))
+            ClientEnqueueEvent::Control(Ok(ClientStreamControl::RotateProxy(_)))
+        ));
+        assert!(matches!(
+            request_rx.try_recv(),
+            Ok(ClientStreamReq::Shutdown)
         ));
         assert!(matches!(writer_rx.try_recv(), Ok(WritePayload::Close)));
         assert!(matches!(

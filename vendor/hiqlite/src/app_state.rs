@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 
+#[cfg(feature = "dashboard")]
+use crate::client::stream::ClientStreamControl;
 #[cfg(any(feature = "backup", feature = "dashboard"))]
 use crate::client::stream::ClientStreamReq;
 #[cfg(feature = "dashboard")]
@@ -73,6 +75,8 @@ pub(crate) struct AppState {
     pub client_request_id: AtomicUsize,
     #[cfg(any(feature = "backup", feature = "dashboard"))]
     pub tx_client_stream: flume::Sender<ClientStreamReq>,
+    #[cfg(feature = "dashboard")]
+    pub tx_client_control: flume::Sender<ClientStreamControl>,
     pub health_check_delay_secs: u32,
     pub learner_only: bool,
 }

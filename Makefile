@@ -205,7 +205,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
-	  client::stream::tests::queued_proxy_handoff_prevents_backpressured_writer_ownership_transfer \
+	  client::stream::tests::dedicated_proxy_control_bypasses_application_backlog_during_writer_backpressure \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
