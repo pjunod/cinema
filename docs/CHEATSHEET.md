@@ -144,7 +144,7 @@ curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/j
        "live_tv_owner_node_id":"<node id>","live_tv_max_sessions":2,
        "live_tv_output_height":720}' $HOST/api/v1/settings
 
-# 2. Probe it — this is the step that says what is actually wrong.
+# 2. Probe it (admin only) — this is the step that says what is actually wrong.
 curl -s -X POST -H "Authorization: Bearer $TOKEN" $HOST/api/v1/live-tv/readiness/refresh
 
 # 3. Enable, carrying the generation step 1 returned.
@@ -179,7 +179,7 @@ Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
 |---|---|
 | Web app + API | `http://<host>:32400` |
 | GDM discovery | UDP `32414` (movable host-side via `PLURX_GDM_PORT`) |
-| Live TV device (outbound, from the owner node) | TCP `80` (`discover.json`, `lineup.json`) and TCP `5004` (stream) on the configured tuner |
+| Live TV device (outbound, from the owner node) | TCP `80` (`discover.json`, and `lineup.json` unless the device advertises it on 5004) and TCP `5004` (stream) on the configured tuner |
 | Data (db, artwork, transcode cache) | `PLURX_DATA_DIR` (default `./data`; Docker bind mount `${PLURX_DATA:-/srv/plurx}` → `/var/lib/plurx`) |
 | Config file | `./plurx.toml` → `/etc/plurx/plurx.toml` (or `PLURX_CONFIG`) |
 | Runtime settings (TMDB key, libraries, users) | In the database, edited in Settings — not the config file |
@@ -227,7 +227,8 @@ master regression so far. Reasoning and the failure they target are in
 | `POST /api/v1/system/search-index/rebuild` | Rebuild the node-local search index (admin) |
 | `/api/v1/keys` | Mint/list/revoke scoped API keys (admin token) |
 | `GET /api/v1/live-tv/channels` | The sanitized tuner lineup; DRM channels are listed and marked unplayable (bearer) |
-| `POST /api/v1/live-tv/readiness/refresh` | Probe the tuner and report one named check per thing that can be wrong (bearer) |
+| `GET /api/v1/live-tv/readiness` | The last readiness verdict, without probing (**admin**) |
+| `POST /api/v1/live-tv/readiness/refresh` | Probe the tuner and report one named check per thing that can be wrong (**admin**) |
 | `POST /api/v1/live-tv/channels/{channel}/sessions` | Start a live session; returns one opaque capability (bearer) |
 | `/api/v1/live-tv/sessions/{capability}/...` | Playlist, segments, status, keepalive, release — **capability only, no account bearer** |
 | Plex-compat façade | `/identity`, `/library/...`, `/:/timeline`, GDM — for Kodi-family Plex clients |

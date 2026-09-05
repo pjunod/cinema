@@ -2510,10 +2510,11 @@ untested, and turn it back off if the device does not visibly improve.
 | 5353 | UDP multicast | Bonjour `_plurx._tcp` discovery for native clients |
 
 Live TV adds no listener. It makes **outbound** connections from the owner node
-to the configured tuner on TCP 80 (`discover.json`, `lineup.json`) and TCP 5004
-(the stream) — those are the device's ports, and they are why a tuner on a
-different VLAN from the owner fails `owner_network` readiness with everything
-else green.
+to the configured tuner on TCP 80 (`discover.json`, and `lineup.json` unless the
+device advertises it on 5004 — those two ports are the only ones accepted from
+an advertised `LineupURL`) and TCP 5004 (the stream). Those are the device's
+ports, and they are why a tuner on a different VLAN from the owner fails
+`owner_network` readiness with everything else green.
 
 GDM discovery only works on 32414 (the protocol hard-codes it), but the *host*
 port is movable via `PLURX_GDM_PORT` when a still-running Plex owns it — you lose
@@ -3711,8 +3712,11 @@ reverting a change you cannot see.
 ### Reading readiness
 
 `POST /api/v1/live-tv/readiness/refresh` returns one named check per thing that
-can be wrong, which is the point: a single "not ready" hides which of eight
-problems you have.
+can be wrong, which is the point: a single "not ready" hides which of nine
+problems you have. Both readiness routes are **administrator-only** — the
+refresh reaches out to somebody's hardware, so it is not something an ordinary
+token gets to trigger. `GET .../readiness` returns the last verdict without
+probing; `POST .../readiness/refresh` probes.
 
 | Check | What a failure means |
 |---|---|

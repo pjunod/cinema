@@ -343,12 +343,17 @@ EPUB sections use, with the tuner as the thing being protected.
   relayed read is size-bounded. A voter cannot be talked into streaming an
   arbitrary URL by asking it nicely.
 - **The device is pinned to an address, not to a name.** The configured private
-  IPv4 is the only host contacted: port 80 for `discover.json` and
-  `lineup.json`, port 5004 for the stream. Loopback and public addresses are
-  refused. The hostname and `BaseURL` the device advertises are *not* followed,
-  redirects are refused, no proxy is honoured, and the documents are bounded —
-  a compromised or merely confused tuner cannot point the server at something
-  else, and cannot exhaust it with an endless JSON body.
+  IPv4 is the only host contacted, on port 80 for `discover.json` and port 5004
+  for the stream. Loopback and public addresses are refused. The **hostname**
+  the device advertises in its `BaseURL` and `LineupURL` is never followed: the
+  request is always re-pinned to the configured address. What is taken from the
+  advertised `LineupURL` is only its port, and only from an allowlist of 80 and
+  5004, and only for the exact path `/lineup.json` — a URL carrying userinfo, a
+  query, a fragment, a non-`http` scheme, another path, another port, or more
+  than 2048 bytes is refused outright. Redirects are refused, no proxy is
+  honoured, and the documents are bounded, so a compromised or merely confused
+  tuner cannot point the server at something else and cannot exhaust it with an
+  endless JSON body.
 - **The lineup is sanitized before it is stored or rendered.** Channel names and
   numbers come from the device, which is untrusted input; they are sanitized on
   the way in, and a DRM marker that is missing, unknown, or null fails

@@ -1356,9 +1356,8 @@ differently.
 
 **One shape, three players.** The owner node publishes a rolling six-segment
 HLS window (see [ARCHITECTURE.md §3a](ARCHITECTURE.md)) and every first-party
-client consumes exactly that: the web app through the same MSE/HLS path it uses
-for copy-video, Apple through AVPlayer, Android through a dedicated Media3
-player. Live TV never invokes the finite-media controller on any client — no
+client consumes exactly that: the web app through a live-only controller of its
+own, Apple through AVPlayer, Android through a dedicated Media3 player. Live TV never invokes the finite-media controller on any client — no
 resume point, no progress write, no watch state. A live channel is not a title
 you are partway through.
 
