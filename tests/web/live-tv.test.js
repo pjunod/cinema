@@ -202,6 +202,41 @@ async function main() {
     assert.equal(nodes["live-tv-player"].hidden, true);
   });
 
+  await test("starting a channel closes an open film and reports only that film's progress", async () => {
+    // The one line on the Live TV path that can touch VOD state is
+    // `closePlayer()`, and the browser acceptance never opens a film, so this
+    // is where that path is pinned. The shipped `closePlayer` does report
+    // progress — for the file being closed, which is the viewer's own position
+    // in the film they were watching, not Live TV writing VOD state. Losing it
+    // would be the defect; what must not happen is a second close, a close
+    // after the tuner is open, or a report for anything else.
+    let clock = 1000, poll, closes = 0;
+    const progress = [];
+    const video = { paused: false, currentTime: 5, canPlayType: () => "maybe", play: async () => {},
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: 240 }) };
+    const nodes = { "live-tv-video": video, "live-tv-player": { hidden: true }, "live-tv-title": {} };
+    const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0 };
+    const events = [];
+    const lease = new liveTv.Lease({
+      start: async (id) => { events.push("start:" + id); return { session_id: "cap" }; },
+      release: async () => { events.push("release"); },
+      status: async () => ({ state: "active" }), keepalive: async () => {},
+    });
+    const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval",
+      "PlurxLiveTv", "PLAYER", "closePlayer", "reportProgress",
+      `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, API='/api', window={};
+       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function exitLiveTvPresentation(){}
+       ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")} return watchLiveTv;`)(
+      state, lease, { getElementById: id => nodes[id], visibilityState: "visible" },
+      { now: () => clock }, fn => { poll = fn; return null; }, liveTv,
+      { fileId: 7 }, () => { closes += 1; progress.push(7); }, (id) => progress.push(id));
+    await run(0);
+    assert.equal(closes, 1, "an open film must be closed exactly once before a tuner opens");
+    assert.deepEqual(progress, [7], "only the closing film's own progress may be reported");
+    assert.deepEqual(events, ["start:one"], "and the tuner must still open afterwards");
+  });
+
   await test("a live window that moves backwards never stops a decoding stream", async () => {
     let clock = 1000, poll, releases = 0, frames = 0;
     // Healthy live playback whose position regresses as the window slides.

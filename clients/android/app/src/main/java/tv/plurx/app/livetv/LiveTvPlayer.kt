@@ -85,13 +85,25 @@ class LiveTvPlayer private constructor(context: Context) {
                     .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(4_000, 12_000, 1_000, 2_000).build())
                     .build()
                 player = output
+                // Both of these tear the player down, and they arrive from
+                // inside ExoPlayer's own listener iteration. Releasing a player
+                // re-entrantly from its callback is not a documented-safe
+                // operation, so the teardown is posted: `Dispatchers.Main`
+                // rather than the scope's `Main.immediate`, which would run it
+                // inline and change nothing.
                 output.addListener(object : Player.Listener {
                     override fun onPlayerError(error: PlaybackException) {
                         if (mine != serial) return
-                        stopWithMessage(liveTvMessage(liveTvPlaybackErrorCode(error.errorCode)))
+                        val code = liveTvPlaybackErrorCode(error.errorCode)
+                        scope.launch(Dispatchers.Main) {
+                            if (mine == serial) stopWithMessage(liveTvMessage(code))
+                        }
                     }
                     override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (mine == serial && playbackState == Player.STATE_ENDED) stopWithMessage(liveTvMessage("stream_failed"))
+                        if (mine != serial || playbackState != Player.STATE_ENDED) return
+                        scope.launch(Dispatchers.Main) {
+                            if (mine == serial) stopWithMessage(liveTvMessage("stream_failed"))
+                        }
                     }
                 })
                 output.setMediaItem(MediaItem.Builder().setUri(api.playlistUrl(started.session_id))
