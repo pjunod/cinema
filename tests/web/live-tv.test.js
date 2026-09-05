@@ -202,6 +202,67 @@ async function main() {
     assert.equal(nodes["live-tv-player"].hidden, true);
   });
 
+  await test("a live window that moves backwards never stops a decoding stream", async () => {
+    let clock = 1000, poll, releases = 0, frames = 0;
+    // Healthy live playback whose position regresses as the window slides.
+    const video = { paused: false, currentTime: 40, canPlayType: () => "maybe", play: async () => {},
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: frames }) };
+    const nodes = { "live-tv-video": video, "live-tv-player": { hidden: true }, "live-tv-title": {} };
+    const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0 };
+    const lease = new liveTv.Lease({
+      start: async () => ({ session_id: "cap" }), release: async () => { releases++; },
+      status: async () => ({ state: "active" }), keepalive: async () => {},
+    });
+    const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
+      `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
+       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function exitLiveTvPresentation(){}
+       ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")} return watchLiveTv;`)(
+      state, lease, { getElementById: id => nodes[id], visibilityState: "visible" },
+      { now: () => clock }, fn => { poll = fn; return null; }, liveTv);
+    await run(0);
+    for (let i = 0; i < 6; i++) { clock += 10000; frames += 120; video.currentTime -= 4; await poll(); }
+    assert.equal(releases, 0, "decoded frames advanced, so the stream was never stuck");
+    assert.notEqual(lease.current, null);
+  });
+
+  await test("a frozen picture still expires even while position climbs", async () => {
+    let clock = 1000, poll, releases = 0;
+    // The mirror image: the timeline advances but nothing is decoded.
+    const video = { paused: false, currentTime: 10, canPlayType: () => "maybe", play: async () => {},
+      getVideoPlaybackQuality: () => ({ totalVideoFrames: 500 }) };
+    const nodes = { "live-tv-video": video, "live-tv-player": { hidden: true }, "live-tv-title": {} };
+    const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0 };
+    const lease = new liveTv.Lease({
+      start: async () => ({ session_id: "cap" }), release: async () => { releases++; },
+      status: async () => ({ state: "active" }), keepalive: async () => {},
+    });
+    const run = new Function("LIVE_TV", "LIVE_TV_LEASE", "document", "performance", "setInterval", "PlurxLiveTv",
+      `const location={hash:'#/live-tv'}, PAGE_RENDER_GENERATION=1, PLAYER=null, API='/api', window={};
+       function detachLiveTvMedia(){} function liveTvMessage(){} function liveTvFailure(){}
+       function exitLiveTvPresentation(){}
+       ${shipped("liveTvNow")}${shipped("stopLiveTv")}${shipped("watchLiveTv")} return watchLiveTv;`)(
+      state, lease, { getElementById: id => nodes[id], visibilityState: "visible" },
+      { now: () => clock }, fn => { poll = fn; return null; }, liveTv);
+    await run(0);
+    for (let i = 0; i < 5; i++) { clock += 10000; video.currentTime += 10; await poll(); }
+    assert.equal(releases, 1, "a frozen decoder must not be renewed by a moving clock");
+    assert.equal(lease.current, null);
+  });
+
+  await test("a store full of stale markers heals instead of refusing forever", () => {
+    let clock = 0, nonce = 0;
+    const storage = memoryStorage();
+    for (let i = 0; i < 40; i++) storage.setItem("plurx_live_tv_pending_v1:old" + i, "1");
+    const barrier = new liveTv.StartBarrier(() => storage, () => clock, () => String(++nonce));
+    // The cap still refuses while those markers are inside their safety window.
+    assert.throws(() => barrier.sync(), e => e.code === "live_tv_storage_unavailable");
+    clock = 90001;
+    const marker = barrier.begin();
+    assert.equal(typeof marker, "string");
+    assert.equal(storage.length, 1, "the expired markers were swept, not kept forever");
+  });
+
   await test("typed lost-owner starts survive clock jumps and route/profile reuse", async () => {
     let monotonic = 0, wall = 1000, posts = 0;
     const block = shell.slice(shell.indexOf("const LIVE_TV="), shell.indexOf("async function liveTvRequest("));

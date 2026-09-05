@@ -72,7 +72,6 @@
         for (let i = 0; i < storage.length; i++) {
           const key = storage.key(i);
           if (!key || !key.startsWith(this.prefix)) continue;
-          if (found.size >= 32) throw new Error("too many unresolved starts");
           found.add(key);
           const value = storage.getItem(key), old = this.observed.get(key);
           // A reload or another tab's rearm always earns a fresh monotonic
@@ -84,8 +83,13 @@
           else if (now >= state.until && storage.getItem(key) === state.value) {
             storage.removeItem(key);
             this.observed.delete(key);
+            found.delete(key);
           }
         }
+        // Sweep first, then refuse. Refusing before the expiry pass meant a
+        // store holding 32 markers could never clear them and Live TV stayed
+        // permanently unavailable in that browser.
+        if (found.size >= 32) throw new Error("too many unresolved starts");
       } catch (_) { throw { code: "live_tv_storage_unavailable" }; }
     }
 

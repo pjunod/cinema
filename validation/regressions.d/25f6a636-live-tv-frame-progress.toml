@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["25f6a636"]
+points = ["live-tv.integration"]
+checks = ["web-static"]
+reason = "Two coverages drive the shipped poll through its own timer: a stream whose position regresses while decoded frames advance must never be released, and a stream whose position climbs while the frame count is frozen must still expire. A third proves the start barrier sweeps its expired markers before it refuses, so a store that reached the cap can heal. Each was executed against the unfixed implementation and observed to fail there."
