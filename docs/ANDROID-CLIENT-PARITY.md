@@ -193,8 +193,24 @@ encoding, the plan execution, and the pricing; `DetailTrackFactsTest`
 The embedded web app remains plurx's administrative control plane: first-server
 setup, libraries, users, metadata keys, integrations, scan control, and system
 logs. Keeping those mutations in one surface avoids reproducing high-impact
-server administration on a TV remote. The Android Settings screen is therefore
+server administration on a TV remote. The Android Settings screen is primarily
 for device-local viewer and playback preferences plus sign-out/change-server.
+HDHomeRun is the deliberate exception: Settings → Developer exposes its safety
+requirements, saved configuration, readiness and separate runtime enablement.
+Every mutation requires server-enforced administrator access and an exact
+settings generation. Previous-owner recovery carries the original owner and
+drain cutoff, and requires an explicit physical-fencing attestation. No build
+feature switch hides Live TV from the navigation.
+
+The dedicated Media3 live player has channel selection, pause/resume, mute,
+fullscreen and stop, without invoking the finite-media controller or writing
+watch progress. Actual rendered frames renew its no-progress budget: Media3's
+[window-relative live position](https://developer.android.com/media/media3/exoplayer/live-streaming)
+can move backward while healthy. A token-free durable marker preserves start
+and cleanup uncertainty across process death and profile changes. Fourteen
+focused `LiveTvTest` cases cover these contracts; physical decode and remote
+navigation remain separate acceptance evidence. DRM, DVR, rewind, captions and
+guide scheduling are deliberately unsupported in the first profile.
 
 ## Layout verification
 

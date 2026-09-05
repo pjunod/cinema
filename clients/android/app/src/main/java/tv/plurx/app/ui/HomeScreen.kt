@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -81,6 +82,7 @@ fun HomeScreen(
     onSearch: () -> Unit,
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenLiveTv: () -> Unit = {},
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
@@ -98,6 +100,7 @@ fun HomeScreen(
             onSearch = onSearch,
             onOpenDownloads = onOpenDownloads,
             onOpenSettings = onOpenSettings,
+            onOpenLiveTv = onOpenLiveTv,
         )
 
         when {
@@ -413,14 +416,9 @@ internal fun HomeTopBar(
     onOpenDownloads: () -> Unit = {},
     onOpenSettings: () -> Unit,
     safeInsets: WindowInsets = safeDisplayInsets(),
+    onOpenLiveTv: () -> Unit = {},
 ) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(safeInsets)
-            .padding(start = side, end = side - 8.dp, top = 14.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    val brand: @Composable () -> Unit = {
         Text(
             when (theme) {
                 ThemeId.Classic -> "cinema"
@@ -431,15 +429,21 @@ internal fun HomeTopBar(
             fontSize = if (formFactor == FormFactor.Television) 32.sp else 26.sp,
             fontWeight = FontWeight.Bold,
         )
-        Box(Modifier.weight(1f))
+    }
+    val user: @Composable () -> Unit = {
         username?.let {
             Text(it, color = Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(end = 4.dp))
         }
+    }
+    val actions: @Composable () -> Unit = {
         TvIconButton(onClick = onRefresh) {
             Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = Muted)
         }
         TvIconButton(onClick = onSearch) {
             Icon(Icons.Filled.Search, contentDescription = "Search", tint = Muted)
+        }
+        TvIconButton(onClick = onOpenLiveTv) {
+            Icon(Icons.Filled.LiveTv, contentDescription = "Live TV", tint = Muted)
         }
         if (formFactor != FormFactor.Television) {
             TvIconButton(onClick = onOpenDownloads) {
@@ -448,6 +452,22 @@ internal fun HomeTopBar(
         }
         TvIconButton(onClick = onOpenSettings) {
             Icon(Icons.Filled.Settings, contentDescription = "Settings", tint = Muted)
+        }
+    }
+    val chrome = Modifier.fillMaxWidth().windowInsetsPadding(safeInsets)
+        .padding(start = side, end = side - 8.dp, top = 14.dp, bottom = 4.dp)
+    if (formFactor == FormFactor.Compact) {
+        // Five actions need their own row on narrow phones; the title and
+        // account must not push the last controls outside the viewport.
+        Column(chrome) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                brand(); Box(Modifier.weight(1f)); user()
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) { actions() }
+        }
+    } else {
+        Row(chrome, verticalAlignment = Alignment.CenterVertically) {
+            brand(); Box(Modifier.weight(1f)); user(); actions()
         }
     }
 }
