@@ -629,6 +629,7 @@ paths = [
   "crates/plurxd/src/web/live-tv.js",
   "tests/web/live-tv.test.js",
   "scripts/live-tv-browser",
+  "scripts/live-tv-endless",
   "docs/HDHOMERUN-LIVE-TV-*.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
