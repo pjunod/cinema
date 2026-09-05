@@ -7161,16 +7161,22 @@ function startPlaybackControl(v,p,bootstrap){
   p.subtitleReadinessReady=undefined;
   if(!bootstrap || !window.PlurxPlaybackControl) return null;
   try{
+    const attachment=p.mediaAttachment;
+    const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
+      attachmentGeneration:startPlaybackControl.captureGeneration=(startPlaybackControl.captureGeneration||0)+1});
+    const capture=()=>p.mediaAttachment===attachment&&playbackOwnsAttachedMedia(p)
+      ?PlurxPlaybackControl.capture(playbackControlSnapshot(v,p),p.controlIntentGeneration||0,owner):null;
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
       clientInstanceId:CONTROL_CLIENT_ID,
-      snapshot:()=>playbackOwnsAttachedMedia(p)?playbackControlSnapshot(v,p):null,
-      intentGeneration:()=>p.controlIntentGeneration||0,
+      capture,
       send:sendPlaybackControl,
-      onExchange:({request,response,error,intentGeneration})=>{
-        if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter) return;
+      onExchange:({request,response,error,capture:captured})=>{
+        if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter
+          ||p.mediaAttachment!==attachment||captured.owner.lifecycleId!==owner.lifecycleId
+          ||captured.owner.attachmentGeneration!==owner.attachmentGeneration) return;
         p.controlLastRequest=request;
         settlePlaybackControlWaiters(p,request,response,error);
-        if(response&&response.delivery
+        if(captured.intentGeneration===(p.controlIntentGeneration||0)&&response&&response.delivery
           &&subtitleReadinessRetryTransition(p,response.delivery)){
           retryReadyNativeSubtitle(p);
         }
@@ -7182,7 +7188,7 @@ function startPlaybackControl(v,p,bootstrap){
         // executed; this is where it is armed. It outlives the reporter and a
         // same-title session replacement, but not the lease.
         if(response&&response.action&&response.action.type==="terminal"
-          &&intentGeneration===(p.controlIntentGeneration||0)){
+          &&captured.intentGeneration===(p.controlIntentGeneration||0)){
           p.controlVerdict=response.action;
           p.controlVerdictExpiresAt=performance.now()+bootstrap.lease_timeout_ms;
         }

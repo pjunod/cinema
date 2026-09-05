@@ -895,14 +895,32 @@ scoped ownership proof, not a physical continuity receipt or completion of
 all cold pre-decision quality/track/seek inputs. Exact committed and integrated
 PR-head approval remains required.
 
-One additional P2 audit lead belongs to the canonical intent work below:
-Apple and Android reporters sample an observation and an intent generation
-separately across concurrency boundaries. A split capture could associate old
-payload A with newer authority B. The required fix is an immutable,
-atomically captured `(snapshot, desired revision)` envelope retained through
-enqueue and retry. This is a source-identified interleaving risk; a
-deterministic split-capture regression is still required before calling it a
-reproduced incident.
+### Atomic control captures — payload and local authority travel together
+
+Commit `fc544fad` corrects the split observation/intent audit lead with one
+immutable source capture across Apple, Android, and web reporters. The envelope
+retains the snapshot, desired generation, and local lifecycle/attachment owner
+through enqueue, urgent coalescing, exact-sequence retry, and exchange callbacks.
+Native source revisions reject reversed async enqueue order, including older
+periodic observations of the same intent. Cadence reads the published capture,
+not AVPlayer or Media3 from a reporter executor.
+
+Adversarial review added deterministic regressions for old attachment reporters
+borrowing a new attachment's capture, a cleared source slot during `409` reset,
+stale subtitle-ready callbacks consuming the new intent's retry edge, and a
+terminal response stopping reporting after a newer same-attachment intent.
+Fresh admission requires the reporter's bound local owner at enqueue and send;
+already-started retries keep their original envelope. Terminal-only suspension
+can yield to newer intent, while explicit End and protocol failure stay final.
+The regression bridge is retained separately in `7d5f959a`.
+
+The frozen source passed scoped independent review. After integrating foundation
+task [#19](http://192.168.4.7:3000/noirr/plurx/pulls/19) at `12be7b5b`, the exact
+tree again passed 103 Apple tests, 102 Android tests, tvOS compilation, and
+complete web checks. Exact integrated-head approval and the development gate
+remain required before merge. These captures do not implement cold
+desired-input ownership on every platform, executable prepared handoff, or
+physical continuity/performance qualification.
 
 ### Apple initial-decision ownership — desired input precedes metadata
 

@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
+const TEST_CAPTURE_OWNER=Object.freeze({lifecycleId:"test-player",attachmentGeneration:1});
+const captureSnapshot=(value,intentGeneration=0,owner=TEST_CAPTURE_OWNER)=>
+  control.capture(value,intentGeneration,owner);
 
 const SHIPPED_UI = fs.readFileSync(
   path.join(__dirname, "../../crates/plurxd/src/web/index.html"),
@@ -254,7 +257,7 @@ async function main() {
   const reporter = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "22222222-2222-4222-8222-222222222222",
-    snapshot: () => snapshot(1_000),
+    capture: () => captureSnapshot(snapshot(1_000)),
     send: async (url, request) => {
       calls.push({ url, request });
       if (calls.length === 1) return first.promise;
@@ -270,8 +273,73 @@ async function main() {
   assert.equal(calls[0].request.sequence, 1);
   assert.equal(calls[0].request.capabilities.platform, "web");
 
-  reporter.notify(snapshot(2_000, "waiting"));
-  reporter.notify(snapshot(3_000, "stalled"));
+  {
+    const requests=[],exchanges=[],held=deferred();
+    let clock=0;
+    const source=snapshot(4_000),sourceOwner={lifecycleId:'capture-test',attachmentGeneration:1};
+    const captured=captureSnapshot(source,3,sourceOwner);
+    let latest=captureSnapshot(snapshot(9_000),4,{...sourceOwner,attachmentGeneration:2});
+    source.selection.audio_track=7;source.capabilities.codecs.push('mutated');
+    sourceOwner.attachmentGeneration=99;
+    const subject=new control.Reporter({bootstrap:bootstrap(),
+      clientInstanceId:'23232323-2323-4323-8323-232323232323',capture:()=>latest,
+      send:async(_,request)=>{requests.push(request);return requests.length===1?held.promise:response(request);},
+      now:()=>clock,setTimer:()=>1,clearTimer:()=>{},onExchange:event=>exchanges.push(event)});
+    // Enqueue A only after its source has moved to B. No metadata may be
+    // recaptured from B, nor may source array mutation alter A's wire body.
+    subject.notify(captured);
+    assert.equal(requests[0].position_ms,4_000);
+    assert.equal(requests[0].selection.audio_track,0);
+    assert.equal(requests[0].capabilities.codecs.includes('mutated'),false);
+    subject.notify(latest);
+    const newest=captureSnapshot(snapshot(12_000),5,latest.owner);
+    latest=newest;subject.notify(newest);
+    held.resolve(Promise.reject(Object.assign(new Error('retry'),{status:429,code:'control_rate_limited'})));
+    await flush();await flush();clock=500;await subject.drain();
+    assert.strictEqual(requests[0],requests[1],'retry retains exact request body');
+    assert.strictEqual(exchanges[0].capture,captured);
+    assert.strictEqual(exchanges[1].capture,captured,'retry retains exact captured owner/intent');
+    clock=750;await subject.drain();
+    assert.equal(requests[2].position_ms,12_000);
+    assert.strictEqual(exchanges[2].capture,newest,'coalescing carries one whole source value');
+    subject.stop();
+  }
+
+  {
+    const held=deferred(),events=[];let sent;
+    let latest=captureSnapshot(snapshot(4_000),0,{lifecycleId:'attachment',attachmentGeneration:1});
+    const original=latest;
+    const subject=new control.Reporter({bootstrap:bootstrap(),
+      clientInstanceId:'24242424-2424-4424-8424-242424242424',capture:()=>latest,
+      send:async(_,request)=>{sent=request;return held.promise;},
+      setTimer:()=>1,clearTimer:()=>{},onExchange:event=>events.push(event)}).start();
+    latest=captureSnapshot(snapshot(8_000),0,{lifecycleId:'attachment',attachmentGeneration:2});
+    held.resolve({...response(sent),action:{type:'terminal',code:'unsupported',message:'old attachment'}});
+    await flush();
+    assert.strictEqual(events[0].capture,original);
+    assert.equal(subject.stopped,false,'same numerical intent does not make a previous attachment terminal current');
+    subject.stop();
+  }
+
+  {
+    const held=deferred(),requests=[],events=[];let clock=0;
+    let latest=captureSnapshot(snapshot(1_000),1);
+    const subject=new control.Reporter({bootstrap:bootstrap(),
+      clientInstanceId:'25252525-2525-4525-8525-252525252525',capture:()=>latest,
+      send:async(_,request)=>{requests.push(request);return requests.length===1?held.promise:response(request);},
+      now:()=>clock,setTimer:()=>1,clearTimer:()=>{},onExchange:event=>events.push(event)}).start();
+    latest=captureSnapshot(snapshot(8_000),2,{lifecycleId:'new-source',attachmentGeneration:3});
+    held.resolve(Promise.reject(Object.assign(new Error('owner changed'),{status:409,code:'owner_changed',
+      generation:'26262626-2626-4626-8626-262626262626',controlEpoch:8})));
+    await flush();await flush();clock=250;await subject.drain();
+    assert.equal(requests[1].position_ms,8_000);
+    assert.equal(requests[1].sequence,1);
+    assert.strictEqual(events[1].capture,latest,'server owner reset adopts one fresh local envelope');
+    subject.stop();
+  }
+
+  reporter.notify(captureSnapshot(snapshot(2_000, "waiting")));
+  reporter.notify(captureSnapshot(snapshot(3_000, "stalled")));
   assert.equal(calls.length, 1, "only one exchange may be in flight");
 
   first.resolve(response(calls[0].request));
@@ -312,7 +380,7 @@ async function main() {
   });
   const changedCapabilities=snapshot(4_000);
   changedCapabilities.capabilities.max_height=720;
-  reporter.notify(changedCapabilities);
+  reporter.notify(captureSnapshot(changedCapabilities));
   const capabilityCooldown=timers.filter(timer=>timer.ms===250).at(-1);
   now=500;
   capabilityCooldown.run();
@@ -327,7 +395,7 @@ async function main() {
   const canceled = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "33333333-3333-4333-8333-333333333333",
-    snapshot: () => snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send: async (_url, _request, requestSignal) => {
       signal = requestSignal;
       await cancellation.promise;
@@ -346,7 +414,7 @@ async function main() {
   const mismatched = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "44444444-4444-4444-8444-444444444444",
-    snapshot: () => snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send: async (_url, request) => Object.assign(response(request), { action: { type: "replace" } }),
     onExchange: ({ error }) => { if (error) invalidResponses += 1; },
   }).start();
@@ -361,7 +429,7 @@ async function main() {
   const retrying=new control.Reporter({
     bootstrap:bootstrap(),
     clientInstanceId:"55555555-5555-4555-8555-555555555555",
-    snapshot:()=>snapshot(7_000),
+    capture: () => captureSnapshot(snapshot(7_000)),
     send:async (_url,request)=>{
       retryCalls.push(request);
       if(retryCalls.length===1) throw new Error("connection reset before response");
@@ -386,7 +454,7 @@ async function main() {
   const timedOut=new control.Reporter({
     bootstrap:bootstrap(),
     clientInstanceId:"66666666-6666-4666-8666-666666666666",
-    snapshot:()=>snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send:async (_url,_request,signal)=>new Promise((_resolve,reject)=>{
       signal.addEventListener("abort",()=>{
         const error=new Error("aborted"); error.name="AbortError"; reject(error);
@@ -413,7 +481,7 @@ async function main() {
     const temporaryReporter=new control.Reporter({
       bootstrap:bootstrap(),
       clientInstanceId:"77777777-7777-4777-8777-777777777777",
-      snapshot:()=>snapshot(8_000),
+      capture: () => captureSnapshot(snapshot(8_000)),
       send:async (_url,request)=>{
         temporaryCalls.push(request);
         if(temporaryCalls.length===1) throw controlError(temporary.status,temporary.code,
@@ -444,7 +512,7 @@ async function main() {
   const ownerReporter=new control.Reporter({
     bootstrap:bootstrap(),
     clientInstanceId:"88888888-8888-4888-8888-888888888888",
-    snapshot:()=>snapshot(9_000),
+    capture: () => captureSnapshot(snapshot(9_000)),
     send:async (_url,request)=>{
       ownerCalls.push(request);
       if(ownerCalls.length===1) throw controlError(409,"owner_changed",
@@ -472,7 +540,7 @@ async function main() {
   const predecessor=new control.Reporter({
     bootstrap:bootstrap(),
     clientInstanceId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    snapshot:()=>snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send:async ()=>late.promise,
     onExchange:()=>{ lateCompletions+=1; },
   }).start();
@@ -486,7 +554,7 @@ async function main() {
   const triggerReporter=new control.Reporter({
     bootstrap:bootstrap(),
     clientInstanceId:"abababab-abab-4bab-8bab-abababababab",
-    snapshot:()=>snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send:async ()=>triggerDeferred.promise,
   }).start();
   const typedTrigger=snapshot(12_000,"failed");
@@ -494,7 +562,7 @@ async function main() {
     decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall",
     ignored_private_field:"must not enter log context",
   };
-  const triggerContext=triggerReporter.notify(typedTrigger);
+  const triggerContext=triggerReporter.notify(captureSnapshot(typedTrigger));
   assert.deepEqual(triggerContext.observation,{
     decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall",
   },"the real reporter preserves bounded typed evidence in an immediate trigger context");
@@ -509,7 +577,7 @@ async function main() {
   const acceptedTypedReporter=new control.Reporter({
     bootstrap:bootstrap(),
     clientInstanceId:"acacacac-acac-4cac-8cac-acacacacacac",
-    snapshot:()=>acceptedTypedSnapshot,
+    capture: () => captureSnapshot(acceptedTypedSnapshot),
     send:async (_url,request)=>response(request),
   }).start();
   await flush();
@@ -524,7 +592,7 @@ async function main() {
   const ending=new control.Reporter({
     bootstrap:bootstrap(),
     clientInstanceId:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-    snapshot:()=>endingSnapshot,
+    capture: () => captureSnapshot(endingSnapshot),
     send:async (_url,request)=>response(request),
     setTimer:(run,ms)=>{ endTimers.push({run,ms}); return endTimers.length; },
     clearTimer:()=>{},
@@ -540,10 +608,10 @@ async function main() {
   const oldReplayController=new control.Reporter({
     bootstrap:bootstrap(),
     clientInstanceId:"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-    snapshot:()=>endRaceSnapshot,
+    capture: () => captureSnapshot(endRaceSnapshot),
     send:async ()=>endRaceResponse.promise,
   }).start();
-  oldReplayController.notify(snapshot(0,"rendering"));
+  oldReplayController.notify(captureSnapshot(snapshot(0,"rendering")));
   assert.equal(oldReplayController.status().pending,true,
     "a replay signal can arrive while terminal end is still in flight");
   oldReplayController.stop();
@@ -551,7 +619,7 @@ async function main() {
   const freshReplayController=new control.Reporter({
     bootstrap:Object.assign(bootstrap(),{generation:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}),
     clientInstanceId:"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-    snapshot:()=>snapshot(0,"rendering"),
+    capture: () => captureSnapshot(snapshot(0,"rendering")),
     send:async (_url,request)=>{ replacementRequests.push(request); return response(request); },
   }).start();
   await flush();
@@ -1520,7 +1588,7 @@ async function main() {
   const declaring = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "66666666-6666-4666-8666-666666666666",
-    snapshot: () => snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send: async (_url, request) => { declared = request.supported_actions; return response(request); },
   }).start();
   await flush();
@@ -1540,7 +1608,7 @@ async function main() {
   const holding = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "77777777-7777-4777-8777-777777777777",
-    snapshot: () => snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send: async (_url, request) =>
       Object.assign(response(request), { action: { type: "hold", reason: "working_set" } }),
     onExchange: ({ error }) => { if (error) holdErrors += 1; else holdExchanges += 1; },
@@ -1558,7 +1626,7 @@ async function main() {
   const unknownReason = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "88888888-8888-4888-8888-888888888888",
-    snapshot: () => snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send: async (_url, request) =>
       Object.assign(response(request), { action: { type: "hold", reason: "a_reason_from_next_year" } }),
     onExchange: ({ error }) => { if (error) unknownReasonErrors += 1; },
@@ -1572,7 +1640,7 @@ async function main() {
   const malformed = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "99999999-9999-4999-8999-999999999999",
-    snapshot: () => snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send: async (_url, request) =>
       Object.assign(response(request), { action: { type: "hold" } }),
     onExchange: ({ error }) => { if (error) malformedHold += 1; },
@@ -1589,7 +1657,7 @@ async function main() {
   const paced = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    snapshot: () => snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send: async (_url, request) =>
       Object.assign(response(request), {
         action: { type: "retry_resource", after_ms: 9_000, reason: "reader_failed" },
@@ -1617,7 +1685,7 @@ async function main() {
   const ended = new control.Reporter({
     bootstrap: bootstrap(),
     clientInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-    snapshot: () => snapshot(),
+    capture: () => captureSnapshot(snapshot()),
     send: async (_url, request) =>
       Object.assign(response(request), {
         action: { type: "terminal", code: "unsupported", message: "cannot be carried" },
@@ -1646,7 +1714,7 @@ async function main() {
     const bad = new control.Reporter({
       bootstrap: bootstrap(),
       clientInstanceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-      snapshot: () => snapshot(),
+      capture: () => captureSnapshot(snapshot()),
       send: async (_url, request) => Object.assign(response(request), { action }),
       onExchange: ({ error }) => { if (error) refused += 1; },
     }).start();
@@ -1735,7 +1803,7 @@ async function main() {
         "  catch(e){ return {err:String(e&&e.message||e)}; }}, ",
         " probe(player,video){PLAYER=player; const r=player.controlReporter;",
         "  return {hasReporter:!!r, stopped:r&&r.stopped, seq:r&&r.sequence,",
-        "   snap:!!(r&&r.snapshot()), notify:r&&r.notify()};}};",
+        "   snap:!!(r&&r.capture()), notify:r&&r.notify()};}};",
       ].join("\n"),
     )(
       (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
@@ -1787,12 +1855,26 @@ async function main() {
     };
   }
   const stalledVideo = { paused: false, seeking: false };
+  {
+    const h=stallHarness(),player=stalledPlayer(),held=deferred();
+    player.mediaAttachment={};player.controlIntentGeneration=0;
+    h.holdWith(()=>held.promise);h.stub.attach(player,stalledVideo,bootstrap());h.attached.push(player);
+    await flush();const old=h.sent[0];
+    player.mediaAttachment={};player.subtitleReadinessReady=false;
+    held.resolve({...response(old),action:{type:'terminal',code:'unsupported',message:'old attachment'},
+      delivery:{subtitle_readiness:'ready'}});
+    await settleExchange();
+    assert.equal(player.controlVerdict,undefined,'actual reporter callback cannot publish across an attachment change');
+    assert.equal(player.controlLastResponse,null);
+    assert.equal(player.subtitleReadinessReady,false);
+    h.stub.detach(player);
+  }
   for(const kind of ['full','partial']){
     const h=stallHarness(),player=stalledPlayer(),held=deferred();
     h.holdWith(()=>held.promise);h.stub.attach(player,stalledVideo,bootstrap());h.attached.push(player);
     await flush();const old=h.sent[0];
     h.stub.preparation(player,kind);player.subtitleReadinessReady=false;
-    assert.equal(player.controlReporter.snapshot(),null,'retained media cannot be snapshotted as desired replacement evidence');
+    assert.equal(player.controlReporter.capture(),null,'retained media cannot be snapshotted as desired replacement evidence');
     assert.equal(h.stub.askProbe(player).trigger,null,'native event notification cannot send old ended/error while preparing');
     held.resolve(Object.assign(response(old),{delivery:{subtitle_readiness:'ready'}}));
     await settleExchange();
@@ -2623,7 +2705,7 @@ async function main() {
       const strict = new control.Reporter({
         bootstrap: bootstrap(),
         clientInstanceId: "22222222-2222-4222-8222-222222222222",
-        snapshot: () => snapshot(),
+        capture: () => captureSnapshot(snapshot()),
         send: async () => ({ accepted: true, action: { type: "none" } }),
       });
       // `notify` schedules through the default timer, and `stop` cancels
