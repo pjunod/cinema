@@ -3812,20 +3812,28 @@ hardware, and it says which are which.
 | DRM channel | refused `drm_unsupported` |
 | after release | 0 bytes of live scratch, 0 tuners held, and a tuner another household client was using untouched throughout |
 
-**ATSC 3.0 does not start, and the codec is not why.** On that device an ATSC
-3.0 channel (HEVC Main 10 1080, AC-3) publishes its first segment at **18.1 s**.
-`STARTUP_TIMEOUT` is 15 s, so plurx lists the channel as playable and then
-always refuses it with `startup_timeout` -- while the same channel plays fine
-once it does start, and while that same HEVC source transcodes to 720p at
-**2.37x realtime** in software on the same machine. The ATSC 1.0 control
-channel on the same device and host took 7.0 s. Separately, two ATSC 3.0
-channels on that antenna return **no bytes at all** from the device within 10 s,
-which is reception and not something plurx can fix.
+**ATSC 3.0: three defects found and fixed, latency still unfinished.** Chasing
+one ATSC 3.0 channel on that device found all three, and none of them was a
+codec:
 
-If you are trying ATSC 3.0 today, expect `startup_timeout` on a channel the
-lineup says is ready. That is the defect, tracked in
-[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md), not your
-configuration.
+1. Every ATSC 3.0 channel is HEVC **Main 10**, the live filter chain pinned no
+   pixel format, and the software encoder pins `-profile:v high` -- so libx264
+   was handed 10-bit frames and refused ("high profile doesn't support a bit
+   depth of 10"), killing FFmpeg before it published anything. Any 10-bit live
+   source hit this, not only ATSC 3.0.
+2. A flat 15 s startup budget expired before that error could be reported, and
+   gave the same sentence to a channel that was quietly working and one that
+   had sent nothing at all.
+3. `-probesize` was 8 MiB of *tuner stream* -- roughly 23 s of wall time on a
+   2.8 Mbps mux, and 1.5 s of pointless latency even on a strong one.
+
+What is left is startup time on a weak mux. The only ATSC 3.0 mux on that
+antenna that feeds at all carries 58% signal quality with visible decode
+errors, and two more ATSC 3.0 channels return **no bytes at all** from the
+device within 10 s, which is reception and not something plurx can fix. If you
+are trying ATSC 3.0 today, expect it to be slow or not to start; ATSC 1.0 is
+accepted end to end. Tracked in
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
 
 ### Accepting it on real hardware
 
@@ -4056,5 +4064,7 @@ the loading overlay a few seconds longer, then playback).
 | A viewer's session will not start again for ~90 s | Their last attempt failed in a way that might mean a tuner *did* open, so the client is holding its place rather than opening a second one | Expected. It clears itself; see [PLAYBACK.md](PLAYBACK.md) |
 | Live TV settings `PUT` returns `409` | Somebody else moved the settings generation | Refetch `/api/v1/settings` and retry with the current generation. Never force it |
 | `plurx_live_tv_sessions` is `0` on a node people are watching on | Sessions are process-local and only the **owner** creates them | Read the metric on the owner; a relaying node reports `plurx_live_tv_relay_bytes_total` instead |
-| An ATSC 3.0 channel is listed as playable and always answers `startup_timeout` | Known defect. On a FLEX 4K an ATSC 3.0 channel publishes its first segment at 18.1 s and `STARTUP_TIMEOUT` is 15 s | No workaround today; the channel is not broken and neither is your configuration. Use an ATSC 1.0 channel. Tracked in [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) |
+| An ATSC 3.0 channel is listed as playable and does not start | Startup time on a weak mux. The three defects behind the original failure are fixed; what remains is latency on a marginal signal | Check that mux's signal quality in the HDHomeRun's own UI first — the one on the test antenna reads 58%. ATSC 1.0 is accepted end to end. Tracked in [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) |
+| A start answers `startup_timeout` saying the tuner sent no data | The device accepted the connection and delivered nothing — the channel has no signal on this device | Reception. Check that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
+| A start answers `startup_timeout` naming a byte count | The tuner is feeding but the producer published no segment inside the producer-progress budget | A real producer problem rather than a missing signal. Check `Settings → Logs` on the owner; the byte count is there so the two cases are distinguishable |
 | An ATSC 3.0 channel returns no picture and no error from the device itself | The device accepted the connection and sent zero bytes — two channels on one test antenna do this | Reception, not software. Check signal on that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
