@@ -1206,81 +1206,8 @@ async fn client_stream(
         handle_read.abort();
         let _ = handle_read.await;
 
-        debug!("make sure reader rx is empty and closed");
-        while let Ok(req) = rx_read.recv_async().await {
-            debug!("Answer from reader into buffer: {:?}", req);
-            // we are very explicit here for better debugging
-            match req {
-                #[cfg(feature = "sqlite")]
-                ClientStreamReq::Execute(_) => {
-                    unreachable!("we should never receive ClientStreamReq::Execute from WS reader")
-                }
-                #[cfg(feature = "sqlite")]
-                ClientStreamReq::ExecuteReturning(_) => {
-                    unreachable!(
-                        "we should never receive ClientStreamReq::ExecuteReturning from WS reader"
-                    )
-                }
-                #[cfg(feature = "sqlite")]
-                ClientStreamReq::Transaction(_) => {
-                    unreachable!(
-                        "we should never receive ClientStreamReq::Transaction from WS reader"
-                    )
-                }
-                #[cfg(feature = "sqlite")]
-                ClientStreamReq::Query(_) => {
-                    unreachable!(
-                        "we should never receive ClientStreamReq::QueryConsistent from WS reader"
-                    )
-                }
-                #[cfg(feature = "sqlite")]
-                ClientStreamReq::QueryConsistent(_) => {
-                    unreachable!(
-                        "we should never receive ClientStreamReq::QueryConsistent from WS reader"
-                    )
-                }
-                #[cfg(feature = "sqlite")]
-                ClientStreamReq::Batch(_) => {
-                    unreachable!("we should never receive ClientStreamReq::Batch from WS reader")
-                }
-                #[cfg(feature = "sqlite")]
-                ClientStreamReq::Migrate(_) => {
-                    unreachable!("we should never receive ClientStreamReq::Migrate from WS reader")
-                }
-                #[cfg(feature = "backup")]
-                ClientStreamReq::Backup(_) => {
-                    unreachable!("we should never receive ClientStreamReq::Backup from WS reader")
-                }
-                #[cfg(feature = "cache")]
-                ClientStreamReq::KV(_) => {
-                    unreachable!("we should never receive ClientStreamReq::KV from WS reader")
-                }
-                #[cfg(feature = "cache")]
-                ClientStreamReq::KVGet(_) => {
-                    unreachable!("we should never receive ClientStreamReq::KVGet from WS reader")
-                }
-                #[cfg(feature = "dlock")]
-                ClientStreamReq::LockAwait(_) => {
-                    unreachable!(
-                        "we should never receive ClientStreamReq::LockAwait from WS reader"
-                    )
-                }
-                #[cfg(feature = "listen_notify_local")]
-                ClientStreamReq::Notify(_) => {
-                    unreachable!("we should never receive ClientStreamReq::Notify from WS reader")
-                }
-                ClientStreamReq::Shutdown => {
-                    unreachable!("we should never receive ClientStreamReq::Shutdown from WS reader")
-                }
-                ClientStreamReq::StreamResponse(resp) => {
-                    proxy_handoff |=
-                        try_forward_response(&mut in_flight, &mut in_flight_buf, false, resp).await;
-                }
-                ClientStreamReq::CleanupBuffer => {
-                    // ignore - we are re-connecting anyway
-                }
-            }
-        }
+        proxy_handoff |=
+            drain_client_reader_responses(&rx_read, &mut in_flight, &mut in_flight_buf).await;
 
         if shutdown {
             fail_client_stream_shutdown(&mut in_flight, &mut in_flight_buf, &rx_req);
@@ -1288,34 +1215,20 @@ async fn client_stream(
             break;
         }
 
-        if proxy_handoff {
-            fail_client_stream_proxy_handoff(&mut in_flight, &mut in_flight_buf);
-            rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
-        } else if leader_handoff {
-            fail_client_stream_leader_handoff(&mut in_flight, &mut in_flight_buf);
-        } else if terminal_transport_failure {
-            for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
-                let _ = ack.send(Err(Error::Connect(
-                    "API connection ended after dispatch; outcome unknown and request was not replayed"
-                        .into(),
-                )));
-            }
-            if rotate_after_disconnect {
-                rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
-            }
-        } else if rotate_after_disconnect {
-            for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
-                let _ = ack.send(Err(Error::Connect(
-                    "Connection to proxy endpoint lost".into(),
-                )));
-            }
-            rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
-        } else {
-            for (req_id, ack) in in_flight.drain() {
-                in_flight_buf.insert(req_id, ack);
-            }
-        }
-        assert!(in_flight.is_empty());
+        finalize_client_stream_disconnect(
+            &client.inner.nodes,
+            &leader,
+            &mut proxy_index,
+            &mut in_flight,
+            &mut in_flight_buf,
+            ClientDisconnectState {
+                proxy_handoff,
+                leader_handoff,
+                terminal_transport_failure,
+                rotate_after_disconnect,
+            },
+        )
+        .await;
 
         debug!("client stream tasks killed - re-connecting now");
     }
@@ -1354,6 +1267,79 @@ fn fail_client_stream_proxy_handoff(
             "Action not allowed, proxy endpoint has changed".into(),
         )));
     }
+}
+
+async fn drain_client_reader_responses(
+    rx_read: &flume::Receiver<ClientStreamReq>,
+    in_flight: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+    in_flight_buf: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+) -> bool {
+    let mut proxy_handoff = false;
+    debug!("make sure reader rx is empty and closed");
+    while let Ok(req) = rx_read.recv_async().await {
+        debug!("Answer from reader into buffer: {:?}", req);
+        match req {
+            ClientStreamReq::StreamResponse(response) => {
+                proxy_handoff |=
+                    try_forward_response(in_flight, in_flight_buf, false, response).await;
+            }
+            ClientStreamReq::CleanupBuffer => {
+                // Ignore the expiry marker while reconnecting.
+            }
+            _ => unreachable!("API WebSocket reader emitted a non-response request"),
+        }
+    }
+    proxy_handoff
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClientDisconnectState {
+    proxy_handoff: bool,
+    leader_handoff: bool,
+    terminal_transport_failure: bool,
+    rotate_after_disconnect: bool,
+}
+
+async fn finalize_client_stream_disconnect(
+    nodes: &[String],
+    leader: &Arc<RwLock<(NodeId, String)>>,
+    proxy_index: &mut usize,
+    in_flight: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+    in_flight_buf: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+    state: ClientDisconnectState,
+) {
+    let rotate_proxy = if state.proxy_handoff {
+        fail_client_stream_proxy_handoff(in_flight, in_flight_buf);
+        true
+    } else if state.leader_handoff {
+        fail_client_stream_leader_handoff(in_flight, in_flight_buf);
+        false
+    } else if state.terminal_transport_failure {
+        for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
+            let _ = ack.send(Err(Error::Connect(
+                "API connection ended after dispatch; outcome unknown and request was not replayed"
+                    .into(),
+            )));
+        }
+        state.rotate_after_disconnect
+    } else if state.rotate_after_disconnect {
+        for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
+            let _ = ack.send(Err(Error::Connect(
+                "Connection to proxy endpoint lost".into(),
+            )));
+        }
+        true
+    } else {
+        for (request_id, ack) in in_flight.drain() {
+            in_flight_buf.insert(request_id, ack);
+        }
+        false
+    };
+
+    if rotate_proxy {
+        rotate_configured_proxy_endpoint(nodes, leader, proxy_index).await;
+    }
+    assert!(in_flight.is_empty());
 }
 
 #[inline(always)]
@@ -1486,8 +1472,16 @@ async fn rotate_proxy_endpoint(
     proxy_index: &mut usize,
 ) {
     debug_assert!(client.inner.proxy_mode);
+    rotate_configured_proxy_endpoint(&client.inner.nodes, leader, proxy_index).await;
+}
+
+async fn rotate_configured_proxy_endpoint(
+    nodes: &[String],
+    leader: &Arc<RwLock<(NodeId, String)>>,
+    proxy_index: &mut usize,
+) {
     let mut lock = leader.write().await;
-    if let Some(endpoint) = next_configured_proxy(&client.inner.nodes, proxy_index) {
+    if let Some(endpoint) = next_configured_proxy(nodes, proxy_index) {
         // Preserve this stream's synthetic/current id and replace only the
         // address with a member of the original configured trust boundary.
         let node_id = lock.0;
@@ -1979,25 +1973,45 @@ mod tests {
         let mut in_flight = HashMap::new();
         let mut in_flight_buf = HashMap::new();
         let mut acknowledgements = Vec::new();
+        let (reader_tx, reader_rx) = flume::bounded(1);
         for request_id in [71, 72] {
             let (ack, response) = oneshot::channel();
             in_flight.insert(request_id, ack);
             acknowledgements.push(response);
         }
+        let reader = tokio::spawn(async move {
+            for request_id in [71, 72] {
+                reader_tx
+                    .send_async(ClientStreamReq::StreamResponse(ApiStreamResponse {
+                        request_id,
+                        result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
+                    }))
+                    .await
+                    .expect("queue refusing response");
+            }
+        });
 
-        let mut proxy_handoff = false;
-        for request_id in [71, 72] {
-            proxy_handoff |= try_forward_response(
-                &mut in_flight,
-                &mut in_flight_buf,
-                false,
-                ApiStreamResponse {
-                    request_id,
-                    result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
-                },
-            )
-            .await;
-        }
+        let proxy_handoff =
+            drain_client_reader_responses(&reader_rx, &mut in_flight, &mut in_flight_buf).await;
+        reader.await.expect("join simulated reader");
+
+        let nodes = vec!["proxy-a:21000".to_owned(), "proxy-b:21000".to_owned()];
+        let leader = Arc::new(RwLock::new((0, nodes[0].clone())));
+        let mut proxy_index = 0;
+        finalize_client_stream_disconnect(
+            &nodes,
+            &leader,
+            &mut proxy_index,
+            &mut in_flight,
+            &mut in_flight_buf,
+            ClientDisconnectState {
+                proxy_handoff,
+                leader_handoff: false,
+                terminal_transport_failure: false,
+                rotate_after_disconnect: false,
+            },
+        )
+        .await;
 
         for response in acknowledgements {
             let payload = response.await.expect("proxy refusal acknowledgement");
@@ -2008,13 +2022,7 @@ mod tests {
             ));
         }
         assert!(proxy_handoff, "the refusing socket must claim one handoff");
-
-        let nodes = vec!["proxy-a:21000".to_owned(), "proxy-b:21000".to_owned()];
-        let mut proxy_index = 0;
-        let next = proxy_handoff
-            .then(|| next_configured_proxy(&nodes, &mut proxy_index))
-            .flatten();
-        assert_eq!(next.as_deref(), Some("proxy-b:21000"));
+        assert_eq!(leader.read().await.1, "proxy-b:21000");
         assert_eq!(proxy_index, 1, "two refusals must rotate only once");
     }
 
@@ -2025,17 +2033,57 @@ mod tests {
         let mut in_flight_buf = HashMap::new();
         let (ack, response) = oneshot::channel();
         in_flight.insert(81, ack);
-
-        // The supervisor may observe EOF before consuming a response that the
-        // reader already decoded. Teardown drains that response before it
-        // decides whether the exact socket owns a proxy handoff.
-        let proxy_handoff = try_forward_response(
-            &mut in_flight,
-            &mut in_flight_buf,
-            false,
-            ApiStreamResponse {
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let (reader_finished_tx, mut reader_finished_rx) = oneshot::channel();
+        let (_writer_finished_tx, mut writer_finished_rx) = oneshot::channel();
+        let (_control_tx, control_rx) = flume::bounded(1);
+        let (reader_tx, reader_rx) = flume::bounded(1);
+        let (_request_tx, request_rx) = flume::bounded(1);
+        reader_tx
+            .send_async(ClientStreamReq::StreamResponse(ApiStreamResponse {
                 request_id: 81,
                 result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
+            }))
+            .await
+            .expect("queue decoded refusal");
+        drop(reader_tx);
+        reader_finished_tx
+            .send(Ok(()))
+            .expect("queue reader EOF outcome");
+
+        let terminal = next_client_connected_event(
+            &mut shutdown_rx,
+            &mut reader_finished_rx,
+            &mut writer_finished_rx,
+            &control_rx,
+            &reader_rx,
+            &request_rx,
+        )
+        .await;
+        assert!(matches!(
+            terminal,
+            ClientConnectedEvent::ReaderFinished(Ok(()))
+        ));
+
+        // The same production teardown seam drains the response that lost the
+        // biased race to EOF, then lets its exact-socket refusal supersede the
+        // generic terminal rotation.
+        let proxy_handoff =
+            drain_client_reader_responses(&reader_rx, &mut in_flight, &mut in_flight_buf).await;
+        let nodes = vec!["proxy-a:21000".to_owned(), "proxy-b:21000".to_owned()];
+        let leader = Arc::new(RwLock::new((0, nodes[0].clone())));
+        let mut proxy_index = 0;
+        finalize_client_stream_disconnect(
+            &nodes,
+            &leader,
+            &mut proxy_index,
+            &mut in_flight,
+            &mut in_flight_buf,
+            ClientDisconnectState {
+                proxy_handoff,
+                leader_handoff: false,
+                terminal_transport_failure: true,
+                rotate_after_disconnect: true,
             },
         )
         .await;
@@ -2046,6 +2094,11 @@ mod tests {
             Ok(ApiStreamResponsePayload::Execute(Err(ref err)))
                 if err.is_forward_to_leader().is_some()
         ));
+        assert_eq!(leader.read().await.1, "proxy-b:21000");
+        assert_eq!(
+            proxy_index, 1,
+            "response-owned and EOF recovery must rotate only once"
+        );
     }
 
     #[tokio::test]
