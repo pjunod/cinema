@@ -186,11 +186,32 @@ anchor = "async fn run_chapter_probe("
 obligation = "keep bounded FFprobe chapter discovery outside producer qualification"
 
 [[surfaces]]
-id = "process.dv_disk_tool"
+id = "process.dv_disk_capability"
 kind = "offline_process"
 source = "crates/plurxd/src/dv_disk.rs"
-anchor = "async fn run_tool_with_bound_media("
-obligation = "retain its independent conversion/verification receipt and source fence"
+anchor = "async fn bounded_tool_probe("
+obligation = "keep dovi_tool and mkvmerge version probes as capability evidence only"
+
+[[surfaces]]
+id = "process.dv_disk_media_probe"
+kind = "offline_process"
+source = "crates/plurxd/src/dv_disk.rs"
+anchor = "async fn probe_bound_with("
+obligation = "bind FFprobe input to the held source descriptor and independent source fence"
+
+[[surfaces]]
+id = "process.dv_disk_unbound_conversion"
+kind = "offline_process"
+source = "crates/plurxd/src/dv_disk.rs"
+anchor = "async fn run_tool_with_timeout("
+obligation = "inventory the unbound conversion child without confusing its output with qualified transcode health"
+
+[[surfaces]]
+id = "process.dv_disk_bound_conversion"
+kind = "offline_process"
+source = "crates/plurxd/src/dv_disk.rs"
+anchor = "#[cfg(unix)]\nasync fn run_tool_with_bound_media("
+obligation = "retain descriptor-bound conversion identity, timeout, and post-run source verification"
 
 # Renderer constraints that the future candidate validator must consume.
 [[surfaces]]

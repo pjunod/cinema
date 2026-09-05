@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import runpy
 import tempfile
@@ -10,9 +11,26 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/decoder-diagnostic-qualification"
+MEDIA_SCRIPT = ROOT / "scripts/decoder-media-baseline"
 FIXTURES = ROOT / "tests/playback/decoder-health"
 CHECKER = runpy.run_path(str(SCRIPT))
+MEDIA_CHECKER = runpy.run_path(str(MEDIA_SCRIPT))
 RAWVIDEO_CONTRACT = "ffmpeg-8.0.1-3ubuntu2-rawvideo-v1"
+CONTRACT_FIELDS = (
+    "id",
+    "host",
+    "ffmpeg_version",
+    "binary_sha256",
+    "buildconf_sha256",
+    "stderr_mode",
+    "input_codec",
+    "decoder",
+    "require_context_addresses",
+    "error_detail",
+    "fixture",
+    "fixture_sha256",
+    "scope",
+)
 EXPECTED_INVENTORY_IDS = {
     "builder.prepublication_retry",
     "builder.resumable_part",
@@ -40,7 +58,10 @@ EXPECTED_INVENTORY_IDS = {
     "process.pacing_probe",
     "process.media_origin_probe",
     "process.chapter_probe",
-    "process.dv_disk_tool",
+    "process.dv_disk_capability",
+    "process.dv_disk_media_probe",
+    "process.dv_disk_unbound_conversion",
+    "process.dv_disk_bound_conversion",
     "renderer.candidates",
     "renderer.pairing",
     "renderer.residency",
@@ -81,6 +102,31 @@ EXPECTED_INVENTORY_IDS = {
 }
 
 
+def write_bound_contract(
+    path: Path,
+    fixture: Path,
+    *,
+    overrides: dict[str, object] | None = None,
+    omit: set[str] | None = None,
+) -> None:
+    with (FIXTURES / "diagnostic-contracts.toml").open("rb") as document:
+        contract = tomllib.load(document)["contracts"][0]
+    contract["fixture"] = fixture.name
+    contract["fixture_sha256"] = hashlib.sha256(fixture.read_bytes()).hexdigest()
+    contract.update(overrides or {})
+    omitted = omit or set()
+    lines = ["version = 1", "", "[[contracts]]"]
+    for field in CONTRACT_FIELDS:
+        if field in omitted:
+            continue
+        value = contract[field]
+        lines.append(
+            f"{field} = "
+            + (str(value).lower() if isinstance(value, bool) else json.dumps(value))
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 class DecoderDiagnosticQualificationTests(unittest.TestCase):
     def test_qualified_ffmpeg_8_shape_latches_fifth_record_in_361_ms(self) -> None:
         result = CHECKER["qualify"](
@@ -104,7 +150,7 @@ class DecoderDiagnosticQualificationTests(unittest.TestCase):
         self.assertEqual(without_contract.contract_qualified_primary_records, 0)
         self.assertFalse(without_contract.automatic_action_qualified)
 
-    def test_contract_rejects_addressless_or_different_codec_records(self) -> None:
+    def test_contract_rejects_addressless_codec_or_detail_mismatch(self) -> None:
         cases = {
             "addressless": (
                 "[vist#0:0/rawvideo] [dec:rawvideo] [error] "
@@ -114,23 +160,18 @@ class DecoderDiagnosticQualificationTests(unittest.TestCase):
                 "[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] "
                 "Error submitting packet to decoder: invalid data"
             ),
+            "different-detail": (
+                "[vist#0:0/rawvideo @ <address>] "
+                "[dec:rawvideo @ <address>] [error] "
+                "Error submitting packet to decoder: arbitrary failure"
+            ),
         }
-        with tempfile.TemporaryDirectory() as directory:
-            for name, primary in cases.items():
-                fixture = Path(directory) / f"{name}.stderr"
-                fixture.write_text(
-                    "\n".join(f"{observed}\t{primary}" for observed in range(5))
-                    + "\n",
-                    encoding="utf-8",
-                )
-                result = CHECKER["qualify"](
-                    fixture,
-                    contract_id=RAWVIDEO_CONTRACT,
-                )
-                with self.subTest(case=name):
-                    self.assertEqual(result.primary_video_error_records, 5)
-                    self.assertEqual(result.contract_qualified_primary_records, 0)
-                    self.assertFalse(result.automatic_action_qualified)
+        contract = CHECKER["action_contract"](RAWVIDEO_CONTRACT)
+        for name, primary in cases.items():
+            with self.subTest(case=name):
+                match = CHECKER["PRIMARY_VIDEO_ERROR"].fullmatch(primary)
+                self.assertIsNotNone(match)
+                self.assertFalse(CHECKER["matches_action_contract"](match, contract))
 
     def test_contract_rejects_unbound_copy_of_qualified_records(self) -> None:
         source = FIXTURES / "qualified-ffmpeg-8.stderr"
@@ -209,23 +250,7 @@ class DecoderDiagnosticQualificationTests(unittest.TestCase):
             fixture = Path(directory) / "qualified-repeat.stderr"
             fixture.write_text("\n".join(lines) + "\n", encoding="utf-8")
             contract_path = Path(directory) / "contracts.toml"
-            contract_path.write_text(
-                "\n".join(
-                    (
-                        "version = 1",
-                        "[[contracts]]",
-                        f'id = "{RAWVIDEO_CONTRACT}"',
-                        'input_codec = "rawvideo"',
-                        'decoder = "rawvideo"',
-                        "require_context_addresses = true",
-                        'error_detail = "Invalid data found when processing input"',
-                        f'fixture = "{fixture.name}"',
-                        f'fixture_sha256 = "{hashlib.sha256(fixture.read_bytes()).hexdigest()}"',
-                    )
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+            write_bound_contract(contract_path, fixture)
             checker_globals = CHECKER["qualify"].__globals__
             original_contracts_path = checker_globals["CONTRACTS_PATH"]
             checker_globals["CONTRACTS_PATH"] = contract_path
@@ -241,6 +266,34 @@ class DecoderDiagnosticQualificationTests(unittest.TestCase):
         self.assertEqual(result.contract_qualified_primary_records, 5)
         self.assertIsNotNone(result.fault_at_ms)
         self.assertFalse(result.automatic_action_qualified)
+
+    def test_contract_rejects_incomplete_or_mismatched_build_provenance(self) -> None:
+        fixture = FIXTURES / "qualified-ffmpeg-8.stderr"
+        cases = {
+            "missing-version": ({}, {"ffmpeg_version"}),
+            "wrong-version": ({"ffmpeg_version": "8.0.2"}, set()),
+            "wrong-binary": ({"binary_sha256": "0" * 64}, set()),
+            "wrong-build": ({"buildconf_sha256": "1" * 64}, set()),
+            "wrong-mode": ({"stderr_mode": "level+error"}, set()),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checker_globals = CHECKER["action_contract"].__globals__
+            original_contracts_path = checker_globals["CONTRACTS_PATH"]
+            try:
+                for name, (overrides, omit) in cases.items():
+                    contract_path = Path(directory) / f"{name}.toml"
+                    write_bound_contract(
+                        contract_path,
+                        fixture,
+                        overrides=overrides,
+                        omit=omit,
+                    )
+                    checker_globals["CONTRACTS_PATH"] = contract_path
+                    with self.subTest(case=name):
+                        with self.assertRaises(CHECKER["QualificationError"]):
+                            CHECKER["action_contract"](RAWVIDEO_CONTRACT)
+            finally:
+                checker_globals["CONTRACTS_PATH"] = original_contracts_path
 
     def test_latency_starts_with_triggering_window_not_stale_error(self) -> None:
         primary = (
@@ -354,14 +407,15 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         identifiers = [surface["id"] for surface in surfaces]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         self.assertEqual(set(identifiers), EXPECTED_INVENTORY_IDS)
-        self.assertEqual(len(surfaces), 64)
+        self.assertEqual(len(surfaces), 67)
         for surface in surfaces:
             with self.subTest(surface=surface["id"]):
                 source = ROOT / surface["source"]
                 self.assertTrue(source.is_file())
-                self.assertIn(
-                    surface["anchor"],
-                    source.read_text(encoding="utf-8"),
+                self.assertEqual(
+                    source.read_text(encoding="utf-8").count(surface["anchor"]),
+                    1,
+                    f'{surface["id"]} must name one exact source anchor',
                 )
                 self.assertTrue(surface["obligation"])
 
@@ -428,6 +482,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
             "container_binary_sha256",
             "container_buildconf_sha256",
             "container_decoder_inventory_sha256",
+            "container_hwaccels_sha256",
             "container_image_id",
             "canonicalization",
         })
@@ -436,12 +491,17 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         for name, node in nodes.items():
             with self.subTest(node=name):
                 for field in (
-                    "container_image_id",
                     "container_binary_sha256",
                     "container_buildconf_sha256",
                     "container_decoder_inventory_sha256",
+                    "container_hwaccels_sha256",
                 ):
                     self.assertRegex(node[field], r"^[0-9a-f]{64}$")
+                self.assertRegex(node["container_image_id"], r"^sha256:[0-9a-f]{64}$")
+                self.assertEqual(
+                    node["advertised_hwaccels"],
+                    ["vdpau", "cuda", "vaapi", "qsv", "drm", "opencl", "vulkan"],
+                )
                 if node["host_ffmpeg"] != "not-on-PATH":
                     self.assertRegex(node["host_binary_sha256"], r"^[0-9a-f]{64}$")
                     self.assertRegex(node["host_buildconf_sha256"], r"^[0-9a-f]{64}$")
@@ -454,7 +514,9 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         self.assertEqual(contracts["version"], 1)
         self.assertEqual(len(contracts["contracts"]), 1)
         contract = contracts["contracts"][0]
+        self.assertEqual(set(contract), set(CONTRACT_FIELDS))
         self.assertEqual(contract["id"], RAWVIDEO_CONTRACT)
+        self.assertEqual(contract["host"], "nynuc")
         self.assertEqual(len(contract["binary_sha256"]), 64)
         self.assertEqual(len(contract["buildconf_sha256"]), 64)
         fixture = FIXTURES / contract["fixture"]
@@ -494,6 +556,21 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
                     self.assertRegex(control[field], r"^[0-9a-f]{64}$")
                 self.assertIn("codec_name=", control["source_probe"])
                 self.assertIn("codec_name=", control["output_probe"])
+
+        build = {
+            field: baseline[field]
+            for field in (
+                "ffmpeg_version",
+                "ffmpeg_binary_sha256",
+                "ffmpeg_buildconf_sha256",
+                "generator_sha256",
+            )
+        }
+        controls = [dict(control) for control in baseline["controls"]]
+        MEDIA_CHECKER["verify"](path, build, controls)
+        controls[0]["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "h264-sdr.source_sha256"):
+            MEDIA_CHECKER["verify"](path, build, controls)
 
 
 if __name__ == "__main__":

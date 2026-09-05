@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 third adversarial review pending · **Updated:** 2026-09-05 ·
+**Status:** M0 third-review findings being resolved · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -26,7 +26,7 @@ An unchecked item is not implied by a nearby passing check.
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Third review pending | [PR #915](https://github.com/pjunod/plurx/pull/915); second-round findings fixed at `f9d68467` |
+| M0 · baseline and diagnostic qualification | Third findings in repair | [PR #915](https://github.com/pjunod/plurx/pull/915); second-round findings fixed at `f9d68467` |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -69,7 +69,8 @@ The distinction between owner, consumer, and support process is deliberate:
 | `process.settings_ffmpeg_version`, `process.pipe_probe` | Settings version display and `pipeprobe::Spawn` capability runs | A successful version/probe query is not producer completion |
 | `process.ffmpeg_*`, `process.dovi_*`, `process.hdr10_*`, `process.pacing_probe` | Exact build, graph, pixel, and pacing probes in `ffmpeg.rs` | Retain node/per-file capability evidence without promoting arbitrary media |
 | `process.media_origin_probe`, `process.chapter_probe` | Bounded FFprobe timeline/metadata helpers | Keep facts distinct from decoded-video health |
-| `process.dv_disk_tool` | Bound-source offline Dolby conversion tools | Retain their independent source fence and verification receipt |
+| `process.dv_disk_capability`, `process.dv_disk_media_probe` | Version and descriptor-bound FFprobe children | Keep capability evidence distinct and retain the media source fence |
+| `process.dv_disk_unbound_conversion`, `process.dv_disk_bound_conversion` | Unbound and descriptor-bound offline Dolby conversion children | Retain independent timeout, source, and verification receipts |
 
 Renderer correctness is distributed across the candidate order and eleven
 existing methods. Candidate validation must consume all twelve contracts
@@ -120,7 +121,7 @@ default and forced-software behavior.
 | Cases | Decoder/renderer/encoder baseline frozen |
 |---|---|
 | `software-sdr-h264` | Software input, CPU renderer, x264 |
-| `qsv-light-h264` | Software input, CPU renderer/upload, QSV encoder |
+| `qsv-light-h264`, `vaapi-light-h264` | Software input, CPU renderer/upload, hardware encoder; no light-source hardware decode |
 | `qsv-heavy-hevc-hdr`, `vaapi-heavy-hevc-hdr` | Heavy hardware input, CPU HDR renderer/download-upload, matching encoder |
 | `qsv-vendor-renderer`, `vaapi-vendor-renderer` | Vendor input surface and renderer, matching encoder |
 | `nvenc-libplacebo-renderer`, `vaapi-opencl-renderer` | Vulkan/OpenCL device initialization and neutral GPU graphs |
@@ -137,7 +138,10 @@ encoded sources through the baseline software HLS command on `nynuc` FFmpeg
 digests, output facts, generator hash, and binary identity are retained in
 [`decoder-media-baseline-2026-09-05.toml`](../tests/playback/decoder-media-baseline-2026-09-05.toml).
 Generated controls cover unaffected behavior without pretending to replace the
-unavailable incident media or hardware qualification.
+unavailable incident media or hardware qualification. The generator's
+`--verify` mode regenerates every source/output on the recorded FFmpeg build
+and compares build identity, generator hash, source/playlist/segment/frame
+hashes, and probe facts with the TOML.
 
 | Control | Available evidence | M0 result / prerequisite |
 |---|---|---|
@@ -189,7 +193,9 @@ Automatic action additionally requires an explicit versioned contract from
 [`diagnostic-contracts.toml`](../tests/playback/decoder-health/diagnostic-contracts.toml)
 that binds FFmpeg version, binary/build hashes, codec, decoder, context
 addresses, severity, exact error detail, and retained fixture hash. The sole
-M0 action contract is host
+M0 harness parses those fields into a closed typed schema, cross-checks the
+host version and hashes against the fleet evidence, then hashes and classifies
+one open fixture descriptor. Its sole action contract is host
 FFmpeg 8.0.1 `rawvideo`; it is not deployed-producer or MPEG-4 qualification.
 `No frame decoded?` is supporting evidence. The #913 FFmpeg 7.1.4 MPEG-4
 capture, deployed FFmpeg 5.1 shape, fatal backend initialization grammars, and
@@ -215,7 +221,9 @@ complete decoder-list output are retained per node in
 
 All four containers advertise software MPEG-4 plus QSV/CUVID families. None of
 those names proves a usable device, correct surface transfer, metadata
-preservation, or decoded pixels. No fleet backend class is qualified in M0.
+preservation, or decoded pixels. Each node row retains the exact `sha256:` image
+ID, full decoder-list hash, hardware-acceleration-list hash and decoded list;
+no fleet backend class is qualified in M0.
 
 Postpublication recovery is likewise unqualified. The clients advertise only
 `hold`, `retry_resource`, and `terminal`; their existing parsers intentionally
@@ -252,7 +260,7 @@ active review record.
 | Severity token was matched in the wrong position and addresses were omitted | Grammar and fixtures now preserve FFmpeg 8 context/address/severity order; FFmpeg 5 is explicitly unqualified |
 | Fixture reader allocated the whole input | Bounded streaming reader drains oversize tails and records coverage loss |
 | Latency began at the first historical error | Latency begins at the oldest record in the triggering window |
-| Normalized baseline argv and media controls were absent | Fifteen exact argv snapshots plus explicit real-media/prerequisite matrix added |
+| Normalized baseline argv and media controls were absent | Sixteen exact argv snapshots plus explicit real-media/prerequisite matrix added |
 | Client replacement support was overstated | Web/Apple/Android capability matrix records parse-only and physical-evidence gaps |
 | Activation semantics depended on “the node/current client” | Persisted values are requested upper bounds; effective mode is node/session-local and visible |
 | Legacy repeats were counted without provenance | Only an immediately preceding classified record owns a repeat summary; ambiguous summaries refuse action |
@@ -264,10 +272,20 @@ active review record.
 | Tolerant grammar was mistaken for build/codec qualification | Automatic action requires an explicit versioned contract; M0 qualifies only the captured FFmpeg 8 rawvideo family |
 | Rawvideo timing replay changed the second #913 offset from 0 to 1 ms | Fixture now preserves `0, 0, 294, 299, 361` and labels grammar versus synthetic timing provenance |
 | Argument baseline inherited `PLURX_HWDECODE` | Compatibility input is injected into the internal builder; default and forced-software cases are both frozen and pass under hostile process environment |
-| VA-API and materially distinct renderers/output grades were absent | Baseline expanded to 15 cases covering every renderer family, normal VideoToolbox, VA-API, and forced software decode |
-| Process/renderer/manifest-cache inventory remained incomplete | Inventory expanded to 64 exact IDs with an equality/count assertion and the missing subprocess/method/cache owners |
+| VA-API and materially distinct renderers/output grades were absent | Baseline expanded to 16 cases covering every renderer family, normal VideoToolbox, heavy/light VA-API, and forced software decode |
+| Process/renderer/manifest-cache inventory remained incomplete | Inventory expanded to 67 exact IDs with equality, count, and unique-anchor assertions plus the missing subprocess/method/cache owners |
 | No actual media baseline existed | Reproducible H.264, MPEG-4 AVI, and HEVC HDR10 source-to-HLS evidence captured on a build-bound FFmpeg 8 host |
 | Fleet hashes were global and lacked canonical commands | Binary/build/decoder/image hashes are now stored per node with exact capture and byte-canonicalization commands |
+
+| Third-pass finding | Resolution on working tree |
+|---|---|
+| Contract metadata was declared but not enforced | A closed typed schema now validates version, hashes, stderr mode, and host against retained fleet evidence |
+| Address/codec rejection tests were pre-rejected by fixture identity | Structural mismatches are tested directly with a fully validated contract |
+| Fixture hash and parse used different opens | One descriptor now supplies both the streaming digest and classified records before action is decided |
+| Light VA-API and legacy override spellings were not frozen | A sixteenth argv case proves light VA-API stays on software decode; a pure table covers `off`, `0`, `false`, and `no` |
+| `dv_disk` subprocess inventory was incomplete and ambiguous | Capability, bound probe, unbound conversion, and Unix bound conversion have distinct rows; all 67 anchors must occur exactly once |
+| Media evidence was not rerunnable from the ledger | The generator now verifies every retained build/source/output fact; the exact `nynuc` run remains pending external payload approval |
+| Image IDs and hardware acceleration lacked exact per-node capture | Exact prefixed image IDs and per-node `-hwaccels` output/hash evidence are retained for all four nodes |
 
 ## Decisions and deviations
 
