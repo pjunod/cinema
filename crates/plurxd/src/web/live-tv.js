@@ -38,7 +38,11 @@
   }
 
   function channelView(channel) {
-    const protectedChannel = !!(channel && (channel.drm || channel.support === "drm_unsupported"));
+    // Allowlist the one playable state. A denylist of known-protected shapes
+    // fails open: a lineup that grows a new `support` value renders an enabled
+    // "Watch live" for a channel this client must refuse.
+    const playable = !!channel && channel.drm !== true && channel.support === "ready";
+    const protectedChannel = !playable;
     return {
       disabled: protectedChannel,
       label: protectedChannel ? "Protected · unsupported" : "Available",
@@ -129,6 +133,11 @@
       this.requests = requests;
       this.generation = 0;
       this.current = null;
+      // The generation that owns `current`. `stop()` bumps `this.generation`
+      // synchronously but only sets `releasing` two microtasks later, so a
+      // renewing request issued in that window would otherwise pass a
+      // generation check that compares the bumped value against itself.
+      this.currentGeneration = 0;
       this.releasing = false;
       this.tail = Promise.resolve();
     }
@@ -141,6 +150,7 @@
         const info = await this.requests.start(channelId);
         if (!capability(info)) throw new Error("Live TV returned an invalid session");
         this.current = info;
+        this.currentGeneration = generation;
         if (generation !== this.generation) {
           await this.releaseCurrent();
           return null;
@@ -174,7 +184,8 @@
       const generation = this.generation;
       const info = this.current;
       const id = capability(info);
-      if (!id || this.releasing || typeof this.requests.keepalive !== "function") return null;
+      if (!id || this.releasing || this.currentGeneration !== this.generation) return null;
+      if (typeof this.requests.keepalive !== "function") return null;
       const result = await this.requests.keepalive(id);
       return generation === this.generation && this.current === info ? result : null;
     }
@@ -184,9 +195,11 @@
       const info = this.current;
       const id = capability(info);
       // A status poll renews the server lease exactly as keepalive does, so it
-      // must observe the same release guard: polling a capability whose DELETE
-      // is already in flight can renew the very lease this client is dropping.
-      if (!id || this.releasing || typeof this.requests.status !== "function") return null;
+      // must observe the same guards: polling a capability whose DELETE is
+      // already in flight — or one a newer generation has superseded — renews
+      // the very lease this client is dropping.
+      if (!id || this.releasing || this.currentGeneration !== this.generation) return null;
+      if (typeof this.requests.status !== "function") return null;
       const result = await this.requests.status(id);
       return generation === this.generation && this.current === info ? result : null;
     }

@@ -12765,6 +12765,12 @@ function liveTvMarkerId(){
 const LIVE_TV_BARRIER=new PlurxLiveTv.StartBarrier(()=>localStorage,liveTvNow,liveTvMarkerId);
 // Observe persisted uncertainty at document boot, not at the first Watch click.
 try{ LIVE_TV_BARRIER.sync(); }catch(e){}
+// A start that failed before the owner could open a tuner is safe to forget.
+// Everything else — every 5xx, and every code this client does not recognise —
+// may already hold a physical tuner whose release never reached us, so the
+// durable marker must survive it. This is an allowlist on purpose: with a
+// denylist, adding a server error code silently makes this client less safe.
+const LIVE_TV_DEFINITIVE_REFUSALS=new Set(["live_tv_disabled","live_tv_protocol_unready","drm_unsupported","channel_not_found","settings_conflict","tuner_capacity","admin_required","invalid_settings"]);
 const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
   start:async channel=>{
     const marker=LIVE_TV_BARRIER.begin(); // durable before the POST can leave
@@ -12780,7 +12786,8 @@ const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
       // A lost public start response cannot be safely retried as a new request.
       // No client heartbeat exists for that capability; allow the server's
       // bounded start + idle expiry to finish before admitting another start.
-      if(["owner_unavailable","startup_timeout","stream_failed","start_outcome_unknown"].includes(e.code)||(!e.code&&(!e.status||e.status>=500))){ LIVE_TV_BARRIER.hold(marker); throw {code:"start_outcome_unknown"}; }
+      const definitive=LIVE_TV_DEFINITIVE_REFUSALS.has(e.code)||(!e.code&&e.status>=400&&e.status<500);
+      if(!definitive){ LIVE_TV_BARRIER.hold(marker); throw {code:"start_outcome_unknown"}; }
       LIVE_TV_BARRIER.confirm(marker);
       throw e;
     }

@@ -123,6 +123,12 @@ async function main() {
     });
     await lease.start("7.1");
     const closing = lease.stop();
+    // `stop()` bumps the generation synchronously but only sets `releasing` two
+    // microtasks later. A poll entered in that window is the real hazard, so it
+    // is checked BEFORE letting the chain run — waiting first would hide it.
+    const racing = lease.status();
+    assert.equal(await racing, null, "a poll entered before the DELETE begins must be refused");
+    assert.equal(statuses, 0, "a superseded capability must never be renewed");
     await new Promise((settle) => setImmediate(settle));
     assert.equal(lease.releasing, true, "the DELETE must still be in flight");
     assert.equal(await lease.status(), null);
@@ -149,7 +155,6 @@ async function main() {
     assert.deepEqual(events, ["start:one", "release:one", "release:one", "start:three"]);
     await lease.stop();
     assert.equal(lease.current, null);
-    assert.equal(lease.released, undefined);
   });
 
   await test("late-start cleanup failure is retained across close", async () => {
@@ -175,7 +180,9 @@ async function main() {
     let clock = 1000, poll, releases = 0, statuses = 0;
     const video = { paused: true, canPlayType: () => "maybe", play: async () => { throw new Error("autoplay denied"); } };
     const nodes = { "live-tv-video": video, "live-tv-player": { hidden: true }, "live-tv-title": {} };
-    const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test" }], serial: 0 };
+    // `support` is a non-optional enum on the wire, so a fixture channel that
+    // omits it is not a channel this client can ever receive.
+    const state = { channels: [{ id: "one", guide_number: "7.1", guide_name: "Test", drm: false, support: "ready" }], serial: 0 };
     const lease = new liveTv.Lease({
       start: async () => ({ session_id: "cap" }), release: async () => { releases++; },
       status: async () => { statuses++; return { state: "active" }; }, keepalive: async () => {},
@@ -213,6 +220,43 @@ async function main() {
     monotonic = 90001;
     await assert.rejects(lease.start("three"), e => e.code === "start_outcome_unknown");
     assert.equal(posts, 2);
+  });
+
+  await test("an unrecognised start failure keeps the durable marker", async () => {
+    let posts = 0, nonce = 0;
+    const block = shell.slice(shell.indexOf("const LIVE_TV="), shell.indexOf("async function liveTvRequest("));
+    const lease = new Function("PlurxLiveTv", "performance", "Date", "localStorage", "crypto", "liveTvRequest",
+      `${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => 0 }, { now: () => 0 }, memoryStorage(),
+      { getRandomValues: bytes => { bytes.fill(0); bytes[0] = ++nonce; return bytes; } }, async () => {
+        // A typed 5xx this client has never seen. The owner may already have
+        // opened a tuner, so the marker must survive and block the retry.
+        posts++; throw { code: "encoder_spawn_failed", status: 500 };
+      });
+    await assert.rejects(lease.start("one"), e => e.code === "start_outcome_unknown");
+    await assert.rejects(lease.start("two"), e => e.code === "start_outcome_unknown");
+    assert.equal(posts, 1, "an unknown failure must not admit a second tuner request");
+  });
+
+  await test("a refusal made before allocation costs no safety wait", async () => {
+    let posts = 0, nonce = 0;
+    const block = shell.slice(shell.indexOf("const LIVE_TV="), shell.indexOf("async function liveTvRequest("));
+    const lease = new Function("PlurxLiveTv", "performance", "Date", "localStorage", "crypto", "liveTvRequest",
+      `${block} return LIVE_TV_LEASE;`)(liveTv, { now: () => 0 }, { now: () => 0 }, memoryStorage(),
+      { getRandomValues: bytes => { bytes.fill(0); bytes[0] = ++nonce; return bytes; } }, async () => {
+        posts++; throw { code: "tuner_capacity", status: 503 };
+      });
+    await assert.rejects(lease.start("one"), e => e.code === "tuner_capacity");
+    await assert.rejects(lease.start("two"), e => e.code === "tuner_capacity");
+    assert.equal(posts, 2, "capacity is decided before a tuner is opened; do not quarantine it");
+  });
+
+  await test("an unfamiliar channel support value is refused, not offered", () => {
+    assert.equal(liveTv.channelView({ drm: false, support: "ready" }).disabled, false);
+    assert.equal(liveTv.channelView({ drm: true, support: "ready" }).disabled, true);
+    assert.equal(liveTv.channelView({ support: "drm_unsupported" }).disabled, true);
+    // A lineup that grows a new state must fail closed, not render Watch live.
+    assert.equal(liveTv.channelView({ support: "encrypted" }).disabled, true);
+    assert.equal(liveTv.channelView({}).disabled, true);
   });
 
   await test("durable starts block reloads and never clear another request's marker", () => {
