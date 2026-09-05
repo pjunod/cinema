@@ -15,7 +15,7 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M0 — capture baseline and freeze diagnostic qualification |
 | Task branch | `codex/decoder-selection-m0` |
-| Task PR | [#914](https://github.com/pjunod/plurx/pull/914) · draft |
+| Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | 14 diagnostic/inventory tests and 1 normalized argument-baseline test pass at `2d4900e1` |
@@ -26,7 +26,7 @@ An unchecked item is not implied by a nearby passing check.
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Findings in repair | [PR #914](https://github.com/pjunod/plurx/pull/914); review fixes are not committed yet |
+| M0 · baseline and diagnostic qualification | Second review | [PR #915](https://github.com/pjunod/plurx/pull/915); first-round findings fixed at `cae1aa43` |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -207,9 +207,11 @@ explicitly; they do not silently run an unqualified automatic replacement.
 
 ## Adversarial review ledger
 
-Two independent agents reviewed PR #914 before the full suite. Their initial
-verdict was request changes; the working tree contains the listed repairs and
-will be sent back for re-review before merge.
+Two independent agents reviewed the first M0 PR head before the full suite.
+Their initial verdict was request changes; the listed repairs are committed
+and in second-pass review on PR #915. GitHub had deleted the temporary effort
+base and closed #914; the same effort and task refs were restored, and #915 is
+the active review record.
 
 | Finding | Resolution on working tree |
 |---|---|
