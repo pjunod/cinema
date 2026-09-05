@@ -1464,7 +1464,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # canonical body. It launches no child and owns no process.
 # 222 + (217 - 216) -> 223 retains the six effort additions and the one
 # settlement response-status assertion from their common 216-site base.
-expected_occurrences = 223
+# 223 -> 226 with P1-3's VOD delivery measurement: three `VodServe::status`
+# reads in `a_segment_answer_carries_the_meter_its_own_session_publishes`. The
+# sentinel's pattern catches `.status(` alongside `.spawn(` and `.output(`, and
+# these are registry reads that launch nothing: the test asserts what a session
+# publishes after its own answer counted bytes, and what a second viewer of the
+# same immutable rendition publishes instead. No process, producer or timer is
+# created or owned.
+expected_occurrences = 226
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -846,8 +846,16 @@ impl DeliveryView {
                 // deadlocked.
                 produced_through_ms: info.ready_ahead_end_ms,
                 fetched_through_ms: info.fetched_end_ms,
-                delivered_bps: None,
-                delivered_idle_ms: None,
+                // Measured at the VOD serving boundary over monotonic time,
+                // like rolling delivery. `None` until a window has closed, and
+                // never substituted from the encoder's configured target.
+                //
+                // This is what made preparation unreachable on the primary
+                // presentation: `headroom_refusal` needs a delivered rate, and
+                // a `None` here refused every VOD exchange with
+                // `throughput_unreported` — which is most of them.
+                delivered_bps: info.delivered_bps,
+                delivered_idle_ms: Some(info.delivered_idle_ms),
                 recent_producer_speed: None,
                 client_runway_ms,
                 admitted: Some(info.admitted),
@@ -11826,9 +11834,10 @@ static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// explain why no successor was staged.
 ///
 /// **Labelled by platform because the three clients are not interchangeable
-/// here.** Only the web client fills `observed_download_bps` at all, so an
-/// unlabelled counter would mix the one platform that can reach a throughput
-/// verdict with the two the client release is actually about, and no reader
+/// here.** All three now fill `observed_download_bps`, but only Apple reports
+/// `dual_player_preparation`, so an unlabelled counter would mix the one
+/// platform that can reach a prepared verdict with the two it is not about,
+/// and no reader
 /// could separate them again.
 ///
 /// Indexed `[platform][axis][outcome]`. Platform order is `ClientPlatform`'s
@@ -12836,7 +12845,25 @@ mod tests {
         ready_ahead_end_ms: Option<i64>,
         fetched_end_ms: i64,
     ) -> HlsSessionInfo {
+        vod_status_delivering(published_end_ms, ready_ahead_end_ms, fetched_end_ms, None)
+    }
+
+    /// The same VOD status, with a measured delivery rate.
+    ///
+    /// `None` is the honest default and the state every VOD session was stuck
+    /// in before P1-3: no window has closed, so there is no rate.
+    fn vod_status_delivering(
+        published_end_ms: Option<i64>,
+        ready_ahead_end_ms: Option<i64>,
+        fetched_end_ms: i64,
+        delivered_bps: Option<i64>,
+    ) -> HlsSessionInfo {
         HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+            // A plausible total, not a rate divided by eight: a fixture that
+            // encodes the wrong unit is how the wrong unit gets copied.
+            delivered_bytes: delivered_bps.map_or(0, |_| 4_194_304),
+            delivered_bps,
+            delivered_idle_ms: 0,
             id: "vod-session".to_owned(),
             file_id: 7,
             target_height: 1080,
@@ -12861,6 +12888,117 @@ mod tests {
             suspended: true,
             final_: false,
         }))
+    }
+
+    /// P1-3. A measured VOD rate reaches the control view, and an unmeasured
+    /// one stays unknown.
+    ///
+    /// Both halves matter. The first is what makes preparation reachable at
+    /// all on the primary presentation; the second is the constraint the
+    /// review states in the same breath — unknown must stay unknown, never
+    /// filled in from the encoder's configured target. On VOD the presentation
+    /// is a stream copy, so the encoder target describes nothing that was ever
+    /// delivered, and a substituted number would let the headroom decision
+    /// pass a client whose link nobody measured.
+    #[test]
+    fn a_measured_vod_delivery_reaches_the_control_view_and_an_unmeasured_one_stays_unknown() {
+        let (_, mut request) = stalled_starved();
+        request.buffered_through_ms = request.position_ms;
+
+        let measured = DeliveryView::from_status(
+            &vod_status_delivering(Some(120_000), Some(120_000), 60_000, Some(12_000_000)),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(measured.delivered_bps, Some(12_000_000));
+        assert_eq!(
+            measured.delivered_idle_ms,
+            Some(0),
+            "the idle age is what tells a stale rate from a dead link, so it \
+             travels with the rate rather than being dropped"
+        );
+
+        let unmeasured = DeliveryView::from_status(
+            &vod_status(Some(120_000), Some(120_000), 60_000),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            unmeasured.delivered_bps, None,
+            "a session that has closed no window reports no rate at all"
+        );
+    }
+
+    /// The refusal this removes. `headroom_refusal` needs a delivered rate;
+    /// with `None` it answers `ThroughputUnreported` for every VOD exchange,
+    /// which is every public session. A measured rate lets the real comparison
+    /// run — and still refuses when the link genuinely lacks headroom, so this
+    /// opens the decision rather than weakening it.
+    #[test]
+    fn a_measured_vod_rate_lets_the_headroom_decision_actually_run() {
+        let (_, mut request) = stalled_starved();
+        request.buffered_through_ms = request.position_ms;
+        let observed = 100_000_000_u64;
+
+        let unmeasured = DeliveryView::from_status(
+            &vod_status(Some(120_000), Some(120_000), 60_000),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            PreparationConditions {
+                observed_download_bps: Some(observed),
+                delivered_bps: unmeasured.delivered_bps,
+            }
+            .headroom_refusal(),
+            Some(FallbackReason::ThroughputUnreported),
+            "this is the state every VOD session was in"
+        );
+
+        let measured = DeliveryView::from_status(
+            &vod_status_delivering(Some(120_000), Some(120_000), 60_000, Some(12_000_000)),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            PreparationConditions {
+                observed_download_bps: Some(observed),
+                delivered_bps: measured.delivered_bps,
+            }
+            .headroom_refusal(),
+            None,
+            "a link with ten times the delivered rate has headroom"
+        );
+
+        let saturated = DeliveryView::from_status(
+            &vod_status_delivering(Some(120_000), Some(120_000), 60_000, Some(80_000_000)),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            PreparationConditions {
+                observed_download_bps: Some(observed),
+                delivered_bps: saturated.delivered_bps,
+            }
+            .headroom_refusal(),
+            Some(FallbackReason::ThroughputInsufficient),
+            "measuring the rate must not become a way to always pass"
+        );
     }
 
     #[test]
@@ -20489,9 +20627,12 @@ mod tests {
         // too tight" and "nobody measured the link" are opposite findings, and
         // a counter that reported them as one number would read as evidence
         // for the throughput rule while measuring only its own missing inputs.
-        // On today's fleet the unreported cases are effectively all of it: the
-        // native clients send no `observed_download_bps` and VOD sessions
-        // carry no `delivered_bps`.
+        // This was once effectively all of it, for two separate reasons that
+        // have both since been fixed: the native clients now send
+        // `observed_download_bps` (Apple from AVFoundation's access log,
+        // Android off the wire), and VOD sessions now carry a measured
+        // `delivered_bps`. What remains unreported is a session too young for
+        // a window to have closed.
         let refusals = [
             (
                 "no margin at all",

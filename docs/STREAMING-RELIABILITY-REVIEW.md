@@ -282,6 +282,84 @@ prepare decision on the primary presentation.
 serving boundary and carry the result into the VOD control view. Unknown must
 stay unknown; it must not be replaced by the configured encoder target.
 
+**Corrected.** A VOD session now owns a `meter::Meter` — the same monotonic
+accumulator rolling delivery has always used — and the segment body pump notes
+each chunk *after* the downstream acknowledgement, so only bytes a viewer
+actually took are counted. `VodSessionInfo` carries `delivered_bytes`,
+`delivered_bps` and `delivered_idle_ms`, and `DeliveryView::from_status` reads
+them. `None` still means unmeasured: no window closed, no rate, and nothing is
+ever substituted from `bitrate_for_height`, which describes what an encoder was
+asked to produce rather than what a link carried — and on VOD, which is a
+stream copy, describes nothing that happened at all.
+
+The buffered init object is deliberately not counted: it is handed over whole,
+so crediting it would date bytes at handoff rather than at delivery and inflate
+the first window of a session that has delivered nothing.
+
+This removes the *unconditional* refusal on the primary presentation. The
+client half was already in place — Apple reads AVFoundation's access log,
+Android counts bytes off the wire over a rolling 500 ms window, and web uses
+`hls.bandwidthEstimate` — so `observed_download_bps` was arriving and only the
+server's own rate was missing. The 2× floor still refuses a saturated link,
+which the regression pins: measuring the rate is not a way to always pass.
+
+It does **not** follow that prepared handoffs now fire, and nothing here claims
+they do. Two things still stand between a measured rate and a prepared
+successor, and both need their own evidence:
+
+- **Timing.** The one production site that builds `PreparationConditions` is
+  the replacement seam, which fires once, on the first control exchange of a
+  newly created session — against a meter seconds old. `recent_bps` is `None`
+  until a window of at least 1.5 s has closed with acknowledged bytes in it,
+  and a window longer than 12 s is discarded, which a cold VOD start can
+  easily exceed. When the window *does* close during the initial buffer-fill
+  burst the server is measuring a saturated link, and the 2× floor then
+  refuses `throughput_insufficient`. The floor's own doc already names this as
+  the residual worth re-reading if prepared handoffs never fire.
+- **Capability.** `dual_player_preparation` is checked before throughput and
+  is still `false` on Android and web, so even a passing rate reaches a
+  prepared decision on Apple only.
+
+Measuring the rate was a precondition, not the whole path.
+
+The same numbers reach the activity view, on both of its paths.
+`vod_delivery_session_info` reported a hard-coded zero with a delivery idle age
+derived from the session's last touch — a value shaped like a measurement that
+was not one, so a handle touched a second ago looked busy whether or not a byte
+had moved. The peer/cluster activity snapshot hard-coded the same zero, which
+would have left the admin page showing a local VOD session with its real rate
+and the identical session on a remote node as `0 B`.
+
+**The delivery idle age is deliberately not serialized.** `VodSessionInfo` is
+the body of `/hls/{session}/status`, and Apple's `DeliveryStarvationDetector`
+cannot fire unless `delivered_idle_ms` is present and at least sixteen seconds.
+VOD has never carried the key, so that detector has never been armed on the
+primary presentation, and publishing it here would switch on an automatic
+session reopen for every VOD viewer as a side effect of adding a measurement.
+That may be the right thing — the detector was written for copy-HLS — but the
+same detector killed healthy 2160p sessions every few minutes in Build 63 off
+this exact signal, so it needs device evidence of its own rather than a ride on
+this change. `DeliveryView::from_status` reads the field in process, which is
+what needs it.
+
+Two things this change found and did not fix:
+
+- **Init objects are not counted, and rolling counts its own.** The buffered
+  init is handed over whole, so crediting it would date bytes at handoff rather
+  than at delivery. The rolling path does credit its equivalent small buffered
+  response, so `delivered_bytes` is systematically short by one init object on
+  VOD and the two presentations differ on a point worth reconciling — in the
+  direction of rolling's, or by counting it here.
+- **`Meter::note` can publish a false zero under concurrent writers.** The
+  window close computes `total - base` from the caller's own post-increment
+  total; a writer preempted between its `fetch_add` and the swap can lose the
+  race and store `recent_bps = 0`, which reads back as `throughput_unreported`
+  and renders as `0.0 Mbps`. Pre-existing in `meter.rs` and shared with rolling
+  delivery, but newly exposed here because a VOD session's parallel segment
+  bodies write one meter. It is not fixed in this change because the race
+  cannot be pinned by a deterministic test at that layer, and an untested edit
+  to the accumulator both presentations depend on is the wrong trade.
+
 ### P1-4 — detached preparation can stage a stale selection
 
 The detached staging task retains no accepted control sequence or desired-
@@ -697,7 +775,7 @@ are retained in
 | P0-4 | Response-before-stage in [`control_session_local`](../crates/plurxd/src/http/hls.rs#L5116); placeholder stage in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L5549); client vocabularies in [`playback-control.js`](../crates/plurxd/src/web/playback-control.js#L14), [`PlaybackControlReporter.swift`](../clients/apple/Sources/PlaybackControlReporter.swift#L316), and [`PlaybackControlReporter.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt#L335); [M6 caller handoff](M6-CALLER-HANDOFF.md) §3.4–3.5 |
 | P1-1 | Watchdog/frontier before admission in [`VodServe::segment`](../crates/plurxd/src/vodserve.rs#L4112); pool cancellation in [`waitpool.rs`](../crates/plurxd/src/waitpool.rs#L126); sticky failure in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L4299); isolated `WaitPool` storm test at `waitpool.rs:405` |
 | P1-2 | VOD mapping in [`DeliveryView::from_status`](../crates/plurxd/src/playback_control.rs#L836); action resolution at `playback_control.rs:1882`; VOD failure status at [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L3315); HTTP 502 mapping at `http/hls.rs:8851` |
-| P1-3 | `delivered_bps: None` at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L847); `has_throughput_headroom` refusal at `playback_control.rs:1120`; impossible injected test rate at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L13727) |
+| P1-3 | **Corrected.** Per-session meter on [`vodserve::Session`](../crates/plurxd/src/vodserve.rs); bytes noted after downstream acknowledgement in the VOD body pump in [`http/hls.rs`](../crates/plurxd/src/http/hls.rs); carried by `VodSessionInfo` into `DeliveryView::from_status`. Proved by `a_vod_body_counts_its_delivered_bytes_where_they_leave`, `an_abandoned_vod_body_counts_nothing_it_did_not_hand_over`, `a_measured_vod_delivery_reaches_the_control_view_and_an_unmeasured_one_stays_unknown` and `a_measured_vod_rate_lets_the_headroom_decision_actually_run`. `PreparationConditions::headroom_refusal` is the real function name; the review's `has_throughput_headroom` never existed |
 | P1-4 | Detached spawn at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L5181); asynchronous candidate reads at `http/hls.rs:5409`; preparation slot identity at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L2418) |
 | P1-5 | SQLite commit at [`sessions.rs`](../crates/plurx-core/src/store/sqlite/sessions.rs#L1623), Hiqlite commit at [`hiqlite_sessions.rs`](../crates/plurx-core/src/store/hiqlite_sessions.rs#L1750), and best-effort timer at `http/hls.rs:5707` |
 | P1-6 | Resume calculation in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L6459) and its capture in [`PreparationCandidateInputs`](../crates/plurxd/src/http/hls.rs#L6239); fetched-end caveat in [`media_sessions.rs`](../crates/plurxd/src/media_sessions.rs#L2497); anchor proved by `a_staged_successor_resumes_at_the_accepted_playhead_not_the_fetch_frontier`, `the_control_seam_stages_from_the_accepted_playhead_not_the_route_frontier` and `a_backward_seek_stages_from_the_seek_target_at_the_control_seam`; aligned lead still unimplemented |

@@ -10186,6 +10186,10 @@ async fn vod_segment_response_before(
         publication_deadline,
     )
     .await?;
+    // Taken before `ready.file` is moved into the reader: the pump outlives
+    // this function, and the session registry lock is long released by the
+    // time it runs.
+    let delivery = std::sync::Arc::clone(&ready.delivery);
     let reader = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(ready.file, len));
     let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
     let (sender, receiver) =
@@ -10307,6 +10311,19 @@ async fn vod_segment_response_before(
             if !accepted {
                 return;
             }
+            // Counted here — where the bytes actually left. `accepted` is the
+            // downstream acknowledgement, so nothing is credited to this
+            // viewer's rate until the chunk has been taken. A meter advanced
+            // at read time instead would measure the disk.
+            //
+            // The buffered init object is deliberately *not* counted. It is
+            // handed to the response whole, so crediting it would date bytes
+            // at handoff rather than at delivery and inflate the first window
+            // of a session that has delivered nothing yet. One small object
+            // missing from the total is the honest trade; the rate is what
+            // `headroom_refusal` reads, and an unmeasured session correctly
+            // reports no rate at all rather than a fast one.
+            delivery.note(bytes_len);
             delivered = delivered.saturating_add(bytes_len);
             if delivered == len {
                 if let Some((manager, session, authorization, complete_object, permit)) =
@@ -18072,13 +18089,151 @@ mod tests {
         path: &std::path::Path,
         advertised_len: u64,
     ) -> crate::vodserve::SegmentReady {
+        vod_ready_metered(
+            path,
+            advertised_len,
+            std::sync::Arc::new(crate::meter::Meter::new()),
+        )
+        .await
+    }
+
+    /// The same answer, against a meter the caller keeps a handle to.
+    ///
+    /// Production takes this meter from the session the segment was opened
+    /// for, so holding it here is what lets a test read the same counter the
+    /// control view will publish.
+    async fn vod_ready_metered(
+        path: &std::path::Path,
+        advertised_len: u64,
+        delivery: std::sync::Arc<crate::meter::Meter>,
+    ) -> crate::vodserve::SegmentReady {
         crate::vodserve::SegmentReady {
+            delivery,
             file: tokio::fs::File::open(path)
                 .await
                 .expect("open VOD response object"),
             len: advertised_len,
             etag: format!("http-test-{advertised_len}"),
         }
+    }
+
+    /// P1-3. A VOD body counts the bytes it hands over, where they leave.
+    ///
+    /// The counter must not move when the segment is merely opened, and must
+    /// not move when the response is merely built: it moves as the body is
+    /// drained, because that is the only moment a byte has actually reached
+    /// this viewer. Without it `DeliveryView` reported `delivered_bps: None`
+    /// on every VOD session, and `headroom_refusal` refused every preparation
+    /// with `throughput_unreported`.
+    #[tokio::test]
+    async fn a_vod_body_counts_its_delivered_bytes_where_they_leave() {
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let headers = RelayHeaders::default();
+        let session_id = "vod-metered";
+        let owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+
+        let path = dir.path().join("metered.m4s");
+        let bytes = vec![7_u8; 24 * 1024];
+        tokio::fs::write(&path, &bytes).await.expect("VOD object");
+
+        let delivery = std::sync::Arc::new(crate::meter::Meter::new());
+        let response = vod_segment_response(
+            &fixture.state,
+            session_id,
+            "seg00004.m4s",
+            &headers,
+            vod_ready_metered(&path, bytes.len() as u64, std::sync::Arc::clone(&delivery)).await,
+            owner,
+        )
+        .await
+        .expect("VOD response");
+        assert_eq!(
+            delivery.total_bytes(),
+            0,
+            "opening a segment and building a response delivers nothing"
+        );
+
+        let drained = axum::body::to_bytes(response.into_body(), bytes.len() + 1)
+            .await
+            .expect("VOD body")
+            .len();
+        assert_eq!(drained, bytes.len());
+        assert_eq!(
+            delivery.total_bytes(),
+            bytes.len() as i64,
+            "every byte the viewer took is counted, and only those"
+        );
+    }
+
+    /// An abandoned body credits exactly what the client actually took.
+    ///
+    /// A viewer who walks away mid-segment must not leave behind a rate built
+    /// from bytes that went nowhere — that is what would make a stalled link
+    /// look fast enough to stage a successor against. The assertion is an
+    /// equality rather than an upper bound: "less than the whole segment"
+    /// holds for a counter that never moved at all, which is how a version of
+    /// this test proved nothing.
+    ///
+    /// What it does **not** pin is the ordering of the `note` against the
+    /// downstream acknowledgement. The local body channel holds one chunk and
+    /// the pump awaits each chunk's acknowledgement before reading the next,
+    /// so it never reads ahead of what it has sent, and counting at read time
+    /// is externally indistinguishable from counting at acknowledgement time.
+    /// That ordering is argued from the code, not proved here; pinning it
+    /// would need a downstream this test can park mid-chunk.
+    #[tokio::test]
+    async fn an_abandoned_vod_body_counts_nothing_it_did_not_hand_over() {
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let headers = RelayHeaders::default();
+        let session_id = "vod-abandoned";
+        let owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+
+        let path = dir.path().join("abandoned.m4s");
+        let bytes = vec![9_u8; 512 * 1024];
+        tokio::fs::write(&path, &bytes).await.expect("VOD object");
+
+        let delivery = std::sync::Arc::new(crate::meter::Meter::new());
+        let response = vod_segment_response(
+            &fixture.state,
+            session_id,
+            "seg00005.m4s",
+            &headers,
+            vod_ready_metered(&path, bytes.len() as u64, std::sync::Arc::clone(&delivery)).await,
+            owner,
+        )
+        .await
+        .expect("VOD response");
+
+        // Take a prefix and abandon the rest. Asserting only "less than the
+        // whole" would hold for a counter that never moved at all, and would
+        // also hold if bytes were counted at read time — the exact defect the
+        // acknowledgement ordering exists to prevent. The prefix has to be
+        // counted *exactly*: everything handed over, nothing that was not.
+        let mut body = response.into_body().into_data_stream();
+        let mut taken = 0_i64;
+        for _ in 0..2 {
+            let chunk = futures_util::StreamExt::next(&mut body)
+                .await
+                .expect("a chunk")
+                .expect("chunk bytes");
+            taken += chunk.len() as i64;
+        }
+        drop(body);
+        tokio::task::yield_now().await;
+
+        assert!(taken > 0, "the fixture must actually hand over a prefix");
+        assert!(
+            taken < bytes.len() as i64,
+            "the fixture must abandon the body before it completes"
+        );
+        assert_eq!(
+            delivery.total_bytes(),
+            taken,
+            "exactly the bytes the viewer took — a reader that counted at read \
+             time would be ahead of this, and one that never counted behind it"
+        );
     }
 
     async fn vod_fetched_segment(fixture: &HlsDeliveryFixture, session_id: &str) -> Option<i64> {
