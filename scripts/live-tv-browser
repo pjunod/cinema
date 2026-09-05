@@ -61,6 +61,11 @@ def main(argv: list[str]) -> int:
             events: list[str] = []
             errors: list[str] = []
             forbidden: list[str] = []
+            # A raised assertion inside a Playwright route handler is caught by
+            # the dispatcher, leaves the route unfulfilled, and surfaces later
+            # as an unrelated timeout — or not at all. Record and assert in the
+            # test body, where a violation actually fails the run.
+            violations: list[str] = []
             pending: list = []
             deletes: list[str] = []
             mode = {"next": "normal", "drop_delete": False}
@@ -77,12 +82,14 @@ def main(argv: list[str]) -> int:
                     return
                 start = re.fullmatch(r"channels/(one|two)/sessions", path)
                 if start and method == "POST":
-                    assert request.headers.get("authorization") == "Bearer " + host.token
+                    if request.headers.get("authorization") != "Bearer " + host.token:
+                        violations.append("start did not carry the account bearer: " + request.url)
                     if mode["next"] == "capacity":
                         mode["next"] = "normal"
                         route.fulfill(status=503, json={"code": "tuner_capacity", "message": "Fixture is busy"})
                         return
-                    assert not active(), "a new tuner was allocated before the old capability was released"
+                    if active():
+                        violations.append("a new tuner was allocated before the old capability was released")
                     capability = "fixture-" + str(len(sessions) + 1)
                     channel = next(c for c in channels if c["id"] == start[1])
                     sessions[capability] = {"opened": time.monotonic(), "closed": False, "channel": channel}
@@ -97,7 +104,8 @@ def main(argv: list[str]) -> int:
                     return
                 resource = re.fullmatch(r"sessions/(fixture-\d+)(?:/(.*))?", path)
                 assert resource, "unexpected Live TV fixture route: " + path
-                assert "authorization" not in request.headers, "account token escaped onto a capability route"
+                if "authorization" in request.headers:
+                    violations.append("account token escaped onto a capability route: " + request.url)
                 capability, suffix = resource.groups()
                 session = sessions[capability]
                 if method == "DELETE":
@@ -236,10 +244,13 @@ def main(argv: list[str]) -> int:
             # Its backend orphan expiry belongs to backend/hardware acceptance,
             # not an invented reaper inside this browser fixture.
             assert all(deletes.count(f"fixture-{i}") == 1 for i in range(1, 10)), deletes
-            assert deletes.count("fixture-10") <= 3, deletes
-            print("PASS decoded H.264/AAC frames advance; pause/resume, fullscreen stop, switch, navigation, typed refusal and late-start cleanup")
+            # Zero satisfies "at most three" while proving nothing about the
+            # unload DELETE the claim below advertises.
+            assert 1 <= deletes.count("fixture-10") <= 3, deletes
+            assert not violations, violations
+    print("PASS decoded H.264/AAC frames advance; pause/resume, fullscreen stop, switch, navigation, typed refusal and late-start cleanup")
             print("PASS active owner loss, producer failure, capability expiry, paused timeout, visibility event and lost-unload reload quarantine")
-            print("PASS no account token on capability requests; zero VOD/account writes; ten starts, nine confirmed releases, one deliberately orphaned start blocks replacement")
+            print("PASS no account token on capability requests; no VOD or account write from any Live TV path; ten starts, nine confirmed releases, one deliberately orphaned start blocks replacement")
             context.close()
             browser.close()
         return 0

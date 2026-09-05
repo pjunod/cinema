@@ -1,5 +1,6 @@
 package tv.plurx.app.livetv
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -154,6 +155,13 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
             }
         } catch (error: LiveTvFailure) {
             throw error
+        } catch (cancelled: CancellationException) {
+            // Cancellation is this coroutine being told to stop, not the tuner
+            // failing. Converting it into a typed failure breaks structured
+            // concurrency and would let a cancelled start be reported as an
+            // ambiguous outcome, arming the barrier for a request that never
+            // reached the owner.
+            throw cancelled
         } catch (_: Exception) {
             // Never surface a transport exception containing a capability URL.
             throw LiveTvFailure(if (starting) "start_outcome_unknown" else "stream_failed")
@@ -163,7 +171,9 @@ class LiveTvApi(origin: String, private val token: String) : LiveTvRequests {
     suspend fun lineup(): LiveTvLineup = Net.json.decodeFromString(request(url("live-tv", "channels"), authenticated = true))
     override suspend fun start(channel: String): LiveTvStarted = try {
         Net.json.decodeFromString(request(url("live-tv", "channels", channel, "sessions"), "POST", authenticated = true, starting = true))
-    } catch (error: LiveTvFailure) { throw error } catch (_: Exception) { throw LiveTvFailure("start_outcome_unknown") }
+    } catch (error: LiveTvFailure) { throw error }
+    catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: Exception) { throw LiveTvFailure("start_outcome_unknown") }
 
     override suspend fun release(capability: String) {
         repeat(2) { attempt ->
