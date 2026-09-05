@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 final adversarial review · **Updated:** 2026-09-05 ·
+**Status:** M0 unit qualification · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -18,15 +18,15 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft; remote state being reconciled |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Fast lane passes at `4ec13f3b`; review repair tests and exact media verification pass at `a16db3da` |
-| Full PR validation | Pending final adversarial approval, then unit and one full suite |
+| Focused validation | Both final adversarial reviews approve `7649ccdd`; repaired fast lane and exact media verification pass |
+| Full PR validation | Unit suite starting; one full suite follows on the corrected head |
 | Blocker | None |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Final adversarial review | [PR #915](https://github.com/pjunod/plurx/pull/915); exact media verifier passes at `a16db3da` |
+| M0 · baseline and diagnostic qualification | Unit qualification | [PR #915](https://github.com/pjunod/plurx/pull/915); both final adversarial reviews approve `7649ccdd` |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -263,8 +263,9 @@ both agents performed a second pass. Both second passes also requested changes;
 their repairs were committed at `f9d68467`. Both third passes requested the
 additional repairs committed at `195b7574`; both fourth passes approved
 `6009367b` with no actionable findings. The fifth pass found missing direct
-probe-normalization test coverage. That repair is committed at `a16db3da` and
-is undergoing final re-review.
+probe-normalization test coverage. That repair is committed at `a16db3da`;
+both reviewers approved the repaired tree at `7649ccdd` with no remaining
+actionable findings.
 GitHub had deleted the temporary effort base and closed #914; the same effort
 and task refs were restored, and #915 is the active review record.
 
@@ -362,6 +363,10 @@ lane and focused tests provide earlier feedback.
 | `a16db3da` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 23 tests, including direct single/duplicate/empty/conflicting probe-row coverage |
 | `a16db3da` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
 | `a16db3da` | `/tmp/codex-decoder-m0-review5/decoder-media-baseline --verify /tmp/codex-decoder-m0-review5/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review8` on `nynuc` | Pass · `"verified": true` |
+| `7649ccdd` | Fifth diagnostic and scope adversarial re-reviews | Pass · both approve; no actionable findings |
+| `7649ccdd` | `make operations-check` | Pass · 209 tests; run outside restricted socket sandbox |
+| `7649ccdd` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
+| `7649ccdd` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
 | `4ec13f3b` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
 | `4ec13f3b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
 | `4ec13f3b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
