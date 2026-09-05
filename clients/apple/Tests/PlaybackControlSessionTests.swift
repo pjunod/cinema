@@ -340,6 +340,32 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertNotNil(first.capabilities)
     }
 
+    func testSourceActorPublishesBeforeReporterCadenceAndNeverPullsLivePlayer() async throws {
+        controlExchanges.reset()
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        defer { session.end(); urlSession.invalidateAndCancel() }
+        var reads = 0
+        session.begin(bootstrap: sessionBootstrap(), transport: transport, observe: {
+            MainActor.assertIsolated()
+            reads += 1
+            return player.observation()
+        })
+        _ = try await waitForExchange { $0.sequence == 1 }
+        player.positionMs = 7_000
+        session.clearVerdict()
+        session.reportEvidence()
+        // No MainActor suspension separates source capture from this change.
+        // A reporter pull or a deferred capture would observe 99s instead.
+        player.positionMs = 99_000
+        let evidence = try await waitForExchange { $0.sequence == 2 }
+        let cadence = try await waitForExchange { $0.sequence == 3 }
+        XCTAssertEqual(evidence.positionMs, 7_000)
+        XCTAssertEqual(cadence.positionMs, 7_000)
+        XCTAssertEqual(reads, 2, "cadence reads the capture slot, never AVPlayer")
+    }
+
     func testQueuedSubtitleReadinessFromSessionACannotMutateSessionBWithTheSameTrack() async throws {
         try await assertQueuedSubtitleReadinessIsFenced(replaceSession: true)
     }
@@ -352,7 +378,48 @@ final class PlaybackControlSessionTests: XCTestCase {
         try await assertQueuedSubtitleReadinessIsFenced(replaceSession: nil)
     }
 
-    private func assertQueuedSubtitleReadinessIsFenced(replaceSession: Bool?) async throws {
+    func testQueuedSubtitleReadinessCannotCrossANewerIntentInTheSameSession() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: nil, newIntent: true)
+    }
+
+    func testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard() async throws {
+        controlExchanges.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        controlAnswer.setReadiness("pending")
+        let publicationHeld = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let session = PlaybackControlSession(scheduleSubtitleReady: { _ in
+            // onExchange has validated the capture, but has not yet stored
+            // its terminal verdict. Hold that real cross-actor boundary.
+            publicationHeld.signal()
+            _ = release.wait(timeout: .now() + 5)
+        })
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer {
+            release.signal(); session.end(); urlSession.invalidateAndCancel()
+            controlAnswer.set(ControlAction(type: "none")); controlAnswer.setReadiness(nil)
+        }
+        session.begin(bootstrap: sessionBootstrap(), transport: transport,
+                      observe: { player.observation() })
+        _ = try await waitForExchange { $0.sequence == 2 }
+        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
+        controlAnswer.setReadiness("ready")
+        session.reportEvidence()
+        let deadline = Date().addingTimeInterval(5)
+        var held = false
+        while !held, Date() < deadline {
+            held = publicationHeld.wait(timeout: .now()) == .success
+            if !held { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        XCTAssertTrue(held)
+        session.end()
+        release.signal()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNil(session.terminalVerdict, "End revokes publication even after its outer guard passed")
+    }
+
+    private func assertQueuedSubtitleReadinessIsFenced(replaceSession: Bool?, newIntent: Bool = false) async throws {
         controlExchanges.reset()
         controlAnswer.setReadiness("pending")
         defer { controlAnswer.setReadiness(nil) }
@@ -395,9 +462,23 @@ final class PlaybackControlSessionTests: XCTestCase {
         } else if replaceSession == false {
             session.end()
         }
+        if newIntent { session.clearVerdict() }
         staleReady()
-        XCTAssertEqual(deliveries, replaceSession == nil ? 1 : 0,
+        XCTAssertEqual(deliveries, replaceSession == nil && !newIntent ? 1 : 0,
                        "a queued response loses its authority when its reporting session ends")
+        if newIntent {
+            session.playerChanged()
+            let deadline = Date().addingTimeInterval(5)
+            while deliveries == 0, Date() < deadline {
+                callbacks.take()?()
+                if deliveries == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+            }
+            XCTAssertEqual(deliveries, 1, "discarding A's callback cannot consume B's ready edge")
+            session.reportEvidence()
+            try await Task.sleep(nanoseconds: 300_000_000)
+            while let callback = callbacks.take() { callback() }
+            XCTAssertEqual(deliveries, 1, "current ready cadence commits only one retry")
+        }
     }
 
     /// The return path M5 exists to open. Before this the reporter was built

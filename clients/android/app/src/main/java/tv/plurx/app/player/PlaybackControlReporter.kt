@@ -3,6 +3,8 @@ package tv.plurx.app.player
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -311,6 +313,27 @@ data class PlaybackControlSnapshot(
             capabilities.isValid
 }
 
+/** Local identity of the player lifetime and reporting attachment, not a wire owner epoch. */
+data class PlaybackControlCaptureOwner(val lifecycleId: String, val attachmentGeneration: Int)
+
+/** State and its authority are captured together on the player dispatcher, before enqueueing. */
+class PlaybackControlCapture(
+    snapshot: PlaybackControlSnapshot,
+    val intentGeneration: Long,
+    val owner: PlaybackControlCaptureOwner,
+    val sourceRevision: Long,
+) {
+    val snapshot = snapshot.copy(
+        capabilities = snapshot.capabilities.copy(
+            codecs = snapshot.capabilities.codecs.toList(),
+            dynamicRanges = snapshot.capabilities.dynamicRanges.toList(),
+        ),
+    )
+
+    fun hasSameIntent(other: PlaybackControlCapture?): Boolean =
+        other != null && owner == other.owner && intentGeneration == other.intentGeneration
+}
+
 @Serializable
 data class ControlRequest(
     val protocol: String,
@@ -365,10 +388,10 @@ internal class SubtitleReadinessRetryState {
     private var lastReady: Boolean? = null
 
     @Synchronized
-    fun record(value: String?): Boolean {
+    fun record(value: String?, commitReady: Boolean = true): Boolean {
         val ready = SubtitleReadinessDecision.meansReady(value)
         val retry = lastReady == false && ready
-        lastReady = ready
+        if (!ready || commitReady) lastReady = ready
         return retry
     }
 }
@@ -418,29 +441,25 @@ class ControlProtocolException(val reason: String) : Exception("control protocol
 class PlaybackControlReporter private constructor(
     bootstrap: ControlBootstrap,
     private val clientInstanceId: String,
-    private val snapshot: () -> PlaybackControlSnapshot?,
+    private val owner: PlaybackControlCaptureOwner,
+    private val capture: () -> PlaybackControlCapture?,
     private val send: suspend (String, ControlRequest) -> ControlResponse,
     private val pace: suspend (Long) -> Unit,
     private val now: () -> Long,
-    private val intentGeneration: () -> Long,
     private val onExchange: (Exchange) -> Unit,
 ) {
     data class Exchange(
         val request: ControlRequest,
         val response: ControlResponse?,
         val failure: String?,
-        /** Local-only viewer intent that produced this request. */
-        val intentGeneration: Long = 0,
-    )
-
-    private data class PendingSnapshot(
-        val snapshot: PlaybackControlSnapshot,
-        val intentGeneration: Long,
-    )
+        val capture: PlaybackControlCapture,
+    ) {
+        val intentGeneration: Long get() = capture.intentGeneration
+    }
 
     private data class PendingRequest(
         val request: ControlRequest,
-        val intentGeneration: Long,
+        val capture: PlaybackControlCapture,
     )
 
     data class Status(
@@ -460,8 +479,10 @@ class PlaybackControlReporter private constructor(
     private var sequence = 0L
     private var acceptedSequence = 0L
     private var stopped = false
+    private var terminalStop: PlaybackControlCapture? = null
+    private var reportingScope: CoroutineScope? = null
     private var inFlight = false
-    private var pending: PendingSnapshot? = null
+    private var pending: PlaybackControlCapture? = null
     private var retryRequest: PendingRequest? = null
     private var acceptedCapabilities: DynamicCapabilities? = null
     private var lastStartedAt: Long? = null
@@ -477,16 +498,16 @@ class PlaybackControlReporter private constructor(
         fun create(
             bootstrap: ControlBootstrap,
             clientInstanceId: String,
-            snapshot: () -> PlaybackControlSnapshot?,
+            owner: PlaybackControlCaptureOwner,
+            capture: () -> PlaybackControlCapture?,
             send: suspend (String, ControlRequest) -> ControlResponse,
             pace: suspend (Long) -> Unit,
             now: () -> Long,
-            intentGeneration: () -> Long = { 0 },
             onExchange: (Exchange) -> Unit = {},
         ): PlaybackControlReporter? {
             if (!bootstrap.isValid || !PlaybackControl.isUuid(clientInstanceId)) return null
             return PlaybackControlReporter(
-                bootstrap, clientInstanceId, snapshot, send, pace, now, intentGeneration, onExchange,
+                bootstrap, clientInstanceId, owner, capture, send, pace, now, onExchange,
             )
         }
     }
@@ -499,15 +520,12 @@ class PlaybackControlReporter private constructor(
     suspend fun start(scope: CoroutineScope) {
         mutex.withLock {
             if (stopped || pump != null) return
+            reportingScope = scope
             if (pending == null) {
-                pending = snapshot()?.let { PendingSnapshot(it, intentGeneration()) }
+                pending = newestCapture(null)
             }
+            pump = scope.launch { run() }
         }
-        val job = scope.launch { run() }
-        val alreadyStopped = mutex.withLock {
-            if (stopped) true else { pump = job; false }
-        }
-        if (alreadyStopped) job.cancel()
     }
 
     /**
@@ -515,12 +533,14 @@ class PlaybackControlReporter private constructor(
      * intermediate position between two exchanges is not worth a round trip,
      * and reporting it late would be worse than not reporting it.
      */
-    suspend fun notify(value: PlaybackControlSnapshot? = null) {
-        val newest = value ?: snapshot() ?: return
-        if (!newest.isValid) return
+    suspend fun notify(value: PlaybackControlCapture? = null) {
+        val newest = newestCapture(value) ?: return
+        if (!newest.snapshot.isValid) return
         mutex.withLock {
-            if (stopped) return
-            pending = PendingSnapshot(newest, intentGeneration())
+            val resume = stopped
+            if (!admitAfterTerminalLocked(newest)) return
+            pending = newest
+            if (resume) pump = reportingScope?.launch { run() }
         }
     }
 
@@ -540,9 +560,10 @@ class PlaybackControlReporter private constructor(
      */
     suspend fun notifyUrgently(
         scope: CoroutineScope,
-        value: PlaybackControlSnapshot? = null,
+        value: PlaybackControlCapture? = null,
     ): Long? {
-        notify(value)
+        val newest = newestCapture(value) ?: return null
+        if (!newest.snapshot.isValid) return null
         // The swap is one critical section on purpose. Releasing the lock
         // between clearing `pump` and setting it would let a concurrent
         // `start()` — whose guard is `pump != null` — launch a second run
@@ -550,7 +571,9 @@ class PlaybackControlReporter private constructor(
         // does not suspend, so holding the mutex across it is safe.
         var floor: Long? = null
         val stale = mutex.withLock {
-            if (stopped || pending == null) return@withLock null
+            if (!admitAfterTerminalLocked(newest)) return@withLock null
+            reportingScope = scope
+            pending = newest
             // This queued snapshot will be the next new request. A retry may
             // replay the current sequence first, but it cannot consume this
             // floor. Returning it lets a replacement session retain ordering
@@ -567,6 +590,8 @@ class PlaybackControlReporter private constructor(
 
     suspend fun stop() {
         val job = mutex.withLock {
+            terminalStop = null
+            reportingScope = null
             if (stopped) return
             stopped = true
             pending = null
@@ -578,6 +603,31 @@ class PlaybackControlReporter private constructor(
         job?.cancel()
     }
 
+    /** Unlike End/protocol failure, a terminal verdict belongs to one intent.
+     * A source publication racing this stop must still be able to report B. */
+    private suspend fun stopForTerminal(captured: PlaybackControlCapture) {
+        val job = mutex.withLock {
+            if (stopped || !captured.hasSameIntent(newestCapture(pending))) return
+            stopped = true
+            terminalStop = captured
+            pending = null
+            retryRequest = null
+            val running = pump
+            pump = null
+            running
+        }
+        job?.cancel()
+    }
+
+    private fun admitAfterTerminalLocked(newest: PlaybackControlCapture): Boolean {
+        if (!stopped) return true
+        val terminal = terminalStop ?: return false
+        if (terminal.hasSameIntent(newest)) return false
+        terminalStop = null
+        stopped = false
+        return true
+    }
+
     suspend fun status(): Status = mutex.withLock {
         Status(sequence, acceptedSequence, inFlight, pending != null, retryRequest != null, stopped)
     }
@@ -585,12 +635,12 @@ class PlaybackControlReporter private constructor(
     suspend fun isStopped(): Boolean = mutex.withLock { stopped }
 
     private suspend fun run() {
-        while (true) {
+        while (currentCoroutineContext().isActive) {
             val cadence = bootstrap.nextExchangeMs
             val wait = mutex.withLock {
                 if (stopped) return
                 if (pending == null && retryRequest == null) {
-                    pending = snapshot()?.let { PendingSnapshot(it, intentGeneration()) }
+                    pending = newestCapture(null)
                 }
                 if (pending == null && retryRequest == null) return@withLock cadence
                 val rateAllowedAt = lastStartedAt?.plus(PlaybackControl.MIN_EXCHANGE_MS) ?: 0L
@@ -621,7 +671,7 @@ class PlaybackControlReporter private constructor(
      */
     private fun nextRequestLocked(): PendingRequest? {
         retryRequest?.let { return it }
-        val newest = pending
+        val newest = newestCapture(pending)
         pending = null
         if (newest == null || !newest.snapshot.isValid) return null
         sequence += 1
@@ -648,7 +698,7 @@ class PlaybackControlReporter private constructor(
             observation = newest.snapshot.observation?.bounded(),
             supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
         )
-        return PendingRequest(request, newest.intentGeneration)
+        return PendingRequest(request, newest)
     }
 
     private suspend fun exchange(pendingRequest: PendingRequest) {
@@ -673,11 +723,11 @@ class PlaybackControlReporter private constructor(
         try {
             accept(request, response)
         } catch (protocolFailure: ControlProtocolException) {
-            onExchange(Exchange(request, null, describe(protocolFailure), pendingRequest.intentGeneration))
+            onExchange(Exchange(request, null, describe(protocolFailure), pendingRequest.capture))
             stop()
             return
         }
-        val ended = mutex.withLock {
+        mutex.withLock {
             if (stopped) return
             retryRequest = null
             request.capabilities?.let { acceptedCapabilities = it }
@@ -692,15 +742,10 @@ class PlaybackControlReporter private constructor(
                     response.action.afterMs,
                 )
             }
-            // A terminal verdict ends reporting. It does not tear the player
-            // down: this reporter still owns no recovery, and buffer already
-            // fetched is still worth playing.
-            request.demand == PlaybackDemand.END ||
-                (response.action.type == "terminal" &&
-                    pendingRequest.intentGeneration == intentGeneration())
         }
-        onExchange(Exchange(request, response, null, pendingRequest.intentGeneration))
-        if (ended) stop()
+        onExchange(Exchange(request, response, null, pendingRequest.capture))
+        if (request.demand == PlaybackDemand.END) stop()
+        else if (response.action.type == "terminal") stopForTerminal(pendingRequest.capture)
     }
 
     private fun accept(request: ControlRequest, response: ControlResponse) {
@@ -751,7 +796,7 @@ class PlaybackControlReporter private constructor(
 
     private suspend fun handle(failure: Throwable, pendingRequest: PendingRequest) {
         val request = pendingRequest.request
-        onExchange(Exchange(request, null, describe(failure), pendingRequest.intentGeneration))
+        onExchange(Exchange(request, null, describe(failure), pendingRequest.capture))
         val transport = failure as? ControlTransportException
         val status = transport?.status
         val code = transport?.code
@@ -797,16 +842,27 @@ class PlaybackControlReporter private constructor(
         val generationChanged = generation != bootstrap.generation
         val epochChanged = epoch > bootstrap.controlEpoch
         if (!generationChanged && !epochChanged) return false
-        val newest = snapshot() ?: return false
-        if (!newest.isValid) return false
+        // A viewer mutation deliberately clears the source slot before its
+        // next capture. Adopt the valid wire owner now, but send nothing until
+        // a fresh capture from this local attachment exists.
+        val newest = currentCapture()?.takeIf { it.snapshot.isValid }
         bootstrap = bootstrap.copy(generation = generation, controlEpoch = epoch)
         sequence = 0
         acceptedSequence = 0
         retryRequest = null
         acceptedCapabilities = null
         lastStartedAt = null
-        pending = PendingSnapshot(newest, intentGeneration())
+        pending = newest
         return true
+    }
+
+    private fun currentCapture(): PlaybackControlCapture? = capture()?.takeIf { it.owner == owner }
+
+    /** Queue order is not source order. Never stamp a new identity on old data. */
+    private fun newestCapture(value: PlaybackControlCapture?): PlaybackControlCapture? {
+        val current = currentCapture() ?: return null
+        if (value != null && value.owner != owner) return null
+        return if (value == null || current.sourceRevision > value.sourceRevision) current else value
     }
 
     private fun retryDelay(error: ControlTransportException?, fallback: Long): Long {

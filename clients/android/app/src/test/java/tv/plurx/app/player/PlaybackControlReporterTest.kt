@@ -1,6 +1,8 @@
 package tv.plurx.app.player
 
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.advanceTimeBy
@@ -84,7 +86,11 @@ private class Harness(private val scope: TestScope) {
     val exchanges = mutableListOf<PlaybackControlReporter.Exchange>()
     val paces = mutableListOf<Long>()
     private val outcomes = ArrayDeque<Result<ControlResponse>>()
+    var sourceRevision = 0L
     var current = snapshot()
+        set(value) { field = value; sourceRevision += 1 }
+    var intentGeneration = 0L
+    var owner = PlaybackControlCaptureOwner("test-player", 1)
     var holds = false
 
     fun enqueue(values: List<Result<ControlResponse>>) = outcomes.addAll(values)
@@ -106,7 +112,7 @@ private class Harness(private val scope: TestScope) {
     }
 
     val now: () -> Long = { scope.currentTime }
-    val snapshotOf: () -> PlaybackControlSnapshot? = { current }
+    val captureOf: () -> PlaybackControlCapture? = { PlaybackControlCapture(current, intentGeneration, owner, sourceRevision) }
     val onExchange: (PlaybackControlReporter.Exchange) -> Unit = { exchanges += it }
 }
 
@@ -114,7 +120,8 @@ private fun reporter(harness: Harness, value: ControlBootstrap = bootstrap()) =
     PlaybackControlReporter.create(
         bootstrap = value,
         clientInstanceId = CLIENT_ID,
-        snapshot = harness.snapshotOf,
+        owner = harness.owner,
+        capture = harness.captureOf,
         send = harness.send,
         pace = harness.pace,
         now = harness.now,
@@ -176,7 +183,8 @@ class PlaybackControlBootstrapTest {
             PlaybackControlReporter.create(
                 bootstrap = bootstrap(),
                 clientInstanceId = "not-a-uuid",
-                snapshot = harness.snapshotOf,
+                owner = harness.owner,
+                capture = harness.captureOf,
                 send = harness.send,
                 pace = harness.pace,
                 now = harness.now,
@@ -901,6 +909,204 @@ class PlaybackControlWireTest {
  * at that call site for exactly this reason.
  */
 class PlaybackControlUrgentNotifyTest {
+
+    @Test
+    fun `terminal latch cannot silence newer source before or after stop`() = runTest {
+        for (transition in listOf("callback", "ordinary", "urgent", "explicit", "end", "protocol")) {
+            val owner = PlaybackControlCaptureOwner("terminal-source", 1)
+            var latest = PlaybackControlCapture(
+                if (transition == "end") snapshot().copy(demand = PlaybackDemand.END) else snapshot(),
+                0, owner, 0,
+            )
+            val next = PlaybackControlCapture(snapshot(position = 9_000), 1, owner, 1)
+            val calls = mutableListOf<ControlRequest>()
+            lateinit var subject: PlaybackControlReporter
+            subject = assertNotNull(PlaybackControlReporter.create(
+                bootstrap(), CLIENT_ID, owner, { latest },
+                send = { _, request ->
+                    calls += request
+                    if (calls.size != 1) accept(request)
+                    else if (transition == "protocol") accept(request).copy(generation = "44444444-4444-4444-8444-444444444444")
+                    else accept(request).copy(action = ControlAction(type = "terminal", code = "unsupported", message = "A"))
+                },
+                pace = { delay(it) }, now = { currentTime },
+                onExchange = {
+                    if (transition == "callback" && it.request.sequence == 1L) {
+                        latest = next
+                        launch { subject.notifyUrgently(this@runTest, next) }
+                    }
+                },
+            ))
+            subject.start(this); runCurrent()
+            if (transition != "callback") {
+                assertTrue(subject.isStopped())
+                subject.notify(latest)
+                assertTrue(subject.isStopped(), "same intent cannot revive its terminal verdict")
+                if (transition == "explicit") subject.stop()
+                latest = next
+                if (transition == "ordinary") subject.notify(next)
+                else subject.notifyUrgently(this, next)
+            }
+            advanceTimeBy(251); runCurrent()
+            val permanent = transition in listOf("explicit", "end", "protocol")
+            assertEquals(if (permanent) 1 else 2, calls.size, transition)
+            assertEquals(permanent, subject.isStopped(), transition)
+            if (!permanent) assertEquals(9_000L, calls[1].positionMs)
+            subject.stop()
+        }
+    }
+
+    @Test
+    fun `owner reset survives cleared source and waits for its own attachment`() = runTest {
+        for (foreignOwner in listOf(false, true)) {
+            val owner = PlaybackControlCaptureOwner("source", 1)
+            var latest: PlaybackControlCapture? = PlaybackControlCapture(snapshot(), 0, owner, 0)
+            val calls = mutableListOf<ControlRequest>()
+            val first = CompletableDeferred<ControlResponse>()
+            val subject = assertNotNull(PlaybackControlReporter.create(
+                bootstrap(), CLIENT_ID, owner, { latest },
+                send = { _, request -> calls += request; if (calls.size == 1) first.await() else accept(request) },
+                pace = { delay(it) }, now = { currentTime },
+            ))
+            subject.start(this); runCurrent()
+            latest = null
+            val nextGeneration = "44444444-4444-4444-8444-444444444444"
+            first.completeExceptionally(ControlTransportException(
+                status = 409, code = "owner_changed", generation = nextGeneration, controlEpoch = 8,
+            ))
+            runCurrent(); advanceTimeBy(251); runCurrent()
+            assertFalse(subject.isStopped(), "temporary capture gap cannot silence reporting")
+            assertEquals(1, calls.size, "owner adoption sends no guessed or old body")
+            latest = PlaybackControlCapture(snapshot(position = 9_000), 1,
+                if (foreignOwner) owner.copy(attachmentGeneration = 2) else owner, 1)
+            val floor = subject.notifyUrgently(this, latest)
+            runCurrent()
+            if (foreignOwner) {
+                assertNull(floor)
+                assertEquals(1, calls.size, "the old reporter cannot borrow attachment B")
+            } else {
+                assertEquals(1L, floor)
+                assertEquals(2, calls.size)
+                assertEquals(nextGeneration, calls[1].generation)
+                assertEquals(8L, calls[1].controlEpoch)
+                assertEquals(1L, calls[1].sequence)
+                assertEquals(9_000L, calls[1].positionMs)
+            }
+            subject.stop()
+        }
+    }
+
+    @Test
+    fun `reversed enqueue keeps newest source for changed and unchanged intent`() = runTest {
+        for (sameIntent in listOf(false, true)) {
+            val owner = PlaybackControlCaptureOwner("ordered-source", 1)
+            var latest: PlaybackControlCapture? = PlaybackControlCapture(snapshot(), 0, owner, 0)
+            val calls = mutableListOf<ControlRequest>()
+            val exchanges = mutableListOf<PlaybackControlReporter.Exchange>()
+            val first = CompletableDeferred<ControlResponse>()
+            val subject = assertNotNull(PlaybackControlReporter.create(
+                bootstrap(), CLIENT_ID, owner, { latest },
+                send = { _, request -> calls += request; if (calls.size == 1) first.await() else accept(request) },
+                pace = { delay(it) }, now = { currentTime }, onExchange = { exchanges += it },
+            ))
+            subject.start(this); runCurrent()
+            val older = PlaybackControlCapture(snapshot(position = 1_000), 1, owner, 1)
+            val newer = PlaybackControlCapture(snapshot(position = 9_000), if (sameIntent) 1 else 2, owner, 2)
+            latest = newer
+            subject.notify(newer)
+            subject.notifyUrgently(this, older) // actor/dispatcher delivery reversed
+            first.complete(accept(calls[0])); runCurrent()
+            advanceTimeBy(251); runCurrent()
+            assertEquals(9_000L, calls[1].positionMs)
+            assertTrue(exchanges[1].capture === newer)
+            subject.stop()
+        }
+    }
+
+    @Test
+    fun `cleared source suspends queued work and old reporter never adopts another attachment`() = runTest {
+        for (replaceOwner in listOf(false, true)) {
+            val owner = PlaybackControlCaptureOwner("lifetime", 1)
+            val captured = PlaybackControlCapture(snapshot(position = 1_000), 1, owner, 1)
+            var latest: PlaybackControlCapture? = captured
+            val calls = mutableListOf<ControlRequest>()
+            val subject = assertNotNull(PlaybackControlReporter.create(
+                bootstrap(), CLIENT_ID, owner, { latest },
+                send = { _, request -> calls += request; accept(request) },
+                pace = { delay(it) }, now = { currentTime },
+            ))
+            subject.notify(captured)
+            latest = if (replaceOwner) PlaybackControlCapture(
+                snapshot(position = 9_000), 2, PlaybackControlCaptureOwner("lifetime", 2), 2,
+            ) else null
+            subject.start(this); runCurrent()
+            advanceTimeBy(5_001); runCurrent()
+            assertTrue(calls.isEmpty(), "queued and cadence admission must use the bound current attachment")
+            assertNull(subject.notifyUrgently(this, captured), "late explicit enqueue cannot resurrect cleared ownership")
+            subject.stop()
+        }
+    }
+
+    @Test
+    fun `started capture keeps source intent through mutation retry and coalescing`() = runTest {
+        val harness = Harness(this)
+        val subject = assertNotNull(reporter(harness))
+        val codecs = mutableListOf(CodecPolicy.H264)
+        harness.current = snapshot(position = 1_000).copy(
+            capabilities = snapshot().capabilities.copy(codecs = codecs),
+        )
+        harness.intentGeneration = 1
+        val captured = assertNotNull(harness.captureOf())
+        harness.enqueue(Result.failure(ControlTransportException(status = 429, code = "control_rate_limited")))
+        subject.notifyUrgently(this, captured)
+        runCurrent()
+        // Once started, a refused request retains its exact source capture.
+        codecs += CodecPolicy.AUTO
+        harness.current = snapshot(position = 9_000)
+        harness.intentGeneration = 2
+        assertEquals(1_000, harness.requests.single().positionMs)
+        assertEquals(listOf(CodecPolicy.H264), harness.requests.single().capabilities?.codecs)
+        val second = assertNotNull(harness.captureOf())
+        subject.notify(second)
+        harness.current = snapshot(position = 12_000)
+        harness.intentGeneration = 3
+        val newest = assertNotNull(harness.captureOf())
+        subject.notify(newest)
+        advanceTimeBy(501)
+        runCurrent()
+        advanceTimeBy(251)
+        runCurrent()
+        assertEquals(listOf(1_000L, 1_000L, 12_000L), harness.requests.take(3).map { it.positionMs })
+        assertTrue(harness.exchanges[0].capture === captured)
+        assertTrue(harness.exchanges[1].capture === captured, "retry retains the same immutable capture")
+        assertTrue(harness.exchanges[2].capture === newest, "coalescing never combines capture fields")
+        subject.stop()
+    }
+
+    @Test
+    fun `terminal from previous attachment cannot stop reused intent number`() = runTest {
+        val harness = Harness(this)
+        val result = CompletableDeferred<ControlResponse>()
+        val subject = assertNotNull(PlaybackControlReporter.create(
+            bootstrap = bootstrap(), clientInstanceId = CLIENT_ID,
+            owner = harness.owner,
+            capture = harness.captureOf,
+            send = { _, request -> harness.requests += request; result.await() },
+            pace = harness.pace, now = harness.now, onExchange = harness.onExchange,
+        ))
+        subject.start(this)
+        runCurrent()
+        val original = harness.requests.single()
+        harness.owner = PlaybackControlCaptureOwner("test-player", 2)
+        harness.current = snapshot(position = 9_000)
+        result.complete(accept(original).copy(action = ControlAction(
+            type = "terminal", code = "unsupported", message = "old attachment",
+        )))
+        runCurrent()
+        assertFalse(subject.status().stopped)
+        assertEquals(1, harness.exchanges.single().capture.owner.attachmentGeneration)
+        subject.stop()
+    }
 
     @Test
     fun `an ordinary report waits out the server's cadence`() = runTest {

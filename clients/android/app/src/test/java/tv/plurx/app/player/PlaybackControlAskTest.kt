@@ -5,6 +5,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -16,6 +18,8 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
+import okio.Buffer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -37,6 +41,52 @@ import kotlin.test.assertTrue
  * pass or flake for reasons unrelated to the code.
  */
 class PlaybackControlAskTest {
+
+    @Test
+    fun `source thread publishes immutable evidence before queued reporter and cadence`() = runBlocking {
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val blocked = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        scope.launch { blocked.countDown(); release.await(5, TimeUnit.SECONDS) }
+        assertTrue(blocked.await(5, TimeUnit.SECONDS))
+        val requests = LinkedBlockingQueue<ControlRequest>()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val buffer = Buffer()
+            chain.request().body!!.writeTo(buffer)
+            val request = json.decodeFromString<ControlRequest>(buffer.readUtf8())
+            requests.add(request)
+            val body = """{"protocol":"${PlaybackControl.PROTOCOL}","generation":"$GENERATION","control_epoch":7,"accepted_sequence":${request.sequence},"action":{"type":"none"}}"""
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200)
+                .message("OK").body(body.toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        val session = PlaybackControlSession(scope)
+        var position = 4_000L
+        var reads = 0
+        val sourceThread = Thread.currentThread()
+        try {
+            session.begin(bootstrap(), {
+                assertTrue(Thread.currentThread() === sourceThread, "Media3 observation stays on source thread")
+                reads += 1
+                observation().copy(positionMs = position)
+            }, PlaybackControlTransport("https://cinema.example", client, json))
+            session.clearVerdict()
+            position = 7_000
+            session.reportEvidence()
+            position = 99_000 // not published; queue/cadence cannot observe it
+            release.countDown()
+            val first = requests.poll(5, TimeUnit.SECONDS)
+            val next = requests.poll(5, TimeUnit.SECONDS)
+            assertEquals(7_000L, first?.positionMs)
+            assertEquals(7_000L, next?.positionMs)
+            assertEquals(2, reads)
+        } finally {
+            release.countDown()
+            session.end()
+            scope.cancel()
+            dispatcher.close()
+        }
+    }
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
@@ -339,6 +389,16 @@ class PlaybackControlAskTest {
                 }
                 queued()
                 assertEquals(if (transition == "current") 1 else 0, retries, transition)
+                if (transition == "new-intent") {
+                    session.playerChanged()
+                    val deadline = monotonicNowMs() + 5_000
+                    while (retries == 0 && monotonicNowMs() < deadline) callbacks.poll(100, TimeUnit.MILLISECONDS)?.invoke()
+                    assertEquals(1, retries, "discarded A readiness must remain available to current B")
+                    session.reportIntent()
+                    kotlinx.coroutines.delay(300)
+                    while (true) (callbacks.poll() ?: break).invoke()
+                    assertEquals(1, retries, "ready cadence commits exactly one retry")
+                }
             } finally {
                 session.end()
                 scope.cancel()
