@@ -27,7 +27,7 @@ change.
 
 | Milestone | Task branch | PR | State | Blocking evidence |
 |---|---|---|---|---|
-| M1 · frame completion | `codex/cluster-transport-m1` | not opened | fifth review found one status-only correction; final exact review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
+| M1 · frame completion | `codex/cluster-transport-m1` | not opened | fifth-review shared-control fix in validation; sixth exact review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same review | foundations implemented; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | implementation in progress | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
@@ -47,7 +47,7 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | Production writer regressions | pass · 5 surfaces | Serialized Raft/API requests and responses plus the proxy response use their production writer seams over real TLS; queue-consuming Raft/API client and server writers report injected flush failures to their supervisors |
 | Deadline and failure regressions | pass | Flush error, blocked combined write/flush budget, 250 ms Close budget, and scaled server-handshake budget all terminate at their documented boundary |
 | Vendored network suite | pass · 46 tests | Prescribed SQLite+cache+auto-heal+macros `network::` library filter on Rust 1.97.1; no failures or ignored tests |
-| API client stream suite | pass · 15 tests | Includes cancellation-safe mutation ownership, decoded-response-before-leader ordering in normal and backpressured admission, stale/same-target leader handling, production request writer, and malformed-frame reader outcome |
+| API client stream suite | pass · 17 tests | Includes cancellation-safe mutation ownership, decoded-response-before-handoff ordering, full-queue proxy-control priority, stale/same-target leader handling, production request writer, and malformed-frame reader outcome |
 | Snapshot ownership foundations | pass · 6 executor tests + 5 real SQLite state-machine tests | One running/one queued admission, cancellation-safe deadline/shutdown ownership, a controlled real-file partial write with digest verification, and real SQLite pending/current recovery pass. The remaining full Raft/socket-disconnect acceptance is explicitly open for M5. |
 | Broad optional-feature probe | invalid baseline lane | `--all-features` enables mutually exclusive `cast_ints` modes and reaches unrelated existing optional-feature compile defects; the repository-prescribed feature matrices remain authoritative |
 | Daemon check and denied-warning Clippy | pass | `plurxd --all-targets` completed on Rust 1.97.1 with no warnings |
@@ -81,16 +81,17 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    the pushed task branch are available. PR creation follows after the current
    exact candidate passes its focused lane and an adversarial review round.
 
-## Next checkpoint — exact-SHA fifth review, then the milestone PR
+## Next checkpoint — exact-SHA sixth review, then the milestone PR
 
-The fourth adversarial round found that a leader handoff could overtake an
-already-decoded API response, plus two overstated evidence claims. The fix
-settles decoded responses before failing unresolved acknowledgements in both
-normal and backpressured admission. The lifecycle evidence now says exactly
-what the regression proves: 100 in-memory WebSocket task cycles, while real
-socket/install acceptance remains open for M5. The next checkpoint validates
-and pushes the exact revision, obtains a clean fifth adversarial review, and
-opens the task PR into the effort branch.
+The fifth adversarial round found that proxy/dashboard controls sharing the
+ordinary request queue could still arrive during full writer admission. The
+fix retains the next ordinary request under manager ownership, lets a queued
+handoff preempt transfer to the stale socket, and defers proxy failure until
+already-decoded responses settle. The lifecycle evidence remains explicitly
+bounded to 100 in-memory WebSocket task cycles; real socket/install acceptance
+is open for M5. The next checkpoint validates and pushes the exact revision,
+obtains a clean sixth adversarial review, and opens the task PR into the effort
+branch.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only

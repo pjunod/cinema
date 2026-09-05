@@ -1232,6 +1232,8 @@ for (const startupDelay of [0, 1600, 7000]) {
             "queued_api_response_wins_before_queued_leader_change",
             "queued_api_response_wins_before_leader_during_writer_backpressure",
             "leader_handoff_settles_decoded_response_before_failing_unresolved_requests",
+            "queued_proxy_handoff_prevents_backpressured_writer_ownership_transfer",
+            "proxy_handoff_settles_decoded_response_before_failing_unresolved_requests",
             "production_api_response_writer_flushes_serialized_response_through_tls",
             "production_api_response_writer_reports_flush_failure_and_closes",
             "production_raft_reader_reports_malformed_frames",
