@@ -48,6 +48,29 @@ const MAX_FORCED_REFRESH_CALLERS: usize = 8;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const TUNER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const PRODUCER_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// The budget once the tuner is actually feeding the graph.
+///
+/// A real HDHomeRun FLEX 4K published an ATSC 3.0 (HEVC Main 10 1080) channel's
+/// first segment at 18.1 s, while an ATSC 1.0 MPEG-2 channel on the same device
+/// and host took 7.04 s. `STARTUP_TIMEOUT` therefore refused a channel that
+/// works, after the lineup had already called it playable -- the worst of the
+/// three available behaviours. Neither the codec nor the encode was the cost:
+/// that source decodes and re-encodes to 720p at 2.37x realtime on the same
+/// machine, and the device delivered its first byte in 2.77 s.
+///
+/// This is deliberately the producer-progress budget rather than a number of
+/// its own: once bytes are flowing, "no segment yet" and "stopped advancing"
+/// are the same question, and two constants would drift. It leaves 18.1 s about
+/// 65% of headroom.
+///
+/// A tuner that has sent NOTHING keeps the short budget. Two ATSC 3.0 channels
+/// on that antenna return zero bytes, and making an operator wait twice as long
+/// to be told a mux is dead is its own defect.
+const STARTUP_FEEDING_TIMEOUT: Duration = PRODUCER_PROGRESS_TIMEOUT;
+/// How often a request waiting for a start re-asks whether the budget grew.
+/// Without this the waiter would commit to the budget in force when it began,
+/// and a tuner that starts feeding a second later would be refused anyway.
+const STARTUP_BUDGET_REVIEW: Duration = Duration::from_secs(1);
 const CAPABILITY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 // Exceeds the controller's common 24-second start + two 5-second activation
 // exchanges, even if the owner publishes immediately and the response is lost.
@@ -514,6 +537,9 @@ struct LiveTvSession {
     worker: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     process: tokio::sync::Mutex<Option<LiveTvProcess>>,
     decoder_unavailable: Arc<AtomicBool>,
+    /// Bytes the tuner has delivered into the graph. Shared with the pump so
+    /// the startup decision can tell a slow channel from an absent one.
+    tuner_bytes: Arc<AtomicU64>,
     resource_admission: Arc<tokio::sync::Semaphore>,
     state: StdMutex<LiveTvSessionState>,
 }
@@ -1124,6 +1150,7 @@ impl LiveTvManager {
             worker: StdMutex::new(None),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            tuner_bytes: Arc::new(AtomicU64::new(0)),
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             state: StdMutex::new(LiveTvSessionState {
                 phase: LiveTvSessionPhase::Starting,
@@ -1829,8 +1856,9 @@ async fn wait_for_startup(
     let _waiter = StartupWaiter {
         session: Arc::clone(&session),
     };
-    let deadline = session.started + STARTUP_TIMEOUT + Duration::from_secs(2);
     loop {
+        // Registered before the state is read, so a publication between the two
+        // cannot be missed.
         let notified = session.changed.notified();
         if let Some(result) = session
             .state
@@ -1846,13 +1874,22 @@ async fn wait_for_startup(
                 provisional
             });
         }
-        tokio::time::timeout_at(deadline, notified)
-            .await
-            .map_err(|_| {
-                LiveTvError::StartupTimeout(
-                    "the tuner did not publish the first live segment in time".into(),
-                )
-            })?;
+        let now = tokio::time::Instant::now();
+        // The same decision the producer makes, plus the two seconds that let
+        // the producer's own verdict reach this waiter first -- a caller should
+        // hear why a start failed, not just that it timed out.
+        if let Some(reason) = startup_overdue(
+            session.started,
+            now + Duration::from_secs(2),
+            session.tuner_bytes.load(Ordering::Acquire),
+        ) {
+            return Err(LiveTvError::StartupTimeout(reason));
+        }
+        // Waiting in slices rather than to the deadline: the budget can grow
+        // while this request is parked, and a wait pinned to the budget in
+        // force when it began would refuse a channel that started feeding a
+        // moment later.
+        let _ = tokio::time::timeout(STARTUP_BUDGET_REVIEW, notified).await;
     }
 }
 
@@ -2074,6 +2111,8 @@ async fn run_live_session_inner(
     let client = owner.client.as_ref().map_err(|_| {
         LiveTvError::DeviceUnavailable("the HDHomeRun HTTP client is unavailable".into())
     })?;
+    // Headers only. No byte can have been delivered before the response
+    // arrives, so this is the short budget by construction.
     let startup_deadline = session.started + STARTUP_TIMEOUT;
     let response = tokio::select! {
         biased;
@@ -2108,7 +2147,12 @@ async fn run_live_session_inner(
             "live-TV FFmpeg did not expose stdin".into(),
         ));
     };
-    let pump = tokio::spawn(pump_tuner_stream(response, stdin, session.cancel.clone()));
+    let pump = tokio::spawn(pump_tuner_stream(
+        response,
+        stdin,
+        session.cancel.clone(),
+        Arc::clone(&session.tuner_bytes),
+    ));
     let serving = owner.serving.clone();
     drop(owner);
 
@@ -2187,10 +2231,14 @@ async fn run_live_session_inner(
             }
 
             let now = tokio::time::Instant::now();
-            if !published && now >= startup_deadline {
-                break Err(LiveTvError::StartupTimeout(
-                    "the tuner did not publish the first live segment in time".into(),
-                ));
+            if !published {
+                if let Some(reason) = startup_overdue(
+                    session.started,
+                    now,
+                    session.tuner_bytes.load(Ordering::Acquire),
+                ) {
+                    break Err(LiveTvError::StartupTimeout(reason));
+                }
             }
             {
                 let state = session
@@ -2253,6 +2301,30 @@ async fn run_live_session_inner(
         stderr,
     });
     terminal
+}
+
+/// Whether a session that has not published a segment yet is out of time, and
+/// what to tell the caller.
+///
+/// One decision, consulted by both the producer loop and the request waiting on
+/// it, so the two can never disagree about whether a start has failed. It reads
+/// the bytes the tuner has actually delivered because that is what separates
+/// "this channel is slow to start" from "this channel is not there": the first
+/// deserves the producer-progress budget, the second deserves a prompt answer.
+fn startup_overdue(
+    started: tokio::time::Instant,
+    now: tokio::time::Instant,
+    tuner_bytes: u64,
+) -> Option<String> {
+    if tuner_bytes == 0 {
+        return (now.duration_since(started) >= STARTUP_TIMEOUT).then(|| {
+            "the tuner sent no data before the start budget ran out; the channel may have \
+             no signal on this device"
+                .to_owned()
+        });
+    }
+    (now.duration_since(started) >= STARTUP_FEEDING_TIMEOUT)
+        .then(|| format!("the tuner sent {tuner_bytes} bytes but no complete live segment in time"))
 }
 
 fn provisional_expired(state: &LiveTvSessionState, now: tokio::time::Instant) -> bool {
@@ -2438,6 +2510,7 @@ async fn pump_tuner_stream(
     response: reqwest::Response,
     mut stdin: tokio::process::ChildStdin,
     cancel: CancellationToken,
+    delivered: Arc<AtomicU64>,
 ) -> Result<(), LiveTvError> {
     // One task owns both the response and stdin. Aborting and joining this
     // task therefore releases the actual tuner connection, not a detached
@@ -2470,6 +2543,9 @@ async fn pump_tuner_stream(
             result = tokio::time::timeout(TUNER_READ_TIMEOUT, stdin.write_all(&bytes)) => {
                 result.map_err(|_| LiveTvError::StreamFailed("FFmpeg input stalled".into()))?
                     .map_err(|error| LiveTvError::StreamFailed(format!("writing FFmpeg input: {error}")))?;
+                // Counted after the write, so it means "reached the graph"
+                // rather than "arrived in this process".
+                delivered.fetch_add(bytes.len() as u64, Ordering::Release);
             }
         }
     }
@@ -3553,6 +3629,7 @@ mod tests {
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            tuner_bytes: Arc::new(AtomicU64::new(0)),
             state: StdMutex::new(LiveTvSessionState {
                 phase: LiveTvSessionPhase::Active,
                 startup: None,
@@ -4309,6 +4386,59 @@ exec /bin/cat >/dev/null
                 "{encoder:?} must not get the software conversion: {filter}"
             );
         }
+    }
+
+    /// A slow channel and an absent one get different budgets.
+    ///
+    /// This is the exact defect a real HDHomeRun found. An ATSC 3.0 channel
+    /// published its first segment at 18.1 s while the ATSC 1.0 channel on the
+    /// same device and host took 7.04 s, so a flat 15 s budget refused a
+    /// channel the lineup had already called playable. Raising the constant for
+    /// everyone would have been the wrong fix: two ATSC 3.0 channels on that
+    /// antenna deliver no bytes at all, and those should still fail promptly.
+    ///
+    /// Every row below is a decision the unfixed implementation got wrong or
+    /// right for the wrong reason: it compared `now` to one deadline and never
+    /// looked at the tuner at all.
+    #[test]
+    fn a_tuner_that_is_feeding_earns_longer_than_one_that_is_silent() {
+        let started = tokio::time::Instant::now();
+        let at = |seconds: u64| started + Duration::from_secs(seconds);
+
+        // Silent: prompt, and the message says the channel may have no signal
+        // rather than blaming the segment that never came.
+        assert!(startup_overdue(started, at(14), 0).is_none());
+        let silent = startup_overdue(started, at(15), 0).expect("silent tuner is overdue at 15s");
+        assert!(
+            silent.contains("no data"),
+            "a silent tuner must say so, not blame a missing segment: {silent}"
+        );
+
+        // Feeding: the 18.1 s real measurement is INSIDE the budget. This is
+        // the assertion the unfixed implementation fails.
+        assert!(
+            startup_overdue(started, at(16), 1).is_none(),
+            "one byte from the tuner must buy more than the silent budget"
+        );
+        assert!(
+            startup_overdue(started, at(19), 4_000_000).is_none(),
+            "18.1s is what a real ATSC 3.0 channel needed; refusing it is the defect"
+        );
+
+        // But feeding is not forever, and the eventual refusal is specific
+        // enough to tell a stalled producer from an absent channel.
+        let stalled = startup_overdue(started, at(30), 4_000_000)
+            .expect("a feeding tuner that never publishes is overdue eventually");
+        assert!(
+            stalled.contains("4000000") && stalled.contains("no complete live segment"),
+            "a stalled producer must name what arrived: {stalled}"
+        );
+
+        // The two budgets are ordered, whatever the constants become.
+        assert!(
+            STARTUP_FEEDING_TIMEOUT > STARTUP_TIMEOUT,
+            "a feeding tuner must never get less time than a silent one"
+        );
     }
 
     #[test]
