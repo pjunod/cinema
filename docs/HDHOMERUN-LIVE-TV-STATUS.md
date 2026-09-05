@@ -1,7 +1,7 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** synchronization merged; M2 ledger corrected; web/native in review · **Effort:** `effort/hdhomerun-live-tv` ·
-**Updated:** 2026-09-04 · **Historical issue:**
+**Status:** backend merged; web acceptance and native client PRs in progress · **Effort:** `effort/hdhomerun-live-tv` ·
+**Updated:** 2026-09-05 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
 Companion to [HDHOMERUN-LIVE-TV-PLAN.md](HDHOMERUN-LIVE-TV-PLAN.md) (the
@@ -16,9 +16,10 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
 | Forgejo main synchronization | merged | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | Astra approved `c4b66e1d`; fresh gate run 61 passed; merge `e8095916` |
-| M2 live HLS and cluster relay | ownership ledger correction; fresh gate pending | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | Astra-approved `3c911018`: pinned fmt/check/clippy, 41 Live TV, 1 signature, 1 Activity, 2 route and 2 admission tests passed; new-base merge `95d71d00` has identical tree |
+| M2 live HLS and cluster relay | merged | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | Astra approved `fc164045`; pinned fmt/check/clippy and 47 focused tests passed; fresh effort gate 85 passed; merge `f2773ca8` |
 | M3 web client | browser structure passed; final Astra fixes in progress | — | 72 captures at `59bf4932`, no console/page errors; 12 focused tests after fixing ambiguous-start and wall-clock findings; live media acceptance remains |
-| M4 Apple and Android | Apple implementation and focused tests in progress | — | Apple API, serialized lease, player and Developer settings compile on iOS/tvOS; 11 focused iOS tests pass; Android compiler ready, implementation remains |
+| M4 Apple | implemented; exact-candidate review and effort PR pending | — | iOS/tvOS compile; 14 focused tests pass on each simulator; Astra found no remaining source findings after fixes |
+| M4 Android | compiler ready; implementation in progress | — | baseline debug build passed; isolated JDK 25/SDK 37 build image ready |
 | M5 docs, hardware, promotion | not started | — | — |
 
 ## Current work — finish client acceptance and effort gates
@@ -77,7 +78,7 @@ PR #7 merged after actual Astra approval and its fresh effort gate. PR #13's
 policy check identified eight stale task/process ownership counts. Astra
 independently attributed every new site; the ledger now names those owners,
 and all 115 validation tests pass. The ledger does not waive the ownership
-check. The updated candidate must pass a fresh effort gate before merge.
+check. Candidate `fc164045` passed fresh effort gate 85 and merged as `f2773ca8`.
 
 Web structural acceptance produced 72 desktop/mobile captures across all three
 layouts with no console/page errors. Actual Astra then found that a typed lost
@@ -132,6 +133,7 @@ extraction was attempted. The supplied deploy key remains scoped to node access.
 | One tuner HTTP GET and one FFmpeg process per session | retries can double-lease physical tuners and split lifecycle ownership | a device-native resumable lease protocol exists |
 | DRM and captions unsupported | plurx has no licensed DRM path; captions lack end-to-end proof | a lawful DRM path or 608/708 fixture exists |
 | All first-party clients are in scope | a living-room feature is not complete as a web-only API | owner explicitly narrows the product surface |
+| Separate Apple and Android task PRs within M4 | each platform gets an independently reviewed, compiled and tested candidate; neither blocks review of the other | both merge before final promotion |
 
 ## Known limits — honest until evidence changes them
 
