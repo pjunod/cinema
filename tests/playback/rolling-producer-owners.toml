@@ -1463,10 +1463,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # HTTP statuses or serialize LiveTvSession status; they own no OS process.
 # Merging main and the HDHomeRun Live TV effort: this counter had moved to
 # 235 on the effort branch and 217 on main from a shared base, and neither
-# value describes the merged tree. 236 is what the checker reads off the
-# merge, so it is what is recorded -- the two inventories above are both
-# still true, and the total is measured rather than added up.
-expected_occurrences = 236
+# value describes the merged tree. 236 was what the checker read off the merge
+# itself -- the two inventories above are both still true, and the total is
+# measured rather than added up.
+# +1: one more `Response::status()` read, in the serving-fence assertion for
+# the owner's internal Live TV snapshot. Same category as the M3 and M7 rows
+# above: an HTTP status code on an in-process `oneshot` response, launching no
+# process and owning no producer.
+expected_occurrences = 237
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

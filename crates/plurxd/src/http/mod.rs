@@ -1588,6 +1588,14 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body, "quorum unavailable\n");
 
+        // Every route here is a client-facing GET behind
+        // `mutable_media_serving_gate`, which is what produces the envelope and
+        // the `Retry-After` asserted below. The internal Live TV snapshot is
+        // NOT one of these -- it is on the outer router, which carries no such
+        // gate -- and it had been sitting in this list as a GET, answering 405
+        // from the router's method table before any fence was consulted. That
+        // looked like coverage and was not; its real fence is asserted on its
+        // own below.
         for path in [
             "/api/v1/hls/probe/status",
             "/api/v1/files/7/decision",
@@ -1604,7 +1612,6 @@ mod tests {
             "/library/metadata/7/thumb",
             "/photo/:/transcode",
             "/api/v1/live-tv/channels",
-            crate::live_tv::SNAPSHOT_PATH,
         ] {
             let response = app
                 .clone()
@@ -1627,6 +1634,29 @@ mod tests {
             assert_eq!(body["code"], "serving_fenced", "{path}");
             assert!(body.get("retry_nodes").is_none(), "{path}");
         }
+
+        // The owner's internal snapshot, asked with the verb it accepts and
+        // with no credential at all. A fenced owner must not reach
+        // configuration, its own network, or FFmpeg under any authentication
+        // shape, so the fence is ahead of the signature check -- which is
+        // exactly what a 503 rather than a 401 proves here. It carries no
+        // envelope and no `Retry-After`: peers read the status, and the
+        // deliberate cost of fencing this early is that there is nothing yet
+        // to sign a body with.
+        let response = app
+            .clone()
+            .oneshot(post(crate::live_tv::SNAPSHOT_PATH, None, json!({})))
+            .await
+            .expect("fenced internal snapshot response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER), None);
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes()
+            .is_empty());
     }
 
     fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -4615,6 +4645,9 @@ mod tests {
             [
                 "analysis",
                 "deliveries",
+                // Live TV runs on one unreplicated node, so its key is in the
+                // base payload rather than behind the clustered branch.
+                "live_tv",
                 "offline",
                 "producing",
                 "scans",
