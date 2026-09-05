@@ -217,6 +217,11 @@ cluster-daemon-check: ## Run real-daemon activation and activity contracts
 	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
 	  --test cluster_activity -- --nocapture
 
+.PHONY: live-tv-two-node-check
+live-tv-two-node-check: ## Run the two-node Live TV acceptance cases (needs a host that can bind ports 80 and 5004)
+	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
+	  --test live_tv_two_node -- --nocapture --test-threads=1
+
 .PHONY: cluster-check
 cluster-check: cluster-wal-check cluster-store-check cluster-harness-check cluster-daemon-check ## Run every replicated recovery and failure contract
 

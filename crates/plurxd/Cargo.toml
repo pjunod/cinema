@@ -77,3 +77,7 @@ required-features = ["cluster-integration-tests"]
 [[test]]
 name = "cluster_activity"
 required-features = ["cluster-integration-tests"]
+
+[[test]]
+name = "live_tv_two_node"
+required-features = ["cluster-integration-tests"]
