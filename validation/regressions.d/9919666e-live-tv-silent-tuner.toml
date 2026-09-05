@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9919666e"]
+points = ["live-tv.integration"]
+checks = ["rust-gate"]
+reason = "A flat fifteen-second STARTUP_TIMEOUT gave one message to two unrelated situations on a real HDHomeRun FLEX 4K: two ATSC 3.0 channels that accept the connection and deliver zero bytes, and a feeding channel whose FFmpeg is still consuming its eight-megabyte probesize when the budget expires -- about twenty-three seconds of wall time on a 2.8 Mbps mux -- so the producer's actual outcome never reached the caller. The coverage drives the one decision both the producer loop and the waiting request now consult: a silent tuner is still refused promptly and the message names the silence rather than blaming a segment, a tuner that has delivered even one byte outlives that budget, a feeding tuner that never publishes is still refused eventually and names how many bytes arrived, and the two budgets stay ordered whatever the constants become. It was executed against the unfixed implementation -- the byte count replaced with an unconditional flat deadline -- and observed to fail there on the assertion that one byte buys more than the silent budget. This is a diagnostics change and not the ATSC 3.0 repair; extending the budget is how the underlying encoder error became reportable as stream_failed instead of a timeout."
