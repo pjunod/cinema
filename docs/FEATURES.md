@@ -512,11 +512,17 @@ startup budget expired first, giving one message to both a channel that is
 quietly working and one that sent nothing at all. And `-probesize` was 8 MiB of
 *tuner stream*, which on a 2.8 Mbps mux is about 23 s of waiting on its own.
 
-What remains is startup time on a weak mux, not a codec: that antenna's only
-feeding ATSC 3.0 mux carries 58% signal quality with visible decode errors, and
-two more ATSC 3.0 channels on it return no bytes at all from the device, which
-is reception rather than software. So Live TV is accepted on ATSC 1.0 and honest
-about ATSC 3.0 being unfinished. See
+With all three repaired, **ATSC 3.0 plays**: a HEVC Main 10 1080 channel with
+AC-3 5.1 arrives as H.264 720p with AAC stereo, playable **9.0 s** after asking
+against the same 15 s budget, on a mux reading only 51% signal quality — and the
+tuner comes back with no scratch left behind.
+
+What plurx still cannot open on that antenna is **protected** ATSC 3.0. Three
+channels are flagged DRM and refused by name. Two more are not flagged and
+behave exactly like the flagged ones: the device accepts the connection and
+returns nothing after a flat ten seconds, while reporting 98% signal quality —
+so that is the device declining to hand over protected content, not a weak
+signal, and not something plurx can fix. See
 [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
 
 **What else is limited, honestly.** Losing the owner node ends the live session

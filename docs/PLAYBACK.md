@@ -1412,10 +1412,15 @@ is reclaimed by the server whether or not any client ever comes back.
   and FFmpeg exit before publishing. `live_video_filter` appends
   `format=yuv420p` on the paths that do not already pin a format; VAAPI and QSV
   pin their own through the hardware upload.
-- **ATSC 3.0 remains unfinished, on latency rather than on codecs.** Every ATSC
-  3.0 channel on the test antenna is HEVC Main 10, and the one mux that feeds at
-  all carries 58% signal quality with visible decode errors. Reproduce with
+- **ATSC 3.0 plays**, measured on the same device: HEVC Main 10 1080 with AC-3
+  5.1 in, H.264 720p with AAC stereo out, playable 9.0 s after asking against
+  the 15 s budget, on a mux reading 51% signal quality. Reproduce with
   `make live-tv-hardware-check DEVICE=<ipv4> --channel <an ATSC 3.0 number>`.
+- **Protected ATSC 3.0 is not playable and never will be here.** Flagged
+  channels are refused by name with `drm_unsupported`. Unflagged ones on a
+  protected mux fail the same way the flagged ones do — the device returns
+  nothing after a flat ten seconds while reporting 98% signal quality — which
+  surfaces as `startup_timeout` naming the silence.
 - **HLS session disk.** A live HLS writer's history grows for its whole life,
   so the reaper keeps 180 s behind the download frontier on both the transcode
   and copy paths. That covers the 120 s fetch lead measured on a physical iPad
