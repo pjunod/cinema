@@ -887,6 +887,9 @@ mod tests {
     #[test]
     fn vod_session_participates_in_the_bounded_peer_inventory() {
         let session = crate::vodserve::VodDeliveryInfo {
+            delivered_bytes: 0,
+            delivered_bps: None,
+            delivered_idle_ms: 0,
             id: "vod-session".to_owned(),
             file_id: 7,
             item_id: 9,

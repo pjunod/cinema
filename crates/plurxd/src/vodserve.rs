@@ -313,6 +313,21 @@ pub struct VodSessionInfo {
     pub working_set_budget_bytes: u64,
     pub completed_cache_bytes: u64,
     pub admitted: bool,
+    /// Everything this viewer has actually been handed, and how fast.
+    ///
+    /// `delivered_bps` is `None` until a measurement window has closed, and
+    /// stays `None` rather than being filled from the encoder's configured
+    /// target: what an encoder was *asked* to produce is not what a link
+    /// carried, and on VOD the presentation is a stream copy, so the target
+    /// describes nothing that happened. Unknown must stay unknown — a
+    /// substituted number would let `headroom_refusal` pass a client whose
+    /// link was never measured.
+    pub delivered_bytes: i64,
+    /// Bits per second, to match the rolling view's units.
+    pub delivered_bps: Option<i64>,
+    /// How long since the rate was last recomputed, which is what tells a
+    /// stale rate from a dead link.
+    pub delivered_idle_ms: i64,
     pub suspended: bool,
     #[serde(rename = "final")]
     pub final_: bool,
@@ -332,6 +347,16 @@ pub struct VodDeliveryInfo {
     pub target_height: i64,
     pub started_unix: i64,
     pub idle_seconds: u64,
+    /// What this delivery has actually handed the viewer.
+    ///
+    /// Carried so the activity view can say what a VOD session is costing.
+    /// It previously reported a hard-coded zero with a delivery idle age
+    /// derived from the session's last touch, which reads as a measurement
+    /// and is not one — a handle that had been touched a second ago looked
+    /// busy whether or not a single byte had moved.
+    pub delivered_bytes: i64,
+    pub delivered_bps: Option<i64>,
+    pub delivered_idle_ms: i64,
 }
 
 /// What [`VodServe::try_create`] answers when the VOD presentation can serve
@@ -443,6 +468,14 @@ pub struct SegmentReady {
     pub len: u64,
     /// Strong: rendition key + plan index + materialization instant + length.
     pub etag: String,
+    /// The meter of the session this answer was opened for.
+    ///
+    /// Carried on the answer rather than looked up by the response, and not
+    /// optional, so a segment cannot be served without something to count it
+    /// with. The delivery rate this feeds is what
+    /// `PreparationConditions::headroom_refusal` reads; a body served against
+    /// no meter would silently reintroduce `throughput_unreported`.
+    pub delivery: Arc<crate::meter::Meter>,
 }
 
 /// The copy recipe one rendition serves, minus `start_seconds` — exactly the
@@ -1486,6 +1519,20 @@ struct Session {
     /// stable across same-id idle reap and resurrection.
     incarnation: Arc<()>,
     last_touch: StdMutex<Instant>,
+    /// Bytes this viewer has actually been handed, over monotonic time.
+    ///
+    /// Per session rather than per rendition: two viewers of the same
+    /// immutable rendition have two different links, and a rate that averaged
+    /// them would describe neither. This is the VOD half of what
+    /// `transcode::Session::delivery` already is for rolling delivery, and it
+    /// exists for the same reason — `PreparationConditions::headroom_refusal`
+    /// cannot judge headroom against a rate nobody measured, so on VOD, which
+    /// is every public session, it refused `throughput_unreported` forever.
+    ///
+    /// `Arc` because the response body outlives the registry lock: bytes are
+    /// counted on the pump task, long after `segment` has returned and the
+    /// `sessions` map has been unlocked.
+    delivery: Arc<crate::meter::Meter>,
     /// Owner-local sequence fence kept separate from media-object touches.
     control: StdMutex<crate::playback_control::ControlState>,
     /// Stored, source-fenced marker boundaries projected onto this rendition's
@@ -2025,6 +2072,7 @@ impl VodServe {
                 lifecycle: Arc::clone(&lifecycle),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -2616,6 +2664,7 @@ impl VodServe {
             lifecycle: Arc::clone(&lifecycle),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
+            delivery: Arc::new(crate::meter::Meter::new()),
             control: StdMutex::new(crate::playback_control::ControlState::default()),
             marker_destinations,
             last_control_snapshot: None,
@@ -2742,6 +2791,9 @@ impl VodServe {
                         .expect("touch lock")
                         .elapsed()
                         .as_secs(),
+                    delivered_bytes: session.delivery.total_bytes(),
+                    delivered_bps: session.delivery.recent_bps().map(|bytes| bytes * 8),
+                    delivered_idle_ms: session.delivery.idle_for_ms(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2984,7 +3036,7 @@ impl VodServe {
     pub async fn playlist(&self, session_id: &str) -> Option<VodPublication<Vec<u8>>> {
         let publication = self.session_rendition(session_id).await?;
         let (result, owner) = match publication.result {
-            Ok((rendition, _)) => (Ok(rendition.playlist.clone()), publication.owner),
+            Ok((rendition, _, _)) => (Ok(rendition.playlist.clone()), publication.owner),
             Err(error) => (Err(error), publication.owner),
         };
         Some(VodPublication { result, owner })
@@ -3001,7 +3053,7 @@ impl VodServe {
         name: &str,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
         let publication = self.session_rendition(session_id).await?;
-        let (rendition, budget) = match publication.result {
+        let (rendition, budget, delivery) = match publication.result {
             Ok(found) => found,
             Err(error) => {
                 return Some(VodPublication {
@@ -3013,7 +3065,10 @@ impl VodServe {
         let owner = publication.owner;
         if name == INIT_NAME {
             return Some(VodPublication {
-                result: self.serve_init(&rendition, budget).await.map(Some),
+                result: self
+                    .serve_init(&rendition, budget, delivery)
+                    .await
+                    .map(Some),
                 owner,
             });
         }
@@ -3033,7 +3088,7 @@ impl VodServe {
         }
         Some(VodPublication {
             result: self
-                .serve_segment(&rendition, session_id, index, budget)
+                .serve_segment(&rendition, session_id, index, budget, delivery)
                 .await
                 .map(Some),
             owner,
@@ -3396,7 +3451,7 @@ impl VodServe {
         &self,
         session_id: &str,
     ) -> Option<VodPublication<VodSessionInfo>> {
-        let (rendition, target_height, owner) = {
+        let (rendition, target_height, owner, delivery) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
@@ -3406,6 +3461,7 @@ impl VodServe {
                 session.live_rendition().map(Arc::clone)?,
                 session.target_height,
                 session.response_owner(),
+                Arc::clone(&session.delivery),
             )
         };
         let last_served = rendition
@@ -3499,6 +3555,11 @@ impl VodServe {
                 working_set_budget_bytes: rendition.working_set_budget,
                 completed_cache_bytes: self.shared.completed_cache.load(Relaxed),
                 admitted,
+                // Bytes per second becomes bits per second here, the same
+                // conversion and the same units the rolling view publishes.
+                delivered_bytes: delivery.total_bytes(),
+                delivered_bps: delivery.recent_bps().map(|bytes| bytes * 8),
+                delivered_idle_ms: delivery.idle_for_ms(),
                 suspended,
                 final_: complete,
             }),
@@ -4023,7 +4084,7 @@ impl VodServe {
     pub async fn hls_facts(&self, session_id: &str) -> Option<VodHlsFacts> {
         let publication = self.session_rendition(session_id).await?;
         let rendition = match publication.result {
-            Ok((rendition, _)) => rendition,
+            Ok((rendition, _, _)) => rendition,
             _ => return None,
         };
         Some(VodHlsFacts {
@@ -4040,7 +4101,7 @@ impl VodServe {
     pub async fn segment_window(&self, session_id: &str, segment_index: i64) -> Option<(f64, f64)> {
         let index = u32::try_from(segment_index).ok()?;
         let publication = self.session_rendition(session_id).await?;
-        let (rendition, _) = match publication.result {
+        let (rendition, _, _) = match publication.result {
             Ok(value) => value,
             _ => return None,
         };
@@ -4287,7 +4348,7 @@ impl VodServe {
     async fn session_rendition(
         &self,
         session_id: &str,
-    ) -> Option<VodPublication<(Arc<Rendition>, Duration)>> {
+    ) -> Option<VodPublication<(Arc<Rendition>, Duration, Arc<crate::meter::Meter>)>> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
         let owner = session.response_owner();
@@ -4297,6 +4358,7 @@ impl VodServe {
                 None => Ok((
                     session.live_rendition().map(Arc::clone)?,
                     session.block_budget,
+                    Arc::clone(&session.delivery),
                 )),
             },
             owner,
@@ -4307,6 +4369,7 @@ impl VodServe {
         &self,
         rendition: &Arc<Rendition>,
         budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
         if self.source_changed(rendition) {
             let cause = "source changed after the fragment index was selected".to_owned();
@@ -4331,7 +4394,7 @@ impl VodServe {
             if rendition.dir.has_init().await {
                 rendition.clear_demand(INIT_DEMAND_INDEX);
                 let path = rendition.dir.path().join(INIT_NAME);
-                let ready = open_ready(&path, &format!("{}-init", rendition.key))
+                let ready = open_ready(&path, &format!("{}-init", rendition.key), &delivery)
                     .await
                     .map_err(VodError::Io)?;
                 if self.source_changed(rendition) {
@@ -4370,15 +4433,16 @@ impl VodServe {
         session_id: &str,
         index: u32,
         budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
         // Materialized → serve immediately: the overwhelmingly common case.
-        if let Some(ready) = self.open_materialized(rendition, index).await? {
+        if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure() {
             return Err(VodError::ProducerFailed(cause));
         }
-        self.blocked_wait(rendition, session_id, index, budget)
+        self.blocked_wait(rendition, session_id, index, budget, delivery)
             .await
     }
 
@@ -4390,6 +4454,7 @@ impl VodServe {
         session_id: &str,
         index: u32,
         budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
         let deadline = tokio::time::Instant::now() + budget;
         let key = WaitKey {
@@ -4420,7 +4485,7 @@ impl VodServe {
         // Register before rechecking bytes/failure to close the lost-wakeup
         // window. The registration stays alive through open_materialized,
         // protecting a just-published target from concurrent eviction.
-        if let Some(ready) = self.open_materialized(rendition, index).await? {
+        if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure() {
@@ -4462,7 +4527,7 @@ impl VodServe {
                     pause.wait().await;
                     pause.wait().await;
                 }
-                match self.open_materialized(rendition, index).await? {
+                match self.open_materialized(rendition, index, &delivery).await? {
                     Some(ready) => Ok(ready),
                     // An eviction already committed before registration, or an
                     // external unlink, can still remove the file. Publication
@@ -4497,6 +4562,7 @@ impl VodServe {
         &self,
         rendition: &Arc<Rendition>,
         index: u32,
+        delivery: &Arc<crate::meter::Meter>,
     ) -> Result<Option<SegmentReady>, VodError> {
         if self.source_changed(rendition) {
             let cause = "source changed after the fragment index was selected".to_owned();
@@ -4511,7 +4577,13 @@ impl VodServe {
         // The materialization instant is part of the etag: key-index-length
         // alone collides across an evict-and-regenerate whose bytes differ
         // while its length happens to match.
-        match open_ready(&path, &format!("{}-{index}-{at_ms}", rendition.key)).await {
+        match open_ready(
+            &path,
+            &format!("{}-{index}-{at_ms}", rendition.key),
+            delivery,
+        )
+        .await
+        {
             Ok(ready) => Ok(Some(ready)),
             // The manifest lied — treat as planned; reconcile repairs it.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -6616,13 +6688,18 @@ fn reader_window(reader: &Reader, seconds_per_segment: f64) -> ReaderWindow {
     }
 }
 
-async fn open_ready(path: &Path, etag_stem: &str) -> io::Result<SegmentReady> {
+async fn open_ready(
+    path: &Path,
+    etag_stem: &str,
+    delivery: &Arc<crate::meter::Meter>,
+) -> io::Result<SegmentReady> {
     let file = tokio::fs::File::open(path).await?;
     let len = file.metadata().await?.len();
     Ok(SegmentReady {
         file,
         len,
         etag: format!("{etag_stem}-{len}"),
+        delivery: Arc::clone(delivery),
     })
 }
 
@@ -7220,6 +7297,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle(session_id),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -7257,6 +7335,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle(session_id),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -10191,6 +10270,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -10292,6 +10372,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -10361,6 +10442,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -10405,6 +10487,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(replacement_touch),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -11304,7 +11387,13 @@ mod tests {
             let rendition = Arc::clone(&rendition);
             tokio::spawn(async move {
                 serve
-                    .serve_segment(&rendition, "viewer", 45, Duration::from_secs(5))
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        45,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
                     .await
             })
         };
@@ -11564,7 +11653,13 @@ mod tests {
             let rendition = Arc::clone(&rendition);
             waits.push(tokio::spawn(async move {
                 serve
-                    .serve_segment(&rendition, "viewer", index, Duration::from_secs(1))
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        index,
+                        Duration::from_secs(1),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
                     .await
             }));
         }
@@ -11574,7 +11669,13 @@ mod tests {
         .await;
         assert!(matches!(
             serve
-                .serve_segment(&rendition, "viewer", 50, Duration::from_secs(1))
+                .serve_segment(
+                    &rendition,
+                    "viewer",
+                    50,
+                    Duration::from_secs(1),
+                    Arc::new(crate::meter::Meter::new())
+                )
                 .await,
             Err(VodError::Busy)
         ));
@@ -11614,7 +11715,13 @@ mod tests {
         assert!(
             matches!(
                 serve
-                    .serve_segment(&rendition, "viewer", 50, Duration::from_millis(1))
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        50,
+                        Duration::from_millis(1),
+                        Arc::new(crate::meter::Meter::new())
+                    )
                     .await,
                 Err(VodError::Pending { .. })
             ),
@@ -11690,7 +11797,13 @@ mod tests {
             let rendition = Arc::clone(&rendition);
             tokio::spawn(async move {
                 serve
-                    .blocked_wait(&rendition, "viewer", 10, Duration::from_secs(5))
+                    .blocked_wait(
+                        &rendition,
+                        "viewer",
+                        10,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
                     .await
             })
         };
@@ -11716,7 +11829,15 @@ mod tests {
         let pending = {
             let serve = Arc::clone(&serve);
             let rendition = Arc::clone(&rendition);
-            tokio::spawn(async move { serve.serve_init(&rendition, Duration::from_secs(1)).await })
+            tokio::spawn(async move {
+                serve
+                    .serve_init(
+                        &rendition,
+                        Duration::from_secs(1),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
         };
         wait_until("init deadline owner", Duration::from_secs(1), async || {
             rendition
@@ -11776,6 +11897,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -12283,7 +12405,13 @@ mod tests {
         }
         let served = tokio::time::timeout(
             Duration::from_secs(5),
-            serve.blocked_wait(&rendition, "sess-x", 5, Duration::from_secs(60)),
+            serve.blocked_wait(
+                &rendition,
+                "sess-x",
+                5,
+                Duration::from_secs(60),
+                Arc::new(crate::meter::Meter::new()),
+            ),
         )
         .await
         .expect("the re-check must answer without sleeping the budget")
@@ -12295,7 +12423,13 @@ mod tests {
         record_failure(&serve.shared, &rendition, "boom".to_string());
         match tokio::time::timeout(
             Duration::from_secs(5),
-            serve.blocked_wait(&rendition, "sess-x", 6, Duration::from_secs(60)),
+            serve.blocked_wait(
+                &rendition,
+                "sess-x",
+                6,
+                Duration::from_secs(60),
+                Arc::new(crate::meter::Meter::new()),
+            ),
         )
         .await
         .expect("the re-check must answer without sleeping the budget")
@@ -12316,7 +12450,15 @@ mod tests {
         let waiter = {
             let serve = Arc::clone(&serve);
             let rendition = Arc::clone(&rendition);
-            tokio::spawn(async move { serve.serve_init(&rendition, Duration::from_secs(30)).await })
+            tokio::spawn(async move {
+                serve
+                    .serve_init(
+                        &rendition,
+                        Duration::from_secs(30),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
         rendition.dir.write_init(b"moov").await.expect("init");
@@ -12338,7 +12480,15 @@ mod tests {
         let waiter = {
             let serve = Arc::clone(&serve);
             let rendition = Arc::clone(&rendition);
-            tokio::spawn(async move { serve.serve_init(&rendition, Duration::from_secs(30)).await })
+            tokio::spawn(async move {
+                serve
+                    .serve_init(
+                        &rendition,
+                        Duration::from_secs(30),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
         record_failure(&serve.shared, &rendition, "boom".to_string());
@@ -12369,7 +12519,7 @@ mod tests {
                 .expect("materialize");
         }
         let first = serve
-            .open_materialized(&rendition, 0)
+            .open_materialized(&rendition, 0, &Arc::new(crate::meter::Meter::new()))
             .await
             .expect("open")
             .expect("materialized");
@@ -12382,7 +12532,7 @@ mod tests {
                 .expect("re-materialize");
         }
         let second = serve
-            .open_materialized(&rendition, 0)
+            .open_materialized(&rendition, 0, &Arc::new(crate::meter::Meter::new()))
             .await
             .expect("open")
             .expect("materialized");

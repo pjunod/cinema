@@ -282,6 +282,32 @@ prepare decision on the primary presentation.
 serving boundary and carry the result into the VOD control view. Unknown must
 stay unknown; it must not be replaced by the configured encoder target.
 
+**Corrected.** A VOD session now owns a `meter::Meter` — the same monotonic
+accumulator rolling delivery has always used — and the segment body pump notes
+each chunk *after* the downstream acknowledgement, so only bytes a viewer
+actually took are counted. `VodSessionInfo` carries `delivered_bytes`,
+`delivered_bps` and `delivered_idle_ms`, and `DeliveryView::from_status` reads
+them. `None` still means unmeasured: no window closed, no rate, and nothing is
+ever substituted from `bitrate_for_height`, which describes what an encoder was
+asked to produce rather than what a link carried — and on VOD, which is a
+stream copy, describes nothing that happened at all.
+
+The buffered init object is deliberately not counted: it is handed over whole,
+so crediting it would date bytes at handoff rather than at delivery and inflate
+the first window of a session that has delivered nothing.
+
+This makes preparation reachable on the primary presentation for the first
+time. The client half was already in place — Apple reads AVFoundation's access
+log, Android counts bytes off the wire over a rolling 500 ms window, and web
+uses `hls.bandwidthEstimate` — so `observed_download_bps` was arriving and only
+the server's own rate was missing. The 2× floor still refuses a saturated link,
+which the regression pins: measuring the rate is not a way to always pass.
+
+The same numbers reach the activity view. `vod_delivery_session_info` reported
+a hard-coded zero with a delivery idle age derived from the session's last
+touch — a value shaped like a measurement that was not one, so a handle touched
+a second ago looked busy whether or not a byte had moved.
+
 ### P1-4 — detached preparation can stage a stale selection
 
 The detached staging task retains no accepted control sequence or desired-
@@ -697,7 +723,7 @@ are retained in
 | P0-4 | Response-before-stage in [`control_session_local`](../crates/plurxd/src/http/hls.rs#L5116); placeholder stage in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L5549); client vocabularies in [`playback-control.js`](../crates/plurxd/src/web/playback-control.js#L14), [`PlaybackControlReporter.swift`](../clients/apple/Sources/PlaybackControlReporter.swift#L316), and [`PlaybackControlReporter.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt#L335); [M6 caller handoff](M6-CALLER-HANDOFF.md) §3.4–3.5 |
 | P1-1 | Watchdog/frontier before admission in [`VodServe::segment`](../crates/plurxd/src/vodserve.rs#L4112); pool cancellation in [`waitpool.rs`](../crates/plurxd/src/waitpool.rs#L126); sticky failure in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L4299); isolated `WaitPool` storm test at `waitpool.rs:405` |
 | P1-2 | VOD mapping in [`DeliveryView::from_status`](../crates/plurxd/src/playback_control.rs#L836); action resolution at `playback_control.rs:1882`; VOD failure status at [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L3315); HTTP 502 mapping at `http/hls.rs:8851` |
-| P1-3 | `delivered_bps: None` at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L847); `has_throughput_headroom` refusal at `playback_control.rs:1120`; impossible injected test rate at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L13727) |
+| P1-3 | **Corrected.** Per-session meter on [`vodserve::Session`](../crates/plurxd/src/vodserve.rs); bytes noted after downstream acknowledgement in the VOD body pump in [`http/hls.rs`](../crates/plurxd/src/http/hls.rs); carried by `VodSessionInfo` into `DeliveryView::from_status`. Proved by `a_vod_body_counts_its_delivered_bytes_where_they_leave`, `an_abandoned_vod_body_counts_nothing_it_did_not_hand_over`, `a_measured_vod_delivery_reaches_the_control_view_and_an_unmeasured_one_stays_unknown` and `a_measured_vod_rate_lets_the_headroom_decision_actually_run`. `PreparationConditions::headroom_refusal` is the real function name; the review's `has_throughput_headroom` never existed |
 | P1-4 | Detached spawn at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L5181); asynchronous candidate reads at `http/hls.rs:5409`; preparation slot identity at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L2418) |
 | P1-5 | SQLite commit at [`sessions.rs`](../crates/plurx-core/src/store/sqlite/sessions.rs#L1623), Hiqlite commit at [`hiqlite_sessions.rs`](../crates/plurx-core/src/store/hiqlite_sessions.rs#L1750), and best-effort timer at `http/hls.rs:5707` |
 | P1-6 | Resume calculation in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L6459) and its capture in [`PreparationCandidateInputs`](../crates/plurxd/src/http/hls.rs#L6239); fetched-end caveat in [`media_sessions.rs`](../crates/plurxd/src/media_sessions.rs#L2497); anchor proved by `a_staged_successor_resumes_at_the_accepted_playhead_not_the_fetch_frontier`, `the_control_seam_stages_from_the_accepted_playhead_not_the_route_frontier` and `a_backward_seek_stages_from_the_seek_target_at_the_control_seam`; aligned lead still unimplemented |

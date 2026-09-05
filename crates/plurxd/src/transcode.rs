@@ -6356,10 +6356,12 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         resume_below_seconds: None,
         resume_below_bytes: None,
         ahead_bytes: None,
-        delivered_bytes: 0,
-        delivered_bps: None,
-        delivered_idle_ms: i64::try_from(info.idle_seconds.saturating_mul(1_000))
-            .unwrap_or(i64::MAX),
+        // Measured, not assumed. The zero and the session-touch age this
+        // replaces looked like a reading and were not one: a handle touched a
+        // second ago reported a fresh delivery whether or not a byte had moved.
+        delivered_bytes: info.delivered_bytes,
+        delivered_bps: info.delivered_bps,
+        delivered_idle_ms: info.delivered_idle_ms,
         readrate: 0.0,
         suspended: false,
         suspend_count: 0,
