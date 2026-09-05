@@ -1072,6 +1072,12 @@ fn decode_setup(encoder: Encoder, source: &MediaFile) -> (Vec<String>, Option<St
     ) {
         return (Vec::new(), None);
     }
+    // FFmpeg 7.1.4-Jellyfin's VideoToolbox MPEG-4 Part 2 path repeatedly
+    // failed frames for issue #913. Avoid that implicated input decoder while
+    // retaining the independently selected h264_videotoolbox output encoder.
+    if encoder::videotoolbox_mpeg4_software_decode(encoder, source) {
+        return (Vec::new(), None);
+    }
     let heavy = heavy_source(source);
     // 10-bit (HDR/DV) surfaces download as p010le; 8-bit as nv12.
     //

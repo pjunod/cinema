@@ -579,6 +579,7 @@ paths = [
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",
   "crates/plurx-core/src/transcode/**",
+  "crates/plurx-core/tests/videotoolbox_decode_policy.rs",
   "crates/plurx-pgs/**",
   "fuzz/**",
   "crates/plurxd/src/{admission,copyseg,delivery,dvpipe,ffmpeg,fragindex,fragment_index_cluster,meter,pgs_overlay,pipeprobe,playback_control,playstart,prodexec,prodrun,prodsched,produce,progressive,renditiondir,subtitles,titlestore,transcode,vodgen,vodserve,waitpool}.rs",

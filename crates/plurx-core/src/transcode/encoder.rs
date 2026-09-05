@@ -7,6 +7,26 @@
 //! low-risk paths, VAAPI/QSV follow documented patterns and are validated on
 //! real hardware.
 
+use crate::domain::MediaFile;
+
+/// Targeted cache identity for the compatibility rule introduced by #913.
+pub(super) const VIDEOTOOLBOX_MPEG4_SOFTWARE_DECODE_REVISION: &str =
+    "videotoolbox-mpeg4-software-v1";
+
+/// Whether issue #913's VideoToolbox/MPEG-4 compatibility rule applies.
+///
+/// The probe's canonical codec value is the contract. Container extensions,
+/// profiles, dimensions, and guessed aliases cannot safely identify MPEG-4
+/// Part 2, so missing or unrecognized metadata preserves existing routing.
+pub(super) fn videotoolbox_mpeg4_software_decode(encoder: Encoder, source: &MediaFile) -> bool {
+    encoder == Encoder::VideoToolbox && source.video_codec.as_deref() == Some("mpeg4")
+}
+
+pub(super) fn decode_policy_revision(encoder: Encoder, source: &MediaFile) -> Option<&'static str> {
+    videotoolbox_mpeg4_software_decode(encoder, source)
+        .then_some(VIDEOTOOLBOX_MPEG4_SOFTWARE_DECODE_REVISION)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoder {
     Software,

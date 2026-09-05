@@ -24,7 +24,8 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::MediaFile;
 
-use super::{Encoder, OutputGrade, SubtitleBurn, ToneMap, TranscodeOptions, SEGMENT_SECONDS};
+use super::{encoder::decode_policy_revision, Encoder, OutputGrade, SubtitleBurn, ToneMap};
+use super::{TranscodeOptions, SEGMENT_SECONDS};
 
 /// Bumped when the meaning of a recipe changes in a way the field list cannot
 /// express — a different hash construction, a corrected serialisation, a fixed
@@ -90,6 +91,12 @@ impl Recipe<'_> {
         let mut h = Sha256::new();
         field(&mut h, "v", CACHE_FORMAT_VERSION.to_string().as_bytes());
         self.digest.feed(&mut h);
+        // Emit this field only for affected recipes. An empty field would move
+        // every unrelated key, which is not an acceptable way to invalidate
+        // one codec/backend pair.
+        if let Some(revision) = decode_policy_revision(self.digest.encoder, self.file) {
+            field(&mut h, "decode_policy", revision.as_bytes());
+        }
         // This occupied the same position with the same literal in the
         // manager-level digest before N1. Moving it here lets a per-title
         // effective quality value participate without changing one byte of a

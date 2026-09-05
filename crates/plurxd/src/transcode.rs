@@ -32910,6 +32910,130 @@ pub(crate) mod tests {
         );
     }
 
+    /// Issue #913 changes both the command and the durable name of the bytes.
+    /// An old complete entry must miss, and old staging parts must not become
+    /// the prefix of a corrected generation. Once corrected output is
+    /// published under the new key, the same request may hit it normally.
+    #[tokio::test]
+    async fn videotoolbox_mpeg4_policy_rejects_old_cache_and_retained_prefix() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file_with_probe_at(
+            &store,
+            "/media/episode.avi",
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(3_358_400),
+                container: Some("avi".into()),
+                video_codec: Some("mpeg4".into()),
+                video_profile: Some("Advanced Simple Profile".into()),
+                width: Some(624),
+                height: Some(352),
+                bit_depth: Some(8),
+                bitrate: Some(1_599_000),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (mgr, _work, cache) = cached_manager(&store);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let encoder = Encoder::VideoToolbox;
+        let opts = mgr.options_for_tone_map(
+            encoder,
+            &file,
+            352,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+        let mut digest = mgr.digest().expect("cache configured");
+        let old_hash =
+            "3e6a5e4ca918f689a2db606e097cce9dbb014f96bbcbe14e6be6d0b9e698a26c".to_owned();
+        let new_hash = mgr
+            .effective_recipe(&mut digest, &file, &opts, encoder, false)
+            .hash();
+        assert_ne!(
+            old_hash, new_hash,
+            "the corrected request needs a new identity"
+        );
+
+        let old_dir = seed_cache_dir(cache.path(), "old/complete").await;
+        store
+            .claim_cache_entry(&old_hash, file_id, 1, NODE, "old/complete")
+            .await
+            .expect("claim old-policy entry");
+        store
+            .complete_cache_entry(&old_hash, NODE, 1_234)
+            .await
+            .expect("complete old-policy entry");
+
+        let owner = || SessionOwner {
+            user_name: "paul",
+            supersession_user: r#"["username","paul"]"#,
+            playback_id: "pb-issue-913",
+            automatic: true,
+        };
+        assert!(
+            mgr.serve_cached(&file, &opts, encoder, "Episode", owner())
+                .await
+                .is_none(),
+            "a corrected request reused complete output made under the old decode policy"
+        );
+        assert!(old_dir.exists(), "a miss need not delete the old entry");
+
+        let old_staging = crate::cachekeep::staging_dir(cache.path(), &old_hash);
+        let old_part = old_staging.join(crate::produce::part_dir(0));
+        tokio::fs::create_dir_all(&old_part)
+            .await
+            .expect("create old retained part");
+        seeded_session_dir(&old_part, 1, 2.0).await;
+        let new_staging = crate::cachekeep::staging_dir(cache.path(), &new_hash);
+        tokio::fs::create_dir_all(&new_staging)
+            .await
+            .expect("create corrected staging root");
+        let new_staging = plurx_core::fs_secure::SecureDirectory::open(&new_staging)
+            .await
+            .expect("open corrected staging root");
+        assert!(
+            resume_parts(&new_staging)
+                .await
+                .expect("read corrected retained prefix")
+                .is_empty(),
+            "old-policy retained parts became a corrected generation prefix"
+        );
+        assert!(
+            old_part.exists(),
+            "the assertion did not actually seed an old retained prefix"
+        );
+
+        seed_cache_dir(cache.path(), "new/complete").await;
+        store
+            .claim_cache_entry(&new_hash, file_id, 1, NODE, "new/complete")
+            .await
+            .expect("claim corrected entry");
+        store
+            .complete_cache_entry(&new_hash, NODE, 1_234)
+            .await
+            .expect("publish corrected entry");
+        let hit = mgr
+            .serve_cached(&file, &opts, encoder, "Episode", owner())
+            .await
+            .expect("corrected request hits corrected output");
+        assert_eq!(hit.encoder, "cached");
+        assert!(mgr.stop_session(&hit.session_id, "test").await);
+        assert!(
+            store
+                .cache_hit(&new_hash, NODE)
+                .await
+                .expect("corrected cache lookup")
+                .is_some(),
+            "corrected output was not published under the corrected key"
+        );
+    }
+
     /// The whole point, end to end: a hit plays with no encoder, no hardware
     /// slot and no queue — and, the part that would destroy the cache, the
     /// bytes are still there afterwards.
