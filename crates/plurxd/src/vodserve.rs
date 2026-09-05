@@ -83,6 +83,15 @@ const DORMANT_RENDITION_TTL: Duration = Duration::from_secs(1800);
 /// read proves the capability is no longer active.
 const TERMINAL_TOMBSTONE_RETENTION: Duration = Duration::from_secs(60);
 const TERMINAL_ROUTE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long one maintenance pass will wait on outstanding terminal cleanups
+/// before proceeding without them.
+///
+/// Sized against the slowest legitimate cleanup — a reader detach that waits
+/// on a subtitle ffmpeg to settle, plus a durable terminal commit — with room
+/// to spare, because the cost of waiting slightly too long is one late
+/// maintenance pass and the cost of not bounding it at all is a node whose
+/// maintenance never runs again.
+const TERMINAL_CLEANUP_MAINTENANCE_WAIT: Duration = Duration::from_secs(30);
 const TERMINAL_ROUTE_CONFIRM_FANOUT: usize = 16;
 /// Begin speculative marker work this many seconds of playback time before a
 /// stored marker. The distance in film time is scaled by the client's current
@@ -115,9 +124,14 @@ const PENDING_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// pool's; a refused wait answers a typed 503 immediately, no state.
 const PER_SESSION_WAIT_CAP: usize = 4;
 
-/// Blocked GETs across the node. TODO(m3-wire): becomes a setting when the
-/// manager exposes the wait caps through `/api/v1/settings`.
-const GLOBAL_WAIT_CAP: usize = 64;
+/// Blocked GETs across the node when the setting is absent.
+///
+/// Now the default rather than the law: `playback.vod_blocked_get_cap` sets
+/// it, and `try_create` applies the current value, so an operator watching
+/// `pool_full` refusals can size it for their own deployment without a
+/// restart. The per-session cap stays a constant because it bounds one viewer
+/// rather than the node.
+const DEFAULT_GLOBAL_WAIT_CAP: usize = 64;
 
 /// The rendition's persisted init identity, beside its `init.mp4`.
 const IDENTITY_NAME: &str = "identity.json";
@@ -136,6 +150,9 @@ pub struct VodSettings {
     pub block_budget: Duration,
     /// From one segment's first blocked demand to bytes or typed failure.
     pub materialize_budget: Duration,
+    /// Node-wide ceiling on blocked segment GETs, from
+    /// `playback.vod_blocked_get_cap`.
+    pub blocked_get_cap: usize,
 }
 
 /// Why a session ended for good. Every cause answers 410 and never resurrects.
@@ -291,6 +308,11 @@ pub struct VodSessionInfo {
     pub producer_state: &'static str,
     pub producer_hold: Option<&'static str>,
     pub producer_failed: Option<String>,
+    /// The bounded class of that failure, in the same vocabulary rolling
+    /// delivery publishes. `producer_failed` is the sentence an operator
+    /// reads; this is the only part a client can act on, because
+    /// `producer_state` flattens every failure to the word `failed`.
+    pub producer_decision: Option<&'static str>,
     pub published_end_ms: Option<i64>,
     /// The end of the contiguous materialized run measured from the segment
     /// this client was last served, rather than from segment 0.
@@ -313,6 +335,34 @@ pub struct VodSessionInfo {
     pub working_set_budget_bytes: u64,
     pub completed_cache_bytes: u64,
     pub admitted: bool,
+    /// Everything this viewer has actually been handed, and how fast.
+    ///
+    /// `delivered_bps` is `None` until a measurement window has closed, and
+    /// stays `None` rather than being filled from the encoder's configured
+    /// target: what an encoder was *asked* to produce is not what a link
+    /// carried, and on VOD the presentation is a stream copy, so the target
+    /// describes nothing that happened. Unknown must stay unknown — a
+    /// substituted number would let `headroom_refusal` pass a client whose
+    /// link was never measured.
+    pub delivered_bytes: i64,
+    /// Bits per second, to match the rolling view's units.
+    pub delivered_bps: Option<i64>,
+    /// How long since the rate was last recomputed, which is what tells a
+    /// stale rate from a dead link.
+    ///
+    /// **Deliberately not serialized.** This struct is the body of
+    /// `/hls/{session}/status`, and Apple's `DeliveryStarvationDetector`
+    /// refuses to fire unless `delivered_idle_ms` is present and at least
+    /// sixteen seconds. VOD has never carried the key, so that detector has
+    /// never been armed on the primary presentation; publishing it here would
+    /// turn on an automatic session reopen for every VOD viewer as a side
+    /// effect of adding a measurement. That may well be the right thing — the
+    /// detector was written for copy-HLS — but it is a client-behaviour change
+    /// that needs its own evidence on hardware, not a rider on this one. The
+    /// field is read in-process by `DeliveryView::from_status`, which is what
+    /// needs it.
+    #[serde(skip)]
+    pub delivered_idle_ms: i64,
     pub suspended: bool,
     #[serde(rename = "final")]
     pub final_: bool,
@@ -332,6 +382,16 @@ pub struct VodDeliveryInfo {
     pub target_height: i64,
     pub started_unix: i64,
     pub idle_seconds: u64,
+    /// What this delivery has actually handed the viewer.
+    ///
+    /// Carried so the activity view can say what a VOD session is costing.
+    /// It previously reported a hard-coded zero with a delivery idle age
+    /// derived from the session's last touch, which reads as a measurement
+    /// and is not one — a handle that had been touched a second ago looked
+    /// busy whether or not a single byte had moved.
+    pub delivered_bytes: i64,
+    pub delivered_bps: Option<i64>,
+    pub delivered_idle_ms: i64,
 }
 
 /// What [`VodServe::try_create`] answers when the VOD presentation can serve
@@ -425,8 +485,14 @@ pub enum VodError {
     ProducerFailed(String),
     /// 410 — the session ended for good.
     Gone(Terminal),
-    /// Wait-pool caps hit → typed 503, no wait.
-    Busy,
+    /// A wait-pool cap was hit → typed 503, no wait.
+    ///
+    /// It carries *which* cap. The two mean different things to the client
+    /// holding the refusal — one says this player is asking for too much at
+    /// once, the other says the node is out of parked-request capacity — and
+    /// collapsing them here is what left an operator unable to tell a single
+    /// seek storm from a node whose ceiling is sized for a smaller deployment.
+    Busy(crate::waitpool::WaitRefused),
     /// 500.
     Io(std::io::Error),
 }
@@ -443,6 +509,14 @@ pub struct SegmentReady {
     pub len: u64,
     /// Strong: rendition key + plan index + materialization instant + length.
     pub etag: String,
+    /// The meter of the session this answer was opened for.
+    ///
+    /// Carried on the answer rather than looked up by the response, and not
+    /// optional, so a segment cannot be served without something to count it
+    /// with. The delivery rate this feeds is what
+    /// `PreparationConditions::headroom_refusal` reads; a body served against
+    /// no meter would silently reintroduce `throughput_unreported`.
+    pub delivery: Arc<crate::meter::Meter>,
 }
 
 /// The copy recipe one rendition serves, minus `start_seconds` — exactly the
@@ -465,9 +539,16 @@ struct Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 struct Reader {
-    /// The furthest segment this session has asked for.
+    /// Current playback anchor, owned by accepted control once available.
+    /// Before control arrives, successful media commits are the fallback.
     frontier: u32,
-    /// The last segment actually served — the eviction window's playhead.
+    control_sequence: Option<u64>,
+    /// The last segment actually served. Telemetry only: the observed runway
+    /// the status publishes is measured from here, while both the eviction
+    /// window and the production target are anchored on `frontier`, which
+    /// accepted control owns. Reading this as the playhead would put a
+    /// viewer's protected range back where their bytes came from rather than
+    /// where they are now.
     last_served: Option<u32>,
     /// Per-playback provenance for speculative marker production. This is
     /// deliberately separate from the ordinary reader frontier: moving the
@@ -479,8 +560,88 @@ impl Reader {
     fn new(frontier: u32) -> Self {
         Self {
             frontier,
+            control_sequence: None,
             last_served: None,
             marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),
+        }
+    }
+
+    fn accept_control(&mut self, sequence: u64, index: u32) {
+        // ControlState already accepted the complete owner epoch/sequence.
+        // A new owner's sequence one must replace the old owner's sequence N.
+        self.control_sequence = Some(sequence);
+        self.frontier = index;
+    }
+
+    fn served(&mut self, index: u32) {
+        self.last_served = Some(index);
+        if self.control_sequence.is_none() {
+            self.frontier = index;
+        }
+    }
+}
+
+/// Declared before a registered wait so cancellation first releases the wait
+/// and its file pin, then wakes the scheduler to observe that exact removal.
+struct DemandWake(Arc<Rendition>);
+
+impl Drop for DemandWake {
+    fn drop(&mut self) {
+        self.0.kick();
+    }
+}
+
+struct MaterializeClock {
+    started: Instant,
+    owners: usize,
+    retry_pending: bool,
+    watchdog: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for MaterializeClock {
+    fn drop(&mut self) {
+        if let Some(watchdog) = &self.watchdog {
+            watchdog.abort();
+        }
+    }
+}
+
+/// HTTP timeout may transfer the deadline to a retry; cancellation may not.
+/// The last cancelled owner removes the clock synchronously, fencing its
+/// sleeping watchdog from a later request for the same entry.
+struct MaterializeDemand {
+    rendition: Arc<Rendition>,
+    index: u32,
+    started: Instant,
+}
+
+impl MaterializeDemand {
+    fn retry_pending(&self) {
+        let mut demands = self.rendition.demand_since.lock().expect("demand lock");
+        if let Some(clock) = demands
+            .get_mut(&self.index)
+            .filter(|clock| clock.started == self.started)
+        {
+            clock.retry_pending = true;
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.started.elapsed() >= self.rendition.materialize_budget
+    }
+}
+
+impl Drop for MaterializeDemand {
+    fn drop(&mut self) {
+        let mut demands = self.rendition.demand_since.lock().expect("demand lock");
+        if let Some(clock) = demands
+            .get_mut(&self.index)
+            .filter(|clock| clock.started == self.started)
+        {
+            clock.owners -= 1;
+            if clock.owners == 0 && !clock.retry_pending {
+                demands.remove(&self.index);
+            }
         }
     }
 }
@@ -1081,7 +1242,26 @@ struct Rendition {
     marker_prewarm_generation: AtomicU64,
     /// A recorded producer failure: subsequent planned-segment GETs answer
     /// `ProducerFailed` until a new create replaces the rendition.
-    failed: StdMutex<Option<String>>,
+    ///
+    /// The class travels with the prose. The prose is a sentence for an
+    /// operator reading a log; the class is the only part a client can act on,
+    /// because `producer_state` flattens every failure to the word `failed`
+    /// and a client that cannot tell "try again" from "this will never work"
+    /// guesses toward retry — reopening, getting the same verdict, reopening
+    /// again.
+    failed: StdMutex<Option<RenditionFailure>>,
+    /// The capacity hold this rendition is under, if any, retained across the
+    /// producer that was terminated for it.
+    ///
+    /// A hold that cannot clear on its own terminates the producer — a stopped
+    /// one goes on holding everything a running one held — which leaves the
+    /// belief `Absent` and takes the reason with it. So the status said
+    /// `waiting` with no hold: the viewer's control plane saw a producer that
+    /// had stopped and never saw *why*, which for a capacity stall is the only
+    /// fact that explains why nothing is arriving. Recorded from each pass's
+    /// own decision and cleared by the first pass that decides anything else,
+    /// so it cannot outlive the condition.
+    capacity_hold: StdMutex<Option<crate::prodsched::Hold>>,
     /// Woken when `init.mp4` lands, for GETs waiting on the identity.
     init_notify: Notify,
     /// The driver's kick: wait registration, segment GETs, attach/detach,
@@ -1099,7 +1279,7 @@ struct Rendition {
     /// One admission-refusal line per fill, not one per materialize.
     warned_admission: AtomicBool,
     /// First blocked demand per plan entry, retained across HTTP 503 retries.
-    demand_since: StdMutex<HashMap<u32, Instant>>,
+    demand_since: StdMutex<HashMap<u32, MaterializeClock>>,
 }
 
 impl Rendition {
@@ -1107,8 +1287,14 @@ impl Rendition {
         self.wake.notify_one();
     }
 
-    fn failure(&self) -> Option<String> {
+    fn failure(&self) -> Option<RenditionFailure> {
         self.failed.lock().expect("failed lock").clone()
+    }
+
+    /// Just the operator-facing sentence, for the paths that answer a typed
+    /// HTTP refusal whose body is prose.
+    fn failure_cause(&self) -> Option<String> {
+        self.failure().map(|failure| failure.cause)
     }
 
     fn identity_path(&self) -> PathBuf {
@@ -1131,7 +1317,7 @@ impl Rendition {
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
-    async fn detach_reader(&self, session_id: &str) {
+    async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
         {
             let mut readers = self.readers.lock().await;
             readers.remove(session_id);
@@ -1139,9 +1325,21 @@ impl Rendition {
                 *self.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
             }
         }
-        // Every VOD session end converges here — terminal, idle reap and
-        // reattachment alike — so this is the one place a departing viewer's
-        // subtitle window is released. The readers guard is deliberately
+        // Retire this session's parked GETs with its reader, not after them.
+        // `playback_demands` ranks a blocked request against the reader that
+        // asked for it, and with no reader to rank against it falls back to
+        // marking the session's oldest wait foreground — so a departed
+        // viewer's abandoned request outranks a present viewer's and aims the
+        // producer at media nobody is watching until its deadline expires.
+        pool.retire_session(&self.key, session_id);
+        // Every VOD session *ending* converges here — terminal and idle reap
+        // alike — so this is the one place a departing viewer's subtitle
+        // window is released. Reattachment is deliberately not one of them:
+        // it is not an ending, the id it reuses belongs to a viewer who is
+        // still watching, and releasing fences that id for half a minute. It
+        // stops its own obsolete flight by name instead, without the fence,
+        // which the comment here used to claim it did through this function.
+        // The readers guard is deliberately
         // dropped first: releasing waits for a real ffmpeg to settle, and
         // holding a rendition-wide lifecycle lock across that await would let
         // one leaving viewer stall every other reader of the same rendition.
@@ -1404,6 +1602,20 @@ struct Session {
     /// stable across same-id idle reap and resurrection.
     incarnation: Arc<()>,
     last_touch: StdMutex<Instant>,
+    /// Bytes this viewer has actually been handed, over monotonic time.
+    ///
+    /// Per session rather than per rendition: two viewers of the same
+    /// immutable rendition have two different links, and a rate that averaged
+    /// them would describe neither. This is the VOD half of what
+    /// `transcode::Session::delivery` already is for rolling delivery, and it
+    /// exists for the same reason — `PreparationConditions::headroom_refusal`
+    /// cannot judge headroom against a rate nobody measured, so on VOD, which
+    /// is every public session, it refused `throughput_unreported` forever.
+    ///
+    /// `Arc` because the response body outlives the registry lock: bytes are
+    /// counted on the pump task, long after `segment` has returned and the
+    /// `sessions` map has been unlocked.
+    delivery: Arc<crate::meter::Meter>,
     /// Owner-local sequence fence kept separate from media-object touches.
     control: StdMutex<crate::playback_control::ControlState>,
     /// Stored, source-fenced marker boundaries projected onto this rendition's
@@ -1528,6 +1740,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> crate::playback_control::GateAnswer<'a> {
         Box::pin(async move {
             let mut sessions = self.shared.sessions.lock().await;
@@ -1550,6 +1763,7 @@ impl crate::playback_control::PreparationGate for VodPreparationGate {
                     predecessor_incarnation_id,
                     deadline_ms,
                     expected_owner_epoch,
+                    desired_digest,
                 );
             staged
         })
@@ -1746,6 +1960,10 @@ struct Shared {
     /// the session-owned detach fence.
     #[cfg(test)]
     terminal_replay_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    control_applied_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    segment_ready_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only rendezvous immediately before terminal reader detach.
     #[cfg(test)]
     terminal_detach_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
@@ -1895,6 +2113,7 @@ impl VodServe {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -1915,7 +2134,7 @@ impl VodServe {
             .get(session_id)
             .and_then(|session| session.rendition.as_ref().map(Arc::clone));
         if let Some(previous) = previous {
-            previous.detach_reader(session_id).await;
+            previous.detach_reader(&self.shared.pool, session_id).await;
         }
         rendition.attach_reader(session_id, 0).await;
         self.shared.sessions.lock().await.insert(
@@ -1939,6 +2158,7 @@ impl VodServe {
                 lifecycle: Arc::clone(&lifecycle),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -2018,12 +2238,16 @@ impl VodServe {
                 rendition_builds: StdMutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
-                pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
+                pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
                 completed_cache: AtomicU64::new(0),
                 terminal_eviction_cursor: AtomicU64::new(0),
                 #[cfg(test)]
                 terminal_replay_pause: StdMutex::new(None),
+                #[cfg(test)]
+                control_applied_pause: StdMutex::new(None),
+                #[cfg(test)]
+                segment_ready_pause: StdMutex::new(None),
                 #[cfg(test)]
                 terminal_detach_pause: StdMutex::new(None),
                 #[cfg(test)]
@@ -2362,6 +2586,14 @@ impl VodServe {
         session_id: String,
         fences: VodCreateFences<'_>,
     ) -> Result<VodStart, String> {
+        // The one funnel every create passes through: the plain entry point,
+        // the cluster one that every shipped caller actually uses, and the
+        // resurrection of a session from its durable route. Applying the
+        // ceiling here rather than at construction is what lets an operator
+        // change it without a restart — a cap set only in `WaitPool::new`
+        // would be frozen at whatever the node booted with — and applying it
+        // at `try_create` alone reached no production path at all.
+        self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -2526,6 +2758,7 @@ impl VodServe {
             lifecycle: Arc::clone(&lifecycle),
             incarnation: Arc::new(()),
             last_touch: StdMutex::new(Instant::now()),
+            delivery: Arc::new(crate::meter::Meter::new()),
             control: StdMutex::new(crate::playback_control::ControlState::default()),
             marker_destinations,
             last_control_snapshot: None,
@@ -2559,6 +2792,13 @@ impl VodServe {
             }
             _ => None,
         };
+        // Set only where this attachment actually moves the viewer off another
+        // rendition. Stopping the flight has to happen after the guards below
+        // are dropped — settlement waits on a real ffmpeg, and holding a
+        // rendition-wide lock across that would let one viewer's recipe change
+        // stall every other reader of the same rendition — so what crosses the
+        // drop is the flight's identity, not the decision to stop it.
+        let mut obsolete_window_flight: Option<u64> = None;
         let mut replacement_readers = rendition.readers.lock().await;
         let _serving_transition = if let Some(admission) = fences.serving_admission.as_ref() {
             Some(admission.commit_guard_before().await.ok_or_else(|| {
@@ -2574,6 +2814,32 @@ impl VodServe {
                     *previous.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
                 }
             }
+            // Reattachment removes the reader here rather than through
+            // `detach_reader`, so it needs the same wait retirement: this
+            // viewer has moved to another rendition, and any request still
+            // parked on the one they left has no reader to be ranked against.
+            // `playback_demands` would mark it foreground on exactly that
+            // absence and keep the old rendition producing for somebody who
+            // is no longer watching it.
+            if let Some(previous) = previous_rendition.as_ref() {
+                self.shared.pool.retire_session(&previous.key, &session_id);
+            }
+            // The third thing `detach_reader` does, which this path was
+            // missing, and which it cannot do the same way. A subtitle window
+            // is keyed by session id alone, so the flight this viewer left
+            // behind is a live ffmpeg extracting a span for the recipe they
+            // just moved off — worth stopping, and `detach_reader`'s comment
+            // claims every ending converges here to stop it.
+            //
+            // It cannot call `release_session_window`, because releasing also
+            // fences the id for half a minute and this id belongs to a viewer
+            // who is still watching: the fence would refuse the first window
+            // of the attachment replacing it and turn a recipe change into
+            // half a minute without subtitles. It names the exact flight
+            // instead, read here under the same guard that decides it is
+            // obsolete, so a successor claiming the session between this read
+            // and the stop is left alone.
+            obsolete_window_flight = crate::subtitles::session_window_flight(&session_id);
         }
         replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
         *rendition.dormant_since.lock().expect("dormant lock") = None;
@@ -2588,8 +2854,19 @@ impl VodServe {
             outgoing.abort_staged_preparation();
         }
         sessions.insert(session_id.clone(), replacement);
+        // Both reader graphs are committed, so the rendition-wide guards have
+        // no further work. They used to live to the end of the function, which
+        // was free while nothing here awaited; the window stop below does, and
+        // settlement waits on a real ffmpeg. Holding either guard across that
+        // would let one viewer's recipe change stall every other reader of the
+        // rendition they left or the one they joined.
+        drop(replacement_readers);
+        drop(previous_readers);
         drop(_serving_transition);
         drop(sessions);
+        if let Some(flight) = obsolete_window_flight {
+            crate::subtitles::abandon_session_window(&session_id, flight).await;
+        }
         self.emit_lifecycle(
             &session_id,
             file.id,
@@ -2652,6 +2929,9 @@ impl VodServe {
                         .expect("touch lock")
                         .elapsed()
                         .as_secs(),
+                    delivered_bytes: session.delivery.total_bytes(),
+                    delivered_bps: session.delivery.recent_bps().map(|bytes| bytes * 8),
+                    delivered_idle_ms: session.delivery.idle_for_ms(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2805,8 +3085,7 @@ impl VodServe {
         *session.last_touch.lock().expect("touch lock") = Instant::now();
         if let (Some(index), Some(readers)) = (segment_index, readers.as_mut()) {
             if let Some(reader) = readers.get_mut(session_id) {
-                reader.last_served = Some(index);
-                reader.frontier = reader.frontier.max(index);
+                reader.served(index);
             }
         }
         let marker_ledger = segment_index.and_then(|_| {
@@ -2895,7 +3174,7 @@ impl VodServe {
     pub async fn playlist(&self, session_id: &str) -> Option<VodPublication<Vec<u8>>> {
         let publication = self.session_rendition(session_id).await?;
         let (result, owner) = match publication.result {
-            Ok((rendition, _)) => (Ok(rendition.playlist.clone()), publication.owner),
+            Ok((rendition, _, _)) => (Ok(rendition.playlist.clone()), publication.owner),
             Err(error) => (Err(error), publication.owner),
         };
         Some(VodPublication { result, owner })
@@ -2912,7 +3191,7 @@ impl VodServe {
         name: &str,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
         let publication = self.session_rendition(session_id).await?;
-        let (rendition, budget) = match publication.result {
+        let (rendition, budget, delivery) = match publication.result {
             Ok(found) => found,
             Err(error) => {
                 return Some(VodPublication {
@@ -2924,7 +3203,10 @@ impl VodServe {
         let owner = publication.owner;
         if name == INIT_NAME {
             return Some(VodPublication {
-                result: self.serve_init(&rendition, budget).await.map(Some),
+                result: self
+                    .serve_init(&rendition, budget, delivery)
+                    .await
+                    .map(Some),
                 owner,
             });
         }
@@ -2944,7 +3226,7 @@ impl VodServe {
         }
         Some(VodPublication {
             result: self
-                .serve_segment(&rendition, session_id, index, budget)
+                .serve_segment(&rendition, session_id, index, budget, delivery)
                 .await
                 .map(Some),
             owner,
@@ -2977,7 +3259,7 @@ impl VodServe {
                 pause.wait().await;
                 pause.wait().await;
             }
-            rendition.detach_reader(&session_id).await;
+            rendition.detach_reader(&shared.pool, &session_id).await;
             rendition.kick();
             let serve = VodServe { shared };
             serve.emit_lifecycle(
@@ -3072,16 +3354,41 @@ impl VodServe {
             } else {
                 let cleanup = Arc::new(TerminalCleanup::new());
                 session.terminal_cleanup = Some(Arc::clone(&cleanup));
-                let rendition = session.rendition.as_ref().map(Arc::clone)?;
-                let work = (
-                    session_id.to_owned(),
-                    rendition,
-                    session.file.id,
-                    session.target_height,
-                    session.kind,
-                    terminal_cause,
-                );
-                (cleanup, Some(work))
+                match session.rendition.as_ref().map(Arc::clone) {
+                    Some(rendition) => {
+                        let work = (
+                            session_id.to_owned(),
+                            rendition,
+                            session.file.id,
+                            session.target_height,
+                            session.kind,
+                            terminal_cause,
+                        );
+                        (cleanup, Some(work))
+                    }
+                    // A session whose rendition is already gone has nothing to
+                    // detach, so this cleanup owns no work and has to say so
+                    // here. Leaving it standing unfinished is far worse than
+                    // the ending it is refusing: `maintain` waits on every
+                    // unfinished cleanup belonging to a tombstoned session
+                    // with nothing bounding the wait, so one of these stops
+                    // the idle reap, the dormant purge, the tombstone eviction
+                    // and every driver kick — node-wide, for good.
+                    //
+                    // Today the compaction that clears `rendition` writes the
+                    // tombstone first under the same pointer identity, so this
+                    // arm is unreachable and the assertion states that rather
+                    // than trusting it. The completion is what a later change
+                    // to that ordering lands on instead of a wedged node.
+                    None => {
+                        debug_assert!(
+                            session.tombstone.is_some(),
+                            "a VOD session lost its rendition without a tombstone"
+                        );
+                        cleanup.complete();
+                        (cleanup, None)
+                    }
+                }
             }
         };
         if let Some((session_id, rendition, file_id, height, kind, cause)) = work {
@@ -3206,6 +3513,12 @@ impl VodServe {
             let cleanup = Arc::new(TerminalCleanup::new());
             session.terminal_cleanup = Some(Arc::clone(&cleanup));
             let Some(rendition) = session.rendition.as_ref().map(Arc::clone) else {
+                // Same hazard as `begin_end`'s: this victim now carries a
+                // tombstone and a cleanup, and skipping to the next one would
+                // leave that cleanup unfinished forever, which is the one
+                // thing `maintain` waits on without a bound. Nothing to
+                // detach means finished, not abandoned.
+                cleanup.complete();
                 continue;
             };
             work.push((
@@ -3233,6 +3546,11 @@ impl VodServe {
         }
         drop(lifecycle_guards);
         Ok(ended)
+    }
+
+    /// Blocked-GET admission counters for the operator surfaces.
+    pub(crate) fn blocked_get_metrics_handle(&self) -> Arc<crate::waitpool::BlockedGetMetrics> {
+        self.shared.pool.metrics_handle()
     }
 
     /// Whether this session id is (or ever was) a VOD session here.
@@ -3307,7 +3625,7 @@ impl VodServe {
         &self,
         session_id: &str,
     ) -> Option<VodPublication<VodSessionInfo>> {
-        let (rendition, target_height, owner) = {
+        let (rendition, target_height, owner, delivery) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
@@ -3317,6 +3635,7 @@ impl VodServe {
                 session.live_rendition().map(Arc::clone)?,
                 session.target_height,
                 session.response_owner(),
+                Arc::clone(&session.delivery),
             )
         };
         let last_served = rendition
@@ -3380,7 +3699,19 @@ impl VodServe {
                     }),
                     true,
                 ),
-                Producer::Absent { .. } => ("waiting", None, false),
+                // A capacity hold outlives the producer it terminated, so a
+                // rendition that wants to produce and cannot still says why.
+                Producer::Absent { .. } => {
+                    match *rendition.capacity_hold.lock().expect("capacity hold") {
+                        Some(crate::prodsched::Hold::NoRoom { .. }) => {
+                            ("waiting", Some("no_room"), false)
+                        }
+                        Some(crate::prodsched::Hold::WorkingSetFull { .. }) => {
+                            ("waiting", Some("working_set"), false)
+                        }
+                        _ => ("waiting", None, false),
+                    }
+                }
             }
         };
         let fetched_end_ms = last_served
@@ -3396,7 +3727,8 @@ impl VodServe {
                 playlist_shape: "vod",
                 producer_state,
                 producer_hold,
-                producer_failed: failed,
+                producer_failed: failed.as_ref().map(|f| f.cause.clone()),
+                producer_decision: failed.as_ref().map(|f| f.decision.status()),
                 published_end_ms,
                 ready_ahead_end_ms,
                 fetched_end_ms,
@@ -3410,6 +3742,11 @@ impl VodServe {
                 working_set_budget_bytes: rendition.working_set_budget,
                 completed_cache_bytes: self.shared.completed_cache.load(Relaxed),
                 admitted,
+                // Bytes per second becomes bits per second here, the same
+                // conversion and the same units the rolling view publishes.
+                delivered_bytes: delivery.total_bytes(),
+                delivered_bps: delivery.recent_bps().map(|bytes| bytes * 8),
+                delivered_idle_ms: delivery.idle_for_ms(),
                 suspended,
                 final_: complete,
             }),
@@ -3594,6 +3931,17 @@ impl VodServe {
             if !Arc::ptr_eq(&session.lifecycle, &lifecycle) || session.tombstone.is_some() {
                 return None;
             }
+            // Acquire the async reader lock before the sequence fence. From
+            // acceptance through anchor publication there is then no await:
+            // cancelling an HTTP response cannot leave an accepted command
+            // whose exact replay silently skips its playback destination.
+            let control_rendition = session.live_rendition().map(Arc::clone)?;
+            let mut readers = control_rendition.readers.lock().await;
+            if control.snapshot.demand != crate::playback_control::PlaybackDemand::End
+                && !readers.contains_key(control.session_id)
+            {
+                return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+            }
             if crate::media_sessions::unix_ms() >= deadline_unix_ms {
                 return Some(Err(crate::playback_control::ControlStateError::Unavailable));
             }
@@ -3613,6 +3961,7 @@ impl VodServe {
                         &control.prepared_successor,
                         control.snapshot.acknowledgement.as_ref(),
                         control.snapshot.request_fingerprint.as_deref(),
+                        &control.snapshot.selection,
                     ),
                 );
                 // Only for an accepted exchange: a replay is the same exchange
@@ -3637,6 +3986,29 @@ impl VodServe {
                     Ok(outcome) => outcome,
                     Err(error) => return Some(Err(error)),
                 };
+            if disposition == crate::playback_control::ControlDisposition::Accepted
+                && control.snapshot.demand != crate::playback_control::PlaybackDemand::End
+            {
+                if let Some(reader) = readers.get_mut(control.session_id) {
+                    reader.accept_control(
+                        control.sequence,
+                        entry_containing(
+                            &control_rendition.plan,
+                            control.snapshot.buffer_anchor_ms() as f64 / 1_000.0,
+                        ),
+                    );
+                    // Recompute optional speculation only after the accepted
+                    // intent is published. Cancellation before that async
+                    // recompute leaves speculation disabled, never enabled
+                    // for the previous seek, pause, or playback position.
+                    let mut prewarm = reader.marker_prewarm.lock().expect("marker ledger lock");
+                    prewarm.enabled = false;
+                    prewarm.deactivate();
+                }
+                control_rendition.kick();
+            }
+            drop(readers);
+
             if disposition == crate::playback_control::ControlDisposition::Accepted
                 && control.snapshot.demand == crate::playback_control::PlaybackDemand::End
             {
@@ -3761,6 +4133,18 @@ impl VodServe {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
+        #[cfg(test)]
+        let control_applied_pause = self
+            .shared
+            .control_applied_pause
+            .lock()
+            .expect("control pause lock")
+            .clone();
+        #[cfg(test)]
+        if let Some(pause) = control_applied_pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
         let (
             disposition,
             accepted_sequence,
@@ -3888,7 +4272,7 @@ impl VodServe {
     pub async fn hls_facts(&self, session_id: &str) -> Option<VodHlsFacts> {
         let publication = self.session_rendition(session_id).await?;
         let rendition = match publication.result {
-            Ok((rendition, _)) => rendition,
+            Ok((rendition, _, _)) => rendition,
             _ => return None,
         };
         Some(VodHlsFacts {
@@ -3905,7 +4289,7 @@ impl VodServe {
     pub async fn segment_window(&self, session_id: &str, segment_index: i64) -> Option<(f64, f64)> {
         let index = u32::try_from(segment_index).ok()?;
         let publication = self.session_rendition(session_id).await?;
-        let (rendition, _) = match publication.result {
+        let (rendition, _, _) = match publication.result {
             Ok(value) => value,
             _ => return None,
         };
@@ -3948,12 +4332,36 @@ impl VodServe {
                 .filter(|cleanup| !cleanup.is_finished())
                 .collect::<Vec<_>>()
         };
-        futures_util::future::join_all(
-            terminal_cleanups
-                .into_iter()
-                .map(|cleanup| async move { cleanup.wait().await }),
+        // Bounded, because every later step in this function is behind it and
+        // this task is the node's only maintenance loop. A cleanup that never
+        // completes — a task the runtime dropped mid-flight, a future ordering
+        // change that installs one with no owner — would otherwise stop the
+        // idle reap, the dormant purge, the tombstone eviction and every
+        // driver kick on the node, permanently and silently.
+        //
+        // Giving up on the wait gives up nothing else: each step below re-reads
+        // what it needs, and tombstone eviction independently requires
+        // `is_finished()`, so a cleanup still legitimately running is simply
+        // waited for on the next tick. The bound is generous against real
+        // settlement — a terminal commit is the slow part — so reaching it is
+        // a defect worth a loud line rather than a busy node.
+        if tokio::time::timeout(
+            TERMINAL_CLEANUP_MAINTENANCE_WAIT,
+            futures_util::future::join_all(
+                terminal_cleanups
+                    .into_iter()
+                    .map(|cleanup| async move { cleanup.wait().await }),
+            ),
         )
-        .await;
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                "a VOD terminal cleanup outlived {:?} of maintenance waiting; \
+                 continuing this pass without it",
+                TERMINAL_CLEANUP_MAINTENANCE_WAIT
+            );
+        }
 
         // End tombstones outlive the response-recovery operation so late or
         // mismatched control cannot resurrect a detached reader. Once the
@@ -4096,7 +4504,7 @@ impl VodServe {
                 // Keep the per-id gate through detach. A resurrection for the
                 // same durable id must attach only after this old reader is
                 // gone, never between registry removal and detach.
-                rendition.detach_reader(&id).await;
+                rendition.detach_reader(&self.shared.pool, &id).await;
                 tracing::info!(
                     session = %session_log_id(&id),
                     rendition = %rendition.key,
@@ -4152,7 +4560,7 @@ impl VodServe {
     async fn session_rendition(
         &self,
         session_id: &str,
-    ) -> Option<VodPublication<(Arc<Rendition>, Duration)>> {
+    ) -> Option<VodPublication<(Arc<Rendition>, Duration, Arc<crate::meter::Meter>)>> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
         let owner = session.response_owner();
@@ -4162,6 +4570,7 @@ impl VodServe {
                 None => Ok((
                     session.live_rendition().map(Arc::clone)?,
                     session.block_budget,
+                    Arc::clone(&session.delivery),
                 )),
             },
             owner,
@@ -4172,13 +4581,20 @@ impl VodServe {
         &self,
         rendition: &Arc<Rendition>,
         budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
         if self.source_changed(rendition) {
             let cause = "source changed after the fragment index was selected".to_owned();
-            record_failure(&self.shared, rendition, cause.clone());
+            record_failure(
+                &self.shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
             return Err(VodError::ProducerFailed(cause));
         }
-        self.shared
+        let demand = self
+            .shared
             .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX);
         rendition.kick();
         let deadline = Instant::now() + budget;
@@ -4195,19 +4611,29 @@ impl VodServe {
             if rendition.dir.has_init().await {
                 rendition.clear_demand(INIT_DEMAND_INDEX);
                 let path = rendition.dir.path().join(INIT_NAME);
-                let ready = open_ready(&path, &format!("{}-init", rendition.key))
+                let ready = open_ready(&path, &format!("{}-init", rendition.key), &delivery)
                     .await
                     .map_err(VodError::Io)?;
                 if self.source_changed(rendition) {
                     let cause =
                         "source changed while the rendition init was being opened".to_owned();
-                    record_failure(&self.shared, rendition, cause.clone());
+                    record_failure(
+                        &self.shared,
+                        rendition,
+                        crate::playback_control::ProducerDecisionReason::SourceChanged,
+                        cause.clone(),
+                    );
                     return Err(VodError::ProducerFailed(cause));
                 }
                 return Ok(ready);
             }
-            if let Some(cause) = rendition.failure() {
+            if let Some(cause) = rendition.failure_cause() {
                 return Err(VodError::ProducerFailed(cause));
+            }
+            if demand.expired() {
+                return Err(VodError::ProducerFailed(
+                    "materializing init.mp4 exceeded the producer deadline".to_owned(),
+                ));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero()
@@ -4215,6 +4641,7 @@ impl VodServe {
                     .await
                     .is_err()
             {
+                demand.retry_pending();
                 return Err(VodError::Pending {
                     retry_after: PENDING_RETRY_AFTER,
                 });
@@ -4228,26 +4655,16 @@ impl VodServe {
         session_id: &str,
         index: u32,
         budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
         // Materialized → serve immediately: the overwhelmingly common case.
-        if let Some(ready) = self.open_materialized(rendition, index).await? {
+        if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
             return Ok(ready);
         }
-        if let Some(cause) = rendition.failure() {
+        if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
-        self.shared.arm_materialize_watchdog(rendition, index);
-        // Planned → register demand and block. The frontier moves before the
-        // wait so the driver sees this reader's reach even while registration
-        // is still in flight.
-        {
-            let mut readers = rendition.readers.lock().await;
-            if let Some(reader) = readers.get_mut(session_id) {
-                reader.frontier = reader.frontier.max(index);
-            }
-        }
-        rendition.kick();
-        self.blocked_wait(rendition, session_id, index, budget)
+        self.blocked_wait(rendition, session_id, index, budget, delivery)
             .await
     }
 
@@ -4259,56 +4676,109 @@ impl VodServe {
         session_id: &str,
         index: u32,
         budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
+        let deadline = tokio::time::Instant::now() + budget;
         let key = WaitKey {
             rendition: rendition.key.clone(),
             index,
         };
-        let mut wait = Box::pin(self.shared.pool.wait(key, session_id, budget));
-        // One poll registers the waiter; kick the driver again once it is
-        // really in the pool so `blocked_on` reflects it this pass.
-        let first = std::future::poll_fn(|cx| {
-            use std::future::Future;
-            std::task::Poll::Ready(wait.as_mut().poll(cx))
-        })
-        .await;
-        let outcome = match first {
-            std::task::Poll::Ready(outcome) => outcome,
-            std::task::Poll::Pending => {
-                rendition.kick();
-                // The lost-wakeup window: a materialize (or a failure) that
-                // landed between the caller's materialized-miss and the
-                // registration above fired its satisfy/fail against an empty
-                // pool — and the driver then sees the index as not owed, so
-                // nothing would ever satisfy it again. One re-check after
-                // registering, before sleeping, closes it; dropping `wait`
-                // deregisters synchronously.
-                if let Some(ready) = self.open_materialized(rendition, index).await? {
-                    return Ok(ready);
-                }
-                if let Some(cause) = rendition.failure() {
-                    return Err(VodError::ProducerFailed(cause));
-                }
-                wait.await
-            }
+        let _wake = DemandWake(Arc::clone(rendition));
+        // Reserve synchronously before any await: a seek storm must not park
+        // unbounded unadmitted futures behind the manifest or a disk open.
+        let (mut wait, demand) = {
+            // The watchdog holds this same lock through fail_entry: an
+            // admitted receiver is bound to its deadline before it is visible
+            // to expiry, including on a multithread runtime.
+            let mut clocks = rendition.demand_since.lock().expect("demand lock");
+            let wait = self
+                .shared
+                .pool
+                .register(key, session_id)
+                // The class travels with the refusal. `blocked_wait` is the only
+                // production caller of `register`, so this line is the whole
+                // seam between the pool knowing which cap fired and a client
+                // or an operator ever finding out.
+                .map_err(VodError::Busy)?;
+            let demand = self
+                .shared
+                .arm_materialize_watchdog_locked(rendition, index, &mut clocks);
+            (wait, demand)
         };
+        // Admission comes before any persistent demand or deadline state. A
+        // refused GET is not work owed by this rendition.
+        rendition.kick();
+        // Register before rechecking bytes/failure to close the lost-wakeup
+        // window. The registration stays alive through open_materialized,
+        // protecting a just-published target from concurrent eviction.
+        if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
+            return Ok(ready);
+        }
+        if let Some(cause) = rendition.failure_cause() {
+            return Err(VodError::ProducerFailed(cause));
+        }
+        if demand.expired() {
+            return Err(VodError::ProducerFailed(format!(
+                "materializing {} exceeded the producer deadline",
+                segment_name(u64::from(index))
+            )));
+        }
+        #[cfg(test)]
+        let waiting_pause = self
+            .shared
+            .segment_ready_pause
+            .lock()
+            .expect("segment pause lock")
+            .clone();
+        #[cfg(test)]
+        if let Some(pause) = waiting_pause {
+            // Phase one proves the post-registration recheck has finished;
+            // the Ready arm supplies phases two and three around file open.
+            pause.wait().await;
+        }
+        let outcome = wait
+            .wait(deadline.saturating_duration_since(tokio::time::Instant::now()))
+            .await;
         match outcome {
-            Err(_refused) => Err(VodError::Busy),
-            Ok(WaitOutcome::Ready) => match self.open_materialized(rendition, index).await? {
-                Some(ready) => Ok(ready),
-                // Evicted in the instant between satisfy and open — rare, and
-                // a retryable pending is the honest answer.
-                None => Err(VodError::Pending {
+            WaitOutcome::Ready => {
+                #[cfg(test)]
+                let pause = self
+                    .shared
+                    .segment_ready_pause
+                    .lock()
+                    .expect("segment pause lock")
+                    .clone();
+                #[cfg(test)]
+                if let Some(pause) = pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
+                match self.open_materialized(rendition, index, &delivery).await? {
+                    Some(ready) => Ok(ready),
+                    // An eviction already committed before registration, or an
+                    // external unlink, can still remove the file. Publication
+                    // during this admitted wait is protected by its narrow pin.
+                    None => Err(VodError::Pending {
+                        retry_after: PENDING_RETRY_AFTER,
+                    }),
+                }
+            }
+            WaitOutcome::Deadline => {
+                if demand.expired() {
+                    return Err(VodError::ProducerFailed(format!(
+                        "materializing {} exceeded the producer deadline",
+                        segment_name(u64::from(index))
+                    )));
+                }
+                demand.retry_pending();
+                Err(VodError::Pending {
                     retry_after: PENDING_RETRY_AFTER,
-                }),
-            },
-            Ok(WaitOutcome::Deadline) => Err(VodError::Pending {
-                retry_after: PENDING_RETRY_AFTER,
-            }),
-            Ok(WaitOutcome::ProducerFailed(cause)) => Err(VodError::ProducerFailed(cause)),
+                })
+            }
+            WaitOutcome::ProducerFailed(cause) => Err(VodError::ProducerFailed(cause)),
             // The rendition went away under the wait; the session's own
             // tombstone (if any) is the more precise cause on the next GET.
-            Ok(WaitOutcome::Gone) => Err(VodError::Gone(Terminal::Deleted)),
+            WaitOutcome::Gone => Err(VodError::Gone(Terminal::Deleted)),
         }
     }
 
@@ -4318,10 +4788,16 @@ impl VodServe {
         &self,
         rendition: &Arc<Rendition>,
         index: u32,
+        delivery: &Arc<crate::meter::Meter>,
     ) -> Result<Option<SegmentReady>, VodError> {
         if self.source_changed(rendition) {
             let cause = "source changed after the fragment index was selected".to_owned();
-            record_failure(&self.shared, rendition, cause.clone());
+            record_failure(
+                &self.shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
             return Err(VodError::ProducerFailed(cause));
         }
         let manifest = rendition.manifest.lock().await;
@@ -4332,7 +4808,13 @@ impl VodServe {
         // The materialization instant is part of the etag: key-index-length
         // alone collides across an evict-and-regenerate whose bytes differ
         // while its length happens to match.
-        match open_ready(&path, &format!("{}-{index}-{at_ms}", rendition.key)).await {
+        match open_ready(
+            &path,
+            &format!("{}-{index}-{at_ms}", rendition.key),
+            delivery,
+        )
+        .await
+        {
             Ok(ready) => Ok(Some(ready)),
             // The manifest lied — treat as planned; reconcile repairs it.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -4418,18 +4900,48 @@ impl Shared {
 
     /// Arm ruling A3's producer deadline once per demanded plan entry. The
     /// timestamp survives shorter HTTP block deadlines and their 503 retries.
-    fn arm_materialize_watchdog(self: &Arc<Self>, rendition: &Arc<Rendition>, index: u32) {
+    fn arm_materialize_watchdog(
+        self: &Arc<Self>,
+        rendition: &Arc<Rendition>,
+        index: u32,
+    ) -> MaterializeDemand {
+        let mut clocks = rendition.demand_since.lock().expect("demand lock");
+        self.arm_materialize_watchdog_locked(rendition, index, &mut clocks)
+    }
+
+    fn arm_materialize_watchdog_locked(
+        self: &Arc<Self>,
+        rendition: &Arc<Rendition>,
+        index: u32,
+        demands: &mut HashMap<u32, MaterializeClock>,
+    ) -> MaterializeDemand {
         let started = Instant::now();
-        {
-            let mut demands = rendition.demand_since.lock().expect("demand lock");
-            if demands.contains_key(&index) {
-                return;
-            }
-            demands.insert(index, started);
+        if let Some(clock) = demands.get_mut(&index) {
+            clock.owners += 1;
+            clock.retry_pending = false;
+            return MaterializeDemand {
+                rendition: Arc::clone(rendition),
+                index,
+                started: clock.started,
+            };
         }
+        demands.insert(
+            index,
+            MaterializeClock {
+                started,
+                owners: 1,
+                retry_pending: false,
+                watchdog: None,
+            },
+        );
+        let owner = MaterializeDemand {
+            rendition: Arc::clone(rendition),
+            index,
+            started,
+        };
         let shared = Arc::clone(self);
         let rendition = Arc::clone(rendition);
-        tokio::spawn(async move {
+        let watchdog = tokio::spawn(async move {
             tokio::time::sleep_until(tokio::time::Instant::from_std(
                 started + rendition.materialize_budget,
             ))
@@ -4447,8 +4959,8 @@ impl Shared {
                         .demand_since
                         .lock()
                         .expect("demand lock")
-                        .remove(&index)
-                        .is_some_and(|since| since == started)
+                        .get(&index)
+                        .is_some_and(|clock| clock.started == started)
                 }
             } else {
                 // The sink takes these locks in the same order and clears the
@@ -4463,39 +4975,65 @@ impl Shared {
                         .demand_since
                         .lock()
                         .expect("demand lock")
-                        .remove(&index)
-                        .is_some_and(|since| since == started)
+                        .get(&index)
+                        .is_some_and(|clock| clock.started == started)
                 }
             };
             if !expired || rendition.failure().is_some() {
                 return;
             }
-            rendition.gen_epoch.fetch_add(1, Relaxed);
-            if !matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
-                let _ = rendition
-                    .slot
-                    .perform(
-                        Step::Terminate {
-                            why: Termination::Idle,
-                        },
-                        || {},
-                    )
-                    .await;
-            }
-            let object = if index == INIT_DEMAND_INDEX {
-                "init.mp4".to_owned()
+            if index != INIT_DEMAND_INDEX {
+                // A slow, cancelled, or superseded segment request cannot
+                // prove that this shared producer is unhealthy. Settle only
+                // currently admitted waiters for this entry; if all callers
+                // disappeared, this is a no-op. Real child failures still
+                // use record_failure to answer the whole rendition.
+                // Keep the episode fence through the synchronous wake. A
+                // cancelled old watchdog must not wake a newly registered
+                // request for this same index after it acquired a new clock.
+                let clocks = rendition.demand_since.lock().expect("demand lock");
+                if !clocks
+                    .get(&index)
+                    .is_some_and(|clock| clock.started == started)
+                {
+                    return;
+                }
+                shared.pool.fail_entry(
+                    &rendition.key,
+                    index,
+                    &format!(
+                        "materializing {} exceeded the {:.1}s producer deadline",
+                        segment_name(u64::from(index)),
+                        rendition.materialize_budget.as_secs_f64()
+                    ),
+                );
+                drop(clocks);
+                rendition.kick();
             } else {
-                segment_name(u64::from(index))
-            };
-            record_failure(
-                &shared,
-                &rendition,
-                format!(
-                    "materializing {object} exceeded the {:.1}s producer deadline",
-                    rendition.materialize_budget.as_secs_f64()
-                ),
-            );
+                // Init waiters inspect their own captured clock after this wake.
+                rendition.init_notify.notify_waiters();
+            }
+            // Preserve expiry long enough for a normal Retry-After cycle to
+            // receive its typed failure, then forget an abandoned HTTP retry.
+            // An old task never removes a newer episode for this same entry.
+            tokio::time::sleep(PENDING_RETRY_AFTER.saturating_mul(2)).await;
+            let mut demands = rendition.demand_since.lock().expect("demand lock");
+            if demands
+                .get(&index)
+                .is_some_and(|clock| clock.started == started && clock.owners == 0)
+            {
+                demands.remove(&index);
+            }
         });
+        if let Some(clock) = demands
+            .get_mut(&index)
+            .filter(|clock| clock.started == started)
+        {
+            clock.watchdog = Some(watchdog.abort_handle());
+        } else {
+            watchdog.abort();
+        }
+        owner
     }
 
     /// Find or build the rendition for `key`, spawning its driver. `None`
@@ -4876,6 +5414,7 @@ impl Shared {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -5105,27 +5644,72 @@ fn spawn_driver(shared: Arc<Shared>, rendition: Arc<Rendition>) {
     });
 }
 
+/// Reclaim what a rendition that has already failed is still holding.
+///
+/// A recorded failure is first-wins and never cleared for the life of the
+/// rendition, and `record_failure` answers every waiter — the pool, and the
+/// init `Notify` — at the moment it lands. From that instant the producer is
+/// serving nobody and no later pass can change that.
+///
+/// The bare early return that used to stand in `driver_pass` left two things
+/// behind. The child was one. `Action::Idle` is what normally reclaims a
+/// producer, and it is only ever reached through the pass that return skipped,
+/// so what remained were the dormant purge — which refuses an admitted
+/// rendition outright — and the last `Arc<Rendition>` drop, which an in-flight
+/// generation task or a parked materialize watchdog can defer for as long as
+/// they live. On an admitted rendition that combination reaps nothing: a live
+/// ffmpeg, or a SIGSTOP'd one still sitting on its codec session, stayed on the
+/// node until the process exited.
+///
+/// The capacity hold is the other, and it is worth being exact about what it
+/// is not. `capacity_hold` is written in exactly one place — the pass below —
+/// so the value from the last pass before the failure latched for the life of
+/// the rendition. It changes nothing a client sees: `status` answers `failed`
+/// ahead of every belief arm, so the stale hold was already shielded from the
+/// wire. Clearing it here removes dead state that contradicts the rendition it
+/// belongs to, so that the next reader of it — a status reordering, an
+/// operator surface, a decision that consults it — is not the one that has to
+/// discover it was never true.
+///
+/// `Termination::Idle` is the existing spelling for "reclaim it"; `after` reads
+/// nothing from the `why` and no wire carries it, so this is not a claim that a
+/// failed rendition is idle.
+async fn retire_failed_rendition(rendition: &Arc<Rendition>) {
+    *rendition.capacity_hold.lock().expect("capacity hold") = None;
+    if matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
+        return;
+    }
+    // Ignored exactly as the dormant purge and generation-end terminations
+    // ignore it: a slot that lost its child between the belief read and here
+    // is the outcome this asked for.
+    let _ = rendition
+        .slot
+        .perform(
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+            || {},
+        )
+        .await;
+}
+
 /// One pass: demand → decide → step → carry it out.
 async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     if rendition.failure().is_some() {
+        retire_failed_rendition(rendition).await;
         return;
     }
-    let mut demands: Vec<Demand> = Vec::new();
-    if let Some(blocked) = shared.pool.blocked_on(&rendition.key) {
-        demands.push(Demand::waiting_on(blocked));
-    }
-    let prewarm_ledgers = {
-        let readers = rendition.readers.lock().await;
-        for reader in readers.values() {
-            demands.push(Demand::idle_at(reader.frontier));
-        }
-        readers
-            .values()
-            .map(|reader| Arc::clone(&reader.marker_prewarm))
-            .collect::<Vec<_>>()
-    };
     let belief = rendition.slot.belief().await;
     let mut manifest = rendition.manifest.lock().await;
+    let (demands, prewarm_ledgers) = {
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
+        let ledgers = readers
+            .values()
+            .map(|reader| Arc::clone(&reader.marker_prewarm))
+            .collect::<Vec<_>>();
+        (demands, ledgers)
+    };
     let position = Position {
         produced_through: belief.produced_through(),
         positioned_at: belief.positioned_at(),
@@ -5136,7 +5720,26 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             held: matches!(belief, Producer::Stopped { .. }),
         },
     };
-    let decision = decide_with_marker_prewarm(&manifest, &demands, position, &prewarm_ledgers);
+    // The eviction windows are read before the decision, not inside the sweep
+    // it may ask for: whether anything can be given up is not answerable
+    // without knowing what is protected, and answering it wrongly turns a
+    // capacity stall into a producer that looks like it stopped making
+    // progress.
+    let windows = eviction_windows(shared, rendition).await;
+    let decision =
+        decide_with_marker_prewarm(&manifest, &demands, position, &windows, &prewarm_ledgers);
+    // Recorded from this pass's own decision, before the step that acts on it.
+    // A hold with no scheduled end terminates its producer, so the belief that
+    // would otherwise carry the reason is gone by the time anyone reads the
+    // status; a hold that clears on its own is still carried by the stopped
+    // producer and needs nothing here. Any other decision clears it, so the
+    // record cannot outlive the condition that produced it.
+    *rendition.capacity_hold.lock().expect("capacity hold") = match decision.action {
+        Action::Suspend { reason, .. } if !crate::prodexec::clears_on_its_own(reason) => {
+            Some(reason)
+        }
+        _ => None,
+    };
     let step = retire_completed_marker_prewarm(
         rendition,
         belief,
@@ -5185,7 +5788,6 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             }
         }
         Step::MakeRoom { wanted } => {
-            let windows = rendition.reader_windows().await;
             match rendition
                 .dir
                 .make_room(&mut manifest, &windows, wanted)
@@ -5203,9 +5805,27 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
                     // Room may now exist; decide again promptly — and the
                     // freed bytes are node-wide news, so every other
                     // rendition's driver re-examines its hold too.
-                    rendition.kick();
                     if freed.bytes > 0 {
+                        rendition.kick();
                         shared.kick_all();
+                    } else if !matches!(belief, Producer::Absent { .. }) {
+                        // Protected bytes make this an indefinite capacity
+                        // hold. Fence queued writes and release the producer;
+                        // leaving it running would immediately exceed the
+                        // same bound that the zero-progress sweep proved.
+                        rendition.gen_epoch.fetch_add(1, Relaxed);
+                        if let Err(error) = rendition
+                            .slot
+                            .perform(
+                                Step::Terminate {
+                                    why: Termination::IndefiniteHold,
+                                },
+                                || {},
+                            )
+                            .await
+                        {
+                            tracing::warn!(rendition = %rendition.key, "terminating producer after a zero-progress capacity sweep: {error}");
+                        }
                     }
                 }
                 Err(error) => {
@@ -5217,6 +5837,79 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             tracing::warn!(rendition = %rendition.key, "producer stalled: {hold:?}");
         }
     }
+}
+
+/// Preserve all admitted obligations, using accepted control solely to rank
+/// current playback ahead of requests outside its buffer window.
+fn playback_demands(
+    pool: &WaitPool,
+    rendition: &Rendition,
+    readers: &HashMap<String, Reader>,
+    manifest: &Manifest,
+) -> Vec<Demand> {
+    let blocked = pool.demands(&rendition.key);
+    let mut nearest = HashMap::new();
+    let mut oldest = HashMap::new();
+    for request in &blocked {
+        // Publication precedes pool.satisfy. A newly materialized nearest
+        // request must not hide the next missing GET during that interval.
+        if !manifest
+            .state(request.index)
+            .is_some_and(|state| !state.is_materialized())
+        {
+            continue;
+        }
+        let first = oldest
+            .entry(&request.session)
+            .or_insert(request.arrival_order);
+        *first = (*first).min(request.arrival_order);
+        if let Some(reader) = readers.get(&request.session).filter(|reader| {
+            reader.control_sequence.is_some()
+                && reader_window(reader, rendition.seconds_per_segment).covers(request.index)
+        }) {
+            let distance = request.index.abs_diff(reader.frontier);
+            let closest = nearest.entry(&request.session).or_insert(distance);
+            *closest = (*closest).min(distance);
+        }
+    }
+    let mut demands = blocked
+        .iter()
+        .map(|blocked| {
+            let mut demand = Demand::waiting_on(blocked.index);
+            demand.arrival_order = Some(blocked.arrival_order);
+            demand.foreground = match (readers.get(&blocked.session), nearest.get(&blocked.session))
+            {
+                (Some(reader), Some(nearest)) => {
+                    blocked.index.abs_diff(reader.frontier) == *nearest
+                }
+                _ => oldest.get(&blocked.session) == Some(&blocked.arrival_order),
+            };
+            demand
+        })
+        .collect::<Vec<_>>();
+    demands.extend(
+        readers
+            .values()
+            .map(|reader| Demand::idle_at(reader.frontier)),
+    );
+    demands
+}
+
+async fn eviction_windows(shared: &Shared, rendition: &Rendition) -> Vec<ReaderWindow> {
+    let mut windows = rendition.reader_windows().await;
+    windows.extend(
+        shared
+            .pool
+            .retained(&rendition.key)
+            .into_iter()
+            .map(|index| ReaderWindow {
+                back: 0,
+                playhead: index,
+                frontier: index,
+                ahead: 0,
+            }),
+    );
+    windows
 }
 
 /// A completed speculative window has no foreground reason to retain its
@@ -5277,9 +5970,10 @@ fn decide_with_marker_prewarm(
     manifest: &Manifest,
     demands: &[Demand],
     position: Position,
+    readers: &[ReaderWindow],
     prewarm_ledgers: &[Arc<StdMutex<MarkerPrewarmLedger>>],
 ) -> MarkerPrewarmDecision {
-    let foreground_action = decide(manifest, demands, position);
+    let foreground_action = decide(manifest, demands, position, readers);
     // Real reader demand is always decided first. Only an idle producer or
     // one that would otherwise stop at the ordinary ahead horizon may spend
     // work on a marker destination. Capacity holds never evict or make room
@@ -5314,7 +6008,7 @@ fn decide_with_marker_prewarm(
                 // above proved the playhead has no work left.
                 Demand::waiting_on(candidate.target_entry)
             };
-            (candidate, decide(manifest, &[demand], position))
+            (candidate, decide(manifest, &[demand], position, readers))
         })
         .filter(|(_, action)| {
             matches!(
@@ -5432,6 +6126,7 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
         record_failure(
             shared,
             rendition,
+            crate::playback_control::ProducerDecisionReason::EngineChanged,
             "the v2 fragment-index engine changed; restart is required".to_owned(),
         );
         return;
@@ -5476,7 +6171,12 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
             Ok(child) => child,
             Err(error) => {
                 let cause = format!("spawning the producer: {error}");
-                record_failure(shared, rendition, cause);
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    cause,
+                );
                 return;
             }
         };
@@ -5484,6 +6184,7 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
             record_failure(
                 shared,
                 rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                 "the producer started without a stdout".to_string(),
             );
             return;
@@ -5494,7 +6195,15 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     // below (a purge committing on the maintain task). Attaching would leave
     // a live ffmpeg in a slot whose driver has already exited — a child
     // nothing reaps until the Arc drops.
-    if rendition.closed.load(Relaxed) {
+    //
+    // A failure recorded in that same gap is the other half of the same
+    // hazard, and it was not guarded. The driver does not exit on a failure,
+    // it switches to reclaiming, and a reclaiming pass that has already read
+    // an absent belief will not look again until something kicks it — so an
+    // attach landing just behind it puts a live child in a slot whose only
+    // remaining reader answers `ProducerFailed`. Refuse the attach instead,
+    // here, where the child is still ours to kill.
+    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         let _ = child.kill().await;
         return;
     }
@@ -5683,7 +6392,7 @@ async fn establish_or_verify(
         on_generation_end(
             shared,
             rendition,
-            Outcome::Failed(Failure::Stream(
+            Outcome::Failed(Failure::EngineChanged(
                 "the v2 fragment-index engine changed before init publication".to_owned(),
             )),
             epoch,
@@ -5800,7 +6509,12 @@ async fn on_generation_end(
             on_init_drift(shared, rendition, cause).await;
         }
         Outcome::Failed(failure) => {
-            record_failure(shared, rendition, describe_failure(&failure));
+            record_failure(
+                shared,
+                rendition,
+                classify_failure(&failure),
+                describe_failure(&failure),
+            );
         }
         Outcome::Ran { produced_through } => {
             let last = rendition.plan.len().saturating_sub(1) as u32;
@@ -5814,6 +6528,7 @@ async fn on_generation_end(
                 record_failure(
                     shared,
                     rendition,
+                    crate::playback_control::ProducerDecisionReason::PartialSuccessExit,
                     format!("producer exited early (produced through {produced_through:?})"),
                 );
             } else {
@@ -5854,22 +6569,92 @@ async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Rendition>, cause: 
         );
         return;
     }
-    record_failure(shared, rendition, cause);
+    // Init drift is a *pipeline* change under a rendition a client already
+    // holds a playlist for — vodgen says so in as many words — so it is filed
+    // as the engine moving, not as the file on disk moving.
+    record_failure(
+        shared,
+        rendition,
+        crate::playback_control::ProducerDecisionReason::EngineChanged,
+        cause,
+    );
 }
 
-fn record_failure(shared: &Arc<Shared>, rendition: &Arc<Rendition>, cause: String) {
-    tracing::warn!(rendition = %rendition.key, "producer failed: {cause}");
-    *rendition.failed.lock().expect("failed lock") = Some(cause.clone());
+fn record_failure(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    decision: crate::playback_control::ProducerDecisionReason,
+    cause: String,
+) {
+    tracing::warn!(
+        rendition = %rendition.key,
+        decision = decision.status(),
+        "producer failed: {cause}"
+    );
+    {
+        // First failure wins. A publication fence records the cause — the
+        // source moved, the engine moved — and the generation it stops then
+        // ends with a *consequence*: the sink refused the bytes, the pipe
+        // closed. Overwriting would file the consequence as the diagnosis and
+        // publish a class that names the wrong subsystem.
+        let mut failed = rendition.failed.lock().expect("failed lock");
+        if failed.is_none() {
+            *failed = Some(RenditionFailure {
+                decision,
+                cause: cause.clone(),
+            });
+        }
+    }
     shared.pool.fail(&rendition.key, &cause);
     // Init waiters block on their own Notify, not the wait pool — without
     // this, a GET waiting for `init.mp4` sleeps its whole budget to learn
     // what every segment waiter was told immediately.
     rendition.init_notify.notify_waiters();
+    // And wake the driver, whose only remaining job for this rendition is to
+    // reclaim the producer. Without it the first reclaiming pass waits for the
+    // next maintenance tick's `kick_all`, so a failure recorded a moment after
+    // one tick leaves a doomed ffmpeg holding a codec session for the whole
+    // interval. This is a `notify_one` on the rendition's own wake, so it
+    // cannot outlive the driver task or wake anything else.
+    rendition.kick();
+}
+
+/// One recorded rendition failure: what a client can act on, and what an
+/// operator reads.
+#[derive(Debug, Clone)]
+struct RenditionFailure {
+    /// The bounded class, in the same vocabulary rolling delivery publishes.
+    /// This is what becomes `DeliveryView::producer_decision`, and through it
+    /// a `terminal` or `retry_resource` action the clients already handle.
+    decision: crate::playback_control::ProducerDecisionReason,
+    /// The sentence. Never parsed, only shown.
+    cause: String,
+}
+
+/// Classify one generation outcome.
+///
+/// `Stream` is genuinely the reader failing on the producer's output, which is
+/// what `ReaderFailed` already names on the rolling side; the other two have
+/// no rolling equivalent, because nothing rolling lands fragments at planned
+/// film times or writes through an immutable sink.
+fn classify_failure(failure: &Failure) -> crate::playback_control::ProducerDecisionReason {
+    use crate::playback_control::ProducerDecisionReason as Reason;
+    match failure {
+        // Handled before this point by `on_init_drift`; classified here so the
+        // match stays exhaustive rather than defaulting a new variant, and
+        // with the same class that path records.
+        Failure::InitDrift(_) => Reason::EngineChanged,
+        Failure::EngineChanged(_) => Reason::EngineChanged,
+        Failure::Landing(_) => Reason::MediaLandingFailed,
+        Failure::Stream(_) => Reason::ReaderFailed,
+        Failure::Sink(_) => Reason::ProducerWriteFailed,
+    }
 }
 
 fn describe_failure(failure: &Failure) -> String {
     match failure {
         Failure::InitDrift(why) => format!("init drift: {why}"),
+        Failure::EngineChanged(why) => format!("engine changed: {why}"),
         Failure::Landing(why) => format!("landing failed: {why}"),
         Failure::Stream(why) => format!("stream failed: {why}"),
         Failure::Sink(error) => format!("sink refused: {error}"),
@@ -5963,24 +6748,37 @@ impl vodgen::Sink for RenditionSink {
             // ended normally rather than faulted.
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
+        // Both fences record their own class before returning. vodgen sees
+        // only an `io::Error` and wraps it as `Failure::Sink`, which would
+        // otherwise be classified `producer_write_failed` — a sink fault,
+        // which is not what happened. `record_failure` is first-wins, so the
+        // class recorded here survives the generation ending underneath it.
         if self
             .rendition
             .source
             .as_ref()
             .is_some_and(|source| !source.unchanged())
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "source changed before fragment publication",
-            ));
+            let cause = "source changed before fragment publication".to_owned();
+            record_failure(
+                &self.shared,
+                &self.rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
         if self.rendition.recipe.cluster_cache_key.is_some()
             && !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "v2 fragment-index engine changed before fragment publication",
-            ));
+            let cause = "v2 fragment-index engine changed before fragment publication".to_owned();
+            record_failure(
+                &self.shared,
+                &self.rendition,
+                crate::playback_control::ProducerDecisionReason::EngineChanged,
+                cause.clone(),
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
         let len = bytes.len() as u64;
         {
@@ -6143,9 +6941,9 @@ fn entry_containing(plan: &SegmentPlan, start_seconds: f64) -> u32 {
 }
 
 /// Apply one accepted control snapshot to the playback's speculative ledger.
-/// The marker seek result is settled before the reader frontier moves, using
-/// only ranges credited by `RenditionSink` and still materialized at this
-/// exact instant.
+/// The accepted playback anchor has already committed with the control
+/// sequence. Marker attribution uses only ranges credited by `RenditionSink`
+/// and still materialized at this exact instant.
 async fn apply_marker_prewarm_control(
     rendition: &Arc<Rendition>,
     session_id: &str,
@@ -6274,27 +7072,23 @@ fn plan_duration_ms(plan: &SegmentPlan) -> i64 {
     (plan.duration_ticks().saturating_mul(1000) / u64::from(plan.timescale.max(1))) as i64
 }
 
-/// A reader's eviction guard: back two segments from the playhead, ahead a
-/// horizon's worth from the frontier.
-///
-/// The high edge covers `max(last_served + 1, frontier)`, not last_served
-/// alone: a forward seek's blocked GET moves the frontier past the playhead,
-/// and a window that forgot it would let `make_room` evict the just-
-/// materialized seek target before the waiter opens it — a Pending → produce
-/// → evict livelock under working-set pressure.
+/// The current playback window, never the interval between every position
+/// visited during this session. Admitted GETs have independent narrow pins,
+/// including the publication-to-open race, so seeking does not need to retain
+/// the entire intervening film.
 fn reader_window(reader: &Reader, seconds_per_segment: f64) -> ReaderWindow {
-    let playhead = reader.last_served.unwrap_or(reader.frontier);
-    let frontier = reader
-        .last_served
-        .map(|served| served.saturating_add(1))
-        .unwrap_or(reader.frontier)
-        .max(reader.frontier);
+    let playhead = reader.frontier;
+    let frontier = reader.frontier.saturating_add(1);
     let per = if seconds_per_segment > 0.0 {
         seconds_per_segment
     } else {
         1.0
     };
-    let ahead = ((f64::from(AHEAD_HORIZON_SECONDS) / per) as u32).max(1);
+    // `ceil`, matching `Position::horizon_segments`, which is what bounds how
+    // far the producer may run. Truncating made the protected range shorter
+    // than the range the ahead-fill is allowed to reach, so a sweep under
+    // pressure could evict the segment the producer was about to write again.
+    let ahead = ((f64::from(AHEAD_HORIZON_SECONDS) / per).ceil() as u32).max(1);
     ReaderWindow {
         back: 2,
         playhead,
@@ -6303,13 +7097,18 @@ fn reader_window(reader: &Reader, seconds_per_segment: f64) -> ReaderWindow {
     }
 }
 
-async fn open_ready(path: &Path, etag_stem: &str) -> io::Result<SegmentReady> {
+async fn open_ready(
+    path: &Path,
+    etag_stem: &str,
+    delivery: &Arc<crate::meter::Meter>,
+) -> io::Result<SegmentReady> {
     let file = tokio::fs::File::open(path).await?;
     let len = file.metadata().await?.len();
     Ok(SegmentReady {
         file,
         len,
         etag: format!("{etag_stem}-{len}"),
+        delivery: Arc::clone(delivery),
     })
 }
 
@@ -6732,6 +7531,7 @@ mod tests {
             completed_cache_bytes: 50 << 30,
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
+            blocked_get_cap: DEFAULT_GLOBAL_WAIT_CAP,
         }
     }
 
@@ -6907,6 +7707,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle(session_id),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -6925,6 +7726,15 @@ mod tests {
     ) {
         let cleanup = Arc::new(TerminalCleanup::new());
         cleanup.complete();
+        insert_terminal_session(serve, session_id, rendition, cleanup).await;
+    }
+
+    async fn insert_terminal_session(
+        serve: &VodServe,
+        session_id: &str,
+        rendition: Arc<Rendition>,
+        cleanup: Arc<TerminalCleanup>,
+    ) {
         let rendition_key = rendition.key.clone();
         let file = Arc::new(rendition.recipe.file.clone());
         serve.shared.sessions.lock().await.insert(
@@ -6944,6 +7754,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle(session_id),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -7031,6 +7842,7 @@ mod tests {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -7165,7 +7977,7 @@ mod tests {
             working_set: WorkingSet::default(),
         };
         assert_eq!(
-            decide(&manifest, &[Demand::idle_at(frontier)], empty_position),
+            decide(&manifest, &[Demand::idle_at(frontier)], empty_position, &[]),
             Action::Reposition { to: frontier },
             "the foreground fixture itself starts at the playhead window"
         );
@@ -7173,6 +7985,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             empty_position,
+            &[],
             &ledgers,
         );
         assert_eq!(
@@ -7211,6 +8024,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             filled_position,
+            &[],
             &ledgers,
         );
         assert!(matches!(
@@ -7238,6 +8052,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &ledgers,
         );
         assert_eq!(
@@ -7276,6 +8091,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &ledgers,
         );
         assert!(
@@ -7502,6 +8318,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &[Arc::clone(&ledger), Arc::clone(&enabled_ledger)],
         );
         assert_eq!(enabled.owners.len(), 1);
@@ -8444,7 +9261,7 @@ mod tests {
         let successor = uuid::Uuid::new_v4().to_string();
         let predecessor = uuid::Uuid::new_v4().to_string();
         assert!(
-            gate.stage_preparation(successor.clone(), predecessor.clone(), i64::MAX)
+            gate.stage_preparation(successor.clone(), predecessor.clone(), i64::MAX, None)
                 .await
         );
         assert!(
@@ -8456,7 +9273,12 @@ mod tests {
         // engine that believed in two could commit the wrong one.
         assert!(
             !gate
-                .stage_preparation(uuid::Uuid::new_v4().to_string(), predecessor, i64::MAX)
+                .stage_preparation(
+                    uuid::Uuid::new_v4().to_string(),
+                    predecessor,
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         assert!(gate.settle_preparation(&successor, true).await);
@@ -8486,6 +9308,7 @@ mod tests {
                 abandoned.clone(),
                 uuid::Uuid::new_v4().to_string(),
                 i64::MAX,
+                None,
             )
             .await
         );
@@ -8501,6 +9324,7 @@ mod tests {
                 uuid::Uuid::new_v4().to_string(),
                 uuid::Uuid::new_v4().to_string(),
                 i64::MAX,
+                None,
             )
             .await
         );
@@ -8534,6 +9358,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
                     i64::MAX,
+                    None,
                 )
                 .await,
             "the stale gate must not take the replacement's slot",
@@ -8547,6 +9372,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
                     i64::MAX,
+                    None,
                 )
                 .await
         );
@@ -8569,8 +9395,13 @@ mod tests {
         let gate = serve.preparation_gate(&session_id).await.expect("gate");
         let staged = uuid::Uuid::new_v4().to_string();
         assert!(
-            gate.stage_preparation(staged.clone(), uuid::Uuid::new_v4().to_string(), i64::MAX,)
-                .await
+            gate.stage_preparation(
+                staged.clone(),
+                uuid::Uuid::new_v4().to_string(),
+                i64::MAX,
+                None
+            )
+            .await
         );
 
         serve.begin_end(&session_id, Terminal::Deleted).await;
@@ -8617,6 +9448,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
                     i64::MAX,
+                    None,
                 )
                 .await,
             "a tombstoned session takes no successor",
@@ -8633,6 +9465,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     uuid::Uuid::new_v4().to_string(),
                     i64::MAX,
+                    None,
                 )
                 .await,
             "nor does a gate outliving its session",
@@ -9270,6 +10103,584 @@ mod tests {
         assert_eq!(first, second, "the playlist is immutable (plan §2.1)");
     }
 
+    /// A capacity stall says why, after the producer it terminated is gone.
+    ///
+    /// A hold with no scheduled end terminates its producer — a stopped one
+    /// goes on holding everything a running one held — which leaves the belief
+    /// `Absent` and takes the reason with it. The status then said `waiting`
+    /// with no hold at all, so a viewer's control plane saw a producer stop
+    /// and never saw that the working set was full. `hold_reason` is the only
+    /// fact that distinguishes "nothing is arriving because there is no room"
+    /// from "nothing is arriving".
+    #[tokio::test]
+    async fn a_capacity_stall_still_says_no_room_after_its_producer_is_gone() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        assert_eq!(
+            serve.status("sess-a").await.expect("status").producer_hold,
+            None,
+            "a healthy rendition is not holding"
+        );
+
+        *rendition.capacity_hold.lock().expect("capacity hold") =
+            Some(crate::prodsched::Hold::NoRoom { wanted: 4_096 });
+        let held = serve.status("sess-a").await.expect("status");
+        assert_eq!(
+            held.producer_hold,
+            Some("no_room"),
+            "the reason outlives the producer it terminated"
+        );
+
+        // And it is cleared by the first pass that decides anything else,
+        // rather than being latched for the life of the rendition.
+        *rendition.capacity_hold.lock().expect("capacity hold") = None;
+        assert_eq!(
+            serve.status("sess-a").await.expect("status").producer_hold,
+            None
+        );
+    }
+
+    /// Reattachment removes a reader without going through `detach_reader`,
+    /// so it needs the same wait retirement.
+    ///
+    /// A viewer who creates again lands on a different rendition; anything
+    /// still parked on the one they left has no reader to be ranked against,
+    /// and `playback_demands` marks a session's oldest wait foreground on
+    /// exactly that absence — keeping the abandoned rendition producing for
+    /// somebody who is no longer watching it.
+    #[tokio::test]
+    async fn reattaching_elsewhere_retires_the_waits_left_behind() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let first = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("the first rendition");
+
+        let _parked = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: first.key.clone(),
+                    index: 40,
+                },
+                "sess-a",
+            )
+            .expect("a parked request on the rendition being left");
+        assert_eq!(serve.shared.pool.demands(&first.key).len(), 1);
+
+        // Same session, a different recipe: a different rendition key, and the
+        // reader moves to it.
+        let mut moved = request("play-a", 0.0);
+        moved.kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        serve
+            .try_create(
+                &moved,
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "sess-a".to_string(),
+            )
+            .await
+            .expect("the replacement is VOD-presentable");
+        let second = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("the replacement rendition");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "the fixture must actually move the viewer to another rendition"
+        );
+
+        assert!(
+            serve.shared.pool.demands(&first.key).is_empty(),
+            "the request left behind goes with the reader that made it"
+        );
+    }
+
+    /// Reattachment also stops the subtitle window the viewer left behind, and
+    /// does it without fencing the id they are still watching under.
+    ///
+    /// A window is keyed by session id alone, so a viewer moving to another
+    /// rendition leaves a live ffmpeg extracting a span for the recipe they
+    /// moved off. `detach_reader` releases one on every real ending and its
+    /// comment claimed reattachment converged there too; it did not, and it
+    /// must not — releasing fences the id for half a minute, and this id
+    /// belongs to somebody who is still watching, so the fence would refuse
+    /// the first window of the attachment that just replaced it. The flight is
+    /// stopped by name instead, which is what this pins from the serving side:
+    /// gone, and the session still able to start the next one.
+    #[tokio::test]
+    async fn reattaching_elsewhere_stops_the_window_flight_it_left_behind() {
+        // The window registry is process-global and keyed by session id
+        // alone, so this fixture cannot use the shared `sess-a` literal: a
+        // concurrent test releasing that id would fence or clear this one's
+        // flight and the failure would read as a defect in the code.
+        let session_id = &uuid::Uuid::new_v4().to_string();
+        let base = crate::test_tempdir().expect("base");
+        let (serve, mut file) = serve_on(base.path()).await;
+        let subs = crate::test_tempdir().expect("subs");
+        // Long enough that a window is a fraction of the runtime, which is the
+        // only condition windowing asks about. The extraction itself is
+        // injected, so nothing here reads the media.
+        file.duration_ms = Some(4 * 60 * 60 * 1_000);
+        create(&serve, &file, session_id, "play-a", &settings()).await;
+        let first = rendition_of(&serve, session_id).await;
+
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        let warm = |anchor: i64| {
+            let started = Arc::clone(&started);
+            let hold = Arc::clone(&hold);
+            let subs_dir = subs.path().to_owned();
+            let file = file.clone();
+            async move {
+                crate::subtitles::warm_vtt_window_with(
+                    session_id,
+                    Some(1),
+                    &subs_dir,
+                    &file,
+                    0,
+                    anchor,
+                    30,
+                    move |_tmp, _, _, _, _| async move {
+                        started.add_permits(1);
+                        hold.acquire().await.expect("hold").forget();
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        };
+        let running = || {
+            let started = Arc::clone(&started);
+            async move {
+                tokio::time::timeout(Duration::from_secs(5), started.acquire())
+                    .await
+                    .expect("the injected extractor starts")
+                    .expect("started semaphore remains open")
+                    .forget();
+            }
+        };
+
+        assert!(warm(600).await, "the viewer owns a window on the way in");
+        running().await;
+        assert!(crate::subtitles::owned_window_for_test(session_id).is_some());
+
+        // Same session, a different recipe: a different rendition key, and the
+        // reader moves to it.
+        let mut moved = request("play-a", 0.0);
+        moved.kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        serve
+            .try_create(
+                &moved,
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                session_id.to_string(),
+            )
+            .await
+            .expect("the replacement is VOD-presentable");
+        assert!(
+            !Arc::ptr_eq(&first, &rendition_of(&serve, session_id).await),
+            "the fixture must actually move the viewer to another rendition"
+        );
+
+        assert!(
+            crate::subtitles::owned_window_for_test(session_id).is_none(),
+            "the flight for the recipe they left does not outlive the move"
+        );
+        assert!(
+            warm(900).await,
+            "and the viewer who is still watching is not fenced out of the next one"
+        );
+        running().await;
+        assert_eq!(
+            crate::subtitles::peak_window_flights_for_test(session_id),
+            1,
+            "one live flight per playback, across the move"
+        );
+
+        hold.add_permits(8);
+        crate::subtitles::release_session_window(session_id).await;
+    }
+
+    /// The configured node cap reaches the pool, on create.
+    ///
+    /// Settings are re-read per create, so that is where the ceiling is
+    /// applied — which is what lets an operator change it without a restart.
+    /// A cap that lived only at construction would be frozen at whatever the
+    /// node booted with, and the plan promised a setting.
+    #[tokio::test]
+    async fn the_configured_blocked_get_cap_reaches_the_pool() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            DEFAULT_GLOBAL_WAIT_CAP,
+            "an unconfigured node still bounds its parked work"
+        );
+
+        let mut tuned = settings();
+        tuned.blocked_get_cap = 3;
+        create(&serve, &file, "sess-a", "play-a", &tuned).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            3,
+            "the operator's number, applied where settings are read"
+        );
+
+        let mut raised = settings();
+        raised.blocked_get_cap = 128;
+        create(&serve, &file, "sess-b", "play-b", &raised).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            128,
+            "and it tracks a later change rather than latching the first"
+        );
+    }
+
+    /// A detached viewer stops being demand at the moment their reader goes,
+    /// not when their abandoned request finally times out.
+    ///
+    /// `playback_demands` ranks a blocked request against the reader that
+    /// asked for it. With the reader gone it falls back to marking that
+    /// session's oldest wait foreground — so until the request's HTTP deadline
+    /// expired, a viewer who had already left outranked one who was still
+    /// watching and pointed the producer at media nobody wanted.
+    #[tokio::test]
+    async fn a_detached_viewer_stops_being_demand_with_its_reader() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        create(&serve, &file, "sess-b", "play-b", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        let _leaving = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 40,
+                },
+                "sess-a",
+            )
+            .expect("a parked request for the leaving viewer");
+        let _staying = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 2,
+                },
+                "sess-b",
+            )
+            .expect("a parked request for the viewer who stays");
+        assert_eq!(serve.shared.pool.demands(&rendition.key).len(), 2);
+
+        rendition.detach_reader(&serve.shared.pool, "sess-a").await;
+
+        let remaining = serve.shared.pool.demands(&rendition.key);
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the departing viewer's parked request left with its reader"
+        );
+        assert_eq!(
+            remaining[0].session, "sess-b",
+            "and the viewer still watching keeps theirs"
+        );
+    }
+
+    /// P1-2. A recorded failure carries its class to the session status.
+    ///
+    /// The prose was always there; the class is what a client can act on.
+    /// Without it `DeliveryView::from_status` had nothing to publish, so a
+    /// rendition that had genuinely failed still produced `action: none`.
+    #[tokio::test]
+    async fn a_recorded_failure_publishes_its_class_not_only_its_sentence() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+
+        let healthy = serve.status("sess-a").await.expect("status");
+        assert_eq!(healthy.producer_decision, None, "nothing has failed");
+        assert_eq!(healthy.producer_failed, None);
+
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+        record_failure(
+            &serve.shared,
+            &rendition,
+            Reason::SourceChanged,
+            "source changed after the fragment index was selected".to_owned(),
+        );
+
+        let failed = serve.status("sess-a").await.expect("status");
+        assert_eq!(failed.producer_state, "failed");
+        assert_eq!(
+            failed.producer_decision,
+            Some(Reason::SourceChanged.status()),
+            "the class travels with the failure"
+        );
+        assert_eq!(
+            failed.producer_failed.as_deref(),
+            Some("source changed after the fragment index was selected"),
+            "the operator's sentence is not replaced by the class"
+        );
+    }
+
+    /// The first failure is the cause; a later one is its consequence.
+    ///
+    /// A publication fence records `source_changed` and then stops the
+    /// generation, which ends by reporting that its sink refused the bytes.
+    /// Overwriting would file the consequence as the diagnosis and publish a
+    /// class naming the wrong subsystem — `producer_write_failed` for a source
+    /// that moved. The sentence must not drift from the class either.
+    #[tokio::test]
+    async fn a_recorded_cause_is_not_overwritten_by_its_own_consequence() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        record_failure(
+            &serve.shared,
+            &rendition,
+            Reason::SourceChanged,
+            "source changed before fragment publication".to_owned(),
+        );
+        record_failure(
+            &serve.shared,
+            &rendition,
+            Reason::ProducerWriteFailed,
+            "sink refused: source changed before fragment publication".to_owned(),
+        );
+
+        let failure = rendition.failure().expect("a recorded failure");
+        assert_eq!(
+            failure.decision,
+            Reason::SourceChanged,
+            "the fence that stopped the generation is the diagnosis"
+        );
+        assert_eq!(
+            failure.cause, "source changed before fragment publication",
+            "the sentence stays with the class it was recorded beside"
+        );
+    }
+
+    /// A source that moves under a rendition is published as a source change,
+    /// end to end, not as whatever the generation happened to say on its way
+    /// down.
+    ///
+    /// This is one of the classification choices that had no coverage: the
+    /// class chosen at a `record_failure` site is invisible to a test that
+    /// supplies its own.
+    #[tokio::test]
+    async fn a_source_that_moves_is_published_as_a_source_change() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+
+        // Move the source under the fence the rendition took at create.
+        let mut bytes = tokio::fs::read(&file.path).await.expect("source bytes");
+        bytes.extend_from_slice(b"moved");
+        tokio::fs::write(&file.path, &bytes)
+            .await
+            .expect("rewrite the source");
+
+        let answer = serve.segment("sess-a", "seg00000.m4s").await;
+        assert!(
+            matches!(
+                answer,
+                Some(VodPublication {
+                    result: Err(VodError::ProducerFailed(_)),
+                    ..
+                })
+            ),
+            "a moved source must refuse the GET, not serve stale media"
+        );
+
+        let status = serve.status("sess-a").await.expect("status");
+        assert_eq!(status.producer_state, "failed");
+        assert_eq!(
+            status.producer_decision,
+            Some(Reason::SourceChanged.status()),
+            "the class names what actually changed"
+        );
+        assert!(
+            !Reason::SourceChanged.is_permanent(),
+            "a moved source is a statement about this plan: a fresh create \
+             re-plans against the file that is there now"
+        );
+    }
+
+    /// Every generation outcome has a class, and each names what happened.
+    ///
+    /// A `match` that fell through to one bucket would compile and would make
+    /// the whole vocabulary decorative, so this pins each arm. `Stream` maps
+    /// onto rolling's existing `ReaderFailed` because it is the same fact —
+    /// reading the producer's output failed — while landing and sink faults
+    /// have no rolling equivalent and get their own names rather than borrow
+    /// one that would misdescribe them.
+    #[test]
+    fn every_generation_failure_names_what_actually_happened() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let cases = [
+            (Failure::InitDrift("init".to_owned()), Reason::EngineChanged),
+            (
+                Failure::EngineChanged("engine".to_owned()),
+                Reason::EngineChanged,
+            ),
+            (
+                Failure::Landing("landing".to_owned()),
+                Reason::MediaLandingFailed,
+            ),
+            (Failure::Stream("stream".to_owned()), Reason::ReaderFailed),
+            (
+                Failure::Sink(io::Error::other("sink")),
+                Reason::ProducerWriteFailed,
+            ),
+        ];
+        for (failure, expected) in cases {
+            assert_eq!(
+                classify_failure(&failure),
+                expected,
+                "{} must not be filed as something else",
+                describe_failure(&failure)
+            );
+            // Permanence follows what a retry can change, not which subsystem
+            // failed. A landing, stream or sink fault is a statement about
+            // this attempt, and a fresh create can succeed. An engine change
+            // is not: the engine baseline is established once per process, so
+            // every reopen re-plans straight back into the same verdict.
+            assert_eq!(
+                classify_failure(&failure).is_permanent(),
+                expected == Reason::EngineChanged,
+                "{} is classified with the wrong permanence",
+                describe_failure(&failure)
+            );
+        }
+    }
+
+    /// The seam the P1-3 correction consists of: the meter a segment answer
+    /// carries is the meter its own session publishes.
+    ///
+    /// Every other proof of this change supplies its own meter, which exercises
+    /// the pump and the control view in isolation and would keep passing if
+    /// `session_rendition` handed out a fresh meter per request — every VOD
+    /// session would silently return to `delivered_bps: None`, preparation
+    /// would go back to refusing `throughput_unreported`, and the whole suite
+    /// would stay green. This drives the production entry point, so nothing
+    /// here chooses the meter, and reads the count back off the session's own
+    /// status rather than off the answer.
+    #[tokio::test]
+    async fn a_segment_answer_carries_the_meter_its_own_session_publishes() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        create(&serve, &file, "sess-b", "play-b", &settings()).await;
+
+        assert_eq!(
+            serve
+                .status("sess-a")
+                .await
+                .expect("status")
+                .delivered_bytes,
+            0,
+            "nothing has been delivered yet"
+        );
+
+        let ready = fetch(&serve, "sess-a", "seg00000.m4s").await;
+        // Exactly what the response pump does, against the meter production
+        // chose rather than one this test made.
+        ready.delivery.note(4_096);
+
+        assert_eq!(
+            serve
+                .status("sess-a")
+                .await
+                .expect("status")
+                .delivered_bytes,
+            4_096,
+            "the session publishes what its own answer counted"
+        );
+        assert_eq!(
+            serve
+                .status("sess-b")
+                .await
+                .expect("status")
+                .delivered_bytes,
+            0,
+            "two viewers of the same immutable rendition are metered apart"
+        );
+    }
+
     #[tokio::test]
     async fn a_blocking_get_materializes_the_segment_and_a_re_get_serves_the_same_bytes() {
         let base = crate::test_tempdir().expect("base");
@@ -9333,6 +10744,156 @@ mod tests {
                 .expect("touch lock"),
             touched,
             "a timed-out VOD materialization must not renew the session",
+        );
+    }
+
+    /// A rendition that has recorded a failure gives its producer back.
+    ///
+    /// The failure is permanent — first-wins, never cleared — and it answers
+    /// every waiter at the moment it lands, so the child that is still running
+    /// is producing for nobody. The driver used to return the instant it saw a
+    /// failure, and `Action::Idle` is the only thing that reclaims a producer,
+    /// so nothing was left to reap it: the dormant purge refuses an admitted
+    /// rendition outright and the last `Arc` drop waits on whichever generation
+    /// task or watchdog outlives it. This drives the case that costs the most —
+    /// a SIGSTOP'd child, which goes on holding the codec session a running one
+    /// held — and asserts the physical outcome, that the pid is gone and
+    /// reaped, not merely that a belief was rewritten.
+    ///
+    /// The latched capacity hold is checked here too, and deliberately not
+    /// dressed up as a wire defect. The first version of this test asserted
+    /// that a failed rendition published `producer_hold: no_room`, and it does
+    /// not: `status` answers `failed` ahead of every belief arm, so the stale
+    /// hold was already shielded. What is asserted is what is true — the field
+    /// is cleared rather than latched for the life of the rendition, so the
+    /// next reader of it is not the one who discovers it was never true.
+    #[tokio::test]
+    async fn a_failed_rendition_reclaims_its_producer_and_drops_its_hold() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = rendition_of(&serve, "sess-a").await;
+
+        wait_until("the producer spawned", Duration::from_secs(10), || {
+            let rendition = Arc::clone(&rendition);
+            async move { rendition.last_child_pid.load(Relaxed) != 0 }
+        })
+        .await;
+        let pid = rendition.last_child_pid.load(Relaxed) as libc::pid_t;
+
+        // The expensive shape: stopped, so it makes no progress, and alive, so
+        // it still owns everything a running producer owned.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+        *rendition.capacity_hold.lock().expect("capacity hold") =
+            Some(crate::prodsched::Hold::NoRoom { wanted: 4_096 });
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the fixture needs a live child to reclaim"
+        );
+
+        record_failure(
+            &serve.shared,
+            &rendition,
+            crate::playback_control::ProducerDecisionReason::EngineChanged,
+            "the fixture recorded a permanent rendition failure".to_owned(),
+        );
+
+        wait_until(
+            "the producer was reclaimed",
+            Duration::from_secs(10),
+            || {
+                let rendition = Arc::clone(&rendition);
+                async move { matches!(rendition.slot.belief().await, Producer::Absent { .. }) }
+            },
+        )
+        .await;
+        // Reaped, not merely signalled: `perform(Terminate)` is `start_kill`
+        // then `wait`, so a pid that still answers here is a zombie this
+        // process owns and never collected.
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the failed rendition's child is gone, not left holding its codec session"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "gone because it was reaped, not because signalling was refused"
+        );
+        assert!(
+            rendition
+                .capacity_hold
+                .lock()
+                .expect("capacity hold")
+                .is_none(),
+            "and the hold is cleared rather than latched for the rendition's life"
+        );
+        let status = serve.status("sess-a").await.expect("status");
+        assert_eq!(status.producer_state, "failed");
+        assert_eq!(
+            status.producer_hold, None,
+            "which the status already answered ahead of the belief, and still does"
+        );
+    }
+
+    /// One unfinished terminal cleanup cannot stop the node's maintenance.
+    ///
+    /// `maintain` waits on every unfinished cleanup belonging to a tombstoned
+    /// session before it does anything else, and that wait had no bound. A
+    /// single cleanup that never completes therefore stopped the idle reap,
+    /// the dormant-rendition purge, the tombstone eviction and every driver
+    /// kick — for the life of the process, with nothing said.
+    ///
+    /// Two arms could install one: `begin_end` and the supersession sweep both
+    /// wrote the tombstone and the cleanup before reading a rendition that may
+    /// be `None`, and both then returned without an owner for it. Both now
+    /// complete it, so this fixture has to install one by hand — which is the
+    /// point. The bound is what holds when the next change to that ordering
+    /// gets it wrong.
+    #[tokio::test(start_paused = true)]
+    async fn one_unfinished_terminal_cleanup_cannot_wedge_node_maintenance() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+
+        let wedged = Arc::new(TerminalCleanup::new());
+        insert_terminal_session(
+            &serve,
+            "sess-wedged",
+            synthetic_rendition(base.path()).await,
+            Arc::clone(&wedged),
+        )
+        .await;
+        let reapable = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_ended_route(store.as_ref(), &reapable, &generation).await;
+        insert_finished_terminal_session(&serve, &reapable, synthetic_rendition(base.path()).await)
+            .await;
+
+        tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION + Duration::from_secs(1)).await;
+        // Paused time auto-advances to the next timer whenever the runtime is
+        // idle, so the elapsed span is exactly the bound the wait armed — which
+        // is what makes this an assertion about the documented number rather
+        // than about finiteness. Without the timeout there is no timer to
+        // advance to and the pass never returns at all.
+        let before = tokio::time::Instant::now();
+        serve.maintain().await;
+        assert_eq!(
+            tokio::time::Instant::now() - before,
+            TERMINAL_CLEANUP_MAINTENANCE_WAIT,
+            "the pass gave up on the wedged cleanup after exactly the documented bound"
+        );
+
+        assert!(
+            !wedged.is_finished(),
+            "the fixture's whole point is a cleanup that never completes"
+        );
+        // And the pass ran to its end anyway, which is the thing that matters:
+        // the work behind the wait still happened.
+        assert!(
+            serve.playlist(&reapable).await.is_none(),
+            "maintenance past its retention window still evicted the other tombstone"
         );
     }
 
@@ -9878,6 +11439,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -9979,6 +11541,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -10048,6 +11611,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -10092,6 +11656,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(replacement_touch),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -10541,6 +12106,7 @@ mod tests {
                     generation.clone(),
                     i64::MAX,
                     1,
+                    None,
                 ));
         }
 
@@ -10766,6 +12332,717 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepted_seek_intent_controls_demand_and_retention_in_both_directions() {
+        const VIEWER: &str = "00000000-0000-4000-8000-000000000001";
+        const GENERATION: &str = "00000000-0000-4000-8000-000000000002";
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        activate_control_route(store.as_ref(), VIEWER, GENERATION).await;
+        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
+        let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
+            session_id: VIEWER,
+            generation: GENERATION,
+            owner_node_id: "node-a",
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-000000000005",
+            sequence,
+            snapshot,
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
+        };
+        let key = |index| WaitKey {
+            rendition: rendition.key.clone(),
+            index,
+        };
+        let old = serve
+            .shared
+            .pool
+            .register(key(3), VIEWER)
+            .expect("old GET admitted");
+        let current = serve
+            .shared
+            .pool
+            .register(key(45), VIEWER)
+            .expect("seek GET admitted");
+        let prefetch = serve
+            .shared
+            .pool
+            .register(key(58), VIEWER)
+            .expect("prefetch admitted");
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        snapshot.render_state = crate::playback_control::RenderState::Seeking;
+        snapshot.seek_target_ms = Some(
+            (rendition.plan.entry(45).expect("target").start_ticks * 1000
+                / u64::from(rendition.timescale)) as i64
+                + 1,
+        );
+        serve
+            .control(control(1, snapshot.clone()))
+            .await
+            .expect("VOD session")
+            .expect("accepted seek");
+        let position = Position {
+            produced_through: None,
+            positioned_at: None,
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet::default(),
+        };
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(
+            &serve.shared.pool,
+            &rendition,
+            &readers,
+            &*rendition.manifest.lock().await,
+        );
+        assert_eq!(
+            decide(&*rendition.manifest.lock().await, &demands, position, &[]),
+            Action::Reposition { to: 45 }
+        );
+        assert!(
+            !reader_window(&readers[VIEWER], rendition.seconds_per_segment).covers(3),
+            "a forward seek does not protect the entire intervening film"
+        );
+        drop(readers);
+
+        snapshot.seek_target_ms = Some(
+            (rendition.plan.entry(3).expect("rewind").start_ticks * 1000
+                / u64::from(rendition.timescale)) as i64
+                + 1,
+        );
+        let mut rewind = serve
+            .control(control(2, snapshot.clone()))
+            .await
+            .expect("VOD session");
+        if let Err(crate::playback_control::ControlStateError::RateLimited(ms)) = rewind {
+            tokio::time::sleep(Duration::from_millis(u64::from(ms) + 1)).await;
+            rewind = serve
+                .control(control(2, snapshot))
+                .await
+                .expect("VOD session");
+        }
+        rewind.expect("accepted rewind");
+        drop(prefetch);
+        let near_prefetch = serve
+            .shared
+            .pool
+            .register(key(10), VIEWER)
+            .expect("nearby prefetch admitted");
+        let mut readers = rendition.readers.lock().await;
+        // An old high GET completing after the backward seek is delivery
+        // evidence, not a new playback command.
+        readers.get_mut(VIEWER).expect("reader").served(45);
+        assert_eq!(readers[VIEWER].frontier, 3);
+        let demands = playback_demands(
+            &serve.shared.pool,
+            &rendition,
+            &readers,
+            &*rendition.manifest.lock().await,
+        );
+        assert_eq!(
+            decide(
+                &*rendition.manifest.lock().await,
+                &demands,
+                Position {
+                    positioned_at: Some(10),
+                    ..position
+                },
+                &[]
+            ),
+            Action::Reposition { to: 3 }
+        );
+        assert!(!reader_window(&readers[VIEWER], rendition.seconds_per_segment).covers(45));
+        drop(readers);
+        assert_eq!(
+            serve.shared.pool.retained(&rendition.key),
+            vec![3, 10, 45],
+            "every admitted request still has a narrow pin"
+        );
+        drop((current, near_prefetch));
+        assert_eq!(serve.shared.pool.retained(&rendition.key), vec![3]);
+        drop(old);
+        assert!(serve.shared.pool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_control_acceptance_keeps_the_anchor_and_exact_replay() {
+        const VIEWER: &str = "00000000-0000-4000-8000-000000000003";
+        const GENERATION: &str = "00000000-0000-4000-8000-000000000004";
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        activate_control_route(store.as_ref(), VIEWER, GENERATION).await;
+        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        snapshot.render_state = crate::playback_control::RenderState::Seeking;
+        snapshot.seek_target_ms = Some(300_000);
+        let target = entry_containing(&rendition.plan, 300.0);
+        let ledger = Arc::clone(&rendition.readers.lock().await[VIEWER].marker_prewarm);
+        ledger.lock().expect("ledger").enabled = true;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *serve
+            .shared
+            .control_applied_pause
+            .lock()
+            .expect("pause lock") = Some(Arc::clone(&pause));
+        let accepted = {
+            let serve = Arc::clone(&serve);
+            let snapshot = snapshot.clone();
+            tokio::spawn(async move {
+                serve
+                    .control(crate::playback_control::LocalControlRequest {
+                        session_id: VIEWER,
+                        generation: GENERATION,
+                        owner_node_id: "node-a",
+                        owner_epoch: 1,
+                        client_instance_id: "00000000-0000-4000-8000-000000000006",
+                        sequence: 1,
+                        snapshot,
+                        prepared_successor:
+                            crate::playback_control::PreparedSuccessorObservation::NotRequested,
+                    })
+                    .await
+            })
+        };
+        pause.wait().await;
+        assert_eq!(
+            rendition.readers.lock().await[VIEWER].frontier,
+            target,
+            "accepted sequence and playback anchor commit before any cancellable side effects"
+        );
+        assert!(!ledger.lock().expect("ledger").enabled, "accepted intent invalidates old speculation even when the later marker update is cancelled");
+        accepted.abort();
+        let _ = accepted.await;
+        *serve
+            .shared
+            .control_applied_pause
+            .lock()
+            .expect("pause lock") = None;
+        let replay = serve
+            .control(crate::playback_control::LocalControlRequest {
+                session_id: VIEWER,
+                generation: GENERATION,
+                owner_node_id: "node-a",
+                owner_epoch: 1,
+                client_instance_id: "00000000-0000-4000-8000-000000000006",
+                sequence: 1,
+                snapshot,
+                prepared_successor:
+                    crate::playback_control::PreparedSuccessorObservation::NotRequested,
+            })
+            .await
+            .expect("VOD session")
+            .expect("exact replay");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(rendition.readers.lock().await[VIEWER].frontier, target);
+    }
+
+    #[tokio::test]
+    async fn a_published_blocked_get_keeps_its_pin_through_the_response_file_open() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 3).await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *serve.shared.segment_ready_pause.lock().expect("pause lock") = Some(Arc::clone(&pause));
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        45,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        pause.wait().await;
+        // Publication follows the production GET's post-registration check;
+        // the oneshot remembers Ready even if it precedes the next poll.
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                45,
+                b"target bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.pool.satisfy(&rendition.key, 45);
+        pause.wait().await;
+        let windows = eviction_windows(&serve.shared, &rendition).await;
+        let mut manifest = rendition.manifest.lock().await;
+        rendition
+            .dir
+            .make_room(&mut manifest, &windows, u64::MAX)
+            .await
+            .expect("pressure sweep");
+        assert!(manifest.state(45).expect("target").is_materialized());
+        drop(manifest);
+        pause.wait().await;
+        assert_eq!(get.await.expect("GET task").expect("response file").len, 12);
+        assert!(serve.shared.pool.retained(&rendition.key).is_empty());
+        let windows = eviction_windows(&serve.shared, &rendition).await;
+        let mut manifest = rendition.manifest.lock().await;
+        rendition
+            .dir
+            .make_room(&mut manifest, &windows, u64::MAX)
+            .await
+            .expect("later sweep");
+        assert!(
+            !manifest.state(45).expect("target").is_materialized(),
+            "opening releases the narrow pin; old destinations do not become permanent retention"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_and_controlled_readers_both_receive_fair_current_demand() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("legacy", 0).await;
+        rendition.attach_reader("controlled", 45).await;
+        rendition
+            .readers
+            .lock()
+            .await
+            .get_mut("controlled")
+            .expect("reader")
+            .accept_control(1, 45);
+        let old = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 3,
+                },
+                "legacy",
+            )
+            .expect("legacy admitted");
+        let newer = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 45,
+                },
+                "controlled",
+            )
+            .expect("controlled admitted");
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(
+            &serve.shared.pool,
+            &rendition,
+            &readers,
+            &*rendition.manifest.lock().await,
+        );
+        let position = Position {
+            produced_through: None,
+            positioned_at: Some(45),
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet::default(),
+        };
+        assert_eq!(
+            decide(&*rendition.manifest.lock().await, &demands, position, &[]),
+            Action::Reposition { to: 3 }
+        );
+        drop(readers);
+        drop(old);
+        let far = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 55,
+                },
+                "legacy",
+            )
+            .expect("far legacy seek admitted");
+        drop(newer);
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(
+            &serve.shared.pool,
+            &rendition,
+            &readers,
+            &*rendition.manifest.lock().await,
+        );
+        assert!(
+            demands
+                .iter()
+                .any(|demand| demand.blocked_on == Some(55) && demand.foreground),
+            "a legacy seek outside the last delivered window remains a fair candidate"
+        );
+        drop(far);
+    }
+
+    #[test]
+    fn an_accepted_new_owner_sequence_one_replaces_the_old_owner_anchor() {
+        let mut reader = Reader::new(3);
+        reader.accept_control(90, 45);
+        reader.accept_control(1, 3);
+        assert_eq!(reader.frontier, 3);
+        assert_eq!(reader.control_sequence, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_published_nearest_request_cannot_hide_the_next_current_get() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("viewer", 45).await;
+        rendition
+            .readers
+            .lock()
+            .await
+            .get_mut("viewer")
+            .expect("reader")
+            .accept_control(1, 45);
+        let mut waits = Vec::new();
+        for index in [3, 45, 46] {
+            waits.push(
+                serve
+                    .shared
+                    .pool
+                    .register(
+                        WaitKey {
+                            rendition: rendition.key.clone(),
+                            index,
+                        },
+                        "viewer",
+                    )
+                    .expect("admitted"),
+            );
+        }
+        let mut manifest = rendition.manifest.lock().await;
+        rendition
+            .dir
+            .materialize(&mut manifest, 45, b"published", now_ms())
+            .await
+            .expect("publish before satisfy");
+        let readers = rendition.readers.lock().await;
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        let position = Position {
+            produced_through: Some(45),
+            positioned_at: Some(45),
+            seconds_per_segment: rendition.seconds_per_segment,
+            working_set: WorkingSet::default(),
+        };
+        assert_eq!(
+            decide(&manifest, &demands, position, &[]),
+            Action::Produce { next: 46 },
+            "old request3 must not win the publication-to-satisfy interval"
+        );
+        drop(waits);
+    }
+
+    #[tokio::test]
+    async fn a_zero_progress_eviction_does_not_self_schedule_a_hot_loop() {
+        use futures_util::FutureExt;
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared")
+            .working_set_budget = 1;
+        rendition.attach_reader("viewer", 0).await;
+        rendition
+            .dir
+            .materialize(
+                &mut *rendition.manifest.lock().await,
+                0,
+                b"protected bytes",
+                now_ms(),
+            )
+            .await
+            .expect("publish");
+        serve.shared.working_set.store(15, Relaxed);
+        let pending = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 1,
+                },
+                "viewer",
+            )
+            .expect("admitted");
+        driver_pass(&serve.shared, &rendition).await;
+        assert!(rendition.wake.notified().now_or_never().is_none(), "zero-byte sweep waits for demand/capacity/maintenance change instead of kicking itself forever");
+        assert_eq!(serve.shared.working_set.load(Relaxed), 15);
+        #[cfg(unix)]
+        {
+            let child = tokio::process::Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("fake running producer");
+            rendition.slot.attach(child, 0).await;
+            driver_pass(&serve.shared, &rendition).await;
+            assert!(
+                matches!(rendition.slot.belief().await, Producer::Absent { .. }),
+                "zero-progress capacity hold releases a running producer"
+            );
+            assert_eq!(
+                rendition.gen_epoch.load(Relaxed),
+                1,
+                "queued producer writes are fenced"
+            );
+            assert!(rendition.wake.notified().now_or_never().is_none());
+        }
+        drop(pending);
+    }
+
+    #[tokio::test]
+    async fn cancelled_and_refused_gets_leave_no_watchdog_or_reader_frontier() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared")
+            .materialize_budget = Duration::from_secs(5);
+        rendition.attach_reader("viewer", 3).await;
+        let mut waits = Vec::new();
+        for index in 10..10 + PER_SESSION_WAIT_CAP as u32 {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            waits.push(tokio::spawn(async move {
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        index,
+                        Duration::from_secs(1),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            }));
+        }
+        wait_until("admitted requests", Duration::from_secs(1), async || {
+            serve.shared.pool.len() == PER_SESSION_WAIT_CAP
+        })
+        .await;
+        assert!(matches!(
+            serve
+                .serve_segment(
+                    &rendition,
+                    "viewer",
+                    50,
+                    Duration::from_secs(1),
+                    Arc::new(crate::meter::Meter::new())
+                )
+                .await,
+            // One viewer at its own ceiling, on a node with room: the refusal
+            // names the per-session cap, which is the answer that tells this
+            // client to slow down rather than telling it the node is out.
+            Err(VodError::Busy(crate::waitpool::WaitRefused::SessionBusy))
+        ));
+        assert!(!rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .contains_key(&50));
+        assert_eq!(rendition.readers.lock().await["viewer"].frontier, 3);
+        let watchdogs = rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .values()
+            .filter_map(|clock| clock.watchdog.clone())
+            .collect::<Vec<_>>();
+        for wait in waits {
+            wait.abort();
+            let _ = wait.await;
+        }
+        assert!(serve.shared.pool.is_empty());
+        assert!(rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .is_empty());
+        wait_until(
+            "cancelled watchdog tasks",
+            Duration::from_secs(1),
+            async || watchdogs.iter().all(tokio::task::AbortHandle::is_finished),
+        )
+        .await;
+        assert!(
+            rendition.failure().is_none(),
+            "orphaned deadlines cannot poison a shared rendition"
+        );
+        assert!(
+            matches!(
+                serve
+                    .serve_segment(
+                        &rendition,
+                        "viewer",
+                        50,
+                        Duration::from_millis(1),
+                        Arc::new(crate::meter::Meter::new())
+                    )
+                    .await,
+                Err(VodError::Pending { .. })
+            ),
+            "a later destination receives its own production budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_episode_cannot_expire_a_later_wait_for_the_same_entry() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared")
+            .materialize_budget = Duration::from_secs(5);
+        let old = serve.shared.arm_materialize_watchdog(&rendition, 10);
+        let old_started = old.started;
+        let old_task = rendition.demand_since.lock().expect("demand lock")[&10]
+            .watchdog
+            .as_ref()
+            .expect("watchdog")
+            .clone();
+        drop(old);
+        wait_until(
+            "old watchdog cancelled",
+            Duration::from_secs(1),
+            async || old_task.is_finished(),
+        )
+        .await;
+        let new = serve.shared.arm_materialize_watchdog(&rendition, 10);
+        assert!(new.started > old_started);
+        let request = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 10,
+                },
+                "viewer",
+            )
+            .expect("new request admitted");
+        assert!(old_task.is_finished());
+        assert_eq!(
+            rendition
+                .demand_since
+                .lock()
+                .expect("demand lock")
+                .get(&10)
+                .expect("new episode retained")
+                .started,
+            new.started
+        );
+        assert_eq!(
+            serve.shared.pool.demands(&rendition.key).len(),
+            1,
+            "old watchdog cannot settle the new request"
+        );
+        drop((request, new));
+    }
+
+    #[tokio::test]
+    async fn a_manifest_recheck_cannot_restart_the_http_block_budget() {
+        // This production seam uses an absolute Tokio deadline; drive the
+        // clock explicitly rather than depend on wall-clock scheduling.
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        tokio::time::pause();
+        let manifest = rendition.manifest.lock().await;
+        let get = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .blocked_wait(
+                        &rendition,
+                        "viewer",
+                        10,
+                        Duration::from_secs(5),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(serve.shared.pool.len(), 1);
+        tokio::time::advance(Duration::from_secs(6)).await;
+        drop(manifest);
+        let result = tokio::time::timeout(Duration::from_millis(100), get)
+            .await
+            .expect("expired GET does not receive a fresh five-second wait")
+            .expect("GET task");
+        assert!(matches!(result, Err(VodError::Pending { .. })));
+    }
+
+    #[tokio::test]
+    async fn cancelled_init_request_does_not_leave_a_rendition_failure() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition)
+            .expect("unshared")
+            .materialize_budget = Duration::from_secs(5);
+        let pending = {
+            let serve = Arc::clone(&serve);
+            let rendition = Arc::clone(&rendition);
+            tokio::spawn(async move {
+                serve
+                    .serve_init(
+                        &rendition,
+                        Duration::from_secs(1),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
+        };
+        wait_until("init deadline owner", Duration::from_secs(1), async || {
+            rendition
+                .demand_since
+                .lock()
+                .expect("demand lock")
+                .contains_key(&INIT_DEMAND_INDEX)
+        })
+        .await;
+        let watchdog = rendition.demand_since.lock().expect("demand lock")[&INIT_DEMAND_INDEX]
+            .watchdog
+            .as_ref()
+            .expect("init watchdog")
+            .clone();
+        pending.abort();
+        let _ = pending.await;
+        assert!(rendition
+            .demand_since
+            .lock()
+            .expect("demand lock")
+            .is_empty());
+        wait_until(
+            "cancelled init watchdog",
+            Duration::from_secs(1),
+            async || watchdog.is_finished(),
+        )
+        .await;
+        assert!(rendition.failure().is_none());
+    }
+
+    #[tokio::test]
     async fn materialize_watchdog_spans_http_retries_and_fails_typed() {
         let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());
@@ -10794,6 +13071,7 @@ mod tests {
                 lifecycle: serve.shared.session_lifecycle("sess-a"),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
+                delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
                 last_control_snapshot: None,
@@ -11225,7 +13503,12 @@ mod tests {
         }
         serve.shared.working_set.fetch_add(10, Relaxed);
         assert_eq!(serve.shared.working_set.load(Relaxed), 10);
-        record_failure(&serve.shared, &rendition, "boom".to_string());
+        record_failure(
+            &serve.shared,
+            &rendition,
+            crate::playback_control::ProducerDecisionReason::ReaderFailed,
+            "boom".to_string(),
+        );
         assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
 
         create(&serve, &file, "sess-b", "play-b", &settings()).await;
@@ -11301,7 +13584,13 @@ mod tests {
         }
         let served = tokio::time::timeout(
             Duration::from_secs(5),
-            serve.blocked_wait(&rendition, "sess-x", 5, Duration::from_secs(60)),
+            serve.blocked_wait(
+                &rendition,
+                "sess-x",
+                5,
+                Duration::from_secs(60),
+                Arc::new(crate::meter::Meter::new()),
+            ),
         )
         .await
         .expect("the re-check must answer without sleeping the budget")
@@ -11310,10 +13599,21 @@ mod tests {
 
         // Same window, failure flavor: a failure recorded in the gap answers
         // typed instead of sleeping.
-        record_failure(&serve.shared, &rendition, "boom".to_string());
+        record_failure(
+            &serve.shared,
+            &rendition,
+            crate::playback_control::ProducerDecisionReason::ReaderFailed,
+            "boom".to_string(),
+        );
         match tokio::time::timeout(
             Duration::from_secs(5),
-            serve.blocked_wait(&rendition, "sess-x", 6, Duration::from_secs(60)),
+            serve.blocked_wait(
+                &rendition,
+                "sess-x",
+                6,
+                Duration::from_secs(60),
+                Arc::new(crate::meter::Meter::new()),
+            ),
         )
         .await
         .expect("the re-check must answer without sleeping the budget")
@@ -11334,7 +13634,15 @@ mod tests {
         let waiter = {
             let serve = Arc::clone(&serve);
             let rendition = Arc::clone(&rendition);
-            tokio::spawn(async move { serve.serve_init(&rendition, Duration::from_secs(30)).await })
+            tokio::spawn(async move {
+                serve
+                    .serve_init(
+                        &rendition,
+                        Duration::from_secs(30),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
         rendition.dir.write_init(b"moov").await.expect("init");
@@ -11356,10 +13664,23 @@ mod tests {
         let waiter = {
             let serve = Arc::clone(&serve);
             let rendition = Arc::clone(&rendition);
-            tokio::spawn(async move { serve.serve_init(&rendition, Duration::from_secs(30)).await })
+            tokio::spawn(async move {
+                serve
+                    .serve_init(
+                        &rendition,
+                        Duration::from_secs(30),
+                        Arc::new(crate::meter::Meter::new()),
+                    )
+                    .await
+            })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
-        record_failure(&serve.shared, &rendition, "boom".to_string());
+        record_failure(
+            &serve.shared,
+            &rendition,
+            crate::playback_control::ProducerDecisionReason::ReaderFailed,
+            "boom".to_string(),
+        );
         match tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
             .expect("the failure must wake the waiter")
@@ -11387,7 +13708,7 @@ mod tests {
                 .expect("materialize");
         }
         let first = serve
-            .open_materialized(&rendition, 0)
+            .open_materialized(&rendition, 0, &Arc::new(crate::meter::Meter::new()))
             .await
             .expect("open")
             .expect("materialized");
@@ -11400,7 +13721,7 @@ mod tests {
                 .expect("re-materialize");
         }
         let second = serve
-            .open_materialized(&rendition, 0)
+            .open_materialized(&rendition, 0, &Arc::new(crate::meter::Meter::new()))
             .await
             .expect("open")
             .expect("materialized");

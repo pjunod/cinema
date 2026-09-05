@@ -5866,6 +5866,30 @@ pub mod status {
         pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
     }
 
+    /// One quorum proof, captured while this node was eligible to serve on it.
+    ///
+    /// Held so serving can continue on a proof that is still inside its own
+    /// lease when a *newer* watermark arrives that this node has not applied
+    /// yet. Publishing a newer watermark overwrites the anchor in the atomics,
+    /// so without this copy the older proof's original deadline is simply lost
+    /// and eligibility drops the instant apply falls one entry behind — even
+    /// though the proof the node was already serving under had not expired.
+    ///
+    /// Opaque to the holder. Every field is compared, never read back out and
+    /// never rewritten: `started_nanos` in particular is the *original* anchor
+    /// and the only deadline this proof will ever have. A catch-up does not
+    /// restamp it, a newer watermark does not extend it, and a sampling error
+    /// does not refresh it — the proof simply expires when it was always going
+    /// to expire.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ServingProof {
+        term: u64,
+        leader: u64,
+        local_observation_epoch: u64,
+        committed_index: u64,
+        started_nanos: u64,
+    }
+
     /// Private, single-operation state retained across one local query.
     /// Callers never receive or replay this capability directly.
     struct BoundedReplicaPermit {
@@ -6088,6 +6112,105 @@ pub mod status {
                 watermark_started_nanos: state.watermark_started_nanos,
                 max_apply_lag_entries,
             })
+        }
+
+        /// The proof this node is serving under, if it is eligible right now.
+        ///
+        /// Eligible here means what serving eligibility has always meant on a
+        /// locally bound voter: a valid watermark whose committed index this
+        /// node has actually applied. Capturing it only in that state is what
+        /// makes the retention below a *continuation* of an eligibility this
+        /// node already had, rather than a new claim to one it never earned.
+        ///
+        /// `None` for a remote-authority process, which has no local replica
+        /// to fall behind and therefore never loses eligibility this way, and
+        /// for the plain SQLite backend, which is not quorum managed at all.
+        pub fn eligible_serving_proof(&self) -> Option<ServingProof> {
+            let elapsed = self.started_at.elapsed();
+            self.eligible_serving_proof_at(elapsed.as_secs(), duration_nanos(elapsed))
+        }
+
+        fn eligible_serving_proof_at(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+        ) -> Option<ServingProof> {
+            // Zero lag is the eligibility condition, and `bounded_replica_state_at`
+            // already answers it consistently under the seqlock: a budget of
+            // zero grants state only when the applied index has reached the
+            // committed one. Reusing it keeps one definition of an eligible
+            // locally bound proof rather than a second that can drift from it.
+            let state = self.bounded_replica_state_at(elapsed_seconds, elapsed_nanos, 0)?;
+            Some(ServingProof {
+                term: state.current_term,
+                leader: state.leader_id,
+                local_observation_epoch: state.local_observation_epoch,
+                committed_index: state.committed_index,
+                started_nanos: state.watermark_started_nanos,
+            })
+        }
+
+        /// Whether a captured proof may still be served under.
+        ///
+        /// Deliberately shaped after `BoundedReplicaPermit::remains_valid_at`,
+        /// because it is answering the same question about the same kind of
+        /// capability. Two differences, both intended:
+        ///
+        /// - the apply-lag budget is not consulted, which is the entire point:
+        ///   this proof is being retained *because* apply is behind, and the
+        ///   bounded-replica read path — which does need freshness — is
+        ///   untouched and still refuses on lag;
+        /// - the committed index may have advanced past the captured one,
+        ///   since a newer watermark arriving is the ordinary cause of this
+        ///   path, but it may never have gone backwards.
+        ///
+        /// Everything else is a hard drop: the original deadline, an explicit
+        /// invalidation, a term or leader or epoch that no longer matches the
+        /// generation this proof was issued in, a local sample that has gone
+        /// stale, or a node that no longer knows its leader.
+        pub fn serving_proof_remains_valid(&self, proof: &ServingProof) -> bool {
+            let elapsed = self.started_at.elapsed();
+            self.serving_proof_remains_valid_at(proof, elapsed.as_secs(), duration_nanos(elapsed))
+        }
+
+        fn serving_proof_remains_valid_at(
+            &self,
+            proof: &ServingProof,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+        ) -> bool {
+            // The original anchor, and the only deadline this proof has. It is
+            // never rewritten, so a catch-up cannot restamp it and a newer
+            // watermark cannot extend it. The window this opens is therefore
+            // strictly no longer than the one the proof already had, and
+            // strictly shorter than the one the newer proof would have
+            // granted — an isolated node still loses authority at exactly the
+            // moment it loses it today.
+            if elapsed_nanos.saturating_sub(proof.started_nanos)
+                >= duration_nanos(QUORUM_WATERMARK_LEASE)
+            {
+                return false;
+            }
+            // Any lag is admissible for this question, so the budget is
+            // saturated rather than zero. Freshness, binding, invalidation and
+            // generation are all still enforced inside.
+            //
+            // Two consequences of reusing that function, both wanted. It also
+            // requires the *current* watermark to be inside its own lease,
+            // which costs nothing — a retained anchor is never later than the
+            // current one, so it expires first — and it means an isolated node
+            // loses authority at exactly the instant it loses it today. And it
+            // requires the watermark source to speak this binary's local-read
+            // protocol, so during a mixed-version window where the leader is
+            // older this retention simply does not apply and the node falls
+            // back to today's behaviour. Both are strictly closed directions.
+            self.bounded_replica_state_at(elapsed_seconds, elapsed_nanos, u64::MAX)
+                .is_some_and(|current| {
+                    current.current_term == proof.term
+                        && current.leader_id == proof.leader
+                        && current.local_observation_epoch == proof.local_observation_epoch
+                        && current.committed_index >= proof.committed_index
+                })
         }
 
         fn bounded_replica_state_at(
@@ -7275,6 +7398,230 @@ pub mod status {
             assert!(
                 !permit.remains_valid_at(10, 10_500_000_000),
                 "the second phase must enforce the configured lag budget too"
+            );
+        }
+
+        /// A proof this node was already serving under survives a newer
+        /// watermark it has not applied, and only until its own deadline.
+        ///
+        /// This is the self-inflicted outage the continuity change exists to
+        /// stop. Publishing a newer committed index overwrites the anchor in
+        /// the atomics, so the older proof's original deadline is simply gone
+        /// and eligibility drops the instant apply falls one entry behind —
+        /// on a node that is in the quorum, holding a live proof, with nothing
+        /// actually wrong with it. Every session on it is then torn down.
+        ///
+        /// The retained proof keeps the *original* anchor and nothing else.
+        /// The assertions walk right up to that deadline and one nanosecond
+        /// past it, from a captured proof whose replacement is comfortably
+        /// fresh — so a lease measured from the newer watermark, or restamped
+        /// on catch-up, fails here rather than in a partition.
+        #[test]
+        fn a_serving_proof_outlives_a_newer_unapplied_watermark_until_its_own_deadline() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let proof = metrics
+                .eligible_serving_proof_at(10, 10_200_000_000)
+                .expect("a node serving at zero lag holds a proof");
+
+            // The newer watermark lands, anchored 300 ms later, and local
+            // apply has not moved. Today this is the moment serving is lost.
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 46),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert_eq!(
+                metrics
+                    .snapshot_at_times(10, 10_500_000_000)
+                    .watermark
+                    .expect("a watermark")
+                    .apply_lag_entries,
+                Some(1),
+                "the fixture must actually put local apply behind"
+            );
+            assert!(
+                metrics.serving_proof_remains_valid_at(&proof, 10, 10_500_000_000),
+                "the proof this node was already serving under has not expired"
+            );
+
+            // Catching up does not restamp it, and neither does the newer
+            // watermark: the deadline is the original anchor plus the lease,
+            // to the nanosecond.
+            assert!(metrics.publish_at(&local_sample(7, Some(46), Some(1)), 11));
+            assert!(
+                metrics.serving_proof_remains_valid_at(&proof, 11, 10_999_999_999),
+                "valid to the last nanosecond of its own lease"
+            );
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 11, 11_000_000_000),
+                "and never one nanosecond past it, however fresh the replacement is"
+            );
+
+            // The replacement proof is still perfectly good at that instant,
+            // which is what makes the expiry above the original one rather
+            // than an artefact of everything having gone stale together.
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(11, 11_000_000_000)
+                    .is_some(),
+                "the caught-up node earns a fresh proof of its own"
+            );
+        }
+
+        /// Every way a retained proof must die, from one fixture each.
+        ///
+        /// Continuity widens exactly one thing — apply lag — and nothing else.
+        /// A term change, a leader change, an epoch change, an explicit
+        /// invalidation and a stale local sample are all still hard drops, and
+        /// they are checked against live state on every poll rather than
+        /// trusted from the moment of capture.
+        #[test]
+        fn a_retained_serving_proof_dies_on_every_generation_change() {
+            let captured = || {
+                let metrics = PassiveRaftMetrics::new(true);
+                assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+                assert!(metrics.publish_watermark_at(
+                    watermark(7, 1, 45),
+                    10_000_000_000,
+                    10_100_000_000,
+                ));
+                let proof = metrics
+                    .eligible_serving_proof_at(10, 10_200_000_000)
+                    .expect("a proof");
+                assert!(
+                    metrics.serving_proof_remains_valid_at(&proof, 10, 10_200_000_000),
+                    "the fixture starts from a proof that is actually valid"
+                );
+                (metrics, proof)
+            };
+
+            let (metrics, proof) = captured();
+            assert!(metrics.publish_at(&local_sample(8, Some(45), Some(1)), 10));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_300_000_000),
+                "a new term is a new generation"
+            );
+
+            let (metrics, proof) = captured();
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(2)), 10));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_300_000_000),
+                "a new leader is a new generation"
+            );
+
+            let (metrics, proof) = captured();
+            assert!(metrics.publish_at(&local_sample(7, Some(45), None), 10));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_300_000_000),
+                "a node that has lost sight of its leader is not serving on this"
+            );
+
+            // Losing the leader and seeing the same one again does not
+            // resurrect the proof, and this is the case the observation epoch
+            // exists for rather than the invalidation flag. The flap sets
+            // `watermark_invalidated`, but the *next successful watermark
+            // publish clears it* — so after a flap and a fresh sample the only
+            // thing still distinguishing the old proof from a current one is
+            // the epoch it was captured under. Without that comparison a proof
+            // from before the flap is honoured after it.
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_400_000_000,
+                10_450_000_000,
+            ));
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_500_000_000)
+                    .is_some(),
+                "the fixture must reach a state where a fresh proof is earnable, \
+                 or it is testing the invalidation flag rather than the epoch"
+            );
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_500_000_000),
+                "a proof captured before a leader flap is not valid after it"
+            );
+
+            let (metrics, proof) = captured();
+            // A successor generation invalidates the retained proof even
+            // though its own publish is rejected.
+            assert!(!metrics.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_250_000_000,
+                10_260_000_000,
+            ));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_300_000_000),
+                "an explicit invalidation is a hard drop"
+            );
+
+            let (metrics, proof) = captured();
+            assert!(
+                !metrics.serving_proof_remains_valid_at(
+                    &proof,
+                    10 + PASSIVE_METRICS_FRESHNESS_SECS + 1,
+                    10_300_000_000
+                ),
+                "a local sample this stale cannot bind anything"
+            );
+        }
+
+        /// Continuity must never let a node serve past what an election could
+        /// finish, and the arithmetic that guarantees it is not obvious.
+        ///
+        /// The retained anchor is by construction never later than the current
+        /// watermark's, so a retained proof always expires first, and the
+        /// window it opens is bounded by the same `QUORUM_WATERMARK_LEASE`
+        /// that bounds every proof. Which means the existing invariant — a
+        /// lease shorter than the vendor election floor — covers this change
+        /// without being relaxed, and the previous release's 1,500 ms floor
+        /// still holds for a mixed-version cluster.
+        #[test]
+        fn retained_serving_proofs_cannot_outlive_the_election_floors() {
+            const PREVIOUS_RELEASE_ELECTION_FLOOR_MS: u128 = 1_500;
+            let config = hiqlite::NodeConfig::default_raft_config(1_000);
+            assert!(
+                QUORUM_WATERMARK_LEASE.as_millis() < u128::from(config.election_timeout_min),
+                "retention is bounded by the same lease, so it cannot outlast an election"
+            );
+            assert!(
+                QUORUM_WATERMARK_LEASE.as_millis() < PREVIOUS_RELEASE_ELECTION_FLOOR_MS,
+                "and it must still hold against the previous release's floor"
+            );
+
+            // A retained anchor is never later than the current watermark's,
+            // so retention never reaches further than trusting the current
+            // proof would have.
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let proof = metrics
+                .eligible_serving_proof_at(10, 10_200_000_000)
+                .expect("a proof");
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 46),
+                10_600_000_000,
+                10_700_000_000,
+            ));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 11_000_000_000),
+                "the retained proof is gone while the newer one is still live"
+            );
+            assert!(
+                metrics
+                    .snapshot_at_times(10, 11_000_000_000)
+                    .watermark_valid,
+                "which is the point: retention expires first, never last"
             );
         }
 

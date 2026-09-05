@@ -570,7 +570,11 @@ expected_occurrences = 15
 [[module_symbols]]
 id = "m4-owner-bound-vod-outcome"
 pattern = "VodPublication"
-expected_occurrences = 24
+# 24 -> 25 with P1-2's classification proof: one more `VodPublication` in
+# `a_source_that_moves_is_published_as_a_source_change`, which matches the
+# refusal a moved source produces on a real segment GET. It reads an owner-bound
+# answer; it does not create or forward one.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-vod-status-owner-admission"
@@ -1049,7 +1053,12 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-vod-terminal-compaction-owner"
 pattern = "TerminalCleanup"
-expected_occurrences = 18
+# 18 -> 20 with the failed-rendition reclaim: the terminal-session test
+# helper gained an `Arc<TerminalCleanup>` parameter so a fixture can install
+# one that never completes, and that fixture constructs it. Both are test
+# scaffolding for the maintenance bound; neither adds a cleanup owner to the
+# production graph, which still mints exactly one per tombstoned session.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-vod-terminal-rendition-compaction"
@@ -1168,6 +1177,20 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # one preparation slot and its durable row together. Without it the first
 # successful stage is the last one for the life of the session. It owns no
 # producer and starts no process — it only settles a slot the actor holds.
+# 389 -> 394 with abb872ba's admitted VOD demand regressions: five test-only
+# task sites exercise control cancellation, publication-to-file-open pinning,
+# refused/cancelled segment GETs, the absolute HTTP deadline, and cancelled
+# init GETs. The cancellation fixtures abort and await their request handles;
+# the file-open fixture joins its GET, and the paused-clock fixture joins its
+# GET through a 100 ms timeout. The segment-cap fixture creates at most
+# PER_SESSION_WAIT_CAP requests from its one spawn site and aborts/joins each.
+# No production task site is added. The existing materialization watchdog now
+# has an exact MaterializeClock AbortHandle instead of being unowned: the
+# request's MaterializeDemand drop removes the last cancelled episode, and
+# clock drop aborts its watchdog. Registration and clock binding share one
+# synchronous lock, so a refused GET creates neither demand nor a watchdog.
+# Expiry only answers that entry's waiters (or wakes init waiters); it no
+# longer terminates the shared producer or records a rendition-wide failure.
 # 389 -> 390 after settlement review: HTTP commit/abort settlement runs in one
 # detached task so cancellation of the request waiter cannot cancel an already
 # authorized Store mutation or release its serving guard early. The task owns
@@ -1179,7 +1202,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and the task starts no worker or process.
 # 391 -> 393: the serving-loss regression owns and joins/cancels its HTTP
 # waiter and serving-loss task. No new production task owner is introduced.
-expected_occurrences = 393
+# 394 + (393 - 389) -> 398 when integrating the independent effort and M6
+# settlement task: retain all five demand-regression owners and all four
+# settlement owners. No source spawn or ownership obligation is discarded.
+expected_occurrences = 398
 
 [[module_structures]]
 id = "method-spawn"
@@ -1190,7 +1216,12 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
 # cancellation token and deadline; the child is kill-on-drop and always reaped
 # on the explicit oversize and ordinary completion paths.
-expected_occurrences = 41
+# 41 -> 42 with abb872ba: the Unix-only zero-progress eviction regression
+# launches `sleep 60` as a fake running producer. It transfers the child to
+# ProducerSlot, then awaits driver_pass; the capacity-hold Terminate step
+# calls Child::kill().await (kill plus reap) before asserting Absent. The child
+# is kill-on-drop if the fixture unwinds. No shipped process is added.
+expected_occurrences = 42
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1281,6 +1312,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 555 -> 557 after adversarial review: the incapable-client production-seam
 # regression adds one exchange-floor sleep and one bounded wait for its
 # detached decision to finish. Both are test-only and awaited.
+# 557 -> 560 with abb872ba: one production sleep retains an expired
+# materialization episode for two PENDING_RETRY_AFTER intervals (2 s), so the
+# normal HTTP retry sees its typed failure. The existing watchdog owns this
+# cleanup; it removes only its matching start timestamp with zero owners.
+# Cancellation/materialization can abort it earlier through clock drop. This
+# is not another producer-progress poll or a new retry/replacement authority.
+# The other two constructors are test-only: a control-rate-floor sleep in
+# the forward/backward seek regression and the paused-clock GET-join timeout
+# in the absolute HTTP-budget regression. Both are awaited by their fixture.
+# WaitPool's existing timeout moved into RegisteredWait::wait with no net
+# constructor change. blocked_wait passes the remaining absolute HTTP budget
+# after its manifest recheck; the request retains its bounded slot/file pin
+# until the file opens or the request is dropped, not merely until notification.
 # 557 -> 561 with M6 acknowledgement settlement: two production `timeout_at`
 # calls bound the commit and abort Store operations by the inherited exchange
 # deadline, and two test-only sleeps cross the control exchange floor before a
@@ -1300,7 +1344,30 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 571 -> 577: admission capacity gets one inherited-deadline timeout;
 # takeover cleanup gets one existing-reconciliation-deadline timeout. The
 # remaining net four constructors belong to bounded settlement regressions.
-expected_occurrences = 577
+# 560 + (577 - 557) -> 580 on effort integration: both independently reviewed
+# timer deltas remain, including the demand episode retention and bounded
+# settlement owner. This is a merged inventory, not a relaxed sentinel.
+# 580 -> 582 with P1-6's accepted-film-time staging proof. Both are test-only
+# helpers in the two new control-seam regressions, and both are awaited before
+# the fixture releases its temporary media. `pace_control_exchanges` sleeps
+# past `MIN_CONTROL_INTERVAL` — the same exchange floor already reviewed at
+# 550 -> 555 and 570 -> 571 — because a second exchange inside it is answered
+# 429 and never reaches the selection engine, so the assertion would otherwise
+# run against a request the server declined to consider. `await_preparation_
+# candidate` bounds the wait for the detached preparation candidate keyed to
+# its exact predecessor, the same shape reviewed at 555 -> 557. Production
+# gains no constructor: the correction replaces one arithmetic expression.
+# Neither timer owns a process, producer, recipe or recovery decision.
+# 582 -> 583 with the failed-rendition reclaim: `tokio::time::timeout` now
+# bounds the wait `maintain` takes on outstanding terminal cleanups. It is the
+# one timer this adds and it owns nothing — no task, no child, no lease — it
+# only stops the node's single maintenance loop from being wedged forever by a
+# cleanup that never completes.
+# 583 -> 585 with the detach convergence: two `tokio::time::timeout` bounds in
+# the new regressions' own `running()` helpers, waiting for an injected
+# subtitle extractor to start. Test-local deadlines that own no task and no
+# child; the production path gains no timer here.
+expected_occurrences = 585
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1337,7 +1404,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # returns. It owns no rolling producer, outlives no await, and never runs in a
 # shipped binary — it exists so the argv pin has a real Dolby-Vision-shaped
 # HEVC source to copy.
-expected_occurrences = 67
+# 67 -> 68 with abb872ba: the test-only `sleep 60` child described under
+# method-spawn. ProducerSlot owns it through the awaited kill/reap; this is a
+# running-child capacity regression, not another production encoder path.
+expected_occurrences = 68
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1399,10 +1469,52 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `Response::status()` off an in-process control refusal, which is the whole
 # assertion — that the owner side answers 410 without a retry hint, or 425 with
 # one. In-process; they launch nothing and own nothing.
+# +5 for direct-file range reliability: one production Response::status()
+# classifies successful GETs before playback bookkeeping; four test call sites
+# assert exact raw-file/HEAD/If-Range response codes. All read HTTP metadata.
+# They create no task, process, timer, or rolling-producer owner. The fixtures
+# own only temporary files and consume their response bodies before return.
+# 216 -> 217 with abb872ba: the same test-only `sleep 60` spawn counted under
+# method-spawn and process-command-construction, not a second child.
+# Both reviewed deltas are retained after integrating the effort.
 # +1 after the second adversarial review: the internal-relay preparation replay
 # regression reads the in-process response status before asserting its retained
 # canonical body. It launches no child and owns no process.
-expected_occurrences = 217
+# 222 + (217 - 216) -> 223 retains the six effort additions and the one
+# settlement response-status assertion from their common 216-site base.
+# 223 -> 226 with P1-3's VOD delivery measurement: three `VodServe::status`
+# reads in `a_segment_answer_carries_the_meter_its_own_session_publishes`. The
+# sentinel's pattern catches `.status(` alongside `.spawn(` and `.output(`, and
+# these are registry reads that launch nothing: the test asserts what a session
+# publishes after its own answer counted bytes, and what a second viewer of the
+# same immutable rendition publishes instead. No process, producer or timer is
+# created or owned.
+# 226 -> 235 with P1-2's VOD failure classification. None of the nine launches
+# anything; the sentinel's pattern catches `.status(` alongside `.spawn(` and
+# `.output(`. Two are production: `record_failure` logs `decision.status()`, and
+# `status_publication` projects the recorded class onto `VodSessionInfo`. The
+# other seven are in the regressions -- `VodServe::status` registry reads that
+# assert what a session publishes before and after a failure is recorded, and
+# `ProducerDecisionReason::status()` projections that pin each class to its wire
+# name through action selection. No process, producer or timer is created.
+# 235 -> 237 after the P1-2 review: two more `VodServe::status` reads, in the
+# regressions that pin a moved source to `source_changed` end to end and that
+# require a recorded cause to survive its own consequence. Registry reads; they
+# launch nothing.
+# 237 -> 239 with the review's permanence proofs: two more
+# `ProducerDecisionReason::status()` projections, in the assertion that every
+# permanent reason carries its own terminal sentence and in the per-arm
+# permanence check. Projections of an enum onto its wire name; nothing is
+# launched.
+# 239 -> 242 with the capacity-hold and reattach regressions: three more
+# `VodServe::status` reads, in the proof that a stall still says `no_room` after
+# the producer it terminated is gone (healthy, held, and cleared again). Registry
+# reads; they launch nothing.
+# +1 for the failed-rendition reclaim test: one more `VodServe::status()` read,
+# asserting that a rendition that has failed reports `failed` with no capacity
+# hold. It is an in-process read of session and belief state; it launches no
+# process and owns no producer.
+expected_occurrences = 243
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1427,12 +1539,37 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # calls coordinate test tasks before the leading fetch is released. They are
 # in-process synchronization and do not address or reap an operating-system
 # process.
-expected_occurrences = 306
+# 306 -> 319 with abb872ba: nine Barrier::wait calls belong to the two
+# deterministic control-acceptance/file-open cancellation seams (five behind
+# cfg(test) in the production methods and four in their fixtures). Four more
+# are WaitPool/RegisteredWait waits: the compatibility test helper delegates
+# to the request-owned wait, and three fixture calls prove notified pin
+# retention, admission refusal, and entry-local failure. The shipped GET's
+# old pool.wait becomes registered.wait, for no net change. All thirteen are
+# in-process waits, not OS-child lifecycle calls; the existing timeout remains
+# owned by each admitted request rather than by a detached task.
+# 319 -> 322 with the departing-session wait retirement: three
+# `RegisteredWait::wait` calls in `a_departing_session_takes_its_own_waits_and
+# _nobody_elses`. The sentinel's pattern catches `.wait(` alongside `.kill(` and
+# `.try_wait(`; these await a oneshot from the pool under a bounded deadline and
+# own no child process. The test requires the departing session's waiter to be
+# answered `Gone` and both surviving waiters to be served normally.
+expected_occurrences = 322
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
-expected_occurrences = 32
+# 32 -> 33 with abb872ba: this deliberately conservative pattern also matches
+# the new `pub async fn wait(` declaration on RegisteredWait. It is the
+# oneshot/timeout method inventoried above, not a free OS wait or reap call.
+# 33 -> 36 with the failed-rendition reclaim: three `libc::kill` calls in the
+# new regression, and none of them is a reap this code owns. One sends SIGSTOP
+# to build the fixture's expensive shape — a child that makes no progress and
+# still holds its codec session — and two are `kill(pid, 0)` liveness probes,
+# the before and the after. The actual termination is still `ProducerSlot`'s,
+# through `Step::Terminate`; the probes are how the test proves that happened
+# to a real process rather than only to a belief.
+expected_occurrences = 36
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -1445,7 +1582,10 @@ pattern = "kill_on_drop\\s*\\("
 # +1: the chapter probe is dropped by cancellation or deadline selection and
 # must not leave ffprobe holding a NAS file or the queue's global media slot.
 # +1 with the bounded subtitle window: its kill_on_drop, for the same reason the whole-track extractor has one.
-expected_occurrences = 37
+# 37 -> 38 with abb872ba: cancellation/unwind protection for the test-only
+# `sleep 60` child. The normal regression path still explicitly kills and
+# reaps it through ProducerSlot; kill-on-drop is not the success assertion.
+expected_occurrences = 38
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

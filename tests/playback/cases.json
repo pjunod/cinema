@@ -97,7 +97,33 @@
         {"fixture": "remux-h264-multitrack-1080", "quality": "nomse", "operation": "audio-switch"},
         {"fixture": "remux-h264-multitrack-1080", "quality": "720", "operation": "audio-switch"},
         {"fixture": "remux-h264-multitrack-1080", "quality": "auto", "operation": "subtitle-toggle"},
-        {"fixture": "remux-h264-multitrack-1080", "quality": "nomse", "operation": "subtitle-toggle"}
+        {"fixture": "remux-h264-multitrack-1080", "quality": "nomse", "operation": "subtitle-toggle"},
+        {
+          "fixture": "remux-h264-multitrack-1080",
+          "quality": "original",
+          "operation": "quality-cycle",
+          "switches": [
+            {"quality": "720", "expected_method": "transcode", "expected_height": 720},
+            {"quality": "original", "expected_method": "remux", "expected_height": 1080}
+          ],
+          "repetitions": 20,
+          "switch_hold_seconds": 0.25,
+          "switch_wait_timeout_seconds": 30,
+          "maximum_switch_ready_ms": 2000,
+          "maximum_landing_error_seconds": 0.25,
+          "minimum_runway_seconds": 2,
+          "require_same_session": true,
+          "require_same_player_generation": true,
+          "evidence_scope": "browser_video_partial",
+          "transition": {
+            "p95_video_gap_ms": 100,
+            "maximum_video_gap_ms": 250,
+            "maximum_wait_events": 0,
+            "maximum_reopen_events": 0,
+            "maximum_stalls": 0,
+            "maximum_hitches": 0
+          }
+        }
       ]
     },
     "stall-recovery": {
@@ -108,12 +134,24 @@
           "quality": "auto",
           "operation": "shaped-cliff",
           "recovery": {
-            "sample_interval_seconds": 1,
-            "recovery_observe_seconds": 60,
+            "sample_interval_seconds": 0.1,
+            "recovery_observe_seconds": 75,
             "baseline_minimum_clock_rate": 0.9,
-            "maximum_automatic_restarts": 1,
-            "maximum_upgrades_per_60s": 1,
-            "recovery_deadline_seconds": 30,
+            "maximum_automatic_restarts": 0,
+            "maximum_upgrades_per_60s": 0,
+            "minimum_downshifts": 1,
+            "maximum_downshifts": 1,
+            "maximum_downshift_ms": 10000,
+            "minimum_post_switch_runway_seconds": 1,
+            "maximum_single_transition_video_gap_ms": 100,
+            "maximum_video_gap_ms": 250,
+            "maximum_landing_error_seconds": 0.25,
+            "maximum_wait_events": 0,
+            "maximum_stalls": 0,
+            "maximum_hitches": 0,
+            "stable_after_downshift_seconds": 60,
+            "evidence_scope": "browser_video_partial",
+            "recovery_deadline_seconds": 10,
             "sustained_seconds": 10,
             "sustained_minimum_clock_rate": 0.9
           }

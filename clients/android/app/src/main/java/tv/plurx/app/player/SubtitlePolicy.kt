@@ -254,16 +254,16 @@ internal fun sessionHeight(
 }
 
 /**
- * Whether the session's height is a promise from an Auto viewer rather than a
- * manual quality pick. An Auto viewer that sends a promise-height — a burn, or
- * Quality = Original — must carry this flag, or the server reads the posted
- * height as a sticky manual pick and can never step that session down.
+ * Whether the viewer selected Auto. New clients always send this Boolean:
+ * omission belongs only to legacy clients, whose server-side fallback treats
+ * a heightless copy session as automatic. Explicit false is therefore what
+ * keeps Original distinct from Auto on that exact body shape.
  * See docs/ADAPTIVE-QUALITY.md §"Native stall-reopen server boundary".
  */
 internal fun qualityAuto(
     quality: PlaybackQuality,
-    delivery: SubtitleDelivery,
-): Boolean = quality == PlaybackQuality.Auto && delivery == SubtitleDelivery.Burn
+    @Suppress("UNUSED_PARAMETER") delivery: SubtitleDelivery,
+): Boolean = quality == PlaybackQuality.Auto
 
 /**
  * The exact body each routing arm posts to `/files/{id}/hls/sessions`.
@@ -319,7 +319,7 @@ internal fun subtitleSessionBody(
         preserve_dolby_vision = true.takeIf { copy && preserveDolbyVision },
         previous_session_id = previousSessionId,
         reopen_reason = reopenReason,
-        quality_auto = true.takeIf { qualityAuto(quality, delivery) },
+        quality_auto = qualityAuto(quality, delivery),
     )
 }
 

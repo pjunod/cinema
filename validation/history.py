@@ -315,13 +315,43 @@ def _is_test_path(path: str) -> bool:
     )
 
 
+def _history_heads(root: Path) -> tuple[str, ...]:
+    """Audit the prospective commit's parents, including an in-progress merge.
+
+    Resolve Git's worktree-local path instead of assuming `.git` is a directory.
+    Unrelated branches must not make unreachable regression mappings valid.
+    Malformed pending-merge state is an error, not an ordinary single-parent audit.
+    """
+
+    heads = [_git(root, "rev-parse", "--verify", "HEAD^{commit}").strip()]
+    merge_path = Path(_git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip())
+    if not merge_path.is_absolute():
+        merge_path = root / merge_path
+    try:
+        merge_heads = merge_path.read_text(encoding="ascii").splitlines()
+    except FileNotFoundError:
+        return tuple(heads)
+    except (OSError, UnicodeError) as exc:
+        raise HistoryError(f"cannot read pending merge heads: {exc}") from exc
+    if not merge_heads or any(
+        not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head)
+        for head in merge_heads
+    ):
+        raise HistoryError("pending MERGE_HEAD must contain full Git commit hashes")
+    for head in merge_heads:
+        heads.append(_git(root, "rev-parse", "--verify", f"{head}^{{commit}}").strip())
+    return tuple(dict.fromkeys(heads))
+
+
 def discover_issues(
     root: Path,
     catalog: Catalog,
     explicit_prefixes: tuple[str, ...] = (),
+    history_heads: tuple[str, ...] | None = None,
 ) -> tuple[IssueCommit, ...]:
     issues: list[IssueCommit] = []
-    history = _git(root, "log", "--no-merges", "--format=%H%x09%s")
+    heads = history_heads if history_heads is not None else _history_heads(root)
+    history = _git(root, "log", "--no-merges", "--format=%H%x09%s", *heads, "--")
     for line in history.splitlines():
         sha, subject = line.split("\t", 1)
         if not ISSUE_RE.search(subject) and not any(
@@ -376,11 +406,13 @@ def audit_history(
         client_fixes_path or root / "tests" / "client-fixes.toml"
     )
     catalog = catalog or load_catalog()
+    history_heads = _history_heads(root)
     issues = discover_issues(
         root,
         catalog,
         tuple(prefix for entry in entries for prefix in entry.commits)
         + tuple(prefix for entry in client_fixes.fixes for prefix in entry.commits),
+        history_heads,
     )
     errors: list[str] = []
     by_sha = {issue.sha: issue for issue in issues}
@@ -476,8 +508,11 @@ def audit_history(
     explicit_commits: set[str] = set()
     if client_fixes.enforce_after:
         try:
+            boundary = _git(
+                root, "rev-parse", "--verify", f"{client_fixes.enforce_after}^{{commit}}"
+            ).strip()
             explicit_commits.update(
-                _git(root, "rev-list", f"{client_fixes.enforce_after}..HEAD").splitlines()
+                _git(root, "rev-list", *history_heads, "--not", boundary, "--").splitlines()
             )
         except HistoryError:
             errors.append(

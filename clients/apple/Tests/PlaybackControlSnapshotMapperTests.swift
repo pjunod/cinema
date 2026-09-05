@@ -70,6 +70,17 @@ final class PlaybackControlSnapshotMapperTests: XCTestCase {
         XCTAssertTrue(snapshot.isValid)
     }
 
+    func testASeekReportsTheViewerTargetNotTheDepartingPlayhead() {
+        var observation = playing(position: 10_000)
+        observation.isSeeking = true
+        observation.seekTargetMs = 90_000
+        let snapshot = map(observation)
+
+        XCTAssertEqual(snapshot.positionMs, 10_000)
+        XCTAssertEqual(snapshot.seekTargetMs, 90_000)
+        XCTAssertEqual(snapshot.renderState, .seeking)
+    }
+
     func testAPausedPlayerHoldsRatherThanEnding() {
         var observation = playing()
         observation.isPaused = true
@@ -90,6 +101,7 @@ final class PlaybackControlSnapshotMapperTests: XCTestCase {
     func testASeekOutranksEveryOtherBusyState() {
         var observation = playing()
         observation.isSeeking = true
+        observation.seekTargetMs = 60_000
         observation.isLikelyToKeepUp = false
         observation.waitingForMs = 20_000
         let snapshot = map(observation)

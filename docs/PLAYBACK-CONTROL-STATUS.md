@@ -967,9 +967,10 @@ bounds how often M6 can ever fire.
 
 **And the one that qualifies would still be refused.** Its counterfactual is
 `throughput_unreported`, not `prepare`: with the capability assumed satisfied,
-the throughput floor refuses because Apple sends no `observedDownloadBps` at
-all (`PlayerController.swift`), and `DeliveryView::from_status` leaves
-`delivered_bps` `None` on VOD. That split earned itself on its first datapoint
+the throughput floor refused because Apple sent no `observedDownloadBps` at
+all (`PlayerController.swift`), and `DeliveryView::from_status` left
+`delivered_bps` `None` on VOD. Both inputs now exist; a refusal today means a
+session too young for a measurement window to have closed. That split earned itself on its first datapoint
 — folded into one `throughput_unproven` it would have read as "the link was too
 tight" for a link nobody measured.
 

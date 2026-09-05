@@ -1607,6 +1607,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIsNotNone(workflow_pin)
         self.assertIsNotNone(cache_pin)
         self.assertEqual(workflow_pin.group(1), cache_pin.group(1))
+        self.assertIn("PLURX_PLAYBACK_CHROME=$chromium", action)
+        self.assertIn('test -x "$chromium"', action)
+        self.assertNotIn("exit 0", action)
 
         # Both Android jobs reuse the Forgejo toolchain image keyed on the
         # Dockerfile hash, and the Makefile honors the pre-pull instead of
