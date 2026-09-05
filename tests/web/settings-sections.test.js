@@ -252,6 +252,11 @@ test("Developer is where the switches that cost something live", () => {
   }
   assert.match(html, /FOOT:saveDeveloper/);
   assert.match(html, /FOOT:saveExperimental/);
+  assert.match(html, /Enable prepared quality handoff/);
+  assert.match(html, /encoder: staged/);
+  assert.match(html, /twenty consecutive commits/);
+  assert.match(html, /Android and web remain unqualified/);
+  assert.match(html, /no separate hidden server flag/);
   // The section says what it is for, so a switch that costs something has
   // somewhere honest to land rather than being buried under Streaming.
   assert.match(html, /runtime settings; no special build/);

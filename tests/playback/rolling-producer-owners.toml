@@ -608,7 +608,10 @@ expected_occurrences = 17
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
 pattern = "commit_guard_before"
-expected_occurrences = 13
+# 13 -> 14 with M6's acknowledgement settlement. The new guard bounds the
+# exact commit-or-abort Store mutation authorized by the actor; it is held only
+# across the bounded executor call and never across worker teardown.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
@@ -618,7 +621,12 @@ expected_occurrences = 24
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
 pattern = "hls_session_status_publication"
-expected_occurrences = 3
+# 3 -> 4 with cancellation-independent preparation settlement: the admission
+# owner retains the exact status-publication handle accepted by the playback
+# actor so its detached Store result reports against the same owner/session.
+# 4 -> 5: the no-status Abort fixture also captures this publication before
+# explicitly discarding it; it verifies status is unnecessary for cleanup.
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-exact-media-session-end"
@@ -647,7 +655,20 @@ pattern = "media_session_route_for_playback"
 # 12 -> 13 after adversarial review replaced helper-only coverage with the
 # actual accepted selection-change seam. Its final assertion proves that the
 # detached stage and later announcement still did not move the pointer.
-expected_occurrences = 13
+# 13 -> 14 with the failed-acknowledgement acceptance: one test-only read proves
+# abort keeps the predecessor current while deleting the staged successor.
+# 14 -> 16 after settlement review: the VOD commit acceptance and detached
+# timeout/replay acceptance each read the current pointer to prove the
+# production HTTP path, not a helper, produced the durable outcome. Both are
+# test-only witnesses; pointer authority remains exclusively in the Store CAS.
+# 16 -> 20 after the second adversarial review: the transient-Store,
+# dropped-reply, exact-singleflight, and internal-relay regressions each read
+# the durable route only to prove that the production path reached its one
+# canonical outcome. They add no read-then-act authority.
+# 20 -> 21: serving-loss settlement regression witnesses the final pointer.
+# 21 -> 20: the frontier fixture reads its staged route directly instead of
+# pretending an unacknowledged preparation can be committed.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -857,7 +878,10 @@ pattern = "terminal_reason"
 # there because an empty preparation ledger is satisfied by a row that was
 # never created as much as by one that was torn down, and only the cause tells
 # the two apart. No new writer of a terminal cause.
-expected_occurrences = 20
+# 20 -> 21 after settlement review: the public post-retirement replay test
+# asserts the predecessor's durable `superseded` cause before exercising the
+# retained exact response. This is a test-only read of the existing writer.
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1147,6 +1171,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # one preparation slot and its durable row together. Without it the first
 # successful stage is the last one for the life of the session. It owns no
 # producer and starts no process — it only settles a slot the actor holds.
+# 389 -> 390 after settlement review: HTTP commit/abort settlement runs in one
+# detached task so cancellation of the request waiter cannot cancel an already
+# authorized Store mutation or release its serving guard early. The task owns
+# that guard until the bounded Store operation finishes; it owns no producer
+# or process, and the durable receipt makes completion replayable.
+# 390 -> 391 after the second adversarial review: one process-wide singleflight
+# owner settles an actor-accepted preparation independently of the HTTP waiter.
+# A 32-slot semaphore bounds active owners, exact retries join the same receipt,
+# and the task starts no worker or process.
+# 391 -> 393: the serving-loss regression owns and joins/cancels its HTTP
+# waiter and serving-loss task. No new production task owner is introduced.
 # 389 -> 392 with HDHomeRun document-boundary fixtures: the one-response
 # redirect/size server, stalled-body server, and stalled fetch are test-only.
 # The first is joined by each caller; the stall pair is explicitly aborted or
@@ -1164,7 +1199,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # Session teardown joins the pump and confirms child exit before retirement;
 # response tasks have child cancellation and progress/total deadlines. The
 # descriptor-open blocking task cannot forcibly cancel an operating-system call.
-expected_occurrences = 413
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 413 on the effort branch and 393 on main from a shared base, and neither
+# value describes the merged tree. 417 is what the checker reads off the
+# merge, so it is what is recorded -- the two inventories above are both
+# still true, and the total is measured rather than added up.
+expected_occurrences = 417
 
 [[module_structures]]
 id = "method-spawn"
@@ -1273,6 +1313,25 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 555 -> 557 after adversarial review: the incapable-client production-seam
 # regression adds one exchange-floor sleep and one bounded wait for its
 # detached decision to finish. Both are test-only and awaited.
+# 557 -> 561 with M6 acknowledgement settlement: two production `timeout_at`
+# calls bound the commit and abort Store operations by the inherited exchange
+# deadline, and two test-only sleeps cross the control exchange floor before a
+# commit or failed acknowledgement. Every timer is awaited and owns no worker.
+# 561 -> 563 after settlement review: one production `timeout_at` bounds only
+# the wait for the detached settlement result, while the Store task retains the
+# serving guard to completion; one test-only sleep creates a deterministic
+# over-deadline completion and is awaited before fixture teardown.
+# 563 -> 570 after the second adversarial review: production gains a bounded
+# semaphore-acquisition timeout plus retry deadline, retry sleep, and request
+# receipt wait; three paused-time fixture sleeps deterministically exercise
+# dropped-reply, transient-Store, and exact-singleflight settlement. The one
+# detached owner is inventoried above and every test task is joined.
+# 570 -> 571 in the exact-SHA replay review fix: one awaited exchange-floor
+# sleep separates Prepare from the late acknowledgement whose stale ingress
+# snapshot reaches the already-completed singleflight receipt.
+# 571 -> 577: admission capacity gets one inherited-deadline timeout;
+# takeover cleanup gets one existing-reconciliation-deadline timeout. The
+# remaining net four constructors belong to bounded settlement regressions.
 # Both efforts moved the count from 550 independently, so the merged total is
 # 550 + 4 + 7 rather than either branch's value.
 # +28 HDHomeRun M2: nineteen production Live TV sites bound startup, drain,
@@ -1280,7 +1339,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # or pace scratch/metrics maintenance. Eight sites are regression timing.
 # One peer_transport timeout bounds response-signature verification within
 # the originating request deadline. None elects a replacement tuner owner.
-expected_occurrences = 589
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 589 on the effort branch and 577 on main from a shared base, and neither
+# value describes the merged tree. 609 is what the checker reads off the
+# merge, so it is what is recorded -- the two inventories above are both
+# still true, and the total is measured rather than added up.
+expected_occurrences = 609
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1386,6 +1450,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `Response::status()` off an in-process control refusal, which is the whole
 # assertion — that the owner side answers 410 without a retry hint, or 425 with
 # one. In-process; they launch nothing and own nothing.
+# +1 after the second adversarial review: the internal-relay preparation replay
+# regression reads the in-process response status before asserting its retained
+# canonical body. It launches no child and owns no process.
 # +3 for HDHomeRun: two HTTP status reads enforce the no-redirect/success
 # contract and one `.output()` awaits the bounded synthetic FFmpeg graph.
 # 219 -> 220 with the quorum-fence regression reading `Response::status()` on
@@ -1394,7 +1461,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +15 HDHomeRun M2: production .spawn() and fixture .output() are the only
 # two new process launches. The other thirteen matches inspect or construct
 # HTTP statuses or serialize LiveTvSession status; they own no OS process.
-expected_occurrences = 235
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 235 on the effort branch and 217 on main from a shared base, and neither
+# value describes the merged tree. 236 is what the checker reads off the
+# merge, so it is what is recorded -- the two inventories above are both
+# still true, and the total is measured rather than added up.
+expected_occurrences = 236
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -7,6 +7,7 @@ import re
 import runpy
 import subprocess
 import tempfile
+import textwrap
 import tomllib
 import unittest
 
@@ -16,6 +17,31 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def make_dry_run_commands(target: str) -> list[str]:
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-n", target],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    commands: list[str] = []
+    continued: list[str] = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith("\\"):
+            continued.append(line[:-1].rstrip())
+            continue
+        continued.append(line)
+        commands.append(" ".join(continued))
+        continued = []
+    if continued:
+        raise AssertionError(f"unterminated recipe continuation for make {target}")
+    return commands
 
 
 def workflow_job_blocks(path: str) -> dict[str, str]:
@@ -174,6 +200,37 @@ class OperationsContractCase(unittest.TestCase):
             script.index("page.wait_for_timeout(settle_ms)"),
         )
 
+    def test_ui_baseline_preserves_exact_periodic_route_request_counts(self):
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_request_contract"
+        )
+        counted = contract["counted_api_calls"]
+
+        self.assertEqual(
+            counted(
+                "activity",
+                {},
+                ["GET /api/v1/activity/detail"] * 3
+                + ["GET /api/v1/cluster/nodes"],
+            ),
+            {
+                "GET /api/v1/activity/detail": 3,
+                "GET /api/v1/cluster/nodes": 1,
+            },
+        )
+        self.assertEqual(
+            counted(
+                "analysis",
+                {},
+                ["GET /api/v1/analysis/summary"] * 2
+                + ["GET /api/v1/analysis/jobs"] * 2,
+            ),
+            {
+                "GET /api/v1/analysis/jobs": 2,
+                "GET /api/v1/analysis/summary": 2,
+            },
+        )
+
     def test_ui_baseline_pins_vod_index_status_before_seeding_libraries(self):
         script = read("scripts/ui-baseline")
         seed = script.index("    def seed(self):")
@@ -181,6 +238,104 @@ class OperationsContractCase(unittest.TestCase):
         libraries = script.index("for name, kind, share in LIBRARIES:", seed)
 
         self.assertLess(pinned, libraries)
+
+    def test_activity_capture_observes_one_real_tick_without_hiding_extra_requests(self):
+        script = read("scripts/ui-baseline")
+        capture = runpy.run_path(str(ROOT / "scripts/ui-baseline"))["ACTIVITY_CAPTURE_JS"]
+        web = read("crates/plurxd/src/web/index.html")
+        page_timer = web.split("function setPageTimer(", 1)[1].split("\nasync function render()", 1)[0]
+        production = "function setPageTimer(" + page_timer
+        contract = r"""
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const [capture, production] = process.argv.slice(1);
+for (const startupDelay of [0, 1600, 7000]) {
+  for (const extraRequest of [false, true]) {
+    let now = 0, next = 0;
+    const timers = new Map(), calls = [];
+    const context = vm.createContext({
+      location: {hash: '#/activity'}, PAGE_TIMER: null, PAGE_RENDER_GENERATION: 1,
+      setInterval(callback, delay, ...args) {
+        const id = ++next;
+        timers.set(id, {callback, delay, args, due: now + delay});
+        return id;
+      },
+      clearInterval(id) { timers.delete(id); },
+      record: value => calls.push(value),
+    });
+    context.window = context;
+    vm.runInContext(capture + '\n' + production, context);
+    vm.runInContext(`
+      record('activity/detail'); // initial production render
+      setPageTimer(() => record('activity/detail'), 3000);
+      setInterval(() => record('unrelated'), 4000);
+    `, context);
+    if (extraRequest) {
+      vm.runInContext("setInterval(() => record('activity/detail'), 4000)", context);
+    }
+    const target = startupDelay + 4500;
+    while (true) {
+      const ready = [...timers].filter(([, t]) => t.due <= target)
+        .sort((a, b) => a[1].due - b[1].due)[0];
+      if (!ready) break;
+      const [id, timer] = ready;
+      now = timer.due;
+      timer.due += timer.delay;
+      timer.callback(...timer.args);
+    }
+    assert.equal(context.__plurxActivityCaptureTick, true);
+    assert.equal(context.PAGE_TIMER, null);
+    assert.ok(calls.includes('unrelated'), 'other timers must remain real');
+    const count = calls.filter(call => call === 'activity/detail').length;
+    assert.equal(count === 2, !extraRequest,
+      `raw request golden: delay=${startupDelay}, extra=${extraRequest}, count=${count}`);
+  }
+}
+"""
+        subprocess.run(["node", "-e", contract, capture, production], check=True)
+        self.assertIn("page.add_init_script(ACTIVITY_CAPTURE_JS)", script)
+        self.assertIn("ACTIVITY_DETAIL_BUSY === 0", script)
+
+    def test_store_verdict_handles_unused_forgejo_workflow_without_weakening_required_lane(self):
+        verdict = workflow_job_blocks(".github/workflows/ci.yml")["cluster_store"]
+        step = workflow_step_blocks(verdict)["Select the required Store graph"]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        states = ("success", "skipped", "failure", "cancelled", "", "unknown")
+        for mode in ("legacy", "shadow", "accelerated", "", "unknown"):
+            for legacy in states:
+                for shard in states:
+                    expected = (
+                        mode in ("legacy", "shadow")
+                        and legacy == "success"
+                        and shard in ("skipped", "success")
+                    ) or (
+                        mode == "accelerated"
+                        and legacy == "skipped"
+                        and shard == "success"
+                    )
+                    with self.subTest(mode=mode, legacy=legacy, shard=shard):
+                        result = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", script],
+                            env={**os.environ, "EXECUTION_MODE": mode,
+                                 "LEGACY_RESULT": legacy, "SHARD_RESULT": shard},
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(result.returncode == 0, expected, result.stdout + result.stderr)
+
+    def test_ui_baseline_reserves_distinct_http_raft_and_api_ports(self):
+        script = read("scripts/ui-baseline")
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_port_contract"
+        )
+        ports = contract["free_ports"](0, 3)
+
+        self.assertEqual(len(ports), 3)
+        self.assertEqual(len(set(ports)), 3)
+        self.assertTrue(all(port > 0 for port in ports))
+        self.assertIn("self.port, self.raft_port, self.api_port = free_ports", script)
+        self.assertIn('raft_bind = "127.0.0.1:{self.raft_port}"', script)
+        self.assertIn('api_bind = "127.0.0.1:{self.api_port}"', script)
 
     def test_ui_baseline_releases_players_and_narrowly_retries_root_attachment(self):
         script = read("scripts/ui-baseline")
@@ -267,6 +422,14 @@ class OperationsContractCase(unittest.TestCase):
             "stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}", compose
         )
         self.assertIn(
+            'start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"', compose
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"',
+            compose,
+        )
+        self.assertIn(
             'PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"',
             compose,
         )
@@ -281,18 +444,90 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn(f"PLURX_DISCOVERY_SERVER_URL: {configured_origin}", discovery)
         self.assertIn(f"PLURX_BIND: {configured_bind}", discovery)
 
-    def test_docker_up_preserves_override_discovery_and_stamps_the_build(self):
-        result = subprocess.run(
-            ["make", "-n", "docker-up"],
-            cwd=ROOT,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
+    def _run_rollout_recipe(self, proof_exit: int) -> tuple[int, Path]:
+        """Run the real `docker-up` recipe with the checker and Docker stubbed."""
+
+        rollout = [
+            line
+            for line in make_dry_run_commands("docker-up")
+            if "docker compose up -d --build" in line
+        ][0]
+        directory = Path(tempfile.mkdtemp())
+        marker = directory / "compose-up-ran"
+        stubs = directory / "bin"
+        stubs.mkdir()
+        (stubs / "python3").write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            "  *--emit-start-period*) echo 1335s ;;\n"
+            f"  *) exit {proof_exit} ;;\n"
+            "esac\n",
+            encoding="utf-8",
         )
-        command = result.stdout
-        self.assertIn("cd deploy && PLURX_BUILD_REF=", command)
-        self.assertIn("PLURX_NODE_HOSTNAME=", command)
-        self.assertIn("docker compose up -d --build", command)
+        (stubs / "docker").write_text(
+            "#!/bin/sh\n"
+            f'printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{marker}"\n',
+            encoding="utf-8",
+        )
+        for stub in stubs.iterdir():
+            stub.chmod(0o755)
+        environment = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}")
+        result = subprocess.run(
+            ["sh", "-c", rollout],
+            cwd=ROOT,
+            check=False,
+            text=True,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.returncode, marker
+
+    def test_a_failed_budget_proof_stops_the_rollout_before_it_touches_a_container(
+        self,
+    ):
+        # The proof used to be a make prerequisite, so make itself guaranteed a
+        # failed check stopped the deploy. It is now `&&` inside one recipe, so
+        # the guarantee is shell-level and has to be exercised: a `;` here
+        # would let a refused budget deploy anyway, and no assertion about the
+        # recipe's text catches that.
+        code, marker = self._run_rollout_recipe(proof_exit=2)
+        self.assertNotEqual(code, 0)
+        self.assertFalse(
+            marker.exists(), "compose up ran after the budget proof failed"
+        )
+
+        code, marker = self._run_rollout_recipe(proof_exit=0)
+        self.assertEqual(code, 0)
+        self.assertTrue(marker.exists())
+        # The period that was proved is the period that gets applied.
+        self.assertEqual(marker.read_text(encoding="utf-8"), "1335s")
+
+    def test_docker_up_preserves_override_discovery_and_stamps_the_build(self):
+        commands = make_dry_run_commands("docker-up")
+        command = "\n".join(commands)
+        rollouts = [
+            line for line in commands if "docker compose up -d --build" in line
+        ]
+        self.assertEqual(len(rollouts), 1)
+        rollout = rollouts[0]
+        self.assertTrue(rollout.startswith("cd deploy && "))
+        self.assertEqual(rollout.count("--emit-start-period"), 1)
+        # Derive once, prove that period, then apply the period that was
+        # proved. A preflight proving a number the mutation does not use is
+        # not a preflight, so the proof and the mutation must read the same
+        # shell variable and must not each derive their own.
+        proof = (
+            'PLURX_HEALTH_START_PERIOD="$period" python3 '
+            "../scripts/validate-docker-startup-budget"
+        )
+        self.assertIn(proof, rollout)
+        self.assertLess(rollout.index("--emit-start-period"), rollout.index(proof))
+        self.assertLess(
+            rollout.index(proof), rollout.index("docker compose up -d --build")
+        )
+        self.assertIn('PLURX_HEALTH_START_PERIOD="$period" PLURX_BUILD_REF=', rollout)
+        self.assertIn("PLURX_NODE_HOSTNAME=", rollout)
         self.assertNotIn("-f deploy/docker-compose.yml", command)
 
         makefile = read("Makefile")
@@ -307,10 +542,107 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}", dockerfile)
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
 
-        # Replicated startup can legitimately use 120s for snapshot transfer
-        # and another 45s to prove the quorum watermark. Docker must not fail
-        # the dependent discovery service before that bounded recovery ends.
-        self.assertIn("--start-period=3m", dockerfile)
+        stages = list(re.finditer(r"(?im)^[ \t]*from\b.*$", dockerfile))
+        runtime_stage = re.search(
+            r"(?im)^[ \t]*from[ \t]+runtime-assets[ \t]+as[ \t]+runtime[ \t]*$",
+            dockerfile,
+        )
+        self.assertIsNotNone(runtime_stage)
+        assert runtime_stage is not None
+        self.assertEqual(runtime_stage.start(), stages[-1].start())
+        runtime = dockerfile[runtime_stage.end() :]
+        healthcheck_instructions = list(
+            re.finditer(r"(?im)^[ \t]*healthcheck\b", dockerfile)
+        )
+        self.assertEqual(len(healthcheck_instructions), 1)
+        self.assertGreater(healthcheck_instructions[0].start(), runtime_stage.end())
+        healthcheck = re.search(
+            r'(?im)^[ \t]*healthcheck[ \t]+--interval=(\S+)[ \t]+'
+            r'--timeout=(\S+)[ \t]+'
+            r'--start-period=(\S+) \\\n'
+            r'[ \t]+cmd[ \t]+\["plurxd",[ \t]*"healthcheck"\][ \t]*$',
+            runtime,
+        )
+        self.assertIsNotNone(healthcheck)
+        assert healthcheck is not None
+        interval, timeout, start_period = healthcheck.groups()
+        self.assertEqual((interval, timeout), ("30s", "5s"))
+
+        checker = runpy.run_path(str(ROOT / "scripts/validate-docker-startup-budget"))
+        parse_duration = checker["parse_duration"]
+        start_period_seconds = parse_duration(start_period, "Dockerfile start period")
+
+        compose_start = re.search(
+            r'(?m)^[ \t]*start_period:[ \t]*'
+            r'"\$\{PLURX_HEALTH_START_PERIOD:-([^}]+)\}"[ \t]*$',
+            compose,
+        )
+        self.assertIsNotNone(compose_start)
+        assert compose_start is not None
+        compose_start_seconds = parse_duration(
+            compose_start.group(1), "Compose default start period"
+        )
+        self.assertEqual(compose_start_seconds, start_period_seconds)
+
+        config_source = read("crates/plurx-core/src/config.rs")
+        default_snapshot = re.search(
+            r"(?m)^pub const DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = "
+            r"([\d_]+);$",
+            config_source,
+        )
+        source_max_snapshot = re.search(
+            r"(?m)^pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);$",
+            config_source,
+        )
+        migration_source = read("crates/plurx-core/src/cluster/migration.rs")
+        phase_names = (
+            "HIQLITE_HEALTH_TIMEOUT",
+            "MEMBERSHIP_ADMISSION_TIMEOUT",
+            "SNAPSHOT_CATCHUP_GRACE",
+        )
+        phases = {
+            name: re.search(
+                rf"(?m)^const {name}: Duration = Duration::from_secs\((\d+)\);$",
+                migration_source,
+            )
+            for name in phase_names
+        }
+        self.assertIsNotNone(default_snapshot)
+        self.assertIsNotNone(source_max_snapshot)
+        self.assertTrue(all(value is not None for value in phases.values()))
+        assert default_snapshot is not None and source_max_snapshot is not None
+
+        # Dockerfile owns the image default. Compose exposes a paired override
+        # for operators who deliberately extend the snapshot deadline.
+        supported_default_startup_seconds = int(
+            default_snapshot.group(1).replace("_", "")
+        ) + sum(int(value.group(1)) for value in phases.values() if value)
+        self.assertGreaterEqual(
+            start_period_seconds, supported_default_startup_seconds
+        )
+
+        env_example = read("deploy/.env.example")
+        max_snapshot = re.search(
+            r"# PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS=(\d+)", env_example
+        )
+        max_health = re.search(
+            r"# PLURX_HEALTH_START_PERIOD=(\d+)([smh])", env_example
+        )
+        self.assertIsNotNone(max_snapshot)
+        self.assertIsNotNone(max_health)
+        assert max_snapshot is not None and max_health is not None
+        env_max_snapshot_seconds = int(max_snapshot.group(1))
+        source_max_snapshot_seconds = int(
+            source_max_snapshot.group(1).replace("_", "")
+        )
+        self.assertEqual(env_max_snapshot_seconds, source_max_snapshot_seconds)
+        max_health_seconds = parse_duration(
+            "".join(max_health.groups()), ".env.example maximum health period"
+        )
+        supported_max_startup_seconds = source_max_snapshot_seconds + sum(
+            int(value.group(1)) for value in phases.values() if value
+        )
+        self.assertGreaterEqual(max_health_seconds, supported_max_startup_seconds)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
@@ -877,6 +1209,46 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("make cluster-harness-check", jobs["cluster_topology"])
         self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
         self.assertIn("run: make cluster-wal-check", workflow)
+        wal_commands = make_dry_run_commands("cluster-wal-check")
+        hiqlite_snapshot_tests = (
+            "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
+            "replacement_socket_drops_cancelled_request_after_consuming_reset",
+            "live_request_on_stale_socket_requires_reconnect",
+            "reset_interrupts_write_enqueue_under_backpressure",
+            "forced_reset_cleanup_does_not_wait_for_full_writer_queue",
+            "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
+            "cache_install_snapshot_preserves_mismatch_for_offset_reset",
+        )
+        for test_name in hiqlite_snapshot_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn(
+                "cargo test --locked --manifest-path vendor/hiqlite/Cargo.toml",
+                command,
+            )
+            self.assertIn(
+                "--no-default-features --features auto-heal,cache,macros,sqlite",
+                command,
+            )
+            self.assertIn("--lib -- --exact", command)
+
+        openraft_test = (
+            "network::snapshot_transport::tests::"
+            "test_chunked_reset_offset_if_snapshot_id_mismatch"
+        )
+        matching = [command for command in wal_commands if openraft_test in command]
+        self.assertEqual(len(matching), 1)
+        openraft_command = matching[0]
+        self.assertIn(
+            "cargo metadata --locked --manifest-path vendor/hiqlite/Cargo.toml",
+            openraft_command,
+        )
+        self.assertIn('p["version"] == "0.9.25"', openraft_command)
+        self.assertIn("cargo test --locked", openraft_command)
+        self.assertIn('--manifest-path "$OPENRAFT_MANIFEST"', openraft_command)
+        self.assertIn("--features generic-snapshot-data", openraft_command)
+        self.assertIn("--lib -- --exact", openraft_command)
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
@@ -1110,7 +1482,7 @@ class OperationsContractCase(unittest.TestCase):
         for contract in (
             'test "$LEGACY_RESULT" = success',
             'test "$LEGACY_RESULT" = skipped',
-            'test "$SHARD_RESULT" = skipped',
+            'skipped|success) ;;',
             'test "$SHARD_RESULT" = success',
             'echo "Store shadow evidence is intentionally outside this gate"',
         ):
@@ -1221,6 +1593,7 @@ class OperationsContractCase(unittest.TestCase):
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
         action = read(".github/actions/playwright/action.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
 
         # The Playwright pip pin and the browser-bundle cache key must move
         # together, or a version bump silently reuses the wrong browsers.
@@ -1241,7 +1614,16 @@ class OperationsContractCase(unittest.TestCase):
         self.assertEqual(
             workflow.count("sha256sum clients/android/Dockerfile"), 2
         )
-        self.assertEqual(workflow.count("secrets.LOCAL_REGISTRY_TOKEN"), 2)
+        self.assertEqual(
+            sum(
+                jobs[name].count("secrets.LOCAL_REGISTRY_TOKEN")
+                for name in ("android_jvm", "android_device")
+            ),
+            2,
+        )
+        self.assertEqual(
+            jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1
+        )
         self.assertIn("192.168.4.7:3000/noirr/android-build", workflow)
         self.assertEqual(workflow.count("PLURX_ANDROID_IMAGE_READY=1"), 4)
         makefile = read("Makefile")
@@ -1503,16 +1885,52 @@ class OperationsContractCase(unittest.TestCase):
             4,
         )
         self.assertIn(
-            "<Repository>192.168.4.7:3000/noirr/plurxd:latest</Repository>",
+            "<Repository>192.168.4.7:3000/noirr/plurxd:main</Repository>",
             unraid,
         )
         self.assertIn(
-            "<Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/latest</Registry>",
+            "<Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/main</Registry>",
             unraid,
         )
         self.assertIn('cron: "41 16 * * 1"', readiness)
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
+
+    def test_main_push_builds_once_and_publishes_only_after_validation(self):
+        workflow = read(".github/workflows/ci.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        publish = jobs["publish_main"]
+        script = read("scripts/registry-push")
+
+        self.assertIn("name: publish merged image (Forgejo registry)", publish)
+        self.assertIn("github.event_name == 'push'", publish)
+        self.assertIn("github.ref == 'refs/heads/main'", publish)
+        for dependency in (
+            "check",
+            "cluster_store",
+            "cluster_topology",
+            "cluster_wal",
+            "cluster_daemon",
+            "web_layout",
+            "vod_web",
+            "package_smoke",
+        ):
+            self.assertIn(f"      - {dependency}\n", publish)
+        self.assertIn("Require the post-merge validation fan-out", publish)
+        self.assertIn("secrets.LOCAL_REGISTRY_TOKEN", publish)
+        self.assertIn("run: scripts/registry-push", publish)
+        self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", publish)
+
+        self.assertIn('IMMUTABLE_REF="$IMAGE:sha-$SHORT_SHA"', script)
+        self.assertIn('FLEET_REF="$IMAGE:main"', script)
+        self.assertNotIn('plurxd:latest', script)
+        self.assertLess(
+            script.index('verify_image "$IMMUTABLE_REF"'),
+            script.index('docker push "$FLEET_REF"'),
+        )
+        self.assertIn('test "$fleet_digest" = "$immutable_digest"', script)
+        self.assertIn("refusing to publish a checkout with tracked changes", script)
+        self.assertIn("registry state is indeterminate; refusing to publish", script)
 
     def test_every_actions_job_has_an_explicit_timeout(self):
         for path in (
@@ -1534,21 +1952,23 @@ class OperationsContractCase(unittest.TestCase):
                 ]
                 self.assertEqual([], missing, f"jobs without timeouts in {path}")
 
+    def test_forgejo_workflows_do_not_declare_ignored_github_permissions(self):
+        workflow_dir = ROOT / ".github/workflows"
+        paths = sorted((*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")))
+        for path in paths:
+            with self.subTest(path=path.relative_to(ROOT)):
+                workflow = path.read_text(encoding="utf-8")
+                self.assertNotRegex(workflow, r"(?m)^\s*permissions:\s*$")
+
     def test_rust_audit_can_report_informational_advisories(self):
         workflow = read(".github/workflows/rust-audit.yml")
-        permissions = workflow.split("permissions:\n", 1)[1].split("\njobs:\n", 1)[0]
         jobs = workflow_job_blocks(".github/workflows/rust-audit.yml")
 
-        self.assertEqual(permissions, "  contents: read\n")
         for name in ("workspace", "fuzz"):
             with self.subTest(name=name):
                 self.assertIn("if: github.event_name != 'schedule'", jobs[name])
-                self.assertIn("      checks: write", jobs[name])
-                self.assertNotIn("      issues: write", jobs[name])
         scheduled = jobs["scheduled"]
         self.assertIn("if: github.event_name == 'schedule'", scheduled)
-        self.assertIn("      issues: write", scheduled)
-        self.assertNotIn("      checks: write", scheduled)
         self.assertEqual(scheduled.count("uses: https://github.com/rustsec/audit-check@"), 1)
         self.assertIn("--additional-lock fuzz/Cargo.lock", scheduled)
         self.assertIn("working-directory: target/rust-audit", scheduled)
@@ -1606,6 +2026,8 @@ class OperationsContractCase(unittest.TestCase):
                     expected = ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
+                elif path == ".github/workflows/ci.yml" and name == "publish_main":
+                    expected = high_cpu
                 elif (
                     path == ".github/workflows/ci.yml"
                     and name == "cluster_store_legacy"

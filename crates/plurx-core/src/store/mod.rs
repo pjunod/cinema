@@ -2955,13 +2955,16 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// for a candidate nobody is watching; a successor promoted without a new
     /// boundary would be ended by maintenance at the moment the preparation
     /// would have expired, taking the playback's pointer with it.
+    ///
+    /// The request also fences the predecessor on the owner node/epoch the
+    /// actor accepted and requires the ledger deadline to remain live in the
+    /// pointer transaction. An optional control receipt is stored atomically
+    /// with a successful advance for replay after the predecessor retires.
     async fn commit_media_session_preparation(
         &self,
         user_id: i64,
         playback_id: &str,
-        staged_incarnation_id: &str,
-        now_ms: i64,
-        lease_expires_at_ms: i64,
+        request: &crate::domain::MediaSessionPreparationCommitRequest,
     ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError>;
 
     /// Discard the staged successor and leave the current stream authoritative.
@@ -2976,12 +2979,13 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// rather than a spurious loss. `Ok(None)` means the named incarnation is
     /// not an aborted successor of this playback — it was never staged, or it
     /// committed and is now current.
+    /// The predecessor owner tuple is part of the same mutation, so an old
+    /// owner's timer cannot tear down a successor after takeover.
     async fn abort_media_session_preparation(
         &self,
         user_id: i64,
         playback_id: &str,
-        staged_incarnation_id: &str,
-        now_ms: i64,
+        request: &crate::domain::MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
     async fn settle_media_session_activation(

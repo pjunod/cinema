@@ -5,9 +5,6 @@ on:
     - cron: "41 16 * * 1"
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 env:
   CARGO_TERM_COLOR: always
 

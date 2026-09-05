@@ -190,22 +190,31 @@ ssh nuc3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
     --username fleet --password-stdin'
 ```
 
-Build only on nuc4, from the exact checkout being shipped. The script embeds
-the git description in the binary and publishes one rollback tag plus the
-moving fleet tag:
+Every successful Forgejo `main` run ends with
+`publish merged image (Forgejo registry)`. The job waits for the post-merge
+validation fan-out, builds once on an X64 runner, verifies the immutable
+registry copy, and only then moves the fleet tag. It publishes
+`sha-<12hex>` for rollback and `main` for the newest qualified merge.
+Versioned releases own `latest`; fleet merges never overwrite that alias.
+
+If the automatic job must be recovered, run the same guarded publisher on
+nuc4 from the exact Forgejo commit. Supplying both identity variables makes a
+retry reuse an existing immutable image instead of rebuilding it:
 
 ```bash
 ssh nuc4
 cd /opt/noirr/plurx
 git fetch origin
 git switch --detach origin/main
-scripts/registry-push
+PLURX_BUILD_REF="$(git rev-parse HEAD)" \
+PLURX_BUILD_SHA="$(git rev-parse HEAD)" \
+  scripts/registry-push
 ```
 
 Each voter keeps this gitignored setting in `deploy/.env`:
 
 ```bash
-PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:latest
+PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main
 ```
 
 Pulling does not stop the running voter, so it may happen ahead of the rolling
@@ -221,7 +230,7 @@ curl -fsS http://127.0.0.1:32400/api/v1/server
 ```
 
 **Rollback by digest-bearing tag, not by rebuilding an old tree on every
-node.** Replace `latest` in `deploy/.env` with the known-good
+node.** Replace `main` in `deploy/.env` with the known-good
 `sha-<12hex>` tag, then run the same serial `up -d` and readiness gate. The
 Forgejo cleanup rule keeps the ten newest `sha-` tags, which bounds disk use
 and rollback depth together.
@@ -1692,6 +1701,66 @@ remain unchanged. During a rolling upgrade, an old-binary leader keeps its
 fixed 10-second deadline until that voter is upgraded; do not treat the new
 deadline as effective cluster-wide until every possible leader is current.
 
+Compose forwards `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` explicitly and
+pairs it with `PLURX_HEALTH_START_PERIOD`. The default five-minute health grace
+covers the 120-second snapshot deadline plus the three sequential 45-second
+startup phases. Raising the snapshot deadline raises what the grace must be,
+but does not make that your bookkeeping: leave `PLURX_HEALTH_START_PERIOD`
+unset and `make docker-up` derives the grace as the resolved deadline plus 135
+seconds, from the same reading its preflight refuses on. That matters most for
+the case that used to bite — a deadline set in a bind-mounted production TOML,
+where `.env` has no reason to mention readiness at all, and the first report of
+the mismatch was a refused deploy on the box.
+
+Set the variable only to choose a grace deliberately. Whether anybody chose is
+answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
+that is anything other than the interpolation default in
+`deploy/docker-compose.yml` came from a shell variable, an env file, or a
+literal pinned in an override, at Compose's own precedence, and is used exactly
+as resolved. It is never silently raised, because a short grace is a legitimate
+choice: it surfaces a build that can never become ready instead of waiting out
+the deadline. If it cannot cover the resolved deadline the preflight refuses it
+by name. Writing the tracked default itself — five minutes — is indistinguishable
+from writing nothing, and is derived from like anything else. The supported
+maximum pair is
+3,600 seconds and 65 minutes; do not adopt the 65-minute maximum as an ordinary
+default.
+
+Use `make docker-up`, not bare `docker compose up`, for a Compose rollout. It
+derives the period, proves it, and applies that same period — a preflight that
+proves one number while `compose up` applies another proves nothing. The proof
+is a read-only, fail-closed preflight that runs `docker compose config` in
+`deploy/`, so shell variables, `deploy/.env`, interpolation defaults, and
+override files have the same precedence they will have during the rollout.
+It then reads the effective snapshot timeout from the resolved container
+environment or, when the environment is empty, a readable bind-mounted
+production TOML. A resolved command-line `--config` path takes precedence over
+`PLURX_CONFIG`, as it does in the server. The command exits before any Compose
+mutation unless the health start period it is about to apply covers that
+timeout plus all three named startup phases.
+
+If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` in the resolved environment. With
+no explicit value, the preflight assumes the source maximum rather than
+guessing that the hidden TOML uses the default.
+
+Two diagnostics, and they answer different questions. `make
+docker-startup-budget-check` answers "would `make docker-up` succeed here" — it
+derives the same period the rollout would and proves that. To ask instead what
+a bare `docker compose up` would apply, which derives nothing, run the script
+without the deriving step:
+
+```bash
+cd deploy && python3 ../scripts/validate-docker-startup-budget
+```
+
+Run either independently when diagnosing configuration without changing a
+container:
+
+```bash
+make docker-startup-budget-check
+```
+
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
 monitor offset continuously. Membership reachability and artwork repair proofs
@@ -2446,6 +2515,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
 | `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Snapshot transfer/install deadline in seconds, bounded 10–3,600; keep identical on every voter |
+| `PLURX_HEALTH_START_PERIOD` | — | derived | Compose-only Docker readiness grace. Unset, `make docker-up` derives the resolved snapshot deadline plus 135 seconds (`5m` when nothing longer resolves). Set it only to choose a grace deliberately: the value is used as written, and refused rather than raised if it cannot cover the deadline |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |

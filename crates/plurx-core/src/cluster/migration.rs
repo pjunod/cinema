@@ -84,7 +84,11 @@ const HIQLITE_READDRESS_BACKUP_DIRNAME: &str = "hiqlite.before-readdress";
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_READDRESS_MARKER_FILENAME: &str = "hiqlite-readdress.json";
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_START_TIMEOUT: Duration = Duration::from_secs(45);
+const HIQLITE_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(feature = "hiqlite-store")]
+const MEMBERSHIP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(feature = "hiqlite-store")]
+const SNAPSHOT_CATCHUP_GRACE: Duration = Duration::from_secs(45);
 // OpenRaft gives an AppendEntries RPC one heartbeat interval. Once a leader is
 // running this Hiqlite transport it lets that RPC use the whole hard deadline,
 // and this 800 ms window admits the observed 600-700 ms durable crash-recovery
@@ -1935,13 +1939,13 @@ async fn start_voter(
     let client = hiqlite::start_node(node_config)
         .await
         .map_err(|error| StoreError::Database(format!("starting Hiqlite voter: {error}")))?;
-    if tokio::time::timeout(HIQLITE_START_TIMEOUT, client.wait_until_healthy_db())
+    if tokio::time::timeout(HIQLITE_HEALTH_TIMEOUT, client.wait_until_healthy_db())
         .await
         .is_err()
     {
         let _ = shutdown_voter(&client, active_transport).await;
         return Err(StoreError::Database(format!(
-            "Hiqlite voter did not become healthy within {HIQLITE_START_TIMEOUT:?}"
+            "Hiqlite voter did not become healthy within {HIQLITE_HEALTH_TIMEOUT:?}"
         )));
     }
     // Committed membership is the gate on startup, and it is the *only* thing
@@ -1949,7 +1953,7 @@ async fn start_voter(
     // role waits for has to be exactly what admission means for it. A voter
     // waits for its vote. A learner waits to be a committed member, and must
     // never wait for a promotion it was admitted specifically not to receive.
-    let admission_deadline = tokio::time::Instant::now() + HIQLITE_START_TIMEOUT;
+    let admission_deadline = tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT;
     loop {
         let metrics = client
             .metrics_db()
@@ -1999,7 +2003,7 @@ async fn start_voter(
     // snapshot RPC to reach its configured soft cancellation point, reconnect,
     // and complete one clean transfer.
     let catchup_timeout = Duration::from_secs(config.cluster.install_snapshot_timeout_secs)
-        .saturating_add(HIQLITE_START_TIMEOUT);
+        .saturating_add(SNAPSHOT_CATCHUP_GRACE);
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
     let catchup_target = loop {
         match client.db_quorum_watermark().await {

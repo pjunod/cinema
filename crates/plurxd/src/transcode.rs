@@ -5320,6 +5320,9 @@ impl Session {
         request: crate::playback_control::LocalControlRequest<'_>,
         deadline_unix_ms: i64,
         terminal_admission: Option<Arc<dyn crate::playback_control::RollingTerminalAdmission>>,
+        preparation_admission: Option<
+            Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
     ) -> Option<
         Result<
             (
@@ -5327,6 +5330,7 @@ impl Session {
                 u64,
                 crate::playback_control::ControlAction,
                 bool,
+                Option<crate::playback_control::PreparationDirective>,
                 crate::playback_control::ClientPlatform,
                 // What the viewer changed and what the device can do about
                 // it. A distinct type rather than a bare `bool`, which also
@@ -5344,7 +5348,12 @@ impl Session {
     > {
         let outcome = match self
             .control
-            .control_before(request, deadline_unix_ms, terminal_admission)
+            .control_before(
+                request,
+                deadline_unix_ms,
+                terminal_admission,
+                preparation_admission,
+            )
             .await
         {
             Ok(outcome) => outcome,
@@ -5364,6 +5373,7 @@ impl Session {
             outcome.accepted_sequence,
             outcome.action,
             outcome.action_suppressed,
+            outcome.preparation_directive,
             outcome.platform,
             outcome.selection,
             outcome.lease.expires_at_unix_ms(),
@@ -9705,6 +9715,7 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
                     outcome.accepted_sequence,
                     outcome.action,
                     outcome.action_suppressed,
+                    outcome.preparation_directive,
                     outcome.platform,
                     outcome.selection,
                     outcome.lease.expires_at_unix_ms(),
@@ -16660,7 +16671,7 @@ impl TranscodeManager {
             crate::playback_control::ControlStateError,
         >,
     > {
-        self.hls_session_control_with_terminal(control, i64::MAX, None)
+        self.hls_session_control_with_terminal(control, i64::MAX, None, None)
             .await
     }
 
@@ -16669,6 +16680,9 @@ impl TranscodeManager {
         control: crate::playback_control::LocalControlRequest<'_>,
         deadline_unix_ms: i64,
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        preparation_admission: Option<
+            Arc<dyn crate::playback_control::PreparationSettlementAdmission>,
+        >,
     ) -> Option<
         Result<
             crate::playback_control::LocalControlResult,
@@ -16702,6 +16716,7 @@ impl TranscodeManager {
                 control.clone(),
                 deadline_unix_ms,
                 terminal_committer.clone(),
+                preparation_admission.clone(),
             )
             .await
         {
@@ -16762,6 +16777,7 @@ impl TranscodeManager {
             accepted_sequence,
             action,
             action_suppressed,
+            preparation_directive,
             platform,
             selection,
             lease_expires_at_unix_ms,
@@ -16770,7 +16786,12 @@ impl TranscodeManager {
             lease_state,
             acknowledged_end,
         ) = match session
-            .accept_control(control, deadline_unix_ms, terminal_admission)
+            .accept_control(
+                control,
+                deadline_unix_ms,
+                terminal_admission,
+                preparation_admission,
+            )
             .await?
         {
             Ok(outcome) => outcome,
@@ -16812,6 +16833,7 @@ impl TranscodeManager {
                     accepted_sequence,
                     action,
                     action_suppressed,
+                    preparation_directive,
                     platform,
                     selection,
                     lease_expires_at_unix_ms,
@@ -16837,6 +16859,7 @@ impl TranscodeManager {
         accepted_sequence: u64,
         action: crate::playback_control::ControlAction,
         action_suppressed: bool,
+        preparation_directive: Option<crate::playback_control::PreparationDirective>,
         platform: crate::playback_control::ClientPlatform,
         selection: crate::playback_control::SelectionObservation,
         lease_expires_at_unix_ms: i64,
@@ -16901,6 +16924,7 @@ impl TranscodeManager {
                 accepted_sequence,
                 action,
                 action_suppressed,
+                preparation_directive,
                 lease_expires_at_unix_ms,
                 lease_timeout_ms,
                 lease_state,
@@ -21944,7 +21968,7 @@ pub(crate) mod tests {
         let accepted = fixture
             .state
             .transcode
-            .hls_session_control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
+            .hls_session_control_with_terminal(request(1), i64::MAX, Some(committer.clone()), None)
             .await
             .expect("local worker")
             .expect("end accepted");
@@ -22002,11 +22026,13 @@ pub(crate) mod tests {
                 request(1),
                 i64::MAX,
                 Some(committer.clone()),
+                None,
             ),
             fixture.state.transcode.hls_session_control_with_terminal(
                 request(1),
                 i64::MAX,
                 Some(committer.clone()),
+                None,
             ),
             async {
                 // The first replay has marked the one shared receipt running
