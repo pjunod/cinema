@@ -13404,6 +13404,7 @@ function analysisSettingsPanel(settings,snapshot){
 function playbackPanel(settings){
   const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
+  const vodBlockedGets=Number(settings.vod_blocked_get_cap)||64;
   const active=SERVER&&Number.isFinite(SERVER.active_transcodes)?`<span class="pill">${SERVER.active_transcodes} active stream${SERVER.active_transcodes===1?"":"s"}</span>`:"";
   const defaults=setCard(`${cardHead("Defaults for every player","Applied on web, Apple and Android when a title has more than one track. Anime dual-audio still prefers the original audio with subtitles.")}
       <div class="setfields">
@@ -13423,6 +13424,7 @@ function playbackPanel(settings){
       <div class="setfields">
         <div><label for="pvws">VOD working set</label><select id="pvws" style="min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label for="pvmb">Producer deadline</label><select id="pvmb" style="min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
+        <div><label for="pvbg">Waiting segment requests</label><select id="pvbg" style="min-width:230px">${presetOpts([["16","16 — a few viewers"],["64","64 — recommended"],["128","128"],["256","256 — a busy household"]],vodBlockedGets,v=>`${v} requests`)}</select></div>
         <div><label for="prr">Stream pace after the first 30 s</label><select id="prr" style="min-width:230px">
           <option value="2" ${settings.stream_readrate==='2'?'selected':''}>2× — gentlest</option>
           <option value="4" ${settings.stream_readrate==='4'?'selected':''}>4× — recommended</option>
@@ -14895,7 +14897,8 @@ async function saveStreaming(btn){
       vod_live_recovery:document.getElementById("pvlr").checked,
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
-      vod_materialize_budget_secs:document.getElementById("pvmb").value}}));
+      vod_materialize_budget_secs:document.getElementById("pvmb").value,
+      vod_blocked_get_cap:document.getElementById("pvbg").value}}));
     if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
     toast("Streaming settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }

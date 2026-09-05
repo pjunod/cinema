@@ -115,9 +115,14 @@ const PENDING_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// pool's; a refused wait answers a typed 503 immediately, no state.
 const PER_SESSION_WAIT_CAP: usize = 4;
 
-/// Blocked GETs across the node. TODO(m3-wire): becomes a setting when the
-/// manager exposes the wait caps through `/api/v1/settings`.
-const GLOBAL_WAIT_CAP: usize = 64;
+/// Blocked GETs across the node when the setting is absent.
+///
+/// Now the default rather than the law: `playback.vod_blocked_get_cap` sets
+/// it, and `try_create` applies the current value, so an operator watching
+/// `pool_full` refusals can size it for their own deployment without a
+/// restart. The per-session cap stays a constant because it bounds one viewer
+/// rather than the node.
+const DEFAULT_GLOBAL_WAIT_CAP: usize = 64;
 
 /// The rendition's persisted init identity, beside its `init.mp4`.
 const IDENTITY_NAME: &str = "identity.json";
@@ -136,6 +141,9 @@ pub struct VodSettings {
     pub block_budget: Duration,
     /// From one segment's first blocked demand to bytes or typed failure.
     pub materialize_budget: Duration,
+    /// Node-wide ceiling on blocked segment GETs, from
+    /// `playback.vod_blocked_get_cap`.
+    pub blocked_get_cap: usize,
 }
 
 /// Why a session ended for good. Every cause answers 410 and never resurrects.
@@ -2208,7 +2216,7 @@ impl VodServe {
                 rendition_builds: StdMutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
-                pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
+                pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
                 completed_cache: AtomicU64::new(0),
                 terminal_eviction_cursor: AtomicU64::new(0),
@@ -2556,6 +2564,14 @@ impl VodServe {
         session_id: String,
         fences: VodCreateFences<'_>,
     ) -> Result<VodStart, String> {
+        // The one funnel every create passes through: the plain entry point,
+        // the cluster one that every shipped caller actually uses, and the
+        // resurrection of a session from its durable route. Applying the
+        // ceiling here rather than at construction is what lets an operator
+        // change it without a restart — a cap set only in `WaitPool::new`
+        // would be frozen at whatever the node booted with — and applying it
+        // at `try_create` alone reached no production path at all.
+        self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -7329,6 +7345,7 @@ mod tests {
             completed_cache_bytes: 50 << 30,
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
+            blocked_get_cap: DEFAULT_GLOBAL_WAIT_CAP,
         }
     }
 
@@ -9995,6 +10012,41 @@ mod tests {
         assert!(
             serve.shared.pool.demands(&first.key).is_empty(),
             "the request left behind goes with the reader that made it"
+        );
+    }
+
+    /// The configured node cap reaches the pool, on create.
+    ///
+    /// Settings are re-read per create, so that is where the ceiling is
+    /// applied — which is what lets an operator change it without a restart.
+    /// A cap that lived only at construction would be frozen at whatever the
+    /// node booted with, and the plan promised a setting.
+    #[tokio::test]
+    async fn the_configured_blocked_get_cap_reaches_the_pool() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            DEFAULT_GLOBAL_WAIT_CAP,
+            "an unconfigured node still bounds its parked work"
+        );
+
+        let mut tuned = settings();
+        tuned.blocked_get_cap = 3;
+        create(&serve, &file, "sess-a", "play-a", &tuned).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            3,
+            "the operator's number, applied where settings are read"
+        );
+
+        let mut raised = settings();
+        raised.blocked_get_cap = 128;
+        create(&serve, &file, "sess-b", "play-b", &raised).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            128,
+            "and it tracks a later change rather than latching the first"
         );
     }
 

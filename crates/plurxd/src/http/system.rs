@@ -1561,6 +1561,10 @@ pub struct SettingsDto {
     pub vod_block_budget_secs: String,
     /// Producer watchdog from first blocked demand to bytes or typed failure.
     pub vod_materialize_budget_secs: String,
+    /// Node-wide ceiling on blocked VOD segment GETs. Each one holds a
+    /// response open and a retention pin, so this is what bounds the parked
+    /// work a seek storm can create. Blank means the built-in default.
+    pub vod_blocked_get_cap: String,
     /// Node-local fragment-index pass interval. Defaults to 15 minutes; 0 is
     /// an explicit pause, in which case an unindexed title is refused.
     pub vod_index_mins: i64,
@@ -1817,6 +1821,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
+        vod_blocked_get_cap: setting(keys::VOD_BLOCKED_GET_CAP).unwrap_or_default(),
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
         vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
             .is_some_and(|value| value.trim() == "1"),
@@ -1882,6 +1887,7 @@ pub struct UpdateSettings {
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
+    pub vod_blocked_get_cap: Option<String>,
     pub vod_index_mins: Option<i64>,
     pub vod_index_cluster_cache: Option<bool>,
     pub analysis_max_attempts: Option<i64>,
@@ -2131,6 +2137,24 @@ pub async fn update_settings(
             if !(10.0..=300.0).contains(&parsed) {
                 return Err(ApiError::BadRequest(
                     "vod_materialize_budget_secs must be between 10 and 300".into(),
+                ));
+            }
+            Some(Some(parsed))
+        }
+    };
+    let vod_blocked_get_cap = match req.vod_blocked_get_cap.as_deref() {
+        None => None,
+        Some(raw) if raw.trim().is_empty() => Some(None),
+        Some(raw) => {
+            let parsed: usize = raw.trim().parse().map_err(|_| {
+                ApiError::BadRequest("vod_blocked_get_cap must be a whole number".into())
+            })?;
+            // Zero would refuse every blocked GET, so every seek past the
+            // materialized run would answer 503 immediately — a setting that
+            // reads like "no limit" and behaves like "no playback".
+            if !(1..=4_096).contains(&parsed) {
+                return Err(ApiError::BadRequest(
+                    "vod_blocked_get_cap must be between 1 and 4096".into(),
                 ));
             }
             Some(Some(parsed))
@@ -2452,6 +2476,13 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::VOD_MATERIALIZE_BUDGET_SECS, &value)
+            .await?;
+    }
+    if let Some(value) = vod_blocked_get_cap {
+        let value = value.map(|parsed| parsed.to_string()).unwrap_or_default();
+        state
+            .store
+            .put_setting(keys::VOD_BLOCKED_GET_CAP, &value)
             .await?;
     }
     if let Some(on) = req.cluster_media_pool_enabled {

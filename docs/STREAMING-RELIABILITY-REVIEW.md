@@ -648,9 +648,44 @@ of what was found, with this note as the correction.
   may run into — so a sweep under pressure could evict the segment the
   ahead-fill was about to write again.
 
-**Still open.** The hard-coded global cap against §2.3's promised setting
-(tracked as P2-10), and fair service at the global limit — no test distributes
-`PoolFull` across sessions.
+**Also corrected: the promised setting.**
+`playback.vod_blocked_get_cap` now sets the node-wide blocked-GET ceiling,
+delivering §2.3's promise; the per-session cap stays a constant because it
+bounds one viewer rather than the node. It is applied where settings are read —
+on create — so an operator can change it without a restart, and lowering it
+never answers a request already parked: a blocked GET holds a client's response
+open, and turning a settings edit into a visible playback failure is worse than
+briefly running over the new number. The value is clamped at both ends, since a
+zero would refuse every blocked GET and make each seek past the materialized
+run a 503, which reads like "no limit" and behaves like "no playback".
+
+The adversarial review of that change is the reason it works at all. The first
+version applied the ceiling in `try_create`, which has no non-test caller: the
+setting was written, stored, read into `VodSettings`, and then dropped on a
+dead path, and the only test hand-built a `VodSettings` in Rust — so the whole
+store-to-pool wire could have been deleted with the suite green. It now lands
+in `try_create_with_release_fence`, the funnel all three entry points share,
+and the test that proves it drives the real store key through `vod_settings`.
+The pattern is the one this review has now caught three times: testing the
+layer that was written instead of the wire it was supposed to reach.
+
+**Still open.** Two things, both understated by the first version of this note.
+
+Nothing on the status surface reports the ceiling in force, so an operator
+reading `pool_full` refusals cannot see the number they are against.
+
+**Fair service at the global limit is not delivered.** What the two caps give
+is a per-viewer bound and a node bound, not a share. Admission stays
+first-come-first-served under a per-session ceiling: with sixteen sessions each
+holding four of a 64-slot node, a seventeenth viewer holding *nothing* is
+refused `PoolFull` — precisely the outcome the finding named. The narrower
+claim that does hold is that a session at its own cap is refused `SessionBusy`
+while node room remains, that a newcomer takes that room, and that the
+per-session refusal wins even on a full node, because `SessionBusy` and
+`PoolFull` mean different things to a client and conflating them would inflate
+the counter an operator sizes the node cap from. That is pinned. The share is
+not, and the test says so in its name rather than implying otherwise: a test
+that asserted fairness here would close the finding by assertion.
 
 **Required correction:** split historical delivery telemetry from current
 demand. A large accepted discontinuity creates a new demand generation and
@@ -839,6 +874,18 @@ appropriate for a different node.
 descriptor cost, record live/admitted/refused waits by reason without unbounded
 labels, and schedule one current demand per playback before admitting a second
 from another.
+
+**Partly corrected.** The first of the three is delivered: the node-wide
+ceiling is now `playback.vod_blocked_get_cap`, clamped 1..=4096, applied on
+every create so it takes effect without a restart, and exposed as a Streaming
+setting. The other two are not. Nothing counts refusals by reason on any
+status surface, so the operator question this finding opens with — was that
+503 one storm, many healthy viewers, or a cap sized for a different node —
+still has no answer from the node itself. And admission remains
+first-come-first-served under a per-session ceiling rather than one current
+demand per playback; see §5 above for exactly what the caps do and do not
+promise. The setting makes the number *changeable*, not *attributable*, and
+the heading names both.
 
 ### P3-1 — client snapshot validation is weaker than the server contract
 

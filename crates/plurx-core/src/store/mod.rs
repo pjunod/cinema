@@ -984,6 +984,19 @@ pub mod keys {
     /// the shorter per-request block deadline so clients can retry 503s while
     /// the same bounded production attempt continues.
     pub const VOD_MATERIALIZE_BUDGET_SECS: &str = "playback.vod_materialize_budget_secs";
+    /// How many blocked VOD segment GETs this node will hold at once.
+    ///
+    /// A blocked GET is a parked request holding an admission slot and a
+    /// retention pin until its segment lands, so the cap is what stops a seek
+    /// storm turning into unbounded parked work. Promised as a setting by the
+    /// VOD presentation plan §2.3 and hard-coded until now; the per-session
+    /// cap stays fixed because it bounds one viewer rather than the node.
+    ///
+    /// The right number is a property of the deployment, not of the code: a
+    /// node serving a handful of viewers wants far less parked work than one
+    /// fronting a household, and an operator watching `pool_full` refusals is
+    /// the only one who can tell which they have.
+    pub const VOD_BLOCKED_GET_CAP: &str = "playback.vod_blocked_get_cap";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not

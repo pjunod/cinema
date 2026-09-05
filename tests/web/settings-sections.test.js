@@ -211,7 +211,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // The two switches that are off on purpose moved to Developer, so Streaming
   // no longer writes them: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
-  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "serr"];
+  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "serr"];
   const developer = ["pcpv1", "dverr"];
   const experimental = ["phs", "dxerr"];
   return Promise.all([
@@ -223,8 +223,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
       "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate", "playback_auto_abr",
-      "stream_readrate", "vod_block_budget_secs", "vod_live_recovery",
-      "vod_materialize_budget_secs", "vod_presentation", "vod_working_set_bytes",
+      "stream_readrate", "vod_block_budget_secs", "vod_blocked_get_cap",
+      "vod_live_recovery", "vod_materialize_budget_secs", "vod_presentation",
+      "vod_working_set_bytes",
     ]);
     assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
     assert.deepEqual(Object.keys(writes.saveExperimental.body).sort(), ["hls_typeless_sliding"]);
