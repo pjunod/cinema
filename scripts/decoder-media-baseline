@@ -42,7 +42,7 @@ def run(args: list[str], *, capture: bool = False, combine_stderr: bool = False)
 
 
 def video_probe(ffprobe: str, path: Path) -> str:
-    return run(
+    output = run(
         [
             ffprobe,
             "-v",
@@ -56,7 +56,11 @@ def video_probe(ffprobe: str, path: Path) -> str:
             str(path),
         ],
         capture=True,
-    ).decode("utf-8").strip()
+    ).decode("utf-8")
+    rows = [line.strip() for line in output.splitlines() if line.strip()]
+    if not rows or len(set(rows)) != 1:
+        raise ValueError(f"ambiguous video probe output for {path}: {rows}")
+    return rows[0]
 
 
 def generate(output: Path, ffmpeg: str, ffprobe: str) -> list[dict[str, str]]:
@@ -67,7 +71,7 @@ def generate(output: Path, ffmpeg: str, ffprobe: str) -> list[dict[str, str]]:
     sources = {
         "h264-sdr": output / "source-h264.mp4",
         "mpeg4-simple-avi": output / "source-mpeg4.avi",
-        "hevc-main10-hdr10": output / "source-hevc-hdr10.mkv",
+        "hevc-main10-hdr10": output / "source-hevc-hdr10.mp4",
     }
     run(
         [
@@ -87,6 +91,8 @@ def generate(output: Path, ffmpeg: str, ffprobe: str) -> list[dict[str, str]]:
             "libx264",
             "-preset",
             "veryfast",
+            "-threads",
+            "1",
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -136,7 +142,7 @@ def generate(output: Path, ffmpeg: str, ffprobe: str) -> list[dict[str, str]]:
             "-preset",
             "ultrafast",
             "-x265-params",
-            "hdr10=1:repeat-headers=1:pools=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+            "hdr10=1:repeat-headers=1:pools=1:frame-threads=1:wpp=0:log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
             "-color_primaries",
             "bt2020",
             "-color_trc",
@@ -184,6 +190,8 @@ def generate(output: Path, ffmpeg: str, ffprobe: str) -> list[dict[str, str]]:
                 "libx264",
                 "-preset",
                 "veryfast",
+                "-threads",
+                "1",
                 "-b:v",
                 "8000k",
                 "-maxrate",
