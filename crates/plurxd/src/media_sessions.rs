@@ -315,6 +315,10 @@ trait TakeoverSettlementIo<A: Send + 'static, W: Send + 'static>: Sync {
         local_session_id: &'a str,
         lease_expires_at_ms: i64,
     ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>>;
+    fn abort_inherited_preparation<'a>(
+        &'a self,
+        route: &'a MediaSessionRoute,
+    ) -> BoxFuture<'a, Result<(), StoreError>>;
     fn seed<'a>(&'a self, route: &'a MediaSessionRoute) -> BoxFuture<'a, ()>;
     fn cache<'a>(
         &'a self,
@@ -422,6 +426,54 @@ impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppStat
             route.media_sequence = renewal.media_sequence;
             route.updated_at_ms = now_ms;
             Ok(Some(route))
+        })
+    }
+
+    fn abort_inherited_preparation<'a>(
+        &'a self,
+        route: &'a MediaSessionRoute,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            let Some(staged) = self
+                .store
+                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .await?
+            else {
+                return Ok(());
+            };
+            if staged.expected_predecessor_incarnation_id != route.incarnation_id {
+                return Err(StoreError::Task(
+                    "takeover found a preparation for the wrong predecessor".to_owned(),
+                ));
+            }
+            let aborted = self
+                .store
+                .abort_media_session_preparation(
+                    route.user_id,
+                    &route.playback_id,
+                    &plurx_core::domain::MediaSessionPreparationAbortRequest {
+                        staged_incarnation_id: staged.staged_incarnation_id.clone(),
+                        expected_predecessor_owner_node_id: route.owner_node_id.clone(),
+                        expected_predecessor_owner_epoch: route.owner_epoch,
+                        now_ms: unix_ms(),
+                    },
+                )
+                .await?;
+            if aborted.is_some() {
+                return Ok(());
+            }
+            let retained = self
+                .store
+                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .await?;
+            if retained.as_ref().is_some_and(|retained| {
+                retained.staged_incarnation_id == staged.staged_incarnation_id
+            }) {
+                return Err(StoreError::Task(
+                    "takeover could not settle the inherited preparation".to_owned(),
+                ));
+            }
+            Ok(())
         })
     }
 
@@ -4307,6 +4359,56 @@ where
         return Err("media-session takeover winner had no safe publication runway".to_owned());
     }
 
+    // A staged successor belongs to the predecessor owner that admitted it.
+    // The new process starts with a fresh ControlState and cannot safely
+    // rehydrate that old node's engine-local slot. Resolve the durable row
+    // before publishing the adopted worker; staging itself is owner-fenced,
+    // so no old detached task can recreate it after the takeover CAS.
+    let Some(preparation_deadline) =
+        takeover_reconciliation_deadline(claim.lease_expires_at_ms, monotonic_expiry)
+    else {
+        metric.outcome = TAKEOVER_FAILED;
+        worker
+            .stop_and_retain_until(
+                "media-session takeover preparation cleanup expired",
+                claim.lease_expires_at_ms,
+                monotonic_expiry,
+            )
+            .await;
+        return Err("takeover preparation cleanup expired".to_owned());
+    };
+    match tokio::time::timeout_at(
+        preparation_deadline,
+        io.abort_inherited_preparation(&claimed),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "takeover inherited preparation cleanup failed");
+            metric.outcome = TAKEOVER_FAILED;
+            worker
+                .stop_and_retain_until(
+                    "media-session takeover preparation cleanup failed",
+                    claim.lease_expires_at_ms,
+                    monotonic_expiry,
+                )
+                .await;
+            return Err("takeover could not settle inherited preparation".to_owned());
+        }
+        Err(_) => {
+            metric.outcome = TAKEOVER_FAILED;
+            worker
+                .stop_and_retain_until(
+                    "media-session takeover preparation cleanup timed out",
+                    claim.lease_expires_at_ms,
+                    monotonic_expiry,
+                )
+                .await;
+            return Err("takeover inherited preparation cleanup timed out".to_owned());
+        }
+    }
+
     // A shared-cache pin is a second Store mutation and therefore has the
     // same lost-reply shape. Prove it against the provisional worker before
     // the stable public capability is installed; a pin failure can therefore
@@ -4576,6 +4678,14 @@ pub(crate) async fn attempt_takeover_for_test(
     route: MediaSessionRoute,
 ) -> Result<(), String> {
     attempt_takeover(state, route).await
+}
+
+#[cfg(test)]
+pub(crate) async fn abort_inherited_preparation_for_test(
+    state: &AppState,
+    route: &MediaSessionRoute,
+) -> Result<(), StoreError> {
+    state.abort_inherited_preparation(route).await
 }
 
 async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<(), String> {
@@ -5320,6 +5430,13 @@ mod tests {
     }
 
     impl TakeoverSettlementIo<ProbeTakeoverAdoption, ProbeTakeoverWorker> for ScriptedTakeoverIo {
+        fn abort_inherited_preparation<'a>(
+            &'a self,
+            _route: &'a MediaSessionRoute,
+        ) -> BoxFuture<'a, Result<(), StoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+
         fn route_generation(&self, _session_id: &str) -> u64 {
             let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
             self.record(format!("generation:{generation}"));
