@@ -17,9 +17,6 @@ on:
       - ".github/workflows/rust-audit.yml"
       - "scripts/vendor-audit-lock"
 
-permissions:
-  contents: read
-
 jobs:
   # Release artifacts resolve from the root workspace; the standalone M0
   # hiqlite experiment is compiled and exercised by CI but does not ship.
@@ -28,9 +25,6 @@ jobs:
   workspace:
     name: RustSec workspace advisory scan
     if: github.event_name != 'schedule'
-    permissions:
-      contents: read
-      checks: write
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:
@@ -56,9 +50,6 @@ jobs:
   fuzz:
     name: RustSec fuzz advisory scan
     if: github.event_name != 'schedule'
-    permissions:
-      contents: read
-      checks: write
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:
@@ -73,9 +64,6 @@ jobs:
   scheduled:
     name: RustSec scheduled advisory report
     if: github.event_name == 'schedule'
-    permissions:
-      contents: read
-      issues: write
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 10
     steps:

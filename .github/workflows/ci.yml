@@ -566,9 +566,6 @@ jobs:
     if: needs.scope.outputs.android_jvm == 'true'
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 20
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       # The toolchain image only changes when its Dockerfile does, yet both
@@ -680,9 +677,6 @@ jobs:
     if: needs.scope.outputs.android_device == 'true'
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 35
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       - name: Isolate the Android SDK from the repository checkout
@@ -802,8 +796,6 @@ jobs:
     # and a directly renderable SVG to an orphan `badges` branch. The README
     # loads the SVG through github.com so authorized private-repo viewers work;
     # shields.io cannot read a private raw.githubusercontent.com branch.
-    permissions:
-      contents: write
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
@@ -1023,9 +1015,6 @@ jobs:
     uses: ./.github/workflows/publish-release.yml
     with:
       release_tag: ${{ github.ref_name }}
-    permissions:
-      contents: read
-      packages: write
 
   # A merged main commit is already qualified by its pull request, but the
   # post-merge run still has to prove the merge tree before changing the fleet
@@ -1056,9 +1045,6 @@ jobs:
     concurrency:
       group: publish-main-image
       cancel-in-progress: false
-    permissions:
-      contents: read
-      packages: write
     steps:
       - name: Require the post-merge validation fan-out
         env:
