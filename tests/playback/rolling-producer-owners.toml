@@ -1338,7 +1338,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 560 + (577 - 557) -> 580 on effort integration: both independently reviewed
 # timer deltas remain, including the demand episode retention and bounded
 # settlement owner. This is a merged inventory, not a relaxed sentinel.
-expected_occurrences = 580
+# 580 -> 582 with P1-6's accepted-film-time staging proof. Both are test-only
+# helpers in the two new control-seam regressions, and both are awaited before
+# the fixture releases its temporary media. `pace_control_exchanges` sleeps
+# past `MIN_CONTROL_INTERVAL` — the same exchange floor already reviewed at
+# 550 -> 555 and 570 -> 571 — because a second exchange inside it is answered
+# 429 and never reaches the selection engine, so the assertion would otherwise
+# run against a request the server declined to consider. `await_preparation_
+# candidate` bounds the wait for the detached preparation candidate keyed to
+# its exact predecessor, the same shape reviewed at 555 -> 557. Production
+# gains no constructor: the correction replaces one arithmetic expression.
+# Neither timer owns a process, producer, recipe or recovery decision.
+expected_occurrences = 582
 
 [[module_structures]]
 id = "bare-time-constructor"

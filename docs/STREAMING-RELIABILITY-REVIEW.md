@@ -319,6 +319,47 @@ the viewer has not watched.
 position/seek target plus a small aligned lead, constrained by contiguous
 buffer evidence. Never use a high-water fetch frontier as presentation time.
 
+**Corrected — the anchor.** `stage_prepared_successor` no longer computes
+`media_origin_ms + fetched_through_ms`. The accepted envelope's
+`seek_target_ms.unwrap_or(position_ms)` is captured at the control seam,
+carried through `PreparationCandidateInputs`, and persisted as the successor's
+absolute film time with the origin *not* added back. Proved at the helper and
+at two real `control_local_inner` exchanges — the arrangement separates all
+four candidate answers, so no assertion passes for the wrong reason — and each
+of the three tests fails against the previous formula.
+
+**Still open — the lead.** This closes only "never use a high-water fetch
+frontier as presentation time". The *small aligned lead constrained by
+contiguous buffer evidence* is not implemented: a successor staged exactly at
+the playhead is behind the viewer by the time it commits, and choosing the lead
+needs `buffered_from_ms`/`buffered_through_ms` contiguity, which is a policy
+decision this correction deliberately did not invent. Note it cannot be applied
+where the resume is chosen: `stage_prepared_successor` knows neither the elapsed
+stage-to-commit time nor the buffer's contiguity, so the lead belongs at or
+after commit.
+
+**Still open — the successor's origin field, found by the adversarial review of
+the correction above.** Staging writes `resume_ms` into the successor's
+`media_origin_ms` as well as its `start_seconds`. Every public session is
+`Presentation::Vod`, whose timeline is the whole film from zero — `try_vod_session`
+returns `media_origin_seconds: 0.0` — so a VOD successor's true origin is `0`
+and the resume belongs only in the recipe's `SessionRequest.start_seconds`.
+Readers that treat `media_origin_ms` as an origin then double-count:
+`owner_loss_resume` and `takeover_resume` compute
+`media_origin_ms + fetched_through_ms`, and a VOD route's `fetched_through_ms`
+is already absolute, so a viewer 40 minutes in whose owner is lost at 45 minutes
+would be reopened around 85 minutes. The client contract has the same shape —
+"align the second timeline with `media_origin_ms`".
+
+This predates the resume correction and is *not* a regression from it: the old
+frontier value was strictly larger. It is unreachable today because no shipping
+client names `prepare_replacement` in `supported_actions`, so nothing commits a
+staged successor — but it becomes live the moment one does, which §4 requires.
+Fix it with the prepared transaction, either by writing `0` for a VOD
+successor's origin or by stopping `owner_loss_resume`/`takeover_resume` deriving
+absolute positions from it, and prove it by committing a successor and asserting
+the film position a client is handed.
+
 ### P1-7 — ordinary changes remain break-before-make on every client
 
 The web quality, Auto, seek/reopen, and rejection paths tear down HLS before
@@ -659,7 +700,7 @@ are retained in
 | P1-3 | `delivered_bps: None` at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L847); `has_throughput_headroom` refusal at `playback_control.rs:1120`; impossible injected test rate at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L13727) |
 | P1-4 | Detached spawn at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L5181); asynchronous candidate reads at `http/hls.rs:5409`; preparation slot identity at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L2418) |
 | P1-5 | SQLite commit at [`sessions.rs`](../crates/plurx-core/src/store/sqlite/sessions.rs#L1623), Hiqlite commit at [`hiqlite_sessions.rs`](../crates/plurx-core/src/store/hiqlite_sessions.rs#L1750), and best-effort timer at `http/hls.rs:5707` |
-| P1-6 | Resume calculation in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L5593); fetched-end caveat in [`media_sessions.rs`](../crates/plurxd/src/media_sessions.rs#L2497); current test `a_staged_successor_resumes_at_the_frontier_not_the_original_start` |
+| P1-6 | Resume calculation in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L6459) and its capture in [`PreparationCandidateInputs`](../crates/plurxd/src/http/hls.rs#L6239); fetched-end caveat in [`media_sessions.rs`](../crates/plurxd/src/media_sessions.rs#L2497); anchor proved by `a_staged_successor_resumes_at_the_accepted_playhead_not_the_fetch_frontier`, `the_control_seam_stages_from_the_accepted_playhead_not_the_route_frontier` and `a_backward_seek_stages_from_the_seek_target_at_the_control_seam`; aligned lead still unimplemented |
 | P1-7 | Web teardown in [`play`/`seekTo`](../crates/plurxd/src/web/index.html#L7807); Apple pause/replace in [`PlayerController`](../clients/apple/Sources/PlayerController.swift#L2601); Android reload/dispose in [`PlayerScreen`](../clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt#L469); predecessor Store end at `sessions.rs:923` |
 | P1-8 | Takeover exclusion in [`media_sessions.rs`](../crates/plurxd/src/media_sessions.rs#L2450); 410/reopen response in [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L8697); [OPERATIONS.md](OPERATIONS.md) §“VOD continuity limits” |
 | P1-9 | Refresh/timeout/lease constants in [`migration.rs`](../crates/plurx-core/src/cluster/migration.rs#L5750); sequential sampling at `migration.rs:6517`; fence readiness in [`serving_fence.rs`](../crates/plurxd/src/serving_fence.rs#L364); VOD steady/seek acceptance receipts |
