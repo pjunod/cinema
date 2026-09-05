@@ -2386,9 +2386,23 @@ fn spawn_live_ffmpeg(
 fn live_video_filter(encoder: Encoder, height: u16) -> String {
     let mut filter =
         format!("bwdif=mode=send_frame:parity=auto:deint=interlaced,scale=-2:{height}");
-    if let Some(suffix) = encoder.filter_suffix() {
-        filter.push(',');
-        filter.push_str(suffix);
+    match encoder.filter_suffix() {
+        // VAAPI uploads as nv12 and QSV as a qsv surface, so both already pin
+        // a pixel format the encoder accepts.
+        Some(suffix) => {
+            filter.push(',');
+            filter.push_str(suffix);
+        }
+        // Nothing else pins one, and the source's own format survives the
+        // chain. Live TV's output is SDR 8-bit H.264 by contract -- the
+        // software encoder pins `-profile:v high` -- so a 10-bit broadcast
+        // reaching libx264 as yuv420p10le makes x264 refuse the profile
+        // outright ("high profile doesn't support a bit depth of 10") and
+        // FFmpeg exit before it publishes anything. Measured against a real
+        // HDHomeRun FLEX 4K: every ATSC 3.0 HEVC Main 10 channel died this
+        // way. Converting here rather than widening the profile keeps one
+        // output contract for every client.
+        None => filter.push_str(",format=yuv420p"),
     }
     filter
 }
@@ -3852,7 +3866,7 @@ exec /bin/cat >/dev/null
     fn live_filter_deinterlaces_interlaced_frames_only() {
         let filter = live_video_filter(Encoder::Software, 720);
         assert!(filter.contains("bwdif=mode=send_frame:parity=auto:deint=interlaced"));
-        assert!(filter.ends_with("scale=-2:720"));
+        assert!(filter.ends_with("scale=-2:720,format=yuv420p"));
     }
 
     #[tokio::test]
@@ -4255,6 +4269,46 @@ exec /bin/cat >/dev/null
         )
         .expect("hostile");
         assert!(validate_lineup(hostile).is_err());
+    }
+
+    /// A 10-bit broadcast has to reach the encoder as 8-bit.
+    ///
+    /// Found on a real HDHomeRun FLEX 4K: every ATSC 3.0 channel is HEVC Main
+    /// 10, the live chain was `bwdif,scale` with no pixel-format conversion,
+    /// and the software encoder pins `-profile:v high`. x264 answers "high
+    /// profile doesn't support a bit depth of 10" and FFmpeg exits before it
+    /// publishes anything, so those channels were listed playable and never
+    /// started.
+    ///
+    /// The conversion belongs only on the paths that do not already pin a
+    /// format: VAAPI uploads nv12 and QSV uploads a qsv surface, and appending
+    /// a system-memory format conversion after a hardware upload would be a
+    /// different bug.
+    #[test]
+    fn the_live_chain_delivers_eight_bit_to_an_eight_bit_profile() {
+        for encoder in [Encoder::Software, Encoder::Nvenc] {
+            let filter = live_video_filter(encoder, 720);
+            assert!(
+                filter.ends_with(",format=yuv420p"),
+                "{encoder:?} pins an 8-bit profile and gets whatever the \
+                 broadcaster sent: {filter}"
+            );
+        }
+        for encoder in [Encoder::Vaapi, Encoder::Qsv] {
+            let filter = live_video_filter(encoder, 720);
+            let suffix = encoder
+                .filter_suffix()
+                .expect("a hardware upload path pins its own format");
+            assert!(
+                filter.ends_with(suffix),
+                "{encoder:?} already uploads in its own format; a trailing \
+                 system-memory conversion would break the upload: {filter}"
+            );
+            assert!(
+                !filter.ends_with(",format=yuv420p"),
+                "{encoder:?} must not get the software conversion: {filter}"
+            );
+        }
     }
 
     #[test]
