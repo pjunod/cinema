@@ -18,7 +18,7 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | [#914](https://github.com/pjunod/plurx/pull/914) · draft |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | 14 diagnostic/inventory tests and 1 normalized argument-baseline test pass on the working tree |
+| Focused validation | 14 diagnostic/inventory tests and 1 normalized argument-baseline test pass at `2d4900e1` |
 | Full PR validation | Pending adversarial review and fixes |
 | Blocker | None; physical Apple/Android client and original-media runs remain later milestone evidence |
 
@@ -248,6 +248,12 @@ lane and focused tests provide earlier feedback.
 | `a9cb879b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,376 files |
 | `a9cb879b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
 | `a9cb879b` | `git diff --check` | Pass |
+| `2d4900e1` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 14 tests |
+| `2d4900e1` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
+| `2d4900e1` | `make operations-check` | Pass · 200 tests; run outside restricted socket sandbox |
+| `2d4900e1` | `make validation-lint` | Pass · 23 points, 28 checks, 1,381 files |
+| `2d4900e1` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `2d4900e1` | `git diff --check` | Pass |
 | Pending | Full PR suite after review fixes | Not run |
 
 ## Remaining evidence before release
