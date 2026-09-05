@@ -421,7 +421,35 @@ async fn device() -> &'static Device {
     }
     let address = private_ipv4();
     let opens = Arc::new(AtomicU64::new(0));
-    serve_fixture_device(address.clone(), Arc::clone(&opens)).await;
+    // On its own thread and its own runtime, because it has to outlive the
+    // case that starts it. `#[tokio::test]` builds one runtime per test and
+    // drops it when that test returns, so a fixture spawned there stops
+    // answering the moment the first case finishes -- while this `OnceLock`
+    // goes on handing every later case the address of a device that is no
+    // longer listening. Those cases then fail on `owner_network: HDHomeRun
+    // device request failed`, which reads like a hardware or network fault and
+    // is neither: run alone, each of them passes.
+    let (bound, listening) = std::sync::mpsc::channel();
+    let served_address = address.clone();
+    let served_opens = Arc::clone(&opens);
+    std::thread::Builder::new()
+        .name("fixture-hdhomerun".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("fixture device runtime");
+            runtime.block_on(async move {
+                serve_fixture_device(served_address, served_opens).await;
+                let _ = bound.send(());
+                // Nothing ends this: the fixture is the whole file's device.
+                std::future::pending::<()>().await;
+            });
+        })
+        .expect("fixture device thread");
+    listening
+        .recv()
+        .expect("the fixture device bound ports 80 and 5004");
     DEVICE.get_or_init(|| Device { address, opens })
 }
 
