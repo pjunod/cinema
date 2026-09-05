@@ -147,6 +147,8 @@ node access.
 | 2026-09-05 | Android heartbeat | `LiveTvLease.heartbeatMarker` | it called `barrier.arm()` every five seconds, which is an `AtomicFile` rename + write + `fsync` + unlink **on the main thread** during live video — dropped frames and an ANR candidate. The durable marker is already on disk for the whole session, so the write changed nothing an observer could see; the heartbeat now refreshes only the in-process deadline |
 | 2026-09-05 | Android watchdog coverage | `LiveTvTest` | the test cited as evidence for the sliding-window fix destructured its regressing-position list into `_` and never used it, feeding a monotonically increasing count instead. It would have passed against the position-based implementation it claimed to rule out. The list is gone, the comment now says what the test does prove, and it is renamed `renderedFrameCountRenewsOnChangeAndFrozenVideoExpires`. **The position-versus-frames choice at the LiveTvPlayer call site remains unproven** until a fake player drives that heartbeat |
 
+| 2026-09-05 | `scripts/live-tv-endless` against a real endless FFmpeg source | ten playlist window rollovers, bounded scratch, one tuner GET, idle orphan expiry, resource cleanup | **passed** — 10 rollovers (media sequence 0 → 60, 4.0 s segments), 66 distinct segments actually read, published window never exceeded 6, peak live scratch 29.9 MB, **one** tuner GET for the whole session; an orphaned capability with no DELETE expired 65 s after its last read and left 0 bytes of scratch and no surviving encoder. The fixture is a real HDHomeRun-shaped device on ports 80 and 5004 at this host's own private address; no household tuner was opened |
+
 
 ## Decisions made while the owner is away
 
