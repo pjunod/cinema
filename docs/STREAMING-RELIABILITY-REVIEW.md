@@ -875,17 +875,38 @@ descriptor cost, record live/admitted/refused waits by reason without unbounded
 labels, and schedule one current demand per playback before admitting a second
 from another.
 
-**Partly corrected.** The first of the three is delivered: the node-wide
-ceiling is now `playback.vod_blocked_get_cap`, clamped 1..=4096, applied on
-every create so it takes effect without a restart, and exposed as a Streaming
-setting. The other two are not. Nothing counts refusals by reason on any
-status surface, so the operator question this finding opens with — was that
-503 one storm, many healthy viewers, or a cap sized for a different node —
-still has no answer from the node itself. And admission remains
-first-come-first-served under a per-session ceiling rather than one current
-demand per playback; see §5 above for exactly what the caps do and do not
-promise. The setting makes the number *changeable*, not *attributable*, and
-the heading names both.
+**Two of three corrected.** The ceiling is now
+`playback.vod_blocked_get_cap`, clamped 1..=4096, applied on every create so it
+takes effect without a restart, and exposed as a Streaming setting.
+
+Attribution follows it. The pool counts admissions and refusals by class,
+tracks what is parked right now, and publishes the ceiling those waits are
+against — as `plurx_vod_blocked_gets_*` on `/metrics`, as `blocked_gets` on
+the system document, and as a row in Settings → System that names the two
+refusal classes apart and says which one the setting would change. All five
+numbers are reported together because no subset is an answer: refusals without
+the ceiling cannot tell a node at its limit from one nowhere near it, and the
+classes summed cannot tell one client's seek storm from a full node, which is
+the distinction that decides whether raising the setting helps at all.
+
+The refusal also stopped being one answer on the wire. `SessionBusy` and
+`PoolFull` both collapsed to `VodError::Busy` at the single call site that
+produces them, and both answered `segment_wait_busy` with a message about
+"this session" — wrong for half of them, and actively misleading to a client
+that responds by slowing its own requests when the truth is that the node is
+out of parked-request capacity. They now carry the class through to two typed
+codes, both still 503 so the retry ladder is unchanged.
+
+The counters are the pool's own, handed out as a handle rather than kept in
+module statics. Statics were the first shape and they were untestable under a
+parallel suite; they were also wrong in a subtler way, since the transcode
+manager replaces its `VodServe` on the cluster boot path and a captured handle
+can address a pool nothing serves from — an admission counter that quietly
+stops moving reads as a quiet node.
+
+**Still open**: admission remains first-come-first-served under a per-session
+ceiling rather than one current demand per playback. See §5 above for exactly
+what the caps do and do not promise.
 
 ### P3-1 — client snapshot validation is weaker than the server contract
 

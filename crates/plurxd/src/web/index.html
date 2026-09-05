@@ -13640,6 +13640,30 @@ function playbackSummaryCard(events){
     <div class="hint">Stalls: ${stalls.supply} supply · ${stalls.decode} decode · ${stalls.other} other<br>
       Encoder suspended: ${suspended.toFixed(1)} seconds · ${rows.length} stored event${rows.length===1?'':'s'} shown</div></div>`;
 }
+// A segment request that arrives before its media exists waits rather than
+// failing, under a per-viewer cap and a node-wide one. When either refuses, the
+// player gets a 503 — and this row is the only place on the node that says how
+// many are parked, what ceiling they are against, and which cap turned anything
+// away.
+//
+// The two refusal classes are named apart on purpose, because they argue for
+// opposite actions. Refusals against one viewer's cap are that cap doing its
+// job on a client asking for too much at once; raising the node setting fixes
+// nothing. Refusals against the node cap are the ones that say the ceiling is
+// sized for a smaller machine, so this is the one that points at the setting,
+// and it says so.
+function blockedGetsHtml(b){
+  if(!b) return `<span class="muted">not reported by this server</span>`;
+  const waiting=Number(b.waiting)||0, cap=Number(b.cap)||0;
+  const viewer=Number(b.refused_session_busy)||0, node=Number(b.refused_pool_full)||0;
+  const head=`${waiting} of ${cap} waiting`;
+  if(!viewer&&!node) return `${head} <span class="muted">· none refused since start-up</span>`;
+  const parts=[];
+  if(viewer) parts.push(`${viewer} refused for a single player's limit`);
+  if(node) parts.push(`<span style="color:var(--bad)">${node} refused because this server was full</span>`);
+  const advice=node?`<div class="muted" style="margin-top:2px">Raising “Waiting segment requests” under Streaming is what changes the second number. The first one it will not change.</div>`:"";
+  return `${head} <span class="muted">· since start-up:</span> ${parts.join(" · ")}${advice}`;
+}
 function systemPanel(sys,playbackEvents){
   const enc=sys.encoders||{};
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
@@ -13654,6 +13678,7 @@ function systemPanel(sys,playbackEvents){
         <dt>Right now</dt><dd><div class="system-now">
           <div class="system-now-counts">${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>
         </div></dd>
+        <dt>Waiting fetches</dt><dd>${blockedGetsHtml(sys.blocked_gets)}</dd>
       </dl></div>
     <div id="settings-playback-events">${SETTINGS_LOADED.has("playbackEvents")?playbackSummaryCard(playbackEvents):`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Loading playback history…</span></div>`}</div>
     <div class="card"><h2 class="section" style="margin-top:0">Logs</h2>

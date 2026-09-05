@@ -142,6 +142,11 @@ pub struct SystemDto {
     /// different bug from one refused at 2 of 2.
     pub hw_slots_in_use: usize,
     pub hw_slots_max: usize,
+    /// Blocked-GET admission: what is parked, the ceiling it is against, and
+    /// why requests were turned away. Reported for the same reason the
+    /// hardware slots are reported as a pair, and then some — see
+    /// [`BlockedGetsDto`].
+    pub blocked_gets: BlockedGetsDto,
     /// Recent targeted-scan requests from other applications, newest last.
     /// The one place an operator can see that monarr is actually talking to
     /// plurx — and what it asked for — without reading the log.
@@ -167,6 +172,37 @@ pub struct SystemDto {
     pub plan_derivation: PlanDerivationDto,
     #[serde(flatten)]
     pub info: crate::state::SystemInfo,
+}
+
+/// Blocked-GET admission on this node.
+///
+/// A segment GET that arrives before its media exists parks rather than
+/// failing, under a per-viewer cap and a node-wide one. When either refuses,
+/// the client gets a 503 — and until this existed that 503 was the end of the
+/// trail: nothing on the node said how many requests were parked, what ceiling
+/// they were against, or which of the two caps had turned anything away.
+///
+/// So all five numbers are reported together, because no subset answers the
+/// question an operator actually has. `waiting` without `cap` cannot tell a
+/// node at its limit from one nowhere near it. `cap` without the refusals
+/// cannot tell a ceiling that is doing its job from one sized for a different
+/// machine. And the two refusal classes folded together cannot tell one
+/// client's seek storm — `session_busy`, the per-viewer cap doing exactly what
+/// it is for — from a genuinely full node, which is `pool_full` and the only
+/// one of the two that argues for raising the setting.
+///
+/// The counters are cumulative for the life of the process; `waiting` and
+/// `cap` are current.
+#[derive(Serialize)]
+pub struct BlockedGetsDto {
+    pub waiting: usize,
+    pub cap: usize,
+    pub admitted: u64,
+    /// One viewer at its own ceiling. Many of these with a low `waiting` is a
+    /// client asking for too much at once, not a node under pressure.
+    pub refused_session_busy: u64,
+    /// The node at its ceiling. This is the one that argues for a larger cap.
+    pub refused_pool_full: u64,
 }
 
 /// Create's reconciliation of the client's plan with the server's, counted
@@ -247,6 +283,16 @@ pub async fn system_info(
         replication,
         hw_slots_in_use: hw_in_use,
         hw_slots_max: hw_max,
+        blocked_gets: {
+            let pool = state.transcode.blocked_get_metrics_handle().snapshot();
+            BlockedGetsDto {
+                waiting: pool.waiting,
+                cap: pool.cap,
+                admitted: pool.admitted,
+                refused_session_busy: pool.refused(crate::waitpool::WaitRefused::SessionBusy),
+                refused_pool_full: pool.refused(crate::waitpool::WaitRefused::PoolFull),
+            }
+        },
         scan_requests: requests.clone(),
         integration: IntegrationDto {
             notifications_received: notifications,
@@ -3518,6 +3564,7 @@ pub(crate) struct MetricsState {
     store_metrics: StoreMetricsCache,
     passive_raft: plurx_core::cluster::migration::status::PassiveRaftMetrics,
     passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
+    blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -3532,6 +3579,9 @@ impl FromRef<AppState> for MetricsState {
             store_metrics: state.store_metrics.clone(),
             passive_raft: state.replication.metrics_handle(),
             passive_membership: state.membership.metrics_handle(),
+            // Taken per request, which `FromRef` is, so it addresses the pool
+            // this node is actually serving from.
+            blocked_gets: state.transcode.blocked_get_metrics_handle(),
         }
     }
 }
@@ -3966,12 +4016,15 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{control_metrics}{playback_metrics}",
+         {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
         control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
+        // Node-wide statics, so this reads no lock a live segment GET can
+        // hold and no `VodServe` handle that a cluster boot may have replaced.
+        blocked_get_metrics = state.blocked_gets.prometheus(),
     );
     (
         [(

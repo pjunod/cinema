@@ -485,8 +485,14 @@ pub enum VodError {
     ProducerFailed(String),
     /// 410 — the session ended for good.
     Gone(Terminal),
-    /// Wait-pool caps hit → typed 503, no wait.
-    Busy,
+    /// A wait-pool cap was hit → typed 503, no wait.
+    ///
+    /// It carries *which* cap. The two mean different things to the client
+    /// holding the refusal — one says this player is asking for too much at
+    /// once, the other says the node is out of parked-request capacity — and
+    /// collapsing them here is what left an operator unable to tell a single
+    /// seek storm from a node whose ceiling is sized for a smaller deployment.
+    Busy(crate::waitpool::WaitRefused),
     /// 500.
     Io(std::io::Error),
 }
@@ -3540,6 +3546,11 @@ impl VodServe {
         Ok(ended)
     }
 
+    /// Blocked-GET admission counters for the operator surfaces.
+    pub(crate) fn blocked_get_metrics_handle(&self) -> Arc<crate::waitpool::BlockedGetMetrics> {
+        self.shared.pool.metrics_handle()
+    }
+
     /// Whether this session id is (or ever was) a VOD session here.
     pub async fn owns(&self, session_id: &str) -> bool {
         self.shared.sessions.lock().await.contains_key(session_id)
@@ -4681,7 +4692,11 @@ impl VodServe {
                 .shared
                 .pool
                 .register(key, session_id)
-                .map_err(|_| VodError::Busy)?;
+                // The class travels with the refusal. `blocked_wait` is the only
+                // production caller of `register`, so this line is the whole
+                // seam between the pool knowing which cap fired and a client
+                // or an operator ever finding out.
+                .map_err(VodError::Busy)?;
             let demand = self
                 .shared
                 .arm_materialize_watchdog_locked(rendition, index, &mut clocks);
@@ -12813,7 +12828,10 @@ mod tests {
                     Arc::new(crate::meter::Meter::new())
                 )
                 .await,
-            Err(VodError::Busy)
+            // One viewer at its own ceiling, on a node with room: the refusal
+            // names the per-session cap, which is the answer that tells this
+            // client to slow down rather than telling it the node is out.
+            Err(VodError::Busy(crate::waitpool::WaitRefused::SessionBusy))
         ));
         assert!(!rendition
             .demand_since
