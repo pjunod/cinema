@@ -112,6 +112,27 @@ async function main() {
     assert.deepEqual(await lease.keepalive(), { ok: true });
   });
 
+  await test("a status poll never renews a capability that is being released", async () => {
+    const release = deferred();
+    let statuses = 0;
+    const lease = new liveTv.Lease({
+      start: async (channel) => ({ session_id: `cap-${channel}` }),
+      release: async () => release.promise,
+      status: async () => { statuses++; return { state: "active" }; },
+      keepalive: async () => ({ ok: true }),
+    });
+    await lease.start("7.1");
+    const closing = lease.stop();
+    await new Promise((settle) => setImmediate(settle));
+    assert.equal(lease.releasing, true, "the DELETE must still be in flight");
+    assert.equal(await lease.status(), null);
+    assert.equal(statuses, 0, "a release in flight must not renew its own lease");
+    assert.equal(await lease.keepalive(), null);
+    release.resolve();
+    await closing;
+    assert.equal(lease.current, null);
+  });
+
   await test("failed cleanup retains the capability and blocks another tuner", async () => {
     const events = [];
     let fail = true;

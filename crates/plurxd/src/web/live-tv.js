@@ -183,7 +183,10 @@
       const generation = this.generation;
       const info = this.current;
       const id = capability(info);
-      if (!id || typeof this.requests.status !== "function") return null;
+      // A status poll renews the server lease exactly as keepalive does, so it
+      // must observe the same release guard: polling a capability whose DELETE
+      // is already in flight can renew the very lease this client is dropping.
+      if (!id || this.releasing || typeof this.requests.status !== "function") return null;
       const result = await this.requests.status(id);
       return generation === this.generation && this.current === info ? result : null;
     }
