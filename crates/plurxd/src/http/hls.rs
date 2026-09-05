@@ -6018,6 +6018,27 @@ async fn control_local_with_settlement_capacity(
         crate::playback_control::record_preparation_observation(
             crate::playback_control::PreparationSeam::InSession,
         );
+        // The film time this exchange accepted, bounded by the film itself.
+        //
+        // `validate` is deliberately looser than that: it allows the duration
+        // plus one target duration of slack, so a client reporting the final
+        // segment's *end* is not refused, and it falls back to
+        // `MAX_MEDIA_MILLIS` when the duration is unknown. Neither is a place a
+        // successor may begin. Staging past the end would hold this playback's
+        // one preparation slot, a durable row and an admission slot for a full
+        // `PREPARATION_DEADLINE_MS` on a resume no viewer can ever reach — and
+        // this value is now client-reported rather than derived from what the
+        // server observed itself delivering, so the seam is where it earns a
+        // bound. `.max(0)` cannot fire on a validated envelope; it is here so a
+        // future caller that has not validated cannot serialize a negative
+        // `start_seconds`.
+        let accepted_film_time_ms = {
+            let asked = request.seek_target_ms.unwrap_or(request.position_ms).max(0);
+            match start.duration_ms {
+                Some(duration) if duration > 0 => asked.min(duration),
+                _ => asked,
+            }
+        };
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
         tokio::spawn(process_preparation_candidate(
@@ -6037,6 +6058,7 @@ async fn control_local_with_settlement_capacity(
                 // not start and would then leave the measurement
                 // unattributable.
                 platform: result.platform,
+                accepted_film_time_ms,
             },
         ));
     }
@@ -6239,6 +6261,30 @@ struct PreparationCandidateInputs {
     delivered_bps: Option<i64>,
     capabilities: Option<crate::playback_control::DynamicCapabilities>,
     platform: crate::playback_control::ClientPlatform,
+    /// Where the viewer actually is, in absolute film time, according to the
+    /// envelope this exchange **accepted**.
+    ///
+    /// Captured here rather than read from the route because only the envelope
+    /// knows it. A route carries `fetched_through_ms`, which is a high-water
+    /// fetch frontier: it advances to the *end* of a segment the moment the
+    /// client asks for it, clients prefetch and retry, and after a backward
+    /// seek it stays far ahead of the playhead. Staging from it hands the
+    /// viewer a successor that begins past film they have not watched.
+    ///
+    /// `seek_target_ms` wins over `position_ms` for the same reason
+    /// [`ControlRequestV1::validate`] anchors the buffer on it: while a seek is
+    /// in flight the reported position is still the old one, and the target is
+    /// where this viewer is going.
+    ///
+    /// Already absolute — the control plane's positions are source-timeline
+    /// values, not offsets into this session — so nothing downstream may add
+    /// `media_origin_ms` to it.
+    ///
+    /// Bounded at the seam by the film's own duration, not by `validate`:
+    /// validation allows a target duration of slack past the end so a client
+    /// reporting the final segment's end is not refused, and that is not a
+    /// place a successor may begin.
+    accepted_film_time_ms: i64,
 }
 
 /// Evaluate and, when admitted, durably stage this selection change.
@@ -6268,6 +6314,7 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
         delivered_bps,
         capabilities,
         platform,
+        accepted_film_time_ms,
     } = exchange;
     #[cfg(test)]
     struct Completion(String);
@@ -6391,6 +6438,7 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
             &recipe,
             &candidate,
             source.as_ref(),
+            accepted_film_time_ms,
         )
         .await;
     }
@@ -6435,6 +6483,7 @@ async fn stage_prepared_successor(
     predecessor: &RemoteStartRequest,
     candidate: &crate::transcode::SessionRequest,
     source: Option<&plurx_core::domain::MediaFile>,
+    accepted_film_time_ms: i64,
 ) {
     // The actor owns the slot. No live local worker means no slot to take, and
     // an expired, remote-owned or retired playback stages nothing.
@@ -6456,14 +6505,29 @@ async fn stage_prepared_successor(
     let now_ms = crate::media_sessions::unix_ms();
     let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
     let staged_session_id = uuid::Uuid::new_v4().to_string();
-    // Where the successor actually begins: the frontier the predecessor has
-    // reached, not the position it was created at. `candidate` is the
-    // predecessor's request with the selection fields overwritten, so its
-    // `start_seconds` is the *original* start — committing that would restart
-    // the film for a viewer forty minutes in.
-    let resume_ms = route
-        .media_origin_ms
-        .saturating_add(route.fetched_through_ms.max(0));
+    // Where the successor actually begins: **where the viewer is**, not where
+    // the predecessor was created and not how far it has fetched.
+    //
+    // `candidate` is the predecessor's request with only the selection fields
+    // overwritten, so its `start_seconds` is the *original* start — committing
+    // that would restart the film for a viewer forty minutes in. That much was
+    // always true. What this previously did instead was
+    // `media_origin_ms + fetched_through_ms`, and that is the other error:
+    // the fetched frontier is a high-water mark, not a presentation time. It
+    // reaches the end of a segment as soon as the client requests that segment,
+    // it survives prefetch and retry, and after a backward seek it stays where
+    // the client had already reached. Resuming there hands the viewer a
+    // successor that starts past film they have never been shown — the very
+    // discontinuity a prepared handoff exists to avoid. `OwnerLossResume`
+    // documents the same hazard and pulls its frontier back by a whole segment
+    // precisely because that path has no envelope to ask; this one does.
+    //
+    // `accepted_film_time_ms` is already absolute source-timeline film time, so
+    // `media_origin_ms` must **not** be added back: the predecessor's origin is
+    // baked into the position the client reported against it, and adding it
+    // again would push a viewer thirty seconds into a film that started at
+    // 00:01:30 out to 00:02:30.
+    let resume_ms = accepted_film_time_ms;
     let staged_request = crate::transcode::SessionRequest {
         request_id: Some(staged_incarnation_id.clone()),
         start_seconds: resume_ms as f64 / 1_000.0,
@@ -14583,6 +14647,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
 
@@ -14634,6 +14699,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let staged = fixture
@@ -14849,6 +14915,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let mut request = control_request(route.incarnation_id.clone());
@@ -14938,6 +15005,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
 
@@ -15066,6 +15134,7 @@ mod tests {
                     dual_player_preparation: true,
                 }),
                 platform: crate::playback_control::ClientPlatform::Apple,
+                accepted_film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
             },
         )
         .await;
@@ -15300,6 +15369,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let first = fixture
@@ -15318,6 +15388,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         assert_eq!(
@@ -15349,6 +15420,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         assert!(
@@ -15377,6 +15449,7 @@ mod tests {
             &staged_predecessor_recipe(route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15556,6 +15629,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15640,6 +15714,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15766,6 +15841,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15849,6 +15925,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let staged = fixture
@@ -15934,6 +16011,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         assert!(
@@ -15985,6 +16063,7 @@ mod tests {
                     &staged_predecessor_recipe(&route),
                     &staged_candidate_request(),
                     Some(&staged_source_file()),
+                    STAGED_ACCEPTED_FILM_TIME_MS,
                 )
                 .await;
                 let mut request = control_request(route.incarnation_id.clone());
@@ -16108,6 +16187,7 @@ mod tests {
                 &staged_predecessor_recipe(&route),
                 &staged_candidate_request(),
                 Some(&staged_source_file()),
+                STAGED_ACCEPTED_FILM_TIME_MS,
             )
             .await;
             let staged = fixture
@@ -16239,6 +16319,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &candidate,
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let staged = fixture
@@ -16388,6 +16469,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let staged = fixture
@@ -16526,6 +16608,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let first_staged = fixture
@@ -16639,6 +16722,7 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            STAGED_ACCEPTED_FILM_TIME_MS,
         )
         .await;
         let replacement = fixture
@@ -16651,17 +16735,86 @@ mod tests {
         assert_ne!(replacement.staged_incarnation_id, first_staged);
     }
 
-    /// The successor resumes where the viewer is, not where the predecessor
-    /// started. `candidate_request` clones the predecessor's request and
-    /// overwrites only the selection, so its `start_seconds` is the *original*
-    /// start — committing that restarts the film for a viewer forty minutes
-    /// in.
+    /// The one arrangement that tells the three candidate resume points apart.
+    ///
+    /// A session whose film begins at 00:01:30, a viewer 30 seconds into it,
+    /// and a client that has fetched 150 seconds of it:
+    ///
+    /// | quantity | route-relative | absolute film time |
+    /// |---|---|---|
+    /// | session origin | — | 90 000 |
+    /// | accepted playhead | 30 000 | **120 000** |
+    /// | fetch frontier | 150 000 | 240 000 |
+    ///
+    /// Each wrong answer lands on its own number, so no assertion here can
+    /// pass for the wrong reason: the fetch frontier gives 240 000, adding the
+    /// origin back to an already-absolute playhead gives 210 000, and the
+    /// predecessor's untouched `start_seconds` gives 0.
+    const RESUME_ORIGIN_MS: i64 = 90_000;
+    const RESUME_FETCHED_THROUGH_MS: i64 = 150_000;
+    const RESUME_ACCEPTED_PLAYHEAD_MS: i64 = 120_000;
+    const RESUME_FETCH_FRONTIER_MS: i64 = RESUME_ORIGIN_MS + RESUME_FETCHED_THROUGH_MS;
+    const RESUME_DOUBLE_COUNTED_ORIGIN_MS: i64 = RESUME_ORIGIN_MS + RESUME_ACCEPTED_PLAYHEAD_MS;
+
+    /// Every place a staged successor's resume is written, in absolute film
+    /// time: the route's `media_origin_ms`, the recipe's `start_seconds`, and
+    /// the bootstrap response's `start_seconds`.
+    ///
+    /// All three are returned because `stage_prepared_successor` writes them
+    /// from `resume_ms` in three separate statements, and a partial correction
+    /// would leave a successor whose row, whose recipe and whose bootstrap
+    /// disagree about where the film starts. The response's `start_seconds` in
+    /// particular is what the client is told when it reads the staged route,
+    /// and it had no assertion anywhere in the suite before this. Staging is
+    /// what establishes them; a commit needs a separately accepted client
+    /// acknowledgement these tests deliberately do not supply.
+    async fn staged_resume_ms(
+        fixture: &HlsDeliveryFixture,
+        route: &MediaSessionRoute,
+    ) -> (i64, f64, f64) {
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        let successor = fixture
+            .state
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("staged route")
+            .expect("successor");
+        let recipe =
+            serde_json::from_str::<RemoteStartRequest>(&successor.recipe_json).expect("recipe");
+        let bootstrap = serde_json::from_str::<StartResponse>(&successor.response_json)
+            .expect("the staged response parses as a StartResponse");
+        (
+            successor.media_origin_ms,
+            recipe.request.start_seconds,
+            bootstrap.start_seconds,
+        )
+    }
+
+    /// P1-6. The successor resumes **where the viewer is**, not at the
+    /// predecessor's original start and not at its fetch frontier.
+    ///
+    /// The original start was always excluded — `candidate_request` clones the
+    /// predecessor's request and overwrites only the selection, so committing
+    /// its `start_seconds` restarts the film for a viewer forty minutes in.
+    /// The frontier is what this test now also excludes: `fetched_through_ms`
+    /// reaches the *end* of a segment the moment the client asks for it and
+    /// survives prefetch, retry and backward seeks, so a successor staged
+    /// there begins past film the viewer has never been shown. That is the
+    /// forward jump a prepared handoff exists to prevent, which is why the
+    /// frontier assertion this replaces was pinning the defect in place.
     #[tokio::test]
-    async fn a_staged_successor_resumes_at_the_frontier_not_the_original_start() {
+    async fn a_staged_successor_resumes_at_the_accepted_playhead_not_the_fetch_frontier() {
         let dir = crate::test_tempdir().expect("state dir");
         let (fixture, session_id, mut route) = staging_fixture(dir.path()).await;
-        route.media_origin_ms = 90_000;
-        route.fetched_through_ms = 2_400_000;
+        route.media_origin_ms = RESUME_ORIGIN_MS;
+        route.fetched_through_ms = RESUME_FETCHED_THROUGH_MS;
 
         stage_prepared_successor(
             &fixture.state,
@@ -16670,36 +16823,277 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            RESUME_ACCEPTED_PLAYHEAD_MS,
         )
         .await;
-        let staged = fixture
-            .state
-            .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
-            .await
-            .expect("ledger read")
-            .expect("a successor is staged");
-        // Frontier selection is established by staging. A commit requires a
-        // separately accepted client acknowledgement, which this test does
-        // not supply; inspecting the staged route proves the actual contract.
-        let successor = fixture
-            .state
-            .store
-            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
-            .await
-            .expect("staged route")
-            .expect("successor");
-        assert_eq!(
-            successor.media_origin_ms, 2_490_000,
-            "origin is the predecessor's origin plus what the client fetched"
+
+        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+            staged_resume_ms(&fixture, &route).await;
+        assert_ne!(
+            origin_ms, RESUME_FETCH_FRONTIER_MS,
+            "the fetch frontier is a high-water mark, never a presentation time"
         );
-        let recipe =
-            serde_json::from_str::<RemoteStartRequest>(&successor.recipe_json).expect("recipe");
+        assert_ne!(
+            origin_ms, RESUME_DOUBLE_COUNTED_ORIGIN_MS,
+            "the accepted playhead is already absolute — the origin is in it once"
+        );
+        assert_eq!(
+            origin_ms, RESUME_ACCEPTED_PLAYHEAD_MS,
+            "the successor begins at the film time the viewer is actually at"
+        );
         assert!(
-            (recipe.request.start_seconds - 2_490.0).abs() < 0.001,
-            "the successor starts at the frontier, not at {}",
+            (start_seconds - RESUME_ACCEPTED_PLAYHEAD_MS as f64 / 1_000.0).abs() < 0.001,
+            "the recipe must agree with the row, not restart at {}",
             staged_candidate_request().start_seconds,
         );
+        assert!(
+            (bootstrap_start_seconds - RESUME_ACCEPTED_PLAYHEAD_MS as f64 / 1_000.0).abs() < 0.001,
+            "the bootstrap the client reads must agree with the row too"
+        );
+    }
+
+    /// The same proof at the **production control-to-staging boundary**.
+    ///
+    /// The helper test above would still pass if the exchange handed it the
+    /// wrong number, because nothing in it exercises the capture. This drives
+    /// two real `control_local_inner` exchanges — the first establishing a
+    /// preparation-capable client and a delivered selection, the second asking
+    /// for a height that crosses both resolution and delivery method — and
+    /// lets the detached candidate run exactly as production spawns it.
+    #[tokio::test]
+    async fn the_control_seam_stages_from_the_accepted_playhead_not_the_route_frontier() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, mut route) = staging_fixture(dir.path()).await;
+        route.media_origin_ms = RESUME_ORIGIN_MS;
+        route.fetched_through_ms = RESUME_FETCHED_THROUGH_MS;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut request = preparing_control_request(&route);
+        // A viewer 30 seconds into this session whose client has already
+        // fetched 150 seconds of it: the two numbers the resume must tell
+        // apart, carried on the envelope the exchange accepts.
+        request.position_ms = RESUME_ACCEPTED_PLAYHEAD_MS;
+        request.buffered_through_ms = RESUME_FETCH_FRONTIER_MS;
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        await_preparation_candidate(&route).await;
+
+        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+            staged_resume_ms(&fixture, &route).await;
+        assert_eq!(
+            origin_ms, RESUME_ACCEPTED_PLAYHEAD_MS,
+            "the exchange's own accepted position is what reaches the ledger"
+        );
+        let expected_seconds = RESUME_ACCEPTED_PLAYHEAD_MS as f64 / 1_000.0;
+        assert!((start_seconds - expected_seconds).abs() < 0.001);
+        assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
+    }
+
+    /// A backward seek is the case the fetch frontier cannot survive: the
+    /// client has already fetched far past where the viewer just asked to go,
+    /// so the frontier stays high while the intended position drops. Resuming
+    /// at the frontier would drop the viewer back at the point they seeked
+    /// *away from*.
+    ///
+    /// `seek_target_ms` wins over `position_ms` here for the reason
+    /// `ControlRequestV1::validate` anchors the buffer on it: mid-seek the
+    /// reported position is still the old one.
+    #[tokio::test]
+    async fn a_backward_seek_stages_from_the_seek_target_at_the_control_seam() {
+        const SEEK_TARGET_MS: i64 = 105_000;
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, mut route) = staging_fixture(dir.path()).await;
+        route.media_origin_ms = RESUME_ORIGIN_MS;
+        route.fetched_through_ms = RESUME_FETCHED_THROUGH_MS;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut request = preparing_control_request(&route);
+        request.position_ms = 200_000;
+        request.buffered_through_ms = RESUME_FETCH_FRONTIER_MS;
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        // Still reporting the old position, as a seeking client does.
+        request.render_state = crate::playback_control::RenderState::Seeking;
+        request.seek_target_ms = Some(SEEK_TARGET_MS);
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        await_preparation_candidate(&route).await;
+
+        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+            staged_resume_ms(&fixture, &route).await;
+        assert_eq!(
+            origin_ms, SEEK_TARGET_MS,
+            "a backward seek resumes where the viewer is going, not where they left"
+        );
+        let expected_seconds = SEEK_TARGET_MS as f64 / 1_000.0;
+        assert!((start_seconds - expected_seconds).abs() < 0.001);
+        assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
+    }
+
+    /// A resume is bounded by the film, not by what `validate` will accept.
+    ///
+    /// `validate` deliberately allows one target duration of slack past the
+    /// end so a client reporting the final segment's *end* is not refused, and
+    /// this value is client-reported rather than derived from what the server
+    /// observed itself delivering. Staging past the end would hold this
+    /// playback's one preparation slot, a durable row and an admission slot
+    /// for a full `PREPARATION_DEADLINE_MS` on a resume nobody can reach.
+    ///
+    /// 2 000 ms of slack is the smallest the clamp in `validate` can be, so
+    /// this position is accepted whatever the fixture's target duration.
+    #[tokio::test]
+    async fn a_resume_past_the_end_of_the_film_is_bounded_by_the_film() {
+        const FIXTURE_DURATION_MS: i64 = 6_000_000;
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, route) = staging_fixture(dir.path()).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut request = preparing_control_request(&route);
+        request.position_ms = FIXTURE_DURATION_MS + 2_000;
+        request.buffered_through_ms = FIXTURE_DURATION_MS + 2_000;
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the envelope itself is valid — the bound under test is the resume, not the exchange"
+        );
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        await_preparation_candidate(&route).await;
+
+        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+            staged_resume_ms(&fixture, &route).await;
+        assert_eq!(
+            origin_ms, FIXTURE_DURATION_MS,
+            "a successor may begin at the end of the film, never past it"
+        );
+        let expected_seconds = FIXTURE_DURATION_MS as f64 / 1_000.0;
+        assert!((start_seconds - expected_seconds).abs() < 0.001);
+        assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
+    }
+
+    /// A control envelope that will be admitted for preparation: a client that
+    /// can hold two pipelines, on a link with headroom, naming the action.
+    fn preparing_control_request(
+        route: &MediaSessionRoute,
+    ) -> crate::playback_control::ControlRequestV1 {
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        request.observed_download_bps = Some(100_000_000);
+        request.capabilities = Some(crate::playback_control::DynamicCapabilities {
+            platform: crate::playback_control::ClientPlatform::Apple,
+            max_height: 2160,
+            codecs: vec![crate::playback_control::CodecPolicy::H264],
+            dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+            dual_player_preparation: true,
+        });
+        request
+    }
+
+    /// Sleep past the per-session control budget.
+    ///
+    /// A second exchange inside `playback_control::MIN_CONTROL_INTERVAL` is
+    /// answered 429 and never reaches the selection engine, so a preparation
+    /// test that skipped this would assert an empty ledger against a request
+    /// the server declined to consider — and would read as "staging is broken".
+    ///
+    /// 260 ms rather than the constant itself, because that constant is
+    /// private and the fifteen exchange-floor sleeps already in this module
+    /// all spell it this way. Widening a production constant's visibility for
+    /// one test helper, while leaving fifteen literals beside it, would buy a
+    /// second idiom rather than remove one. Migrating all sixteen is worth
+    /// doing — in a change that is not also correcting a resume.
+    async fn pace_control_exchanges() {
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+    }
+
+    /// Wait for the detached candidate keyed to this exact predecessor.
+    ///
+    /// Keyed rather than counted: the process-global in-flight count may still
+    /// be zero before the spawned future receives its first poll, so polling it
+    /// would let an assertion run against a ledger nothing had written yet.
+    async fn await_preparation_candidate(route: &MediaSessionRoute) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if take_preparation_candidate_completion(&route.incarnation_id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached preparation candidate completed");
     }
 
     /// A VOD session — which is what every public create actually is — has a
@@ -16734,6 +17128,14 @@ mod tests {
             "the VOD engine serves every public session and must answer here"
         );
     }
+
+    /// A plausible accepted playhead for the staging tests that are not about
+    /// *where* the successor resumes.
+    ///
+    /// Deliberately nonzero: the fixture route starts at `media_origin_ms` 0
+    /// with nothing fetched, so a zero here would let a resume computed from
+    /// entirely the wrong quantity agree with the right one by accident.
+    const STAGED_ACCEPTED_FILM_TIME_MS: i64 = 30_000;
 
     /// The fixture's own source row. The seam reads it, and staging refuses
     /// without a snapshot — `0/0` is the sentinel that would refuse the
