@@ -264,6 +264,14 @@ review as a cluster authority-boundary change. **No patch was applied.** Obtain
 explicit user approval before implementing it; a general “keep going” is not
 that approval. Other tasks can continue.
 
+**Approved and implemented, 2026-09-05.** The user was shown the change and the
+five constraints below verbatim, asked whether to build it, and answered yes.
+That is the explicit approval this section requires — recorded here rather than
+only in a commit message, because the next reader of this paragraph needs to
+know the boundary was cleared by a person and not reasoned around. The
+constraints were implemented as written; the paragraph below stands unchanged
+as the specification they were held to.
+
 The reviewed proposal retains an already-eligible quorum proof only until its
 **original** expiry when a newer watermark is not locally applied. Never extend,
 restamp or renew the old proof because local apply caught up. Prefer a new
