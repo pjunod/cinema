@@ -376,6 +376,14 @@ must not change bounded-replica-read semantics. The previous release's
 1,500 ms election floor remains a mixed-version constraint; the current
 2,400 ms floor is not by itself permission to lengthen the lease.
 
+**Authorization status:** the independent adversarial design review accepted
+the bounded eligible-proof approach, but automated safety review refused the
+source edit because it changes quorum-serving authority. The isolated
+`codex/serving-proof-continuity` worktree remains unchanged at `56e4f6eb`.
+Implementation requires explicit approval; no alternate write path, lease
+change, production setting, or deployment was attempted. Unaffected client
+and media-production tasks continue.
+
 **Required correction:** separate inability to refresh an observation from a
 confirmed term/quorum change. Refuse new mutations and publications when
 authority is uncertain, but allow already-admitted immutable bytes to drain.
@@ -896,14 +904,58 @@ enqueue and retry. This is a source-identified interleaving risk; a
 deterministic split-capture regression is still required before calling it a
 reproduced incident.
 
+### Apple initial-decision ownership — desired input precedes metadata
+
+The next Apple slice retains one initial decision request before the first
+network await: explicit audio, subtitle Default/Off/track, quality Auto/Original/
+height, and the exact non-menu height when supplied. A cold recipe command
+replaces that request; its own generation rejects old success and error even
+when the viewer chooses A → B → A on the same title. Defaults from a delayed
+decision cannot overwrite the newer request. Seek and Pause remain independent
+of decision ownership: neither forces a repeated decision nor grants an old
+operation permission to resume playback.
+
+An absolute 20-second initial-decision deadline exposes the existing Try Again
+surface without discarding the recipe, destination, or Pause. This is a bound on
+the decision request, **not** a claim that the entire create/attach/preparation
+pipeline has one deadline. That broader owner and make-before-break transaction
+remain required.
+
+The independent adversary found three additional boundaries in this slice:
+
+- a successful decision followed by a failed first create crossed into the
+  warm Retry arm and implicitly requested Play; Retry now authorizes another
+  preparation without changing transport, and repeated no-item failures retain
+  the resume destination;
+- a control-sequence await could resume after a new title started and submit
+  an old body using the new mutable file ID; creates capture file/lifecycle and
+  revalidate after the await, including before the bounded 400 fallback;
+- a queued periodic observer, or one firing with no attached item, could replace
+  a 40-second resume position with zero; the actual callback now requires its
+  current title, an attached item, and no active preparation. Delayed black-frame
+  recovery also retains item/action ownership.
+
+Commit `3155bfe9` retains these corrections. The 19 focused
+`PlayerOperationOwnershipTests` exercise actual controller
+commands, captured decision requests, produced session bodies, repeated create
+failures, cancellation-ignoring decisions, injected deadline/read boundaries,
+and the actual periodic callback. The expanded 50-test control/presentation
+regression run and iOS/tvOS compilation pass on the same reviewed source.
+The session-body fixtures deliberately stop before network attachment; they do
+not establish physical decoder, audio, or display continuity. Existing offline
+and native-selection ownership tests remain in the focused run.
+
 ### Executable handoff audit — durable settlement is not a running successor
 
-The fresh audit uses Forgejo main `4ce33f95` and concurrent
-[PR #5](http://192.168.4.7:3000/noirr/plurx/pulls/5) at `20951a9`. PR #5 owns
-durable, cancellation-independent acknowledgement settlement and exact
-predecessor compare-and-swap. This effort will extend that implementation
-after integration, not create a second ledger. The anchors below identify
-functions rather than line numbers that move as the branches merge.
+The initial audit used Forgejo main `4ce33f95` and concurrent
+[PR #5](http://192.168.4.7:3000/noirr/plurx/pulls/5) at `20951a9`. It was
+rechecked after that PR merged into main `15f88e53`: durable,
+cancellation-independent acknowledgement settlement and exact predecessor
+compare-and-swap are implemented, but `stage_prepared_successor` still writes
+`encoder: staged` without starting a worker. The effort's local integration
+preserves this ledger and its own accepted-demand publication; it does not
+create a second transaction. The anchors below identify functions rather than
+line numbers that move as the branches merge.
 
 | Boundary | Observed implementation | Required completion |
 |---|---|---|
@@ -951,12 +1003,15 @@ documentation debt:
    grade, and burn settings belong in rendition identity. Real FFmpeg tests
    must generate and decode transcode/burn output across 0→90→3 seeks and
    producer restarts.
-4. **Original is not source-height Manual.** `QualitySelection` currently
-   has Auto and Manual only, and `candidate_request` keeps an existing
-   transcode in transcode mode. Add explicit Original semantics to the
-   authoritative resolver. Audio conversion need not re-encode video; burn
-   and incompatible HDR requirements must be reported honestly. Test
-   Original→720p→Original, including source-height Manual as a distinct case.
+4. **Original is not source-height Manual.** The effort already added an
+   explicit `QualitySelection::Original` wire value before `ad79ae81`;
+   the earlier statement that this enum was absent is superseded. The
+   remaining defect is in the producer resolver: `candidate_request` still
+   keeps an existing transcode in transcode mode for every quality value.
+   Finish Original semantics there rather than add another wire enum. Audio
+   conversion need not re-encode video; burn and incompatible HDR requirements
+   must be reported honestly. Test Original→720p→Original, including
+   source-height Manual as a distinct case.
 5. **Truthful capacity and delivery.** `DeliveryView::from_status` drops VOD
    producer decisions and delivered throughput, while
    `PreparationConditions::headroom_refusal` requires measured headroom.

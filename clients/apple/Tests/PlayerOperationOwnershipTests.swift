@@ -198,7 +198,7 @@ final class PlayerOperationOwnershipTests: XCTestCase {
 
     func testPreferredAudioPreparationCannotOverwriteANewerExplicitChoice() async throws {
         let decisionEntered = expectation(description: "decision suspended")
-        var decision: CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>?
+        var decisions: [CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>] = []
         let preparedAudio = expectation(description: "preferred audio suspended")
         var releaseAudio: CheckedContinuation<Void, Never>?
         var audioCommits = 0
@@ -213,8 +213,8 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         preparation.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
         let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in
             try await withCheckedThrowingContinuation {
-                decision = $0
-                decisionEntered.fulfill()
+                decisions.append($0)
+                if decisions.count == 1 { decisionEntered.fulfill() }
             }
         }, mediaSelectionPreparation: preparation)
         let model = AppModel()
@@ -231,8 +231,335 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertEqual(audioCommits, 0)
         XCTAssertEqual(controller.selectedAudio, 7)
         controller.stop()
-        try XCTUnwrap(decision).resume(throwing: CancellationError())
+        for decision in decisions { decision.resume(throwing: CancellationError()) }
         await load.value
+    }
+
+    private final class Decisions {
+        struct Request {
+            let file: Int
+            let selection: PrePlaySelection
+            let quality: PlaybackQuality
+            var continuation: CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>?
+        }
+        var requests: [Request] = []
+
+        func request(file: Int, selection: PrePlaySelection, quality: PlaybackQuality) async throws
+            -> (decision: Decision, caps: DeviceCaps) {
+            try await withCheckedThrowingContinuation {
+                requests.append(Request(file: file, selection: selection, quality: quality, continuation: $0))
+            }
+        }
+
+        func resolve(_ index: Int, with result: Result<(decision: Decision, caps: DeviceCaps), Error>) {
+            let continuation = requests[index].continuation
+            requests[index].continuation = nil
+            continuation?.resume(with: result)
+        }
+
+        func cancelAll() {
+            for index in requests.indices { resolve(index, with: .failure(CancellationError())) }
+        }
+    }
+
+    private final class DecisionDeadlines {
+        var waits: [CheckedContinuation<Void, Error>?] = []
+        func wait() async throws {
+            try await withCheckedThrowingContinuation { waits.append($0) }
+        }
+        func fire(_ index: Int) {
+            let continuation = waits[index]
+            waits[index] = nil
+            continuation?.resume()
+        }
+        func cancelAll() {
+            for index in waits.indices {
+                let continuation = waits[index]
+                waits[index] = nil
+                continuation?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private func waitUntil(
+        _ message: String, file: StaticString = #filePath, line: UInt = #line,
+        _ condition: @MainActor () -> Bool
+    ) async throws {
+        for _ in 0..<300 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail(message, file: file, line: line)
+        throw APIError.transport(message)
+    }
+
+    private func coldDecision(file: Int = 1, mode: String = "transcode") throws -> Decision {
+        try JSONDecoder().decode(Decision.self, from: Data("""
+        {"fileId":\(file),"method":"\(mode)","playUrl":"/not-fetched",
+         "source":{"height":1080,"durationMs":600000},
+         "audio":[{"index":0,"codec":"aac","default":true},
+                  {"index":7,"codec":"aac","default":false}],
+         "subtitles":[],"ladder":[]}
+        """.utf8))
+    }
+
+    func testColdCommandsComposeIntoTheActualSessionRequestAndRejectStaleDefaults() async throws {
+        let decisions = Decisions()
+        var creates: [(Int, CreateSessionRequest)] = []
+        let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+            try await decisions.request(file: file, selection: selection, quality: quality)
+        }, requestHlsSession: { _, file, body in
+            creates.append((file, body))
+            throw APIError.transport("fixture stops before network attachment")
+        })
+        let model = AppModel()
+        let previousQuality = model.playbackQuality
+        model.playbackQuality = .auto
+        defer { controller.stop(); decisions.cancelAll(); model.playbackQuality = previousQuality }
+        controller.start(model: model, itemId: 1, fileId: 1, startMs: 40_000,
+                         durationMs: 600_000, title: "Cold commands")
+        let originalLoad = try XCTUnwrap(controller.loadingTask)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        controller.selectAudio(7)
+        try await waitUntil("audio decision") { decisions.requests.count == 2 }
+        controller.selectQuality(720)
+        try await waitUntil("quality decision") { decisions.requests.count == 3 }
+        controller.selectSubtitle(nil)
+        try await waitUntil("explicit Off decision") { decisions.requests.count == 4 }
+        controller.seek(toMs: 90_000)
+        controller.togglePlayPause()
+        let finalLoad = try XCTUnwrap(controller.loadingTask)
+        let requested = decisions.requests[3]
+        XCTAssertEqual(requested.selection, PrePlaySelection(audioIndex: 7, subtitleIndex: -1))
+        XCTAssertEqual(requested.quality, .p720)
+        XCTAssertEqual(controller.currentMs, 90_000)
+        // Complete superseded requests in a different order, including a
+        // cancellation-ignoring successful response with old default tracks.
+        decisions.resolve(2, with: .failure(APIError.transport("stale quality error")))
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        decisions.resolve(1, with: .success((try coldDecision(), caps)))
+        await originalLoad.value
+        XCTAssertNil(controller.decision)
+        XCTAssertFalse(controller.failed)
+        XCTAssertTrue(creates.isEmpty)
+        decisions.resolve(3, with: .success((try coldDecision(), caps)))
+        await finalLoad.value
+        XCTAssertEqual(creates.count, 1)
+        let (file, body) = try XCTUnwrap(creates.first)
+        XCTAssertEqual(file, 1)
+        XCTAssertEqual(body.height, 720)
+        XCTAssertEqual(body.audio, 7)
+        XCTAssertEqual(body.start, 90)
+        XCTAssertNil(body.subtitle)
+        XCTAssertNil(body.subtitleBurn)
+        XCTAssertEqual(controller.selectedAudio, 7)
+        XCTAssertEqual(controller.selectedHeight, 720)
+        XCTAssertNil(controller.selectedSubtitle)
+        XCTAssertFalse(controller.wantsPlayback)
+        XCTAssertEqual(controller.pendingPlaybackIntentForTesting.targetMs, 90_000)
+    }
+
+    func testColdOriginalAndAutoABARejectTheFirstIdenticalQualityResponse() async throws {
+        for desired in [PlaybackQuality.original, .auto] {
+            let decisions = Decisions()
+            var creates: [CreateSessionRequest] = []
+            let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            }, requestHlsSession: { _, _, body in
+                creates.append(body)
+                throw APIError.transport("fixture stops before network attachment")
+            })
+            let model = AppModel()
+            let previousQuality = model.playbackQuality
+            model.playbackQuality = desired
+            defer { controller.stop(); decisions.cancelAll(); model.playbackQuality = previousQuality }
+            start(controller, model: model)
+            let first = try XCTUnwrap(controller.loadingTask)
+            try await waitUntil("initial ABA decision") { decisions.requests.count == 1 }
+            controller.selectQuality(720)
+            try await waitUntil("middle ABA decision") { decisions.requests.count == 2 }
+            if desired == .original { controller.selectOriginalQuality() }
+            else { controller.selectQuality(nil) }
+            try await waitUntil("latest ABA decision") { decisions.requests.count == 3 }
+            let latest = try XCTUnwrap(controller.loadingTask)
+            XCTAssertEqual(decisions.requests[0].quality, desired)
+            XCTAssertEqual(decisions.requests[2].quality, desired)
+            decisions.resolve(0, with: .success((try coldDecision(mode: "remux"), caps)))
+            await first.value
+            XCTAssertNil(controller.decision)
+            XCTAssertTrue(creates.isEmpty)
+            decisions.resolve(2, with: .success((try coldDecision(mode: "remux"), caps)))
+            await latest.value
+            let body = try XCTUnwrap(creates.first)
+            XCTAssertEqual(creates.count, 1)
+            XCTAssertNil(body.height)
+            XCTAssertEqual(body.copy, true)
+            XCTAssertEqual(body.qualityAuto, desired == .auto)
+            XCTAssertEqual(controller.selectedQualityIsOriginal, desired == .original)
+        }
+    }
+
+    func testColdDecisionDeadlineAllowsRetryWithoutLosingSeekPauseOrRecipe() async throws {
+        let decisions = Decisions()
+        let deadlines = DecisionDeadlines()
+        var creates: [CreateSessionRequest] = []
+        let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+            try await decisions.request(file: file, selection: selection, quality: quality)
+        }, waitInitialDecisionDeadline: { try await deadlines.wait() }, requestHlsSession: { _, _, body in
+            creates.append(body)
+            throw APIError.transport("fixture stops before network attachment")
+        })
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); deadlines.cancelAll() }
+        controller.start(model: model, itemId: 1, fileId: 1, startMs: 40_000,
+                         durationMs: 600_000, title: "Retry", initialHeight: 720)
+        let timedOut = try XCTUnwrap(controller.loadingTask)
+        try await waitUntil("decision and deadline") { decisions.requests.count == 1 && deadlines.waits.count == 1 }
+        controller.seek(toMs: 90_000)
+        controller.togglePlayPause()
+        deadlines.fire(0)
+        try await waitUntil("decision times out") { controller.failed }
+        XCTAssertTrue(controller.canRetryPlaybackFailure)
+        XCTAssertNil(controller.decision)
+        XCTAssertEqual(controller.currentMs, 90_000)
+        XCTAssertFalse(controller.wantsPlayback)
+        controller.retryAfterPlaybackFailure()
+        let retry = try XCTUnwrap(controller.loadingTask)
+        try await waitUntil("retry request and deadline") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
+        XCTAssertFalse(controller.failed)
+        XCTAssertEqual(decisions.requests[1].quality, .p720)
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        await timedOut.value
+        XCTAssertNil(controller.decision, "an expired owner cannot return after Retry")
+        XCTAssertTrue(creates.isEmpty)
+        decisions.resolve(1, with: .success((try coldDecision(), caps)))
+        await retry.value
+        let body = try XCTUnwrap(creates.first)
+        XCTAssertEqual(creates.count, 1)
+        XCTAssertEqual(body.height, 720)
+        XCTAssertEqual(body.start, 90)
+        XCTAssertFalse(controller.wantsPlayback)
+        XCTAssertEqual(controller.pendingPlaybackIntentForTesting.targetMs, 90_000)
+    }
+
+    func testSupersededDecisionDeadlineCannotFailTheNewRecipe() async throws {
+        let decisions = Decisions()
+        let deadlines = DecisionDeadlines()
+        let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+            try await decisions.request(file: file, selection: selection, quality: quality)
+        }, waitInitialDecisionDeadline: { try await deadlines.wait() })
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); deadlines.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("first deadline") { decisions.requests.count == 1 && deadlines.waits.count == 1 }
+        controller.selectAudio(7)
+        try await waitUntil("replacement deadline") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
+        deadlines.fire(0)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertFalse(controller.failed)
+        XCTAssertEqual(controller.selectedAudio, 7)
+        deadlines.fire(1)
+        try await waitUntil("current deadline fails") { controller.failed }
+        controller.stop()
+        XCTAssertFalse(controller.canRetryPlaybackFailure)
+    }
+
+    func testRetryAfterFirstCreateFailurePreservesPauseAndResumeAcrossRepeatedFailures() async throws {
+        var creates: [CreateSessionRequest] = []
+        let answer = try coldDecision()
+        let controller = PlayerController(requestPlaybackDecision: { [caps] _, _, _, _ in (answer, caps) },
+            requestHlsSession: { _, _, body in
+                creates.append(body)
+                throw APIError.transport("first session unavailable")
+            })
+        let model = AppModel()
+        defer { controller.stop() }
+        controller.start(model: model, itemId: 1, fileId: 1, startMs: 40_000,
+                         durationMs: 600_000, title: "Cold create retry", initialHeight: 720)
+        controller.togglePlayPause()
+        await controller.loadingTask?.value
+        XCTAssertTrue(controller.failed)
+        XCTAssertNotNil(controller.decision)
+        XCTAssertNil(controller.player.currentItem)
+        XCTAssertEqual(controller.currentMs, 40_000)
+        for count in 2...3 {
+            controller.retryAfterPlaybackFailure()
+            try await waitUntil("retry create completes") { creates.count == count && controller.failed }
+            XCTAssertFalse(controller.wantsPlayback)
+            XCTAssertEqual(controller.currentMs, 40_000)
+            XCTAssertEqual(creates.last?.start, 40)
+            XCTAssertEqual(creates.last?.height, 720)
+        }
+    }
+
+    func testStopStartWhileReadingControlSequenceCannotCreateOldRecipeForNewFile() async throws {
+        let decisions = Decisions()
+        let controlReads = DecisionDeadlines()
+        var reads = 0
+        var files: [Int] = []
+        let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+            try await decisions.request(file: file, selection: selection, quality: quality)
+        }, requestHlsSession: { _, file, _ in
+            files.append(file)
+            throw APIError.transport("fixture stops before network attachment")
+        }, readControlSequence: { _ in
+            reads += 1
+            if reads == 1 { try? await controlReads.wait() }
+            return nil
+        })
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); controlReads.cancelAll() }
+        start(controller, model: model)
+        let old = try XCTUnwrap(controller.loadingTask)
+        try await waitUntil("old decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("old control read") { controlReads.waits.count == 1 }
+        controller.stop()
+        start(controller, model: model, file: 2)
+        let latest = try XCTUnwrap(controller.loadingTask)
+        try await waitUntil("new decision") { decisions.requests.count == 2 }
+        controlReads.fire(0)
+        await old.value
+        XCTAssertTrue(files.isEmpty, "revoked recipe cannot issue a create, even against its original file")
+        XCTAssertNil(controller.decision)
+        XCTAssertFalse(controller.failed)
+        decisions.resolve(1, with: .success((try coldDecision(file: 2), caps)))
+        await latest.value
+        XCTAssertEqual(files, [2])
+    }
+
+    func testNoItemAndOldTitleTimerCallbacksCannotOverwriteColdResumeOrRetry() async throws {
+        let decisions = Decisions()
+        let deadlines = DecisionDeadlines()
+        let controller = PlayerController(requestPlaybackDecision: { _, file, selection, quality in
+            try await decisions.request(file: file, selection: selection, quality: quality)
+        }, waitInitialDecisionDeadline: { try await deadlines.wait() })
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); deadlines.cancelAll() }
+        start(controller, model: model)
+        let oldTimer = controller.makePeriodicPlaybackObservation()
+        controller.stop()
+        controller.start(model: model, itemId: 2, fileId: 2, startMs: 40_000,
+                         durationMs: 600_000, title: "Retained resume")
+        let timer = controller.makePeriodicPlaybackObservation()
+        try await waitUntil("held resume decision") { decisions.requests.count == 1 && deadlines.waits.count == 1 }
+        oldTimer()
+        timer()
+        XCTAssertEqual(controller.currentMs, 40_000)
+        controller.selectQuality(720)
+        try await waitUntil("held quality decision") { decisions.requests.count == 2 && deadlines.waits.count == 2 }
+        timer()
+        deadlines.fire(1)
+        try await waitUntil("resume decision timeout") { controller.failed }
+        XCTAssertEqual(controller.currentMs, 40_000)
+        controller.retryAfterPlaybackFailure()
+        try await waitUntil("resume Retry decision") { decisions.requests.count == 3 }
+        XCTAssertEqual(controller.currentMs, 40_000)
+        // The predecessor callback must also be rejected once the new title
+        // has an item; a no-item guard alone does not cover that lifecycle.
+        controller.player.replaceCurrentItem(with: AVPlayerItem(url: URL(fileURLWithPath: "/not-loaded")))
+        oldTimer()
+        XCTAssertEqual(controller.currentMs, 40_000)
     }
 
     #if os(iOS)
