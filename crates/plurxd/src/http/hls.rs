@@ -13868,6 +13868,109 @@ mod tests {
             crate::subtitles::release_session_window(session_id).await;
         }
 
+        /// Abandoning a window stops the flight and leaves the session able to
+        /// start the next one; releasing stops it and fences the id.
+        ///
+        /// That difference is the whole reason the second operation exists.
+        /// Reattachment moves a viewer to a different rendition under the same
+        /// session id, so the flight they left is extracting a span for the
+        /// recipe they moved off and is worth stopping — but the id belongs to
+        /// somebody still watching. Releasing it fences that id for
+        /// `WINDOW_RELEASE_FENCE`, which would refuse the first window of the
+        /// attachment that just replaced it: a recipe change costing half a
+        /// minute of subtitles. Reaching for `release_session_window` there
+        /// looks like the tidy fix and is a regression.
+        ///
+        /// The named flight matters too. A successor claiming the session
+        /// between the read and the stop carries a different id and must
+        /// survive, or a viewer who reattaches twice quickly loses the second
+        /// attachment's work to the first one's cleanup.
+        #[tokio::test]
+        async fn abandoning_a_window_stops_the_flight_without_fencing_the_session() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+            let started = Arc::new(tokio::sync::Semaphore::new(0));
+            let hold = Arc::new(tokio::sync::Semaphore::new(0));
+
+            let warm = |sequence: Option<u64>, anchor: i64| {
+                let started = Arc::clone(&started);
+                let hold = Arc::clone(&hold);
+                let subs_dir = fixture.state.subs_dir.clone();
+                let file = file.clone();
+                let session_id = session_id.clone();
+                async move {
+                    crate::subtitles::warm_vtt_window_with(
+                        &session_id,
+                        sequence,
+                        &subs_dir,
+                        &file,
+                        0,
+                        anchor,
+                        WINDOW_SECONDS,
+                        move |_tmp, _, _, _, _| async move {
+                            started.add_permits(1);
+                            hold.acquire().await.expect("hold").forget();
+                            Ok(())
+                        },
+                    )
+                    .await
+                }
+            };
+            let running = || {
+                let started = Arc::clone(&started);
+                async move {
+                    tokio::time::timeout(Duration::from_secs(5), started.acquire())
+                        .await
+                        .expect("a producer starts")
+                        .expect("started semaphore remains open")
+                        .forget();
+                }
+            };
+
+            assert!(warm(Some(5), 600).await, "a first claim starts a flight");
+            running().await;
+            let flight = crate::subtitles::session_window_flight(session_id)
+                .expect("the flight is named while it is live");
+
+            // A stale identity names nothing: the live flight is untouched.
+            crate::subtitles::abandon_session_window(session_id, flight.wrapping_add(1)).await;
+            assert_eq!(
+                crate::subtitles::session_window_flight(session_id),
+                Some(flight),
+                "an identity that is not this flight's stops nothing"
+            );
+
+            crate::subtitles::abandon_session_window(session_id, flight).await;
+            assert!(
+                crate::subtitles::owned_window_for_test(session_id).is_none(),
+                "the named flight is stopped and settled"
+            );
+
+            // The difference from release, stated as the viewer experiences
+            // it: the very next window is admitted rather than refused for
+            // half a minute.
+            assert!(
+                warm(Some(6), 900).await,
+                "abandoning does not fence the session that is still watching"
+            );
+            running().await;
+            assert_eq!(
+                crate::subtitles::owned_window_for_test(session_id)
+                    .expect("the replacement owns the slot")
+                    .0,
+                900
+            );
+            assert_eq!(
+                crate::subtitles::peak_window_flights_for_test(session_id),
+                1,
+                "and the abandoned flight settled before the replacement started"
+            );
+
+            hold.add_permits(8);
+            crate::subtitles::release_session_window(session_id).await;
+        }
+
         /// A first play with no authority is displaced by the first request
         /// that has one — a settled destination is a fact, and the anchor a
         /// session happened to open on is not.

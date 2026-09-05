@@ -1135,14 +1135,32 @@ tombstone and the cleanup before reading a rendition that may be `None`, then
 returned leaving it ownerless. Both now complete it, and the wait is bounded
 so the next change to that ordering costs a logged line rather than a node.
 
+**Also corrected: the window a reattaching viewer leaves behind.** The
+reattachment path duplicated `detach_reader`'s reader removal and wait
+retirement but not its subtitle-window release, and `detach_reader`'s own
+comment claimed every ending converged there — so a viewer changing recipes
+left a live ffmpeg extracting a span for the rendition they had moved off.
+
+The obvious fix is wrong, which is why the finding sat. A window is keyed by
+session id alone and `release_session_window` also fences that id for thirty
+seconds; the id here belongs to a viewer who is still watching, so releasing
+would refuse the first window of the attachment that just replaced it and turn
+a recipe change into half a minute without subtitles. Reattachment therefore
+stops the flight *by name* — the identity read under the same guard that judges
+it obsolete, so a successor claiming the session in between survives — through
+a second operation that carries no fence. `detach_reader`'s comment now says
+reattachment is deliberately not one of its endings rather than claiming it as
+one. The regression at the subtitle layer pins the distinction directly: the
+named flight stops, a stale identity stops nothing, and the very next window is
+admitted. Substituting `release_session_window` there passes the "flight is
+gone" assertion and fails the one after it.
+
 **Still open** in this area: total serving admission across sessions, fair
-service at the global limit (see §5), the reattachment path's open-coded
-detach — which duplicates `detach_reader`'s reader removal and wait retirement
-but not its subtitle-window release, contradicting that function's own comment
-— eviction windows synthesized from wait-pool pins that outlive a departed
-session's reader, and the absence of any decrement path for `completed_cache`,
-which makes an admitted rendition's footprint unreclaimable by any session
-close. None of those is addressed here.
+service at the global limit (see §5), refusal attribution by reason, eviction
+windows synthesized from wait-pool pins that outlive a departed session's
+reader, and the absence of any decrement path for `completed_cache`, which
+makes an admitted rendition's footprint unreclaimable by any session close.
+None of those is addressed here.
 
 ### Astra continuation review — keep transport, media, and title ownership distinct
 

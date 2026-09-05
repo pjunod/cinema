@@ -1363,7 +1363,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # one timer this adds and it owns nothing — no task, no child, no lease — it
 # only stops the node's single maintenance loop from being wedged forever by a
 # cleanup that never completes.
-expected_occurrences = 583
+# 583 -> 585 with the detach convergence: two `tokio::time::timeout` bounds in
+# the new regressions' own `running()` helpers, waiting for an injected
+# subtitle extractor to start. Test-local deadlines that own no task and no
+# child; the production path gains no timer here.
+expected_occurrences = 585
 
 [[module_structures]]
 id = "bare-time-constructor"
