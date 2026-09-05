@@ -276,6 +276,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         MEDIA_SESSION_TERMINAL_ACKS_SCHEMA,
         MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
         super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
+        super::MEDIA_PLAYBACK_DESIRED_SCHEMA,
     ] {
         validate_sql(sql)?;
         for result in timeout_store(client.batch(sql)).await? {
@@ -343,6 +344,63 @@ impl From<&mut Row<'_>> for PointerRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(row.get("current_incarnation_id"))
     }
+}
+
+struct DesiredRow(crate::domain::DesiredOwnership);
+
+impl From<&mut Row<'_>> for DesiredRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(crate::domain::DesiredOwnership {
+            user_id: row.get("user_id"),
+            playback_id: row.get("playback_id"),
+            revision: row.get("revision"),
+            digest: row.get("digest"),
+            canonical_form: row.get("canonical_form"),
+            updated_at_ms: row.get("updated_at_ms"),
+        })
+    }
+}
+
+/// The bounds the table's own CHECK constraints enforce.
+///
+/// Deliberately identical to the SQLite backend's: the two have to refuse the
+/// same inputs, or a replicated import disagrees with the node it imported
+/// from and the disagreement only surfaces as a constraint violation during a
+/// restore.
+fn validate_desired_selection(
+    playback_id: &str,
+    digest: &str,
+    canonical_form: &str,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let valid = (1..=128).contains(&playback_id.len())
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && (1..=512).contains(&canonical_form.len())
+        && now_ms > 0;
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Task("invalid desired selection".to_owned()))
+    }
+}
+
+async fn desired_row(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    playback_id: &str,
+) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+    let sql = "SELECT user_id, playback_id, revision, digest, canonical_form, updated_at_ms
+          FROM media_playback_desired
+         WHERE user_id = $1 AND playback_id = $2";
+    validate_sql(sql)?;
+    Ok(store
+        .client()
+        .query_consistent_map::<DesiredRow, _>(sql, params!(user_id, playback_id))
+        .await?
+        .into_iter()
+        .next()
+        .map(|row| row.0))
 }
 
 struct StagedRow(crate::domain::MediaSessionStagedGeneration);
@@ -1727,6 +1785,56 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         };
         Ok(Some(route))
+    }
+
+    async fn record_desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        digest: &str,
+        canonical_form: &str,
+        now_ms: i64,
+    ) -> Result<crate::domain::DesiredOwnership, StoreError> {
+        validate_desired_selection(playback_id, digest, canonical_form, now_ms)?;
+        // The revision decision is made by the statement, not by a read
+        // followed by a write. Two exchanges for the same playback can
+        // otherwise both observe revision 3 and both write 4, which turns a
+        // monotone revision into a number two different asks share — and this
+        // is a replicated store, so the two exchanges need not even be on the
+        // same node.
+        let sql = "INSERT INTO media_playback_desired
+                 (user_id, playback_id, revision, digest, canonical_form, updated_at_ms)
+             VALUES ($1, $2, 1, $3, $4, $5)
+             ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                 revision = CASE
+                     WHEN media_playback_desired.digest = excluded.digest
+                         THEN media_playback_desired.revision
+                     ELSE media_playback_desired.revision + 1
+                 END,
+                 digest = excluded.digest,
+                 canonical_form = excluded.canonical_form,
+                 updated_at_ms = CASE
+                     WHEN media_playback_desired.digest = excluded.digest
+                         THEN media_playback_desired.updated_at_ms
+                     ELSE excluded.updated_at_ms
+                 END";
+        validate_sql(sql)?;
+        timeout_store(self.client().execute(
+            sql,
+            params!(user_id, playback_id, digest, canonical_form, now_ms),
+        ))
+        .await?;
+        desired_row(self, user_id, playback_id)
+            .await?
+            .ok_or_else(|| StoreError::Database("desired selection vanished".to_owned()))
+    }
+
+    async fn desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+        desired_row(self, user_id, playback_id).await
     }
 
     async fn rejoin_media_session_preparation(

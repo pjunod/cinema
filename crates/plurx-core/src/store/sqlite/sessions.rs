@@ -159,6 +159,55 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
     }
 }
 
+/// The bounds the table's own CHECK constraints enforce, refused before the
+/// statement rather than as a database error.
+///
+/// Same reason every other validator here exists: a constraint violation
+/// arrives as an opaque database failure that a caller cannot act on and an
+/// operator cannot read, and the two backends have to refuse the same inputs
+/// or a replicated import disagrees with the node it imported from.
+fn validate_desired_selection(
+    playback_id: &str,
+    digest: &str,
+    canonical_form: &str,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let valid = (1..=128).contains(&playback_id.len())
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && (1..=512).contains(&canonical_form.len())
+        && now_ms > 0;
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Task("invalid desired selection".to_owned()))
+    }
+}
+
+fn desired_within(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    playback_id: &str,
+) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT revision, digest, canonical_form, updated_at_ms
+           FROM media_playback_desired
+          WHERE user_id = ?1 AND playback_id = ?2",
+    )?;
+    let mut rows = statement.query(rusqlite::params![user_id, playback_id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::domain::DesiredOwnership {
+        user_id,
+        playback_id: playback_id.to_owned(),
+        revision: row.get(0)?,
+        digest: row.get(1)?,
+        canonical_form: row.get(2)?,
+        updated_at_ms: row.get(3)?,
+    }))
+}
+
 fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), StoreError> {
     let valid = valid_uuid(&preparation.incarnation_id)
         && valid_uuid(&preparation.session_id)
@@ -1513,6 +1562,62 @@ impl MediaSessionStore for SqliteStore {
             Ok(Some(route))
         })
         .await
+    }
+
+    async fn record_desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        digest: &str,
+        canonical_form: &str,
+        now_ms: i64,
+    ) -> Result<crate::domain::DesiredOwnership, StoreError> {
+        validate_desired_selection(playback_id, digest, canonical_form, now_ms)?;
+        let playback_id = playback_id.to_owned();
+        let digest = digest.to_owned();
+        let canonical_form = canonical_form.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            // The revision advances only on a change of digest, and the
+            // decision is made inside the transaction rather than by reading
+            // first and writing after: two exchanges for the same playback can
+            // otherwise both read revision 3 and both write 4, which turns a
+            // monotone revision into a number two different asks share.
+            tx.execute(
+                "INSERT INTO media_playback_desired
+                     (user_id, playback_id, revision, digest, canonical_form, updated_at_ms)
+                 VALUES (?1, ?2, 1, ?3, ?4, ?5)
+                 ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                     revision = CASE
+                         WHEN media_playback_desired.digest = excluded.digest
+                             THEN media_playback_desired.revision
+                         ELSE media_playback_desired.revision + 1
+                     END,
+                     digest = excluded.digest,
+                     canonical_form = excluded.canonical_form,
+                     updated_at_ms = CASE
+                         WHEN media_playback_desired.digest = excluded.digest
+                             THEN media_playback_desired.updated_at_ms
+                         ELSE excluded.updated_at_ms
+                     END",
+                rusqlite::params![user_id, &playback_id, &digest, &canonical_form, now_ms],
+            )?;
+            let owned = desired_within(&tx, user_id, &playback_id)?
+                .ok_or_else(|| StoreError::Database("desired selection vanished".into()))?;
+            tx.commit()?;
+            Ok(owned)
+        })
+        .await
+    }
+
+    async fn desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+        let playback_id = playback_id.to_owned();
+        self.with_conn(move |conn| desired_within(conn, user_id, &playback_id))
+            .await
     }
 
     async fn rejoin_media_session_preparation(

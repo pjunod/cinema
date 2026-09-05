@@ -690,6 +690,27 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "media_playback_desired",
+        columns: &[
+            "user_id",
+            "playback_id",
+            "revision",
+            "digest",
+            "canonical_form",
+            "updated_at_ms",
+        ],
+        order_by: "user_id, playback_id",
+        // A brand-new table, so `minimum_schema` is the whole story: a source
+        // older than v28 has no rows to carry and needs no arm in
+        // `value_projection`. Carried on import rather than dropped, because
+        // what a viewer asked for is the one fact about a playback that a
+        // rebuilt cluster cannot re-derive from anything else it holds.
+        minimum_schema: 28,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "media_sessions",
         columns: &[
             "incarnation_id",
@@ -2546,7 +2567,8 @@ mod tests {
         assert!(names.contains(&"analysis_lifecycle_counters"));
         assert!(names.contains(&"timeline_annotation_sets"));
         assert!(names.contains(&"timeline_manual_overrides"));
-        assert_eq!(names.len(), 39, "review every imported durable table");
+        assert!(names.contains(&"media_playback_desired"));
+        assert_eq!(names.len(), 40, "review every imported durable table");
     }
 
     #[test]

@@ -960,6 +960,38 @@ pub struct MediaSessionActivation {
 /// takeover inventory. Both are properties of the row, not of a mode flag —
 /// the sentinel already means *not publishable*, and a staged successor wants
 /// exactly that until it commits.
+/// What a viewer has asked for, and how many times they have changed it.
+///
+/// The durable answer to "has the viewer asked for something else since", which
+/// nothing else about a playback can give. A resolved height cannot tell
+/// Original from a manual pick at the source's own height; a session's recipe
+/// is desired-as-built and is written once at activation; the intent
+/// fingerprint is deliberately lossy so a retry recovers the first answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DesiredOwnership {
+    pub user_id: i64,
+    pub playback_id: String,
+    /// Monotone per playback, and advanced only when `digest` changes.
+    ///
+    /// That is what separates it from the four near misses: a capture
+    /// revision, an attachment generation, a generic intent generation and a
+    /// control sequence all move on cadence, on reconnection or on recovery.
+    /// This moves when, and only when, the viewer asks for something else — so
+    /// two asks are orderable, which a content hash alone can never be.
+    pub revision: i64,
+    /// The normalized selection's digest.
+    pub digest: String,
+    /// The text that digest was taken over.
+    ///
+    /// Stored so the digest is checkable. A hash whose input is not recoverable
+    /// is a value nobody can verify: an operator can read what the viewer asked
+    /// for, and a later binary can confirm its own canonical form still
+    /// produces this digest rather than discovering a silent mismatch when
+    /// every comparison suddenly starts failing.
+    pub canonical_form: String,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MediaSessionPreparation {
     /// The successor being staged. Minted like any other incarnation.

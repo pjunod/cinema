@@ -134,6 +134,50 @@ pub(crate) const MEDIA_SESSION_PREPARATIONS_SCHEMA: &str =
         PRIMARY KEY (user_id, playback_id)
     ) STRICT;";
 
+/// What a viewer has asked for, per playback, shared verbatim by both backends.
+///
+/// Everything else about a playback records what *happened*: which incarnation
+/// is current, what was built, how far it produced, what the response said.
+/// This is the only row that records what was *wanted*, and the distinction is
+/// the whole reason it exists. A resolved height cannot tell Original from a
+/// manual pick at the source's own height; a session's recipe is desired-as-
+/// built and is written once at activation; the durable intent fingerprint is
+/// deliberately lossy so a retry recovers the first answer. None of the three
+/// can answer "has the viewer asked for something else since", which is the
+/// question every admission point has to ask before it publishes media.
+///
+/// Keyed by playback rather than by session, and kept out of
+/// `media_playback_pointers` for the reason that matters here: a desired row
+/// has to be able to exist *before* the session that satisfies it, and that
+/// table's `current_incarnation_id` is `NOT NULL`. An ask that only becomes
+/// durable once something has already been built for it cannot be the thing
+/// that decides whether to build it.
+///
+/// `revision` advances only when `digest` changes, which is what makes it a
+/// media-intent revision rather than a cadence counter — the four near misses
+/// §1 names all move on heartbeats, reporter attachments or recovery. It is
+/// monotone per playback so two asks are orderable, which a content hash alone
+/// can never be.
+///
+/// `canonical_form` is stored beside the digest deliberately, at the cost of
+/// about a hundred bytes. A digest whose input is not recoverable is a hash
+/// nobody can check: an operator reading this row can see what the viewer
+/// asked for, and a later binary can verify that its own canonical form still
+/// produces the stored digest rather than discovering a silent mismatch when
+/// every comparison starts failing.
+pub(crate) const MEDIA_PLAYBACK_DESIRED_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS media_playback_desired (
+        user_id        INTEGER NOT NULL,
+        playback_id    TEXT NOT NULL
+            CHECK (length(playback_id) BETWEEN 1 AND 128),
+        revision       INTEGER NOT NULL CHECK (revision > 0),
+        digest         TEXT NOT NULL CHECK (length(digest) = 64),
+        canonical_form TEXT NOT NULL
+            CHECK (length(canonical_form) BETWEEN 1 AND 512),
+        updated_at_ms  INTEGER NOT NULL,
+        PRIMARY KEY (user_id, playback_id)
+    ) STRICT;";
+
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
     AFTER UPDATE OF publication_ready_at_ms ON media_sessions
@@ -2865,6 +2909,40 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Record what a viewer is asking for, and return the ownership that
+    /// results.
+    ///
+    /// Idempotent on the ask rather than on the call. Recording the same
+    /// digest again returns the existing row unchanged — the revision does not
+    /// move — because a viewer repeating themselves has not changed their
+    /// mind, and a revision that advanced on repetition would be the cadence
+    /// counter this exists to replace. Recording a different digest advances
+    /// the revision by exactly one.
+    ///
+    /// Written before an intent-changing request is reported accepted, so
+    /// there is no window in which a client has been told its new selection
+    /// was taken and nothing durable says so.
+    async fn record_desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        digest: &str,
+        canonical_form: &str,
+        now_ms: i64,
+    ) -> Result<crate::domain::DesiredOwnership, StoreError>;
+
+    /// What this playback is currently asking for, if anything ever said.
+    ///
+    /// `None` for a playback that predates this row or has never sent an
+    /// intent-changing request. Absent is not "unchanged" and not "default":
+    /// it is no evidence, and every caller has to treat it that way or an
+    /// upgraded node would fence every session that started before it.
+    async fn desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError>;
 
     /// Replace one named staged successor with a merged preparation.
     ///

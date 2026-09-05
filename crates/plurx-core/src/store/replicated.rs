@@ -438,6 +438,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "sessions.rs",
+        method: "record_desired_selection",
+        is_async: true,
+        // The write decides its own revision — the statement compares the
+        // stored digest and either advances or does not — so the transaction
+        // wraps a write and a read-back rather than a read that a branch then
+        // acts on. Reading first and writing after would let two exchanges for
+        // the same playback observe the same revision and both write its
+        // successor, which is exactly the collision a monotone revision exists
+        // to prevent.
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteUntilStable,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
         method: "activate_media_session",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -837,7 +851,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 65);
+        assert_eq!(methods.len(), 66);
     }
 
     #[test]

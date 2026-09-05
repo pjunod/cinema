@@ -1250,11 +1250,13 @@ mod tests {
                 // Everything v44 and later built has to go, or the replayed
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
-                // history. Leaving any of them makes the replay fail on a
-                // column or table that is already there.
+                // history, v48's desired-selection row. Leaving any of them
+                // makes the replay fail on a column or table that is already
+                // there.
                 "DROP INDEX dv_conversions_recovery_guard;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
+                 DROP TABLE IF EXISTS media_playback_desired;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
@@ -1343,10 +1345,11 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 3] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 4] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
+            "media_playback_desired",
         ];
 
         assert!(

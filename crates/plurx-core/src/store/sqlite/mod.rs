@@ -972,6 +972,12 @@ const MIGRATIONS: &[&str] = &[
     // converting one. Empty means whichever identity is next, which is what
     // every row written before this column meant.
     crate::store::fragment_index_cluster::ANALYSIS_REQUEST_IDENTITY_SCHEMA,
+    // v48: what a viewer has asked for, per playback. Every other row about a
+    // playback records what happened; this is the only one that records what
+    // was wanted, and it has to be able to exist before the session that
+    // satisfies it — which is why it is its own table rather than columns on
+    // `media_playback_pointers`, whose `current_incarnation_id` is NOT NULL.
+    crate::store::MEDIA_PLAYBACK_DESIRED_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1967,6 +1973,141 @@ mod tests {
         holder.await.expect("join").expect("holder");
     }
 
+    /// The revision advances on a change of ask and on nothing else.
+    ///
+    /// That is the entire difference between this and the four counters §1
+    /// rules out. A capture revision moves on every snapshot publish, an
+    /// attachment generation on every reconnection, a generic intent
+    /// generation on a title change, a control sequence on every heartbeat —
+    /// so none of them can answer "has the viewer asked for something else".
+    /// A revision that moved when a client merely repeated itself would be the
+    /// same kind of number wearing a better name, and every admission point
+    /// comparing it would refuse work that nothing was wrong with.
+    ///
+    /// Monotonicity is the other half: two asks have to be *orderable*, which
+    /// a content hash alone can never be. Going back to an earlier selection
+    /// is a new ask, not a return to an old one, so the revision goes forward
+    /// while the digest goes back — which is what makes ABA visible.
+    #[tokio::test]
+    async fn a_desired_revision_advances_on_a_new_ask_and_never_on_a_repeat() {
+        use crate::store::MediaSessionStore;
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        assert_eq!(
+            store.desired_selection(7, "play-a").await.expect("read"),
+            None,
+            "a playback nobody has asked anything about says so, rather than \
+             inventing a default that an admission point would compare against"
+        );
+
+        let auto = "a".repeat(64);
+        let manual = "b".repeat(64);
+        let record = |digest: &str, form: &str, now: i64| {
+            let store = &store;
+            let digest = digest.to_owned();
+            let form = form.to_owned();
+            async move {
+                store
+                    .record_desired_selection(7, "play-a", &digest, &form, now)
+                    .await
+                    .expect("record")
+            }
+        };
+        let first = record(&auto, "v1;quality=auto", 1_000).await;
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.updated_at_ms, 1_000);
+
+        // The same ask again, twice, from a client doing exactly what clients
+        // do: repeating its selection on every exchange.
+        let repeated = record(&auto, "v1;quality=auto", 2_000).await;
+        assert_eq!(
+            repeated, first,
+            "repeating an ask is not changing it — not the revision, and not \
+             even the timestamp, which would otherwise make an unchanged row \
+             look freshly decided"
+        );
+        assert_eq!(record(&auto, "v1;quality=auto", 3_000).await, first);
+
+        // A different ask.
+        let second = record(&manual, "v1;quality=manual:720", 4_000).await;
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.updated_at_ms, 4_000);
+        assert_eq!(second.canonical_form, "v1;quality=manual:720");
+
+        // And back to the first selection. The digest returns; the revision
+        // does not. Without that, an ask that went A → B → A would be
+        // indistinguishable from one that never left A, and a staged
+        // successor for the first A could be committed against the second.
+        let third = record(&auto, "v1;quality=auto", 5_000).await;
+        assert_eq!(third.digest, first.digest);
+        assert_eq!(
+            third.revision, 3,
+            "returning to an earlier selection is a new ask, not a return to an old one"
+        );
+
+        assert_eq!(
+            store.desired_selection(7, "play-a").await.expect("read"),
+            Some(third),
+            "and the row that is read back is the one that was written"
+        );
+        assert_eq!(
+            store.desired_selection(8, "play-a").await.expect("read"),
+            None,
+            "asks are per viewer as well as per playback"
+        );
+        assert_eq!(
+            store.desired_selection(7, "play-b").await.expect("read"),
+            None
+        );
+    }
+
+    /// The row refuses what its own constraints refuse, before the statement.
+    ///
+    /// Both backends have to reject the same inputs or a replicated import
+    /// disagrees with the node it imported from — and the disagreement would
+    /// surface as an opaque constraint violation during a restore, which is
+    /// the worst possible moment to discover it.
+    #[tokio::test]
+    async fn a_desired_selection_is_bounded_before_it_reaches_the_table() {
+        use crate::store::MediaSessionStore;
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        const NOT_HEX: &str = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        let digest = "c".repeat(64);
+        for (playback_id, digest, form, now, why) in [
+            ("", digest.as_str(), "v1;x", 1, "an empty playback id"),
+            (
+                "play-a",
+                "short",
+                "v1;x",
+                1,
+                "a digest that is not a sha-256",
+            ),
+            ("play-a", NOT_HEX, "v1;x", 1, "a digest that is not hex"),
+            ("play-a", digest.as_str(), "", 1, "an empty canonical form"),
+            (
+                "play-a",
+                digest.as_str(),
+                "v1;x",
+                0,
+                "a timestamp before the epoch",
+            ),
+        ] {
+            assert!(
+                store
+                    .record_desired_selection(7, playback_id, digest, form, now)
+                    .await
+                    .is_err(),
+                "{why} must be refused"
+            );
+        }
+        assert_eq!(
+            store.desired_selection(7, "play-a").await.expect("read"),
+            None,
+            "and a refused write leaves nothing behind"
+        );
+    }
+
     #[tokio::test]
     async fn settings_roundtrip_and_upsert() {
         let store = SqliteStore::open_in_memory().expect("open");
@@ -2126,7 +2267,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 47,
+            version, 48,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
