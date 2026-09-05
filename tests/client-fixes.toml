@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "apple.cold-decision-recipe-and-lifecycle"
+commits = ["3155bfe9"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func restartInitialDecision(lifecycle: Int)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testColdCommandsComposeIntoTheActualSessionRequestAndRejectStaleDefaults"
+
+[[fixes]]
 id = "web.bounded-preparation-and-retained-observers"
 commits = ["0a70d6fb"]
 source = "crates/plurxd/src/web/index.html"
