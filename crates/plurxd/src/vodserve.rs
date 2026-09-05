@@ -6130,7 +6130,7 @@ async fn establish_or_verify(
         on_generation_end(
             shared,
             rendition,
-            Outcome::Failed(Failure::Stream(
+            Outcome::Failed(Failure::EngineChanged(
                 "the v2 fragment-index engine changed before init publication".to_owned(),
             )),
             epoch,
@@ -6307,10 +6307,13 @@ async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Rendition>, cause: 
         );
         return;
     }
+    // Init drift is a *pipeline* change under a rendition a client already
+    // holds a playlist for — vodgen says so in as many words — so it is filed
+    // as the engine moving, not as the file on disk moving.
     record_failure(
         shared,
         rendition,
-        crate::playback_control::ProducerDecisionReason::SourceChanged,
+        crate::playback_control::ProducerDecisionReason::EngineChanged,
         cause,
     );
 }
@@ -6326,10 +6329,20 @@ fn record_failure(
         decision = decision.status(),
         "producer failed: {cause}"
     );
-    *rendition.failed.lock().expect("failed lock") = Some(RenditionFailure {
-        decision,
-        cause: cause.clone(),
-    });
+    {
+        // First failure wins. A publication fence records the cause — the
+        // source moved, the engine moved — and the generation it stops then
+        // ends with a *consequence*: the sink refused the bytes, the pipe
+        // closed. Overwriting would file the consequence as the diagnosis and
+        // publish a class that names the wrong subsystem.
+        let mut failed = rendition.failed.lock().expect("failed lock");
+        if failed.is_none() {
+            *failed = Some(RenditionFailure {
+                decision,
+                cause: cause.clone(),
+            });
+        }
+    }
     shared.pool.fail(&rendition.key, &cause);
     // Init waiters block on their own Notify, not the wait pool — without
     // this, a GET waiting for `init.mp4` sleeps its whole budget to learn
@@ -6359,8 +6372,10 @@ fn classify_failure(failure: &Failure) -> crate::playback_control::ProducerDecis
     use crate::playback_control::ProducerDecisionReason as Reason;
     match failure {
         // Handled before this point by `on_init_drift`; classified here so the
-        // match stays exhaustive rather than defaulting a new variant.
-        Failure::InitDrift(_) => Reason::SourceChanged,
+        // match stays exhaustive rather than defaulting a new variant, and
+        // with the same class that path records.
+        Failure::InitDrift(_) => Reason::EngineChanged,
+        Failure::EngineChanged(_) => Reason::EngineChanged,
         Failure::Landing(_) => Reason::MediaLandingFailed,
         Failure::Stream(_) => Reason::ReaderFailed,
         Failure::Sink(_) => Reason::ProducerWriteFailed,
@@ -6370,6 +6385,7 @@ fn classify_failure(failure: &Failure) -> crate::playback_control::ProducerDecis
 fn describe_failure(failure: &Failure) -> String {
     match failure {
         Failure::InitDrift(why) => format!("init drift: {why}"),
+        Failure::EngineChanged(why) => format!("engine changed: {why}"),
         Failure::Landing(why) => format!("landing failed: {why}"),
         Failure::Stream(why) => format!("stream failed: {why}"),
         Failure::Sink(error) => format!("sink refused: {error}"),
@@ -6463,24 +6479,37 @@ impl vodgen::Sink for RenditionSink {
             // ended normally rather than faulted.
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
+        // Both fences record their own class before returning. vodgen sees
+        // only an `io::Error` and wraps it as `Failure::Sink`, which would
+        // otherwise be classified `producer_write_failed` — a sink fault,
+        // which is not what happened. `record_failure` is first-wins, so the
+        // class recorded here survives the generation ending underneath it.
         if self
             .rendition
             .source
             .as_ref()
             .is_some_and(|source| !source.unchanged())
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "source changed before fragment publication",
-            ));
+            let cause = "source changed before fragment publication".to_owned();
+            record_failure(
+                &self.shared,
+                &self.rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
         if self.rendition.recipe.cluster_cache_key.is_some()
             && !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "v2 fragment-index engine changed before fragment publication",
-            ));
+            let cause = "v2 fragment-index engine changed before fragment publication".to_owned();
+            record_failure(
+                &self.shared,
+                &self.rendition,
+                crate::playback_control::ProducerDecisionReason::EngineChanged,
+                cause.clone(),
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
         let len = bytes.len() as u64;
         {
@@ -9815,6 +9844,102 @@ mod tests {
         );
     }
 
+    /// The first failure is the cause; a later one is its consequence.
+    ///
+    /// A publication fence records `source_changed` and then stops the
+    /// generation, which ends by reporting that its sink refused the bytes.
+    /// Overwriting would file the consequence as the diagnosis and publish a
+    /// class naming the wrong subsystem — `producer_write_failed` for a source
+    /// that moved. The sentence must not drift from the class either.
+    #[tokio::test]
+    async fn a_recorded_cause_is_not_overwritten_by_its_own_consequence() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        record_failure(
+            &serve.shared,
+            &rendition,
+            Reason::SourceChanged,
+            "source changed before fragment publication".to_owned(),
+        );
+        record_failure(
+            &serve.shared,
+            &rendition,
+            Reason::ProducerWriteFailed,
+            "sink refused: source changed before fragment publication".to_owned(),
+        );
+
+        let failure = rendition.failure().expect("a recorded failure");
+        assert_eq!(
+            failure.decision,
+            Reason::SourceChanged,
+            "the fence that stopped the generation is the diagnosis"
+        );
+        assert_eq!(
+            failure.cause, "source changed before fragment publication",
+            "the sentence stays with the class it was recorded beside"
+        );
+    }
+
+    /// A source that moves under a rendition is published as a source change,
+    /// end to end, not as whatever the generation happened to say on its way
+    /// down.
+    ///
+    /// This is one of the classification choices that had no coverage: the
+    /// class chosen at a `record_failure` site is invisible to a test that
+    /// supplies its own.
+    #[tokio::test]
+    async fn a_source_that_moves_is_published_as_a_source_change() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+
+        // Move the source under the fence the rendition took at create.
+        let mut bytes = tokio::fs::read(&file.path).await.expect("source bytes");
+        bytes.extend_from_slice(b"moved");
+        tokio::fs::write(&file.path, &bytes)
+            .await
+            .expect("rewrite the source");
+
+        let answer = serve.segment("sess-a", "seg00000.m4s").await;
+        assert!(
+            matches!(
+                answer,
+                Some(VodPublication {
+                    result: Err(VodError::ProducerFailed(_)),
+                    ..
+                })
+            ),
+            "a moved source must refuse the GET, not serve stale media"
+        );
+
+        let status = serve.status("sess-a").await.expect("status");
+        assert_eq!(status.producer_state, "failed");
+        assert_eq!(
+            status.producer_decision,
+            Some(Reason::SourceChanged.status()),
+            "the class names what actually changed"
+        );
+        assert!(
+            !Reason::SourceChanged.is_permanent(),
+            "a moved source is a statement about this plan: a fresh create \
+             re-plans against the file that is there now"
+        );
+    }
+
     /// Every generation outcome has a class, and each names what happened.
     ///
     /// A `match` that fell through to one bucket would compile and would make
@@ -9828,7 +9953,11 @@ mod tests {
         use crate::playback_control::ProducerDecisionReason as Reason;
 
         let cases = [
-            (Failure::InitDrift("init".to_owned()), Reason::SourceChanged),
+            (Failure::InitDrift("init".to_owned()), Reason::EngineChanged),
+            (
+                Failure::EngineChanged("engine".to_owned()),
+                Reason::EngineChanged,
+            ),
             (
                 Failure::Landing("landing".to_owned()),
                 Reason::MediaLandingFailed,
@@ -9846,11 +9975,16 @@ mod tests {
                 "{} must not be filed as something else",
                 describe_failure(&failure)
             );
-            assert!(
-                !classify_failure(&failure).is_permanent(),
-                "a VOD plan failure is never a verdict about the film: a fresh \
-                 create re-plans and can succeed, and telling a client terminal \
-                 would abandon media its own reopen would have played"
+            // Permanence follows what a retry can change, not which subsystem
+            // failed. A landing, stream or sink fault is a statement about
+            // this attempt, and a fresh create can succeed. An engine change
+            // is not: the engine baseline is established once per process, so
+            // every reopen re-plans straight back into the same verdict.
+            assert_eq!(
+                classify_failure(&failure).is_permanent(),
+                expected == Reason::EngineChanged,
+                "{} is classified with the wrong permanence",
+                describe_failure(&failure)
             );
         }
     }

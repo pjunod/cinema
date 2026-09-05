@@ -285,12 +285,47 @@ rolling has no equivalent for: `source_changed`, `engine_changed`,
 `ProcessExit`, which is one that ran and stopped), `media_landing_failed` and
 `producer_write_failed`.
 
-**None of the five is permanent, deliberately.** `is_permanent` is reserved for
-verdicts about the source itself, and a VOD rendition is planned once against
-an exact source and an exact fragment-index engine — so every way it fails is a
-statement about *this plan*, not about the film, and a fresh create re-plans and
-can succeed. Answering `terminal` would make a client abandon media its own
-reopen would have played.
+**Four of the five are retryable; `engine_changed` is not.** A VOD rendition is
+planned once against an exact source and an exact fragment-index engine, so a
+landing, write, launch or source-moved fault is a statement about *that plan*
+rather than about the film — a fresh create re-plans and can succeed.
+`engine_changed` is different, and the adversarial review of this change is what
+established it: the engine baseline is a per-process `OnceCell` set at start-up,
+so once it has moved every planned rendition fails identically until the node
+restarts, and a reopen re-plans straight back into the same verdict. Telling
+that client to retry is telling it to poll until an operator intervenes, so it
+is permanent and carries its own terminal message.
+
+`producer_launch_failed` is the awkward one and is deliberately retryable: a
+spawn that fails under resource pressure succeeds on the next attempt, and a
+spawn that fails because the binary is missing is an install fault an operator
+reads in the same log line — not something a viewer's client should be told is
+final.
+
+**What permanence does today: nothing a viewer sees.** All three reporters stop
+*reporting* on `terminal` and deliberately leave the player alone, because
+making `terminal` end playback is M5's work. So classifying VOD failures does
+not change client behaviour yet — for a transient verdict it sets the same
+5 000 ms cadence the exchange already ran at. It is the fact M5 needs in order
+to act, and until then its value is that operators and metrics can finally see
+which failure a session actually hit.
+
+**Widening the vocabulary is only safe because the relay stopped checking
+membership.** `ControlResponseV1::is_valid_for` runs on the *relaying* node
+against that node's own compiled vocabulary, so during a rolling deploy an
+ingress on the older build would have rejected an owner's newer reason outright
+— turning a good exchange into a 503 `control_unavailable` with a 500 ms retry
+and making that session poll ten times faster than its own cadence for the whole
+deploy window. It now bounds the *shape* of the name and relays it, exactly as
+clients already ignore hold reasons they do not know. `action_is_believable`
+keeps the exact-name comparison, because an action must match the decision it
+claims to rest on.
+
+**Still open.** The per-entry materialize watchdog uses `pool.fail_entry`, which
+answers one GET without marking the rendition failed, so a producer that simply
+stops making progress still yields `action: none`. That is the remaining hole in
+"a VOD failure reaches the client as an action" and it belongs with §3's bounded
+`NoRoom` and admission work.
 
 ### P1-3 — preparation is unreachable on the production VOD observation
 

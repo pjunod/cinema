@@ -570,7 +570,11 @@ expected_occurrences = 15
 [[module_symbols]]
 id = "m4-owner-bound-vod-outcome"
 pattern = "VodPublication"
-expected_occurrences = 24
+# 24 -> 25 with P1-2's classification proof: one more `VodPublication` in
+# `a_source_that_moves_is_published_as_a_source_change`, which matches the
+# refusal a moved source produces on a real segment GET. It reads an owner-bound
+# answer; it does not create or forward one.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-vod-status-owner-admission"
@@ -1479,7 +1483,16 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # assert what a session publishes before and after a failure is recorded, and
 # `ProducerDecisionReason::status()` projections that pin each class to its wire
 # name through action selection. No process, producer or timer is created.
-expected_occurrences = 235
+# 235 -> 237 after the P1-2 review: two more `VodServe::status` reads, in the
+# regressions that pin a moved source to `source_changed` end to end and that
+# require a recorded cause to survive its own consequence. Registry reads; they
+# launch nothing.
+# 237 -> 239 with the review's permanence proofs: two more
+# `ProducerDecisionReason::status()` projections, in the assertion that every
+# permanent reason carries its own terminal sentence and in the per-arm
+# permanence check. Projections of an enum onto its wire name; nothing is
+# launched.
+expected_occurrences = 239
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

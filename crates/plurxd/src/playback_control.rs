@@ -602,11 +602,24 @@ impl ControlResponseV1 {
                     "demand" | "time" | "bytes" | "global" | "ahead" | "working_set" | "no_room"
                 )
             })
-            && self
-                .delivery
-                .producer_decision
-                .as_deref()
-                .is_none_or(|value| ProducerDecisionReason::from_status(value).is_some())
+            // Shape, not membership. A relaying node runs its *own* compiled
+            // vocabulary, so during a rolling deploy an ingress on the older
+            // build would reject an owner's newer reason outright — the whole
+            // exchange becomes a 503 `control_unavailable` with a 500 ms
+            // retry, and that session polls ten times faster than its own
+            // cadence for the length of the deploy, learning nothing. An
+            // unrecognised name is relayed and left for the client to ignore,
+            // exactly as the clients already ignore hold reasons they do not
+            // know. `action_is_believable` keeps the exact-name comparison,
+            // because an action must match the decision it claims to rest on,
+            // and it fails closed on a name this node cannot resolve.
+            && self.delivery.producer_decision.as_deref().is_none_or(|value| {
+                !value.is_empty()
+                    && value.len() <= 48
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            })
             && self.delivery.owner_epoch == self.control_epoch
             && self.delivery.owner_node_hash.starts_with("n-")
             && self.delivery.owner_node_hash.len() == 18
@@ -1658,7 +1671,7 @@ pub(crate) enum ControlAction {
     },
     /// Production stopped for a reason that may not recur.
     ///
-    /// Seventeen of the nineteen producer decisions are timing, process, plan or
+    /// Sixteen of the nineteen producer decisions are timing, process, plan or
     /// executor facts. The client should try again on the server's own
     /// cadence rather than deciding for itself how hard to retry, which is
     /// what every client does today.
@@ -2013,6 +2026,9 @@ fn terminal_message(decision: ProducerDecisionReason) -> String {
         }
         ProducerDecisionReason::InvalidConfiguration => {
             "the requested delivery configuration is not a legal one"
+        }
+        ProducerDecisionReason::EngineChanged => {
+            "this server must restart before it can serve this title again"
         }
         // Only permanent decisions reach here today; a future permanent
         // variant without its own sentence gets the reason and no invention.
@@ -3889,6 +3905,13 @@ pub(crate) enum ProducerDecisionReason {
     SourceChanged,
     /// The fragment-index engine moved under a rendition planned by the
     /// previous one, so this node cannot serve that plan until it restarts.
+    ///
+    /// Permanent, and the one VOD reason that is. The engine baseline is a
+    /// per-process `OnceCell` established at start-up, so every rendition with
+    /// a cluster cache key fails identically for the life of this daemon: a
+    /// reopen replaces the rendition, re-plans, and gets the same verdict.
+    /// Telling a client to keep retrying that is telling it to poll until an
+    /// operator restarts the node.
     EngineChanged,
     /// The producer could not be started at all — the spawn failed, or the
     /// child came up without the stdout the pipeline reads. Distinct from
@@ -3925,20 +3948,32 @@ impl ProducerDecisionReason {
         }
     }
 
-    /// Whether retrying this source, unchanged, can ever succeed.
+    /// Whether retrying, unchanged, can ever succeed on this node.
     ///
-    /// Seventeen of these nineteen reasons are timing, process, executor or
-    /// plan facts: the same file on the same pipeline may well work on the
-    /// next attempt. Two are verdicts about the source itself — this container
-    /// cannot be carried by this pipeline, or the recipe that was asked for is
-    /// not a legal one — and no amount of retrying changes either.
+    /// Sixteen of these nineteen reasons are timing, process, executor or plan
+    /// facts: the same file on the same pipeline may well work on the next
+    /// attempt. Three cannot be retried into working. Two are verdicts about
+    /// the source itself — this container cannot be carried by this pipeline,
+    /// or the recipe that was asked for is not a legal one. The third,
+    /// `EngineChanged`, is a verdict about this *process*: the fragment-index
+    /// engine baseline is a per-process `OnceCell`, so once it has moved,
+    /// every planned rendition fails the same way until the node restarts, and
+    /// a reopen re-plans straight back into it.
     ///
-    /// The five VOD reasons add no permanent verdict, deliberately. A VOD
-    /// rendition is planned once against an exact source and an exact
-    /// fragment-index engine, so every way it fails is a statement about
-    /// *this plan*, not about the film: a fresh create re-plans and can
-    /// succeed. Telling a client `terminal` would make it abandon media that
-    /// its own reopen would have played.
+    /// The other four VOD reasons are genuinely retryable, because a VOD
+    /// rendition is planned once against an exact source and an exact engine
+    /// and those failures are statements about *that plan* rather than about
+    /// the film — a fresh create re-plans and can succeed. `ProducerLaunchFailed`
+    /// is the awkward one and is deliberately retryable: a spawn that fails on
+    /// resource pressure succeeds on the next attempt, and a spawn that fails
+    /// because the binary is missing is an install fault an operator reads in
+    /// the same log line, not something the viewer's client should be told is
+    /// terminal.
+    ///
+    /// Note what permanence does and does not do today: all three reporters
+    /// stop *reporting* on `terminal` and deliberately leave the player alone,
+    /// because making `terminal` end playback is M5's work. So this split does
+    /// not yet change what a viewer sees — it is the fact M5 needs in order to.
     ///
     /// The distinction is the whole reason a client cannot decide for itself.
     /// `producer_state` flattens all nineteen to the word `failed`, so a
@@ -3946,7 +3981,10 @@ impl ProducerDecisionReason {
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
     pub(crate) fn is_permanent(self) -> bool {
-        matches!(self, Self::Unsupported | Self::InvalidConfiguration)
+        matches!(
+            self,
+            Self::Unsupported | Self::InvalidConfiguration | Self::EngineChanged
+        )
     }
 
     /// The bounded vocabulary, in the order the wire and metrics use.
@@ -12895,6 +12933,35 @@ mod tests {
         status
     }
 
+    /// A reason this node has never heard of relays instead of collapsing the
+    /// exchange.
+    ///
+    /// The hazard is a rolling deploy: the owner runs the new build and the
+    /// ingress relaying for it runs the old one, so the ingress validates
+    /// against its own compiled vocabulary. Rejecting the response turns a
+    /// perfectly good exchange into a 503 `control_unavailable` carrying a
+    /// 500 ms retry, and that session then polls ten times faster than its own
+    /// cadence for the whole deploy window while learning nothing. Widening
+    /// the vocabulary is only safe because of this.
+    #[test]
+    fn a_relay_passes_on_a_decision_it_does_not_know() {
+        let (mut response, request) = relay_pair();
+        response.delivery.producer_decision = Some("a_reason_from_a_newer_build".to_owned());
+        assert!(
+            response.is_valid_for(&request),
+            "an unknown but well-formed reason is the client's to ignore, not \
+             the relay's to fail the exchange over"
+        );
+
+        for malformed in ["", "Has Caps", "has spaces", &"x".repeat(49)] {
+            response.delivery.producer_decision = Some(malformed.to_owned());
+            assert!(
+                !response.is_valid_for(&request),
+                "shape is still bounded: {malformed:?} is not a wire name"
+            );
+        }
+    }
+
     /// P1-2. A VOD failure reaches the client as an action, not as silence.
     ///
     /// `vodserve` has always had a failure; what it did not have was a class,
@@ -13382,15 +13449,23 @@ mod tests {
     }
 
     #[test]
-    fn only_a_verdict_about_the_source_itself_is_permanent() {
+    fn only_a_verdict_no_retry_can_change_is_permanent() {
         // The split that decides whether a client should ever be told to give
-        // up. Seventeen of the nineteen are timing, process, executor or plan facts:
-        // the same file on the same pipeline may work on the next attempt.
-        // Two are verdicts about the source, and no retry changes those.
+        // up. Sixteen of the nineteen are timing, process, executor or plan
+        // facts: the same file on the same pipeline may work on the next
+        // attempt. Three cannot be retried into working — two verdicts about
+        // the source, and one about this daemon process. `EngineChanged` is
+        // the third because the fragment-index engine baseline is a
+        // per-process `OnceCell`: once it has moved, every planned rendition
+        // fails identically until the node restarts, and a reopen re-plans
+        // straight back into it. Telling that client to retry is telling it to
+        // poll until an operator intervenes.
         for reason in ProducerDecisionReason::ALL {
             let expected = matches!(
                 reason,
-                ProducerDecisionReason::Unsupported | ProducerDecisionReason::InvalidConfiguration
+                ProducerDecisionReason::Unsupported
+                    | ProducerDecisionReason::InvalidConfiguration
+                    | ProducerDecisionReason::EngineChanged
             );
             assert_eq!(
                 reason.is_permanent(),
@@ -13404,8 +13479,21 @@ mod tests {
                 .into_iter()
                 .filter(|reason| reason.is_permanent())
                 .count(),
-            2,
+            3,
         );
+        // A permanent reason must carry a sentence a viewer could be shown,
+        // not the wire name falling through `terminal_message`'s default.
+        for reason in ProducerDecisionReason::ALL
+            .into_iter()
+            .filter(|r| r.is_permanent())
+        {
+            assert_ne!(
+                terminal_message(reason),
+                reason.status(),
+                "{} is permanent and needs its own message",
+                reason.status(),
+            );
+        }
     }
 
     #[test]
@@ -15276,6 +15364,50 @@ mod tests {
             ),
             Err(ControlStateError::StaleClient)
         );
+    }
+
+    /// A valid relayed answer and the request it answers.
+    fn relay_pair() -> (ControlResponseV1, ControlRelayRequest) {
+        let request = relay_request();
+        let response = ControlResponseV1 {
+            protocol: PROTOCOL_V1.to_owned(),
+            generation: request.generation.clone(),
+            control_epoch: 1,
+            accepted_sequence: 1,
+            server_time_unix_ms: 1_000_000,
+            lease: PlaybackLeaseView {
+                state: "active".to_owned(),
+                renew_after_ms: NEXT_EXCHANGE_MS,
+                expires_at_unix_ms: 1_060_000,
+            },
+            delivery: DeliveryView {
+                presentation: "vod".to_owned(),
+                producer_state: "complete".to_owned(),
+                produced_through_ms: Some(7_200_000),
+                fetched_through_ms: 25_000,
+                delivered_bps: None,
+                delivered_idle_ms: None,
+                recent_producer_speed: None,
+                client_runway_ms: 15_000,
+                admitted: Some(true),
+                producer_decision: None,
+                hold_reason: None,
+                subtitle_readiness: None,
+                owner_node_hash: "n-0123456789abcdef".to_owned(),
+                owner_epoch: 1,
+            },
+            effective_selection: EffectiveSelection {
+                quality_auto: true,
+                height: 1080,
+                audio_track: Some(0),
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                codec: "source".to_owned(),
+                dynamic_range: Some("sdr".to_owned()),
+            },
+            action: ControlAction::None,
+        };
+        (response, request)
     }
 
     fn relay_request() -> ControlRelayRequest {
