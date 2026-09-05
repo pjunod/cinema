@@ -62,7 +62,7 @@ def main(argv: list[str]) -> int:
             forbidden: list[str] = []
             pending: list = []
             deletes: list[str] = []
-            mode = {"next": "normal"}
+            mode = {"next": "normal", "drop_delete": False}
 
             def active() -> list[str]:
                 return [key for key, value in sessions.items() if not value["closed"]]
@@ -101,6 +101,9 @@ def main(argv: list[str]) -> int:
                 session = sessions[capability]
                 if method == "DELETE":
                     deletes.append(capability)
+                    if mode["drop_delete"]:
+                        route.abort("failed")
+                        return
                     if not session["closed"]:
                         session["closed"] = True
                         events.append("release:" + capability)
@@ -216,18 +219,26 @@ def main(argv: list[str]) -> int:
             page.evaluate("delete document.visibilityState")
 
             watch()
+            mode["drop_delete"] = True
             page.goto("about:blank")
-            until(lambda: not active(), "real document pagehide did not release")
+            # Unload delivery is not guaranteed. Deliberately lose DELETE and
+            # prove a replacement document cannot allocate a second tuner.
+            page.goto(host.base_url + "/#/live-tv")
+            assert page.evaluate("Object.keys(localStorage).some(key => key.startsWith('plurx_live_tv_pending_v1:'))")
+            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+            page.get_by_text("90 seconds", exact=False).wait_for()
+            assert active() == ["fixture-10"] and len(sessions) == 10
             assert not forbidden, "Live TV wrote VOD/account state: " + repr(forbidden)
             assert not errors, "browser page errors: " + repr(errors)
-            assert events == [entry for i in range(1, 11) for entry in (f"start:fixture-{i}", f"release:fixture-{i}")], events
-            # pagehide intentionally sends a best-effort keepalive DELETE in
-            # addition to serialized stop; all ordinary flows send exactly one.
+            assert events == [entry for i in range(1, 10) for entry in (f"start:fixture-{i}", f"release:fixture-{i}")] + ["start:fixture-10"], events
+            # The last capability intentionally has no confirmed DELETE.
+            # Its backend orphan expiry belongs to backend/hardware acceptance,
+            # not an invented reaper inside this browser fixture.
             assert all(deletes.count(f"fixture-{i}") == 1 for i in range(1, 10)), deletes
-            assert 1 <= deletes.count("fixture-10") <= 2, deletes
+            assert deletes.count("fixture-10") <= 3, deletes
             print("PASS decoded H.264/AAC frames advance; pause/resume, fullscreen stop, switch, navigation, typed refusal and late-start cleanup")
-            print("PASS active owner loss, producer failure, capability expiry, paused timeout, visibility event and real pagehide release")
-            print("PASS no account token on capability requests; zero VOD/account writes; ten starts, ten confirmed releases, bounded DELETE counts")
+            print("PASS active owner loss, producer failure, capability expiry, paused timeout, visibility event and lost-unload reload quarantine")
+            print("PASS no account token on capability requests; zero VOD/account writes; ten starts, nine confirmed releases, one deliberately orphaned start blocks replacement")
             context.close()
             browser.close()
         return 0
