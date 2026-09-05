@@ -11,7 +11,7 @@ use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf};
 use tokio::sync::oneshot::Sender;
@@ -623,6 +623,7 @@ async fn client_stream(
 
         let (tx_write, rx_write) = flume::bounded(1);
         let (tx_read, rx_read) = flume::bounded(1);
+        let pending_reader_response = Arc::new(Mutex::new(None));
 
         // TODO splitting needs `unstable-split` feature right now but is about to be stabilized soon
         let (rx, write) = ws.split(tokio::io::split);
@@ -631,8 +632,9 @@ async fn client_stream(
 
         let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
         let reader_tx = tx_read.clone();
+        let reader_pending = pending_reader_response.clone();
         let handle_read = task::spawn(async move {
-            let outcome = stream_reader(read, reader_tx).await;
+            let outcome = stream_reader(read, reader_tx, reader_pending).await;
             let _ = tx_reader_finished.send(outcome);
         });
         let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
@@ -1206,8 +1208,14 @@ async fn client_stream(
         handle_read.abort();
         let _ = handle_read.await;
 
-        proxy_handoff |=
-            drain_client_reader_responses(&rx_read, &mut in_flight, &mut in_flight_buf).await;
+        proxy_handoff |= drain_client_reader_responses(
+            &rx_read,
+            &pending_reader_response,
+            &mut in_flight,
+            &mut in_flight_buf,
+            client.inner.proxy_mode,
+        )
+        .await;
 
         if shutdown {
             fail_client_stream_shutdown(&mut in_flight, &mut in_flight_buf, &rx_req);
@@ -1271,8 +1279,10 @@ fn fail_client_stream_proxy_handoff(
 
 async fn drain_client_reader_responses(
     rx_read: &flume::Receiver<ClientStreamReq>,
+    pending_reader_response: &Mutex<Option<ApiStreamResponse>>,
     in_flight: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
     in_flight_buf: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+    proxy_mode: bool,
 ) -> bool {
     let mut proxy_handoff = false;
     debug!("make sure reader rx is empty and closed");
@@ -1280,14 +1290,27 @@ async fn drain_client_reader_responses(
         debug!("Answer from reader into buffer: {:?}", req);
         match req {
             ClientStreamReq::StreamResponse(response) => {
-                proxy_handoff |=
+                let proxy_refused =
                     try_forward_response(in_flight, in_flight_buf, false, response).await;
+                proxy_handoff |= proxy_mode && proxy_refused;
             }
             ClientStreamReq::CleanupBuffer => {
                 // Ignore the expiry marker while reconnecting.
             }
             _ => unreachable!("API WebSocket reader emitted a non-response request"),
         }
+    }
+    let pending_response = {
+        pending_reader_response
+            .lock()
+            .expect("client reader response mutex poisoned")
+            .take()
+    };
+    if let Some(response) = pending_response {
+        debug!("Answer retained by reader during teardown: {:?}", response);
+        let proxy_refused =
+            try_forward_response(in_flight, in_flight_buf, false, response).await;
+        proxy_handoff |= proxy_mode && proxy_refused;
     }
     proxy_handoff
 }
@@ -1398,7 +1421,7 @@ async fn try_forward_response(
     response: ApiStreamResponse,
 ) -> bool {
     let proxy_refused = api_response_is_forward_to_leader(&response.result);
-    let delivered = match in_flight.remove(&response.request_id) {
+    let recognized = match in_flight.remove(&response.request_id) {
         None => {
             if awaiting_timeout {
                 match in_flight_buf.remove(&response.request_id) {
@@ -1406,16 +1429,14 @@ async fn try_forward_response(
                         error!("client ack for ApiStreamResponse missing");
                         false
                     }
-                    Some(ack) => match ack.send(Ok(response.result)) {
-                        Ok(_) => {
-                            debug!("ApiStreamResponse sent to client from in_flight_buf");
-                            true
-                        }
-                        Err(err) => {
+                    Some(ack) => {
+                        if let Err(err) = ack.send(Ok(response.result)) {
                             error!("client ack could not be sent for {:?}", err);
-                            false
+                        } else {
+                            debug!("ApiStreamResponse sent to client from in_flight_buf");
                         }
-                    },
+                        true
+                    }
                 }
             } else {
                 error!("client ack for ApiStreamResponse missing");
@@ -1423,19 +1444,20 @@ async fn try_forward_response(
             }
         }
 
-        Some(ack) => match ack.send(Ok(response.result)) {
-            Ok(_) => {
-                debug!("ApiStreamResponse sent to client");
-                true
-            }
-            Err(err) => {
+        Some(ack) => {
+            if let Err(err) = ack.send(Ok(response.result)) {
                 error!("client ack could not be sent for {:?}", err);
-                false
+            } else {
+                debug!("ApiStreamResponse sent to client");
             }
-        },
+            true
+        }
     };
 
-    proxy_refused && delivered
+    // A refusal belongs to this socket when its request id was recognized.
+    // Caller cancellation can make acknowledgement delivery fail, but it must
+    // not leave the refusing proxy selected for later requests.
+    proxy_refused && recognized
 }
 
 async fn update_leader(
@@ -1499,6 +1521,7 @@ fn cleanup_buffer_timeout(tx: flume::Sender<ClientStreamReq>, seconds: u64) -> J
 async fn stream_reader<S>(
     mut read: FragmentCollectorRead<ReadHalf<S>>,
     tx: flume::Sender<ClientStreamReq>,
+    pending_response: Arc<Mutex<Option<ApiStreamResponse>>>,
 ) -> Result<(), String>
 where
     S: AsyncRead + Unpin,
@@ -1523,9 +1546,7 @@ where
                 let bytes = frame.payload.deref();
                 let payload = deserialize::<ApiStreamResponse>(bytes)
                     .map_err(|err| format!("invalid API stream response: {err}"))?;
-                tx.send_async(ClientStreamReq::StreamResponse(payload))
-                    .await
-                    .map_err(|err| format!("API reader outcome channel closed: {err}"))?;
+                send_client_reader_response(&tx, &pending_response, payload).await?;
             }
             OpCode::Close => break,
             OpCode::Ping => {}
@@ -1535,6 +1556,39 @@ where
 
     debug!("Exiting Client Stream Reader");
     Ok(())
+}
+
+async fn send_client_reader_response(
+    tx: &flume::Sender<ClientStreamReq>,
+    pending_response: &Mutex<Option<ApiStreamResponse>>,
+    response: ApiStreamResponse,
+) -> Result<(), String> {
+    *pending_response
+        .lock()
+        .expect("client reader response mutex poisoned") = Some(response);
+
+    loop {
+        let response = pending_response
+            .lock()
+            .expect("client reader response mutex poisoned")
+            .take()
+            .expect("pending client reader response missing");
+        match tx.try_send(ClientStreamReq::StreamResponse(response)) {
+            Ok(()) => return Ok(()),
+            Err(flume::TrySendError::Full(ClientStreamReq::StreamResponse(response))) => {
+                *pending_response
+                    .lock()
+                    .expect("client reader response mutex poisoned") = Some(response);
+                task::yield_now().await;
+            }
+            Err(flume::TrySendError::Disconnected(_)) => {
+                return Err("API reader outcome channel closed".to_owned());
+            }
+            Err(flume::TrySendError::Full(_)) => {
+                unreachable!("client reader emitted a non-response request")
+            }
+        }
+    }
 }
 
 async fn stream_writer<S>(
@@ -1969,31 +2023,83 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
+    async fn dropped_caller_still_allows_its_proxy_refusal_to_claim_handoff() {
+        let mut in_flight = HashMap::new();
+        let mut in_flight_buf = HashMap::new();
+        let (ack, dropped_response) = oneshot::channel();
+        drop(dropped_response);
+        in_flight.insert(63, ack);
+
+        assert!(
+            try_forward_response(
+                &mut in_flight,
+                &mut in_flight_buf,
+                false,
+                ApiStreamResponse {
+                    request_id: 63,
+                    result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
+                },
+            )
+            .await,
+            "the current socket owns recovery even after caller cancellation"
+        );
+        assert!(in_flight.is_empty());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
     async fn concurrent_proxy_refusals_coalesce_into_one_endpoint_advance() {
         let mut in_flight = HashMap::new();
         let mut in_flight_buf = HashMap::new();
         let mut acknowledgements = Vec::new();
         let (reader_tx, reader_rx) = flume::bounded(1);
+        let pending_reader_response = Arc::new(Mutex::new(None));
         for request_id in [71, 72] {
             let (ack, response) = oneshot::channel();
             in_flight.insert(request_id, ack);
             acknowledgements.push(response);
         }
-        let reader = tokio::spawn(async move {
+        let reader_pending = pending_reader_response.clone();
+        let mut reader = tokio::spawn(async move {
             for request_id in [71, 72] {
-                reader_tx
-                    .send_async(ClientStreamReq::StreamResponse(ApiStreamResponse {
+                send_client_reader_response(
+                    &reader_tx,
+                    &reader_pending,
+                    ApiStreamResponse {
                         request_id,
                         result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
-                    }))
+                    },
+                )
                     .await
-                    .expect("queue refusing response");
+                    .expect("retain refusing response");
             }
         });
 
-        let proxy_handoff =
-            drain_client_reader_responses(&reader_rx, &mut in_flight, &mut in_flight_buf).await;
-        reader.await.expect("join simulated reader");
+        time::timeout(Duration::from_secs(1), async {
+            loop {
+                if pending_reader_response
+                    .lock()
+                    .expect("client reader response mutex poisoned")
+                    .is_some()
+                {
+                    break;
+                }
+                task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second response must block behind the one-slot queue");
+        reader.abort();
+        let _ = (&mut reader).await;
+
+        let proxy_handoff = drain_client_reader_responses(
+            &reader_rx,
+            &pending_reader_response,
+            &mut in_flight,
+            &mut in_flight_buf,
+            true,
+        )
+        .await;
 
         let nodes = vec!["proxy-a:21000".to_owned(), "proxy-b:21000".to_owned()];
         let leader = Arc::new(RwLock::new((0, nodes[0].clone())));
@@ -2038,6 +2144,7 @@ mod tests {
         let (_writer_finished_tx, mut writer_finished_rx) = oneshot::channel();
         let (_control_tx, control_rx) = flume::bounded(1);
         let (reader_tx, reader_rx) = flume::bounded(1);
+        let pending_reader_response = Mutex::new(None);
         let (_request_tx, request_rx) = flume::bounded(1);
         reader_tx
             .send_async(ClientStreamReq::StreamResponse(ApiStreamResponse {
@@ -2068,8 +2175,14 @@ mod tests {
         // The same production teardown seam drains the response that lost the
         // biased race to EOF, then lets its exact-socket refusal supersede the
         // generic terminal rotation.
-        let proxy_handoff =
-            drain_client_reader_responses(&reader_rx, &mut in_flight, &mut in_flight_buf).await;
+        let proxy_handoff = drain_client_reader_responses(
+            &reader_rx,
+            &pending_reader_response,
+            &mut in_flight,
+            &mut in_flight_buf,
+            true,
+        )
+        .await;
         let nodes = vec!["proxy-a:21000".to_owned(), "proxy-b:21000".to_owned()];
         let leader = Arc::new(RwLock::new((0, nodes[0].clone())));
         let mut proxy_index = 0;
@@ -2101,6 +2214,90 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn teardown_drained_non_proxy_refusal_preserves_terminal_ambiguity() {
+        let mut in_flight = HashMap::new();
+        let mut in_flight_buf = HashMap::new();
+        let (settled_ack, settled_response) = oneshot::channel();
+        let (unresolved_ack, unresolved_response) = oneshot::channel();
+        in_flight.insert(91, settled_ack);
+        in_flight.insert(92, unresolved_ack);
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let (reader_finished_tx, mut reader_finished_rx) = oneshot::channel();
+        let (_writer_finished_tx, mut writer_finished_rx) = oneshot::channel();
+        let (_control_tx, control_rx) = flume::bounded(1);
+        let (reader_tx, reader_rx) = flume::bounded(1);
+        let pending_reader_response = Mutex::new(None);
+        let (_request_tx, request_rx) = flume::bounded(1);
+        reader_tx
+            .send_async(ClientStreamReq::StreamResponse(ApiStreamResponse {
+                request_id: 91,
+                result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
+            }))
+            .await
+            .expect("queue decoded leader refusal");
+        drop(reader_tx);
+        reader_finished_tx
+            .send(Ok(()))
+            .expect("queue reader EOF outcome");
+
+        let terminal = next_client_connected_event(
+            &mut shutdown_rx,
+            &mut reader_finished_rx,
+            &mut writer_finished_rx,
+            &control_rx,
+            &reader_rx,
+            &request_rx,
+        )
+        .await;
+        assert!(matches!(
+            terminal,
+            ClientConnectedEvent::ReaderFinished(Ok(()))
+        ));
+
+        let proxy_handoff = drain_client_reader_responses(
+            &reader_rx,
+            &pending_reader_response,
+            &mut in_flight,
+            &mut in_flight_buf,
+            false,
+        )
+        .await;
+        let nodes = vec!["node-a:21000".to_owned(), "node-b:21000".to_owned()];
+        let leader = Arc::new(RwLock::new((1, nodes[0].clone())));
+        let mut proxy_index = 0;
+        finalize_client_stream_disconnect(
+            &nodes,
+            &leader,
+            &mut proxy_index,
+            &mut in_flight,
+            &mut in_flight_buf,
+            ClientDisconnectState {
+                proxy_handoff,
+                leader_handoff: false,
+                terminal_transport_failure: true,
+                rotate_after_disconnect: false,
+            },
+        )
+        .await;
+
+        assert!(!proxy_handoff, "ordinary clients do not own proxy recovery");
+        assert!(matches!(
+            settled_response.await.expect("drained refusal acknowledgement"),
+            Ok(ApiStreamResponsePayload::Execute(Err(ref err)))
+                if err.is_forward_to_leader().is_some()
+        ));
+        assert!(matches!(
+            unresolved_response
+                .await
+                .expect("unresolved acknowledgement"),
+            Err(Error::Connect(ref message)) if message.contains("outcome unknown")
+        ));
+        assert_eq!(leader.read().await.1, "node-a:21000");
+        assert_eq!(proxy_index, 0);
+    }
+
     #[tokio::test]
     async fn production_api_reader_reports_malformed_frames() {
         let (client_io, server_io) = tokio::io::duplex(4 * 1024);
@@ -2108,9 +2305,10 @@ mod tests {
         let (read, _write) = client.split(tokio::io::split);
         let read = FragmentCollectorRead::new(read);
         let (tx, _rx) = flume::bounded(1);
+        let pending_reader_response = Arc::new(Mutex::new(None));
         let (finished, result) = oneshot::channel();
         tokio::spawn(async move {
-            let _ = finished.send(stream_reader(read, tx).await);
+            let _ = finished.send(stream_reader(read, tx, pending_reader_response).await);
         });
         let mut server = WebSocket::after_handshake(server_io, Role::Server);
 

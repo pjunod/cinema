@@ -27,7 +27,7 @@ change.
 
 | Milestone | Task branch | PR | State | Blocking evidence |
 |---|---|---|---|---|
-| M1 · frame completion | `codex/cluster-transport-m1` | not opened | eighth-review production-seam regressions in validation; ninth exact review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
+| M1 · frame completion | `codex/cluster-transport-m1` | not opened | all ninth-review findings fixed and validated; tenth exact review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same review | foundations implemented; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | implementation in progress | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
@@ -47,15 +47,15 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | Production writer regressions | pass · 5 surfaces | Serialized Raft/API requests and responses plus the proxy response use their production writer seams over real TLS; queue-consuming Raft/API client and server writers report injected flush failures to their supervisors |
 | Deadline and failure regressions | pass | Flush error, blocked combined write/flush budget, 250 ms Close budget, and scaled server-handshake budget all terminate at their documented boundary |
 | Vendored network suite | pass · 46 tests | Prescribed SQLite+cache+auto-heal+macros `network::` library filter on Rust 1.97.1; no failures or ignored tests |
-| API client stream suite | pass · 19 tests | Includes cancellation-safe mutation ownership, decoded-response-before-handoff ordering, exact-socket proxy refusal ownership, concurrent-refusal coalescing, EOF-before-drain handling, a dedicated leader-control queue that bypasses an application backlog during writer backpressure, stale/same-target leader handling, production request writer, and malformed-frame reader outcome |
+| API client stream suite | pass · 21 tests | Includes cancellation-safe mutation ownership, decoded-response-before-handoff ordering, exact-socket proxy refusal ownership after caller cancellation, cancellation-safe retention of a decoded response blocked behind the bounded reader queue, concurrent-refusal coalescing, proxy/non-proxy EOF-before-drain handling, a dedicated leader-control queue that bypasses an application backlog during writer backpressure, stale/same-target leader handling, production request writer, and malformed-frame reader outcome |
 | Snapshot ownership foundations | pass · 6 executor tests + 5 real SQLite state-machine tests | One running/one queued admission, cancellation-safe deadline/shutdown ownership, a controlled real-file partial write with digest verification, and real SQLite pending/current recovery pass. The remaining full Raft/socket-disconnect acceptance is explicitly open for M5. |
 | Broad optional-feature probe | invalid baseline lane | `--all-features` enables mutually exclusive `cast_ints` modes and reaches unrelated existing optional-feature compile defects; the repository-prescribed feature matrices remain authoritative |
 | Daemon check and denied-warning Clippy | pass | `plurxd --all-targets` completed on Rust 1.97.1 with no warnings |
 | Vendored denied-warning Clippy | pass | Prescribed auto-heal+cache+macros+SQLite and cache-only library lanes pass with `-D warnings`; seven pre-existing Rust 1.97.1 lint findings were corrected rather than suppressed |
 | Dependency resolution | pass | Standalone vendor lock now matches the daemon transport stack: Tokio 1.53.1 and rustls 0.23.42 |
 | Persistent regression map | pass | The transport tests are in `cluster-wal-check`; a command wrapper fails exact filters unless one test executes, the broad snapshot filter requires ten passing tests, and operations contracts preserve both guards |
-| Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the seventh-review fixes, including exact-socket proxy refusal/coalescing and dedicated leader-control/backpressure regressions, with enforced nonzero counts for every exact filter; loopback tests used the normal unsandboxed allowance |
-| Operations contracts | pass · 186 tests | Persistent command/count guards and the existing deployment, CI, and UI-baseline contracts pass; the port-reservation fixture used the normal unsandboxed loopback allowance |
+| Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the ninth-review fixes, including exact-socket proxy refusal/coalescing, caller-cancellation recovery, retained decoded responses, and dedicated leader-control/backpressure regressions, with enforced nonzero counts for every exact filter; loopback tests used the normal unsandboxed allowance |
+| Operations contracts | pass · 186 tests | Persistent command/count guards include the new caller-cancellation recovery regression; the existing deployment, CI, and UI-baseline contracts pass with the port-reservation fixture using the normal unsandboxed loopback allowance |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
 ## Decisions to review — autonomous choices
@@ -81,7 +81,7 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    the pushed task branch are available. PR creation follows after the current
    exact candidate passes its focused lane and an adversarial review round.
 
-## Next checkpoint — exact-SHA ninth review, then the milestone PR
+## Next checkpoint — exact-SHA tenth review, then the milestone PR
 
 The seventh adversarial round found that a caller-issued proxy rotation could
 outlive the socket whose refusal created it, or duplicate an EOF-triggered
@@ -94,10 +94,16 @@ review correctly rejected helper-only proxy tests: the replacements now drive
 the production reader-drain and disconnect-finalization seams, make the biased
 reader-finished event win over queued responses, settle both concurrent
 refusals, and distinguish one endpoint advance from zero or two. The lifecycle
-evidence remains explicitly bounded to 100 in-memory WebSocket task cycles;
-real socket/install acceptance is open for M5. The next checkpoint validates
-and pushes the exact revision, obtains a clean ninth adversarial review, and
-opens the task PR into the effort branch.
+evidence review then found three teardown gaps. Teardown promotion now uses the
+same proxy-mode guard as live handling, a recognized refusal still owns socket
+recovery after its caller drops the acknowledgement receiver, and the reader
+retains a decoded response while the one-slot outcome queue is full so task
+abort cannot discard it. Regressions exercise all three paths through the
+production seams, including non-proxy EOF ambiguity and two refusals separated
+by queue backpressure. Evidence remains explicitly bounded to 100 in-memory
+WebSocket task cycles; real socket/install acceptance is open for M5. The next
+checkpoint pushes the exact revision, obtains a clean tenth adversarial review,
+and opens the task PR into the effort branch.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only
