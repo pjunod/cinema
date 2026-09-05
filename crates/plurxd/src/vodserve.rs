@@ -1277,7 +1277,7 @@ impl Rendition {
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
-    async fn detach_reader(&self, session_id: &str) {
+    async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
         {
             let mut readers = self.readers.lock().await;
             readers.remove(session_id);
@@ -1285,6 +1285,13 @@ impl Rendition {
                 *self.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
             }
         }
+        // Retire this session's parked GETs with its reader, not after them.
+        // `playback_demands` ranks a blocked request against the reader that
+        // asked for it, and with no reader to rank against it falls back to
+        // marking the session's oldest wait foreground — so a departed
+        // viewer's abandoned request outranks a present viewer's and aims the
+        // producer at media nobody is watching until its deadline expires.
+        pool.retire_session(&self.key, session_id);
         // Every VOD session end converges here — terminal, idle reap and
         // reattachment alike — so this is the one place a departing viewer's
         // subtitle window is released. The readers guard is deliberately
@@ -2079,7 +2086,7 @@ impl VodServe {
             .get(session_id)
             .and_then(|session| session.rendition.as_ref().map(Arc::clone));
         if let Some(previous) = previous {
-            previous.detach_reader(session_id).await;
+            previous.detach_reader(&self.shared.pool, session_id).await;
         }
         rendition.attach_reader(session_id, 0).await;
         self.shared.sessions.lock().await.insert(
@@ -3152,7 +3159,7 @@ impl VodServe {
                 pause.wait().await;
                 pause.wait().await;
             }
-            rendition.detach_reader(&session_id).await;
+            rendition.detach_reader(&shared.pool, &session_id).await;
             rendition.kick();
             let serve = VodServe { shared };
             serve.emit_lifecycle(
@@ -4324,7 +4331,7 @@ impl VodServe {
                 // Keep the per-id gate through detach. A resurrection for the
                 // same durable id must attach only after this old reader is
                 // gone, never between registry removal and detach.
-                rendition.detach_reader(&id).await;
+                rendition.detach_reader(&self.shared.pool, &id).await;
                 tracing::info!(
                     session = %session_log_id(&id),
                     rendition = %rendition.key,
@@ -5485,7 +5492,14 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             held: matches!(belief, Producer::Stopped { .. }),
         },
     };
-    let decision = decide_with_marker_prewarm(&manifest, &demands, position, &prewarm_ledgers);
+    // The eviction windows are read before the decision, not inside the sweep
+    // it may ask for: whether anything can be given up is not answerable
+    // without knowing what is protected, and answering it wrongly turns a
+    // capacity stall into a producer that looks like it stopped making
+    // progress.
+    let windows = eviction_windows(shared, rendition).await;
+    let decision =
+        decide_with_marker_prewarm(&manifest, &demands, position, &windows, &prewarm_ledgers);
     let step = retire_completed_marker_prewarm(
         rendition,
         belief,
@@ -5534,7 +5548,6 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             }
         }
         Step::MakeRoom { wanted } => {
-            let windows = eviction_windows(shared, rendition).await;
             match rendition
                 .dir
                 .make_room(&mut manifest, &windows, wanted)
@@ -5717,9 +5730,10 @@ fn decide_with_marker_prewarm(
     manifest: &Manifest,
     demands: &[Demand],
     position: Position,
+    readers: &[ReaderWindow],
     prewarm_ledgers: &[Arc<StdMutex<MarkerPrewarmLedger>>],
 ) -> MarkerPrewarmDecision {
-    let foreground_action = decide(manifest, demands, position);
+    let foreground_action = decide(manifest, demands, position, readers);
     // Real reader demand is always decided first. Only an idle producer or
     // one that would otherwise stop at the ordinary ahead horizon may spend
     // work on a marker destination. Capacity holds never evict or make room
@@ -5754,7 +5768,7 @@ fn decide_with_marker_prewarm(
                 // above proved the playhead has no work left.
                 Demand::waiting_on(candidate.target_entry)
             };
-            (candidate, decide(manifest, &[demand], position))
+            (candidate, decide(manifest, &[demand], position, readers))
         })
         .filter(|(_, action)| {
             matches!(
@@ -6815,7 +6829,11 @@ fn reader_window(reader: &Reader, seconds_per_segment: f64) -> ReaderWindow {
     } else {
         1.0
     };
-    let ahead = ((f64::from(AHEAD_HORIZON_SECONDS) / per) as u32).max(1);
+    // `ceil`, matching `Position::horizon_segments`, which is what bounds how
+    // far the producer may run. Truncating made the protected range shorter
+    // than the range the ahead-fill is allowed to reach, so a sweep under
+    // pressure could evict the segment the producer was about to write again.
+    let ahead = ((f64::from(AHEAD_HORIZON_SECONDS) / per).ceil() as u32).max(1);
     ReaderWindow {
         back: 2,
         playhead,
@@ -7693,7 +7711,7 @@ mod tests {
             working_set: WorkingSet::default(),
         };
         assert_eq!(
-            decide(&manifest, &[Demand::idle_at(frontier)], empty_position),
+            decide(&manifest, &[Demand::idle_at(frontier)], empty_position, &[]),
             Action::Reposition { to: frontier },
             "the foreground fixture itself starts at the playhead window"
         );
@@ -7701,6 +7719,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             empty_position,
+            &[],
             &ledgers,
         );
         assert_eq!(
@@ -7739,6 +7758,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             filled_position,
+            &[],
             &ledgers,
         );
         assert!(matches!(
@@ -7766,6 +7786,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &ledgers,
         );
         assert_eq!(
@@ -7804,6 +7825,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &ledgers,
         );
         assert!(
@@ -8030,6 +8052,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &[Arc::clone(&ledger), Arc::clone(&enabled_ledger)],
         );
         assert_eq!(enabled.owners.len(), 1);
@@ -9796,6 +9819,67 @@ mod tests {
             .expect("playlist bytes")
             .0;
         assert_eq!(first, second, "the playlist is immutable (plan §2.1)");
+    }
+
+    /// A detached viewer stops being demand at the moment their reader goes,
+    /// not when their abandoned request finally times out.
+    ///
+    /// `playback_demands` ranks a blocked request against the reader that
+    /// asked for it. With the reader gone it falls back to marking that
+    /// session's oldest wait foreground — so until the request's HTTP deadline
+    /// expired, a viewer who had already left outranked one who was still
+    /// watching and pointed the producer at media nobody wanted.
+    #[tokio::test]
+    async fn a_detached_viewer_stops_being_demand_with_its_reader() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        create(&serve, &file, "sess-b", "play-b", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        let _leaving = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 40,
+                },
+                "sess-a",
+            )
+            .expect("a parked request for the leaving viewer");
+        let _staying = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 2,
+                },
+                "sess-b",
+            )
+            .expect("a parked request for the viewer who stays");
+        assert_eq!(serve.shared.pool.demands(&rendition.key).len(), 2);
+
+        rendition.detach_reader(&serve.shared.pool, "sess-a").await;
+
+        let remaining = serve.shared.pool.demands(&rendition.key);
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the departing viewer's parked request left with its reader"
+        );
+        assert_eq!(
+            remaining[0].session, "sess-b",
+            "and the viewer still watching keeps theirs"
+        );
     }
 
     /// P1-2. A recorded failure carries its class to the session status.
@@ -11608,7 +11692,7 @@ mod tests {
             &*rendition.manifest.lock().await,
         );
         assert_eq!(
-            decide(&*rendition.manifest.lock().await, &demands, position),
+            decide(&*rendition.manifest.lock().await, &demands, position, &[]),
             Action::Reposition { to: 45 }
         );
         assert!(
@@ -11658,7 +11742,8 @@ mod tests {
                 Position {
                     positioned_at: Some(10),
                     ..position
-                }
+                },
+                &[]
             ),
             Action::Reposition { to: 3 }
         );
@@ -11867,7 +11952,7 @@ mod tests {
             working_set: WorkingSet::default(),
         };
         assert_eq!(
-            decide(&*rendition.manifest.lock().await, &demands, position),
+            decide(&*rendition.manifest.lock().await, &demands, position, &[]),
             Action::Reposition { to: 3 }
         );
         drop(readers);
@@ -11953,7 +12038,7 @@ mod tests {
             working_set: WorkingSet::default(),
         };
         assert_eq!(
-            decide(&manifest, &demands, position),
+            decide(&manifest, &demands, position, &[]),
             Action::Produce { next: 46 },
             "old request3 must not win the publication-to-satisfy interval"
         );

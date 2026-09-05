@@ -600,6 +600,42 @@ seventeenth fail immediately. Existing tests prove a forward target and pool
 limits separately; they do not prove latest-target service after a reversal or
 fair service at the global limit.
 
+**Mostly already corrected — by `abb872ba`, not by this review's own work.**
+Re-reading the code rather than the finding: the reader frontier is *not* a
+monotonic high-water mark. `Reader::accept_control` assigns it, so an accepted
+backward seek moves it back, and once control owns it a segment GET can no
+longer move it at all. The driver reads that current frontier, and the eviction
+window is anchored on it — `[frontier − 2, frontier + 1 + ahead]`, never the
+interval between every position the session has visited. `last_served` survives
+only as telemetry. The narrative above describes the pre-`abb872ba` shape and
+the evidence row's line anchors are dead; both are left in place as the record
+of what was found, with this note as the correction.
+
+**Corrected here.** Two things the re-read did turn up, both real:
+
+- **A departed viewer kept stealing the producer.** `detach_reader` removed the
+  reader but left that session's registered GETs in the wait pool, and
+  `playback_demands` ranks a blocked request against the reader that asked for
+  it — with no reader it falls back to marking that session's oldest wait
+  *foreground*. So an abandoned request outranked a present viewer's and aimed
+  production at media nobody was watching, until its HTTP deadline expired.
+  Detach now retires that session's waits, waking them `Gone` — the same answer
+  their own disconnect would have produced.
+- **A window-locked working set lied about why it was stuck.**
+  `Manifest::has_evictable` answered without looking at what reader windows
+  protect, so `decide` returned `MakeRoom`, the sweep skipped every protected
+  index and freed nothing, and the driver terminated the producer as one that
+  had made no progress. The viewer's control plane saw a producer stop and
+  never saw `no_room` — the one fact that explains why nothing is arriving.
+  `has_evictable` now applies the same guard the sweep does, so the decision is
+  `NoRoom` up front. The eviction window's ahead reach also truncated where the
+  production horizon rounds up, leaving the protected range shorter than the
+  range the producer may run into.
+
+**Still open.** The hard-coded global cap against §2.3's promised setting
+(tracked as P2-10), and fair service at the global limit — no test distributes
+`PoolFull` across sessions.
+
 **Required correction:** split historical delivery telemetry from current
 demand. A large accepted discontinuity creates a new demand generation and
 window; exact in-flight requests retain their own pins, while superseded waits

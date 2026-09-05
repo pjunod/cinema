@@ -283,6 +283,50 @@ impl WaitPool {
         self.wake_rendition(rendition, WaitOutcome::Gone);
     }
 
+    /// Retire everything one departing session still has parked on this
+    /// rendition.
+    ///
+    /// A detached viewer's registered GET otherwise stays in `demands` with no
+    /// reader behind it, and the scheduler's fallback marks a session's oldest
+    /// wait *foreground* precisely because it cannot see a reader to rank it
+    /// against — so an abandoned request outranks a present viewer's and takes
+    /// the producer with it until its HTTP deadline expires. Waking them
+    /// `Gone` is the same answer their own disconnect would have produced, and
+    /// each response dropping its guard is what returns the cap slots.
+    pub fn retire_session(&self, rendition: &str, session: &str) {
+        let mut drained = Vec::new();
+        {
+            let mut state = self.lock();
+            let keys: Vec<WaitKey> = state
+                .waiters
+                .keys()
+                .filter(|key| key.rendition == rendition)
+                .cloned()
+                .collect();
+            for key in keys {
+                let Some(waiters) = state.waiters.get_mut(&key) else {
+                    continue;
+                };
+                let mut kept = Vec::with_capacity(waiters.len());
+                for waiter in waiters.drain(..) {
+                    if waiter.session == session {
+                        drained.push(waiter);
+                    } else {
+                        kept.push(waiter);
+                    }
+                }
+                if kept.is_empty() {
+                    state.waiters.remove(&key);
+                } else {
+                    *waiters = kept;
+                }
+            }
+        }
+        for waiter in drained {
+            let _ = waiter.tx.send(WaitOutcome::Gone);
+        }
+    }
+
     fn wake_rendition(&self, rendition: &str, outcome: WaitOutcome) {
         let mut drained = Vec::new();
         {
@@ -589,6 +633,45 @@ mod tests {
         assert_eq!(a.await, Ok(WaitOutcome::Gone));
         assert_eq!(b.await, Ok(WaitOutcome::Gone));
         assert!(pool.is_empty());
+    }
+
+    /// A departing session's parked requests leave with it.
+    ///
+    /// Left behind they stay in `demands` with no reader to rank them
+    /// against, and the scheduler's fallback marks a session's oldest wait
+    /// foreground for exactly that reason — so an abandoned request outranks a
+    /// present viewer's and aims the producer at media nobody is watching.
+    /// Only that session goes; everyone else's waits survive.
+    #[tokio::test]
+    async fn a_departing_session_takes_its_own_waits_and_nobody_elses() {
+        let pool = WaitPool::new(64, 4);
+        let mut leaving = pool.register(key(1), "gone").expect("leaving wait");
+        let mut staying = pool.register(key(2), "here").expect("staying wait");
+        let mut same_index = pool.register(key(1), "here").expect("shared index");
+        assert_eq!(pool.demands("abcd1234").len(), 3);
+
+        pool.retire_session("abcd1234", "gone");
+
+        assert_eq!(
+            leaving.wait(secs(1)).await,
+            WaitOutcome::Gone,
+            "the departing session's waiter is answered, not left to time out"
+        );
+        let surviving = pool.demands("abcd1234");
+        assert_eq!(surviving.len(), 2, "only the departing session left");
+        assert!(
+            surviving.iter().all(|demand| demand.session == "here"),
+            "a shared index must not take another session's waiter with it"
+        );
+
+        pool.satisfy("abcd1234", 1);
+        assert_eq!(
+            same_index.wait(secs(1)).await,
+            WaitOutcome::Ready,
+            "the other session waiting on the same segment is served normally"
+        );
+        pool.satisfy("abcd1234", 2);
+        assert_eq!(staying.wait(secs(1)).await, WaitOutcome::Ready);
     }
 
     #[tokio::test]
