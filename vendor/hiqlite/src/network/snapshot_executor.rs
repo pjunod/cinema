@@ -85,15 +85,25 @@ where
         if *connection_closed.borrow() {
             return Err(SubmitError::ConnectionClosed);
         }
-        if *self.shutdown.borrow() {
+        // Subscribe before inspecting the value so a concurrent shutdown is
+        // either observed here or wakes the admission/response select below.
+        // Subscribing after the check can lose the notification because a new
+        // receiver treats the current value as already seen.
+        let mut shutdown = self.shutdown.subscribe();
+        if *shutdown.borrow() {
             return Err(SubmitError::ExecutorClosed);
         }
 
         let (response, response_rx) = oneshot::channel();
         let mut pending = Job { request, response };
-        let mut shutdown = self.shutdown.subscribe();
         let admission_deadline = time::Instant::now() + admission_timeout;
         loop {
+            if *connection_closed.borrow() {
+                return Err(SubmitError::ConnectionClosed);
+            }
+            if *shutdown.borrow() {
+                return Err(SubmitError::ExecutorClosed);
+            }
             // Check the absolute boundary before attempting ownership transfer.
             // A successful `try_send` is the only point after which execution
             // is permitted, so AdmissionTimeout can never race an already
@@ -286,6 +296,33 @@ mod tests {
             caller.await.expect("caller task"),
             Err(SubmitError::ExecutorClosed)
         );
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_before_submission_is_latched_and_admits_no_work() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let executor = NodeOwnedExecutor::start({
+            let started = Arc::clone(&started);
+            move |request: usize| {
+                let started = Arc::clone(&started);
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    request
+                }
+            }
+        });
+        executor.request_shutdown();
+        let (_close, mut connection_closed) = watch::channel(false);
+
+        assert_eq!(
+            executor
+                .submit(1, Duration::from_secs(1), &mut connection_closed)
+                .await,
+            Err(SubmitError::ExecutorClosed)
+        );
+        assert!(executor.tx.is_empty());
+        assert_eq!(started.load(Ordering::SeqCst), 0);
         assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
     }
 

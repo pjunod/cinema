@@ -56,10 +56,10 @@ pub(crate) async fn dashboard_query_dynamic(
                 if let Some((id, node)) = err.is_forward_to_leader() {
                     state
                         .tx_client_stream
-                        .send_async(crate::client::stream::ClientStreamReq::LeaderChange((
-                            id,
-                            node.clone(),
-                        ), None))
+                        .send_async(crate::client::stream::ClientStreamReq::LeaderChange(
+                            (id, node.clone()),
+                            None,
+                        ))
                         .await
                         .map_err(|err| Error::Error(err.to_string().into()))?;
                     execute_dynamic(&state, sql.clone()).await?

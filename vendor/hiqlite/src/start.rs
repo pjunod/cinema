@@ -237,10 +237,7 @@ where
         task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
-            server
-                .serve(router_api.into_make_service())
-                .await
-                .unwrap();
+            server.serve(router_api.into_make_service()).await.unwrap();
         }));
     } else {
         let listener = TcpListener::from_std(listener_api)?;

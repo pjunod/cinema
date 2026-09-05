@@ -286,9 +286,9 @@ impl Client {
         let res = self
             .retry_db_after_leader_change(|| self.query_remote_req(query.clone(), consistent))
             .await?
-        .into_iter()
-        .map(crate::Row::Owned)
-        .collect();
+            .into_iter()
+            .map(crate::Row::Owned)
+            .collect();
 
         Ok(res)
     }

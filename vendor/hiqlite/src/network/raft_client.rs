@@ -370,6 +370,34 @@ async fn enqueue_write_or_reset(
     writer_finished: &mut oneshot::Receiver<Result<(), String>>,
 ) -> Result<(), WriteEnqueueError> {
     loop {
+        // Preserve first-terminal ownership: do not hand a frame to the
+        // writer after reset/shutdown/task completion was already latched.
+        // These synchronous checks run before every ownership-transfer
+        // attempt; the select below handles state that changes while full.
+        if shutdown.is_requested() {
+            return Err(WriteEnqueueError::Shutdown);
+        }
+        if reset.epoch() != socket_epoch {
+            return Err(WriteEnqueueError::Reset);
+        }
+        match reader_finished.try_recv() {
+            Ok(outcome) => return Err(WriteEnqueueError::ReaderFinished(outcome)),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                return Err(WriteEnqueueError::ReaderFinished(Err(
+                    "Raft reader task exited without reporting an outcome".into(),
+                )));
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+        }
+        match writer_finished.try_recv() {
+            Ok(outcome) => return Err(WriteEnqueueError::WriterFinished(outcome)),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                return Err(WriteEnqueueError::WriterFinished(Err(
+                    "Raft writer task exited without reporting an outcome".into(),
+                )));
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+        }
         match tx_write.try_send(payload) {
             Ok(()) => return Ok(()),
             Err(flume::TrySendError::Disconnected(payload)) => {
@@ -387,7 +415,7 @@ async fn enqueue_write_or_reset(
             result = &mut *writer_finished => return Err(WriteEnqueueError::WriterFinished(
                 result.unwrap_or_else(|_| Err("Raft writer task exited without reporting an outcome".into()))
             )),
-            () = tokio::task::yield_now() => {}
+            () = time::sleep(Duration::from_millis(1)) => {}
         }
     }
 }
@@ -1258,49 +1286,76 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_connection_failures_return_supervised_tasks_to_baseline() {
-        let active = Arc::new(AtomicU64::new(0));
-        let completed = Arc::new(AtomicU64::new(0));
-        for id in 0..100 {
-            let (sender, receiver) = flume::bounded(1);
-            let active_for_task = Arc::clone(&active);
-            let completed_for_task = Arc::clone(&completed);
-            let task = tokio::spawn(async move {
-                active_for_task.fetch_add(3, Ordering::SeqCst);
-                let reader = tokio::spawn(std::future::pending::<()>());
-                let writer = tokio::spawn(std::future::pending::<()>());
-                assert!(matches!(
-                    receiver.recv_async().await,
-                    Ok(RaftRequest::Shutdown)
-                ));
-                reader.abort();
-                writer.abort();
-                let _ = reader.await;
-                let _ = writer.await;
-                active_for_task.fetch_sub(3, Ordering::SeqCst);
-                completed_for_task.fetch_add(1, Ordering::SeqCst);
-            });
-            let connection = NetworkConnectionStreaming {
-                node: Node {
-                    id,
-                    addr_raft: "127.0.0.1:32401".to_owned(),
-                    addr_api: "127.0.0.1:32402".to_owned(),
-                },
-                sender,
-                reset: Arc::new(ConnectionResetState::default()),
-                shutdown: Arc::new(ConnectionShutdownState::default()),
-                runtime: tokio::runtime::Handle::current(),
-                task: Some(task),
-            };
-            drop(connection);
+        struct ActiveTask(Arc<AtomicU64>);
+
+        impl Drop for ActiveTask {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
         }
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while completed.load(Ordering::SeqCst) != 100 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("all connection supervisors must finish");
+        let active = Arc::new(AtomicU64::new(0));
+        for _ in 0..100 {
+            let (client_io, server_io) = tokio::io::duplex(4 * 1024);
+            let client = WebSocket::after_handshake(client_io, Role::Client);
+            let (read, write) = client.split(tokio::io::split);
+            let read = FragmentCollectorRead::new(read);
+            let (tx_read, rx_read) = flume::bounded(1);
+            let (_request_sender, request_receiver) = flume::bounded(1);
+            let (reader_finished, mut reader_result) = oneshot::channel();
+            let (writer_finished, mut writer_result) = oneshot::channel();
+            let (tx_write, rx_write) = flume::bounded(1);
+
+            let active_reader = Arc::clone(&active);
+            let handle_read = tokio::spawn(async move {
+                active_reader.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveTask(active_reader);
+                let outcome = NetworkStreaming::stream_reader(read, tx_read).await;
+                let _ = reader_finished.send(outcome);
+            });
+            let active_writer = Arc::clone(&active);
+            let handle_write = tokio::spawn(async move {
+                active_writer.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveTask(active_writer);
+                NetworkStreaming::stream_writer(write, rx_write, writer_finished).await;
+            });
+            let peer = tokio::spawn(async move {
+                let mut server = WebSocket::after_handshake(server_io, Role::Server);
+                crate::network::frame_io::write_socket_frame_flushed(
+                    &mut server,
+                    Frame::binary(Payload::Borrowed(b"not a Raft response")),
+                )
+                .await
+                .expect("inject malformed peer response");
+            });
+
+            let reset = ConnectionResetState::default();
+            let shutdown = ConnectionShutdownState::default();
+            let event = tokio::time::timeout(
+                Duration::from_secs(1),
+                next_connected_event(
+                    &reset,
+                    reset.epoch(),
+                    &rx_read,
+                    &request_receiver,
+                    &shutdown,
+                    &mut reader_result,
+                    &mut writer_result,
+                ),
+            )
+            .await
+            .expect("real reader failure must wake the supervisor");
+            assert!(matches!(
+                event,
+                ConnectedEvent::ReaderFinished(Err(ref error))
+                    if error.contains("invalid Raft stream response")
+            ));
+
+            stop_stream_tasks(&tx_write, handle_write, handle_read, true).await;
+            peer.await.expect("peer task must quiesce");
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+        }
+
         assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
@@ -1574,6 +1629,62 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), &mut enqueue).await,
             Ok(Err(WriteEnqueueError::Reset))
         ));
+    }
+
+    #[tokio::test]
+    async fn latched_reset_prevents_write_queue_ownership_transfer() {
+        let (tx_write, rx_write) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        reset.request_reset(socket_epoch);
+        let (_reader_finished, mut reader_result) = oneshot::channel();
+        let (_writer_finished, mut writer_result) = oneshot::channel();
+
+        let result = enqueue_write_or_reset(
+            &tx_write,
+            WritePayload::Payload(b"stale".to_vec()),
+            &reset,
+            socket_epoch,
+            &shutdown,
+            &mut reader_result,
+            &mut writer_result,
+        )
+        .await;
+
+        assert!(matches!(result, Err(WriteEnqueueError::Reset)));
+        assert!(rx_write.is_empty());
+    }
+
+    #[tokio::test]
+    async fn latched_reader_failure_prevents_write_queue_ownership_transfer() {
+        let (tx_write, rx_write) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        let (reader_finished, mut reader_result) = oneshot::channel();
+        let (_writer_finished, mut writer_result) = oneshot::channel();
+        reader_finished
+            .send(Err("reader stopped".into()))
+            .expect("retain reader result receiver");
+
+        let result = enqueue_write_or_reset(
+            &tx_write,
+            WritePayload::Payload(b"stale".to_vec()),
+            &reset,
+            socket_epoch,
+            &shutdown,
+            &mut reader_result,
+            &mut writer_result,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(WriteEnqueueError::ReaderFinished(Err(ref error)))
+                if error == "reader stopped"
+        ));
+        assert!(rx_write.is_empty());
     }
 
     #[tokio::test]

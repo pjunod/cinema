@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+expected="${PLURX_EXPECT_TEST_COUNT:-}"
+is_test=false
+is_exact=false
+for argument in "$@"; do
+  case "$argument" in
+    test) is_test=true ;;
+    --exact) is_exact=true ;;
+  esac
+done
+
+if [[ -z "$expected" && "$is_test" == true && "$is_exact" == true ]]; then
+  expected=1
+fi
+if [[ -z "$expected" ]]; then
+  exec "$@"
+fi
+
+output="$(mktemp "${TMPDIR:-/tmp}/plurx-test-count.XXXXXX")"
+trap 'rm -f "$output"' EXIT
+set +e
+"$@" 2>&1 | tee "$output"
+status=${PIPESTATUS[0]}
+set -e
+if [[ $status -ne 0 ]]; then
+  exit "$status"
+fi
+
+actual="$({
+  awk '
+    /^test result: ok\./ {
+      for (field = 1; field <= NF; field++) {
+        if ($field == "passed;") {
+          total += $(field - 1)
+        }
+      }
+    }
+    END { print total + 0 }
+  ' "$output"
+})"
+if [[ "$actual" != "$expected" ]]; then
+  printf 'expected %s matching Rust test(s), but %s passed\n' "$expected" "$actual" >&2
+  exit 1
+fi

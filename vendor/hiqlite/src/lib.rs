@@ -53,9 +53,10 @@ pub const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(14);
 
 #[cfg(feature = "sqlite")]
 pub use crate::client::{
-    DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
-    DB_LOCAL_READ_PROTOCOL_VERSION,
+    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
 };
+#[cfg(feature = "validation-test-helpers")]
+pub use crate::network::raft_client::validation_set_raft_partitioned;
 #[cfg(feature = "sqlite")]
 pub use crate::snapshot_metrics::{
     DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotLastOutcome,
@@ -63,16 +64,14 @@ pub use crate::snapshot_metrics::{
 };
 #[cfg(feature = "sqlite")]
 use crate::store::state_machine::sqlite::state_machine::Response;
-#[cfg(any(feature = "sqlite", feature = "cache"))]
-pub use crate::{client::Client, error::Error};
-#[cfg(feature = "validation-test-helpers")]
-pub use crate::network::raft_client::validation_set_raft_partitioned;
 #[cfg(feature = "validation-test-helpers")]
 pub use crate::store::state_machine::sqlite::state_machine::{
     validation_applied_payload_counts, validation_applied_sql_class_counts,
     validation_apply_pause_observed, validation_pause_apply,
     validation_register_applied_sql_classes, validation_resume_apply,
 };
+#[cfg(any(feature = "sqlite", feature = "cache"))]
+pub use crate::{client::Client, error::Error};
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use config::{NodeConfig, RaftConfig, RateLimitConfig};
 #[cfg(feature = "sqlite")]

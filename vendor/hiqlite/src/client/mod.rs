@@ -24,13 +24,11 @@ mod listen_notify;
 mod mgmt;
 #[cfg(feature = "sqlite")]
 pub use mgmt::{
-    DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
-    DB_LOCAL_READ_PROTOCOL_VERSION,
+    DB_LOCAL_READ_PROTOCOL_VERSION, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot,
 };
 #[cfg(feature = "sqlite")]
 pub(crate) use mgmt::{
-    DB_QUORUM_WATERMARK_COMPAT_PROBE, DB_QUORUM_WATERMARK_MARKER,
-    db_quorum_watermark_local,
+    DB_QUORUM_WATERMARK_COMPAT_PROBE, DB_QUORUM_WATERMARK_MARKER, db_quorum_watermark_local,
 };
 #[cfg(feature = "sqlite")]
 mod migrate;

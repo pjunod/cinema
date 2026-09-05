@@ -284,6 +284,85 @@ fn try_writer_enqueue(
     }
 }
 
+enum ClientConnectedEvent {
+    Shutdown,
+    ReaderFinished(Result<(), String>),
+    WriterFinished(Result<(), String>),
+    Leader(Result<ClientLeaderChange, flume::RecvError>),
+    Incoming(Result<ClientStreamReq, flume::RecvError>),
+}
+
+enum ClientEnqueueEvent {
+    Shutdown,
+    LeaderChange(Result<ClientLeaderChange, flume::RecvError>),
+    ReaderFinished(Result<(), String>),
+    WriterFinished(Result<(), String>),
+    Retry,
+}
+
+fn latched_client_enqueue_event(
+    stream_shutdown: &tokio::sync::watch::Receiver<bool>,
+    reader_finished: &mut oneshot::Receiver<Result<(), String>>,
+    writer_finished: &mut oneshot::Receiver<Result<(), String>>,
+    leaders: &flume::Receiver<ClientLeaderChange>,
+) -> Option<ClientEnqueueEvent> {
+    if *stream_shutdown.borrow() {
+        return Some(ClientEnqueueEvent::Shutdown);
+    }
+    match reader_finished.try_recv() {
+        Ok(outcome) => return Some(ClientEnqueueEvent::ReaderFinished(outcome)),
+        Err(oneshot::error::TryRecvError::Closed) => {
+            return Some(ClientEnqueueEvent::ReaderFinished(Err(
+                "API reader task exited without reporting an outcome".into(),
+            )));
+        }
+        Err(oneshot::error::TryRecvError::Empty) => {}
+    }
+    match writer_finished.try_recv() {
+        Ok(outcome) => return Some(ClientEnqueueEvent::WriterFinished(outcome)),
+        Err(oneshot::error::TryRecvError::Closed) => {
+            return Some(ClientEnqueueEvent::WriterFinished(Err(
+                "API writer task exited without reporting an outcome".into(),
+            )));
+        }
+        Err(oneshot::error::TryRecvError::Empty) => {}
+    }
+    match leaders.try_recv() {
+        Ok(change) => Some(ClientEnqueueEvent::LeaderChange(Ok(change))),
+        Err(flume::TryRecvError::Disconnected) => Some(ClientEnqueueEvent::LeaderChange(Err(
+            flume::RecvError::Disconnected,
+        ))),
+        Err(flume::TryRecvError::Empty) => None,
+    }
+}
+
+async fn next_client_connected_event(
+    stream_shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    reader_finished: &mut oneshot::Receiver<Result<(), String>>,
+    writer_finished: &mut oneshot::Receiver<Result<(), String>>,
+    leaders: &flume::Receiver<ClientLeaderChange>,
+    reader: &flume::Receiver<ClientStreamReq>,
+    requests: &flume::Receiver<ClientStreamReq>,
+) -> ClientConnectedEvent {
+    select! {
+        biased;
+        _ = stream_shutdown.changed() => ClientConnectedEvent::Shutdown,
+        result = reader_finished => ClientConnectedEvent::ReaderFinished(
+            result.unwrap_or_else(|_| Err(
+                "API reader task exited without reporting an outcome".into()
+            ))
+        ),
+        result = writer_finished => ClientConnectedEvent::WriterFinished(
+            result.unwrap_or_else(|_| Err(
+                "API writer task exited without reporting an outcome".into()
+            ))
+        ),
+        change = leaders.recv_async() => ClientConnectedEvent::Leader(change),
+        result = reader.recv_async() => ClientConnectedEvent::Incoming(result),
+        result = requests.recv_async() => ClientConnectedEvent::Incoming(result),
+    }
+}
+
 const CLIENT_STREAM_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 fn reconnect_delay(
@@ -466,37 +545,46 @@ async fn client_stream(
         let mut force_writer_abort = false;
 
         'connected: loop {
-            let res = select! {
-                biased;
-                _ = stream_shutdown.changed() => {
+            let res = match next_client_connected_event(
+                &mut stream_shutdown,
+                &mut rx_reader_finished,
+                &mut rx_writer_finished,
+                &rx_leader,
+                &rx_read,
+                &rx_req,
+            )
+            .await
+            {
+                ClientConnectedEvent::Shutdown => {
                     shutdown = true;
                     None
                 }
-                reader_result = &mut rx_reader_finished => {
-                    match reader_result {
-                        Ok(Ok(())) => debug!("API WebSocket reader exited"),
-                        Ok(Err(err)) => error!("API WebSocket reader failed: {err}"),
-                        Err(_) => error!("API WebSocket reader task exited without an outcome"),
+                ClientConnectedEvent::ReaderFinished(result) => {
+                    match result {
+                        Ok(()) => debug!("API WebSocket reader exited"),
+                        Err(err) => error!("API WebSocket reader failed: {err}"),
                     }
                     terminal_transport_failure = true;
                     rotate_after_disconnect = client.inner.proxy_mode;
                     None
                 }
-                writer_result = &mut rx_writer_finished => {
-                    match writer_result {
-                        Ok(Ok(())) => error!("API WebSocket writer exited while connected"),
-                        Ok(Err(err)) => error!("API WebSocket writer failed: {err}"),
-                        Err(_) => error!("API WebSocket writer task exited without an outcome"),
+                ClientConnectedEvent::WriterFinished(result) => {
+                    match result {
+                        Ok(()) => error!("API WebSocket writer exited while connected"),
+                        Err(err) => error!("API WebSocket writer failed: {err}"),
                     }
                     terminal_transport_failure = true;
                     force_writer_abort = true;
                     rotate_after_disconnect = client.inner.proxy_mode;
                     None
                 }
-                res = rx_read.recv_async() => Some(res),
-                res = rx_req.recv_async() => Some(res),
-                change = rx_leader.recv_async() => {
-                    let Ok(ClientLeaderChange { leader_id, node, ready }) = change else {
+                ClientConnectedEvent::Leader(change) => {
+                    let Ok(ClientLeaderChange {
+                        leader_id,
+                        node,
+                        ready,
+                    }) = change
+                    else {
                         let _ = tx_write.try_send(WritePayload::Close);
                         shutdown = true;
                         break;
@@ -520,6 +608,7 @@ async fn client_stream(
                     }
                     break;
                 }
+                ClientConnectedEvent::Incoming(result) => Some(result),
             };
             let Some(res) = res else {
                 let _ = tx_write.try_send(WritePayload::Close);
@@ -825,13 +914,6 @@ async fn client_stream(
             };
 
             if let Some((payload, request_id, ack)) = payload {
-                enum EnqueueEvent {
-                    Shutdown,
-                    LeaderChange(Result<ClientLeaderChange, flume::RecvError>),
-                    ReaderFinished(Result<(), String>),
-                    WriterFinished(Result<(), String>),
-                    Retry,
-                }
                 // `flume::SendFut` is not cancellation safe at the ownership
                 // boundary: it can transfer the item before being repolled
                 // Ready. Retain `Full(payload)` explicitly so any terminal
@@ -840,50 +922,59 @@ async fn client_stream(
                 // outcome is treated as unknown until a response arrives.
                 let mut pending_payload = payload;
                 loop {
-                    match try_writer_enqueue(&tx_write, pending_payload) {
-                        TryWriterEnqueue::Sent => {
-                            in_flight.insert(request_id, ack);
-                            break;
+                    let enqueue = if let Some(event) = latched_client_enqueue_event(
+                        &stream_shutdown,
+                        &mut rx_reader_finished,
+                        &mut rx_writer_finished,
+                        &rx_leader,
+                    ) {
+                        event
+                    } else {
+                        match try_writer_enqueue(&tx_write, pending_payload) {
+                            TryWriterEnqueue::Sent => {
+                                in_flight.insert(request_id, ack);
+                                break;
+                            }
+                            TryWriterEnqueue::Disconnected => {
+                                terminal_transport_failure = true;
+                                force_writer_abort = true;
+                                rotate_after_disconnect = client.inner.proxy_mode;
+                                let _ = ack.send(Err(Error::Connect(
+                                    "API transport ended before request dispatch".into(),
+                                )));
+                                break 'connected;
+                            }
+                            TryWriterEnqueue::Full(payload) => {
+                                pending_payload = payload;
+                            }
                         }
-                        TryWriterEnqueue::Disconnected => {
-                            terminal_transport_failure = true;
-                            force_writer_abort = true;
-                            rotate_after_disconnect = client.inner.proxy_mode;
-                            let _ = ack.send(Err(Error::Connect(
-                                "API transport ended before request dispatch".into(),
-                            )));
-                            break 'connected;
-                        }
-                        TryWriterEnqueue::Full(payload) => {
-                            pending_payload = payload;
-                        }
-                    }
 
-                    let enqueue = select! {
-                        biased;
-                        _ = stream_shutdown.changed() => EnqueueEvent::Shutdown,
-                        change = rx_leader.recv_async() => EnqueueEvent::LeaderChange(change),
-                        result = &mut rx_reader_finished => EnqueueEvent::ReaderFinished(
-                            result.unwrap_or_else(|_| Err(
-                                "API reader task exited without reporting an outcome".into()
-                            ))
-                        ),
-                        result = &mut rx_writer_finished => EnqueueEvent::WriterFinished(
-                            result.unwrap_or_else(|_| Err(
-                                "API writer task exited without reporting an outcome".into()
-                            ))
-                        ),
-                        () = tokio::task::yield_now() => EnqueueEvent::Retry,
+                        select! {
+                            biased;
+                            _ = stream_shutdown.changed() => ClientEnqueueEvent::Shutdown,
+                            result = &mut rx_reader_finished => ClientEnqueueEvent::ReaderFinished(
+                                result.unwrap_or_else(|_| Err(
+                                    "API reader task exited without reporting an outcome".into()
+                                ))
+                            ),
+                            result = &mut rx_writer_finished => ClientEnqueueEvent::WriterFinished(
+                                result.unwrap_or_else(|_| Err(
+                                    "API writer task exited without reporting an outcome".into()
+                                ))
+                            ),
+                            change = rx_leader.recv_async() => ClientEnqueueEvent::LeaderChange(change),
+                            () = time::sleep(Duration::from_millis(1)) => ClientEnqueueEvent::Retry,
+                        }
                     };
                     match enqueue {
-                        EnqueueEvent::Retry => continue,
-                        EnqueueEvent::Shutdown => {
+                        ClientEnqueueEvent::Retry => continue,
+                        ClientEnqueueEvent::Shutdown => {
                             shutdown = true;
                             let _ = ack
                                 .send(Err(Error::Connect("client stream manager stopped".into())));
                             break 'connected;
                         }
-                        EnqueueEvent::LeaderChange(change) => {
+                        ClientEnqueueEvent::LeaderChange(change) => {
                             let Ok(ClientLeaderChange {
                                 leader_id,
                                 node,
@@ -917,7 +1008,7 @@ async fn client_stream(
                             )));
                             break 'connected;
                         }
-                        EnqueueEvent::ReaderFinished(outcome) => {
+                        ClientEnqueueEvent::ReaderFinished(outcome) => {
                             if let Err(err) = outcome {
                                 error!("API WebSocket reader failed while enqueueing: {err}");
                             }
@@ -928,7 +1019,7 @@ async fn client_stream(
                             )));
                             break 'connected;
                         }
-                        EnqueueEvent::WriterFinished(outcome) => {
+                        ClientEnqueueEvent::WriterFinished(outcome) => {
                             if let Err(err) = outcome {
                                 error!("API WebSocket writer failed while enqueueing: {err}");
                             }
@@ -1361,6 +1452,51 @@ mod tests {
         assert!(matches!(
             rx.try_recv(),
             Ok(WritePayload::Payload(bytes)) if bytes == b"non-idempotent mutation"
+        ));
+    }
+
+    #[tokio::test]
+    async fn queued_leader_change_wins_before_queued_api_request() {
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reader_finished_tx, mut reader_finished_rx) = oneshot::channel();
+        let (_writer_finished_tx, mut writer_finished_rx) = oneshot::channel();
+        let (leader_tx, leader_rx) = flume::bounded(1);
+        let (_socket_reader_tx, socket_reader_rx) = flume::bounded(1);
+        let (request_tx, request_rx) = flume::bounded(1);
+        leader_tx
+            .send_async(ClientLeaderChange {
+                leader_id: 8,
+                node: Node {
+                    id: 8,
+                    addr_raft: "node-eight:21000".into(),
+                    addr_api: "node-eight:21001".into(),
+                },
+                ready: None,
+            })
+            .await
+            .expect("queue leader change");
+        request_tx
+            .send_async(ClientStreamReq::Shutdown)
+            .await
+            .expect("queue API request");
+
+        let event = next_client_connected_event(
+            &mut shutdown_rx,
+            &mut reader_finished_rx,
+            &mut writer_finished_rx,
+            &leader_rx,
+            &socket_reader_rx,
+            &request_rx,
+        )
+        .await;
+
+        assert!(matches!(
+            event,
+            ClientConnectedEvent::Leader(Ok(ClientLeaderChange { leader_id: 8, .. }))
+        ));
+        assert!(matches!(
+            request_rx.try_recv(),
+            Ok(ClientStreamReq::Shutdown)
         ));
     }
 

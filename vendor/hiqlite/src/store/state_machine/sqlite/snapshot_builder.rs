@@ -1,18 +1,18 @@
 use crate::snapshot_metrics::{SnapshotOperation, SnapshotTimer};
+use crate::store::StorageResult;
 use crate::store::state_machine::sqlite::TypeConfigSqlite;
 use crate::store::state_machine::sqlite::state_machine::StateMachineSqlite;
 use crate::store::state_machine::sqlite::writer::{SnapshotRequest, WriterRequest};
-use crate::store::StorageResult;
 use crate::{Node, NodeId};
 use openraft::{
     RaftSnapshotBuilder, Snapshot, SnapshotMeta, StorageError, StorageIOError, StoredMembership,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{oneshot, Mutex};
 #[cfg(test)]
 use tokio::sync::Notify;
+use tokio::sync::{Mutex, oneshot};
 use tokio::{fs, task};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -112,9 +112,11 @@ impl RaftSnapshotBuilder<TypeConfigSqlite> for SQLiteSnapshotBuilder {
                 source: StorageIOError::write_state_machine(&err),
             })?;
         sync_directory(&self.path_snapshots).await?;
-        let snapshot = fs::File::open(&path).await.map_err(|err| StorageError::IO {
-            source: StorageIOError::read_state_machine(&err),
-        })?;
+        let snapshot = fs::File::open(&path)
+            .await
+            .map_err(|err| StorageError::IO {
+                source: StorageIOError::read_state_machine(&err),
+            })?;
 
         let snapshot_id = snapshot_id.to_string();
         let snapshot = Snapshot {
@@ -189,12 +191,9 @@ pub(crate) async fn snapshots_cleanup(
 
     let mut deletes = Vec::new();
     loop {
-        let Some(entry) = list
-            .next_entry()
-            .await
-            .map_err(|error| StorageError::IO {
-                source: StorageIOError::read(&error),
-            })?
+        let Some(entry) = list.next_entry().await.map_err(|error| StorageError::IO {
+            source: StorageIOError::read(&error),
+        })?
         else {
             break;
         };
@@ -244,15 +243,11 @@ pub(crate) async fn snapshots_cleanup(
     Ok(())
 }
 
-pub(crate) async fn load_current_snapshot(
-    path_snapshots: &str,
-) -> StorageResult<SnapshotPointer> {
+pub(crate) async fn load_current_snapshot(path_snapshots: &str) -> StorageResult<SnapshotPointer> {
     load_snapshot_pointer(path_snapshots, CURRENT_SNAPSHOT_POINTER, true).await
 }
 
-pub(crate) async fn load_pending_snapshot(
-    path_snapshots: &str,
-) -> StorageResult<SnapshotPointer> {
+pub(crate) async fn load_pending_snapshot(path_snapshots: &str) -> StorageResult<SnapshotPointer> {
     load_snapshot_pointer(path_snapshots, PENDING_SNAPSHOT_POINTER, false).await
 }
 
@@ -383,10 +378,7 @@ async fn publish_snapshot_pointer(
 }
 
 pub(crate) async fn clear_pending_snapshot(path_snapshots: &str) -> StorageResult<()> {
-    for name in [
-        PENDING_SNAPSHOT_POINTER,
-        PENDING_SNAPSHOT_POINTER_TEMP,
-    ] {
+    for name in [PENDING_SNAPSHOT_POINTER, PENDING_SNAPSHOT_POINTER_TEMP] {
         let path = format!("{path_snapshots}/{name}");
         match fs::remove_file(path).await {
             Ok(()) => {}
@@ -402,9 +394,11 @@ pub(crate) async fn clear_pending_snapshot(path_snapshots: &str) -> StorageResul
 }
 
 pub(crate) async fn sync_file(path: &str) -> StorageResult<()> {
-    let file = fs::File::open(path).await.map_err(|error| StorageError::IO {
-        source: StorageIOError::write_state_machine(&error),
-    })?;
+    let file = fs::File::open(path)
+        .await
+        .map_err(|error| StorageError::IO {
+            source: StorageIOError::write_state_machine(&error),
+        })?;
     file.sync_all().await.map_err(|error| StorageError::IO {
         source: StorageIOError::write_state_machine(&error),
     })
@@ -494,7 +488,9 @@ mod snapshot_metrics_cleanup_contract {
             pending_id: None,
         }));
         snapshots_cleanup(
-            root.to_str().expect("UTF-8 snapshot cleanup root").to_owned(),
+            root.to_str()
+                .expect("UTF-8 snapshot cleanup root")
+                .to_owned(),
             #[cfg(feature = "backup")]
             backups
                 .to_str()

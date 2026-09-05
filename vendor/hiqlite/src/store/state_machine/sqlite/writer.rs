@@ -34,10 +34,7 @@ pub enum WriterRequest {
     Query(Query),
     Migrate(Migrate),
     Snapshot(SnapshotRequest),
-    SnapshotApply((
-        String,
-        oneshot::Sender<Result<(), StorageError<NodeId>>>,
-    )),
+    SnapshotApply((String, oneshot::Sender<Result<(), StorageError<NodeId>>>)),
     MetadataRead(oneshot::Sender<StateMachineData>),
     MetadataMembership(MetaMembershipRequest),
     Backup(BackupRequest),

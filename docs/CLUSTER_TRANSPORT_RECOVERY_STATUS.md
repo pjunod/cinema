@@ -27,9 +27,9 @@ change.
 
 | Milestone | Task branch | PR | State | Blocking evidence |
 |---|---|---|---|---|
-| M1 · frame completion | `codex/cluster-transport-m1` | not opened | second-review fixes passing | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
-| M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same review | second-review fixes passing | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write retry, and 100-cycle task quiescence pass |
-| M3 · recovery budgets | planned | not opened | not started | Virtual-time exact bounds · config/env/Compose precedence |
+| M1 · frame completion | `codex/cluster-transport-m1` | not opened | third-review fixes pass; fourth review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
+| M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same review | implementation complete; end-to-end acceptance remains open | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 real-socket reader/writer failure cycles pass; full Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | implementation in progress | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
 | M5 · recovery campaign | planned | not opened | not started | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
@@ -46,18 +46,19 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | Buffered-write reproduction | pass · 2 pinned cases | With underlying writability already restored, raw fastwebsockets `write_frame` leaves a 32-byte server response and 3 MiB client request unavailable for 200 ms; explicit flush delivers each on the same socket |
 | Production writer regressions | pass · 5 surfaces | Serialized Raft/API requests and responses plus the proxy response use their production writer seams over real TLS; queue-consuming Raft/API client and server writers report injected flush failures to their supervisors |
 | Deadline and failure regressions | pass | Flush error, blocked combined write/flush budget, 250 ms Close budget, and scaled server-handshake budget all terminate at their documented boundary |
-| Vendored network suite | pass · 42 tests | Prescribed SQLite+cache+auto-heal+macros `network::` library filter on Rust 1.97.1; no failures or ignored tests |
-| API client stream suite | pass · 11 tests | Includes cancellation-safe mutation ownership, stale/same-target leader handling, production request writer, and malformed-frame reader outcome |
-| Snapshot ownership | pass · 5 executor tests + 10 real snapshot tests | One running/one queued admission, cancellation-safe deadline/shutdown ownership, a real-file partial write with digest verification, and real SQLite pending/current recovery all pass |
+| Vendored network suite | pass · 46 tests | Prescribed SQLite+cache+auto-heal+macros `network::` library filter on Rust 1.97.1; no failures or ignored tests |
+| API client stream suite | pass · 12 tests | Includes cancellation-safe mutation ownership, queued leader priority, stale/same-target leader handling, production request writer, and malformed-frame reader outcome |
+| Snapshot ownership foundations | pass · 6 executor tests + 5 real SQLite state-machine tests | One running/one queued admission, cancellation-safe deadline/shutdown ownership, a controlled real-file partial write with digest verification, and real SQLite pending/current recovery pass. The remaining full Raft/socket-disconnect acceptance is explicitly open for M5. |
 | Broad optional-feature probe | invalid baseline lane | `--all-features` enables mutually exclusive `cast_ints` modes and reaches unrelated existing optional-feature compile defects; the repository-prescribed feature matrices remain authoritative |
 | Daemon check and denied-warning Clippy | pass | `plurxd --all-targets` completed on Rust 1.97.1 with no warnings |
 | Vendored denied-warning Clippy | pass | Prescribed auto-heal+cache+macros+SQLite library lane passes with `-D warnings`; seven pre-existing Rust 1.97.1 lint findings were corrected rather than suppressed |
 | Dependency resolution | pass | Standalone vendor lock now matches the daemon transport stack: Tokio 1.53.1 and rustls 0.23.42 |
-| Persistent regression map | pass | The exact transport tests are in `cluster-wal-check` and the operations contract asserts each command appears once with the prescribed feature lane |
-| Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the second-review fixes, including exact persistent mappings; loopback HTTP tests used the normal unsandboxed test allowance |
+| Persistent regression map | pass | The transport tests are in `cluster-wal-check`; a command wrapper fails exact filters unless one test executes, the broad snapshot filter requires ten passing tests, and operations contracts preserve both guards |
+| Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the third-review fixes, including enforced nonzero counts for every exact filter; loopback HTTP tests used the normal unsandboxed test allowance |
+| Operations contracts | pass · 186 tests | Persistent command/count guards and the existing deployment, CI, and UI-baseline contracts pass; the port-reservation fixture used the normal unsandboxed loopback allowance |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
-## Decisions to review — autonomous choices and external blockers
+## Decisions to review — autonomous choices
 
 1. **Work only in an independent clone.** The implementation lives at
    `/private/tmp/plurx-cluster-recovery-agent`. A mistakenly created worktree
@@ -76,20 +77,20 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    is only safe when the connection owns both split tasks and accepted
    snapshot work has a longer-lived owner. Keeping these coupled changes in
    one review prevents the flush fix from shipping with known teardown races.
-5. **Do not merge without a real reviewed PR.** `gh auth status` reported the
-   configured GitHub credential as invalid on 2026-09-05. The authenticated
-   Forgejo Git remote can fetch and push. PR creation/merge remains blocked
-   until an authenticated review API is available; implementation and local
-   evidence continue meanwhile.
+5. **Open and merge only reviewed exact candidates.** Git hosting access and
+   the pushed task branch are available. PR creation follows after the current
+   exact candidate passes its focused lane and an adversarial review round.
 
-## Next checkpoint — exact-SHA third review, then the milestone PR
+## Next checkpoint — exact-SHA fourth review, then the milestone PR
 
-The second adversarial round found cancellation-unsafe queue ownership, stale
-leader-handoff behavior, shutdown ordering, off-runtime cleanup ownership, and
-acceptance-test gaps. Those findings are implemented and the focused compiler,
-strict-lint, snapshot, and cluster/WAL lanes pass. The next checkpoint commits
-and pushes this exact revision, obtains a clean adversarial review of that SHA,
-and opens the M1/M2 task PR into the effort branch.
+The third adversarial round found terminal-priority races, a lost snapshot
+executor shutdown wakeup, hot retry loops, missing zero-test enforcement, and
+overstated M2 evidence. The fixes pace retries, check latched terminal state
+before every ownership transfer, prioritize leader handoff, exercise 100 real
+reader/writer socket failures, enforce test counts, and state the remaining M5
+acceptance gap explicitly. The next checkpoint validates and pushes the exact
+revision, obtains a clean fourth adversarial review, and opens the task PR into
+the effort branch.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only

@@ -1,9 +1,7 @@
 use crate::app_state::AppState;
 use crate::client::LeaderRecovery;
 use crate::client::stream::{ClientLeaderChange, ClientStreamReq};
-use crate::{
-    Client, Error, LEADER_DISCOVERY_TIMEOUT, LEADER_STREAM_HANDOFF_TIMEOUT, Node, NodeId,
-};
+use crate::{Client, Error, LEADER_DISCOVERY_TIMEOUT, LEADER_STREAM_HANDOFF_TIMEOUT, Node, NodeId};
 use openraft::RaftMetrics;
 use std::clone::Clone;
 #[cfg(feature = "sqlite")]
@@ -54,8 +52,8 @@ async fn change_leader_and_wait(
         }
         reopened.await.is_ok()
     })
-        .await
-        .unwrap_or(false)
+    .await
+    .unwrap_or(false)
 }
 
 #[cfg(feature = "sqlite")]
@@ -99,19 +97,12 @@ impl Client {
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
-        retry_request_after_leader_change(
-            request,
-            |error| async move {
-                let recovered = self
-                    .was_leader_update_error(
-                        &error,
-                        &self.inner.leader_db,
-                        &self.inner.tx_client_db,
-                    )
-                    .await;
-                (error, recovered)
-            },
-        )
+        retry_request_after_leader_change(request, |error| async move {
+            let recovered = self
+                .was_leader_update_error(&error, &self.inner.leader_db, &self.inner.tx_client_db)
+                .await;
+            (error, recovered)
+        })
         .await
     }
 
@@ -543,10 +534,7 @@ mod tests {
         #[cfg(feature = "sqlite")]
         assert_eq!(LEADER_REQUEST_MAX_ATTEMPTS, 3);
         assert_eq!(LEADER_DISCOVERY_TIMEOUT, Duration::from_secs(8));
-        assert_eq!(
-            crate::LEADER_STREAM_CONNECT_TIMEOUT,
-            Duration::from_secs(5)
-        );
+        assert_eq!(crate::LEADER_STREAM_CONNECT_TIMEOUT, Duration::from_secs(5));
         assert_eq!(LEADER_STREAM_HANDOFF_TIMEOUT, Duration::from_secs(6));
         assert_eq!(
             crate::LEADER_RETRY_RECOVERY_TIMEOUT,
@@ -651,11 +639,7 @@ mod tests {
         let sender = starter.expect("the first caller starts recovery");
 
         let first_waiter = tokio::spawn(async move {
-            time::timeout(
-                Duration::from_secs(3),
-                LeaderRecovery::wait(first_receiver),
-            )
-            .await
+            time::timeout(Duration::from_secs(3), LeaderRecovery::wait(first_receiver)).await
         });
         tokio::task::yield_now().await;
         time::advance(Duration::from_secs(3)).await;
@@ -749,7 +733,9 @@ mod tests {
             panic!("expected handoff acknowledgement");
         };
         time::advance(Duration::from_millis(4_900)).await;
-        ready.send(()).expect("near-boundary stream acknowledgement");
+        ready
+            .send(())
+            .expect("near-boundary stream acknowledgement");
         assert!(recovery.await.expect("successful handoff"));
     }
 }
