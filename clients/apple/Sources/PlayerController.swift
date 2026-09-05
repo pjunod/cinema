@@ -1497,9 +1497,12 @@ final class PlayerController: ObservableObject {
     }
 
     private let requestPlaybackDecision: @MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps)
+    private let requestHlsSession: @MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart
+    private let readControlSequence: @MainActor (PlaybackControlSession) async -> UInt64?
     private let mediaSelectionPreparation: MediaSelectionPreparation
     private let itemPreparation: ItemPreparation
     private let canPlayOffline: (AVURLAsset) -> Bool
+    private let waitInitialDecisionDeadline: @MainActor () async throws -> Void
 
     init(
         requestPlaybackDecision: @escaping @MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps) = {
@@ -1507,12 +1510,24 @@ final class PlayerController: ObservableObject {
         },
         mediaSelectionPreparation: MediaSelectionPreparation = MediaSelectionPreparation(),
         itemPreparation: ItemPreparation = ItemPreparation(),
-        canPlayOffline: @escaping (AVURLAsset) -> Bool = { $0.assetCache?.isPlayableOffline == true }
+        canPlayOffline: @escaping (AVURLAsset) -> Bool = { $0.assetCache?.isPlayableOffline == true },
+        waitInitialDecisionDeadline: @escaping @MainActor () async throws -> Void = {
+            try await Task.sleep(for: .seconds(20))
+        },
+        requestHlsSession: @escaping @MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart = {
+            try await $0.createHlsSession(fileId: $1, body: $2)
+        },
+        readControlSequence: @escaping @MainActor (PlaybackControlSession) async -> UInt64? = {
+            await $0.controlSequence
+        }
     ) {
         self.requestPlaybackDecision = requestPlaybackDecision
         self.mediaSelectionPreparation = mediaSelectionPreparation
         self.itemPreparation = itemPreparation
         self.canPlayOffline = canPlayOffline
+        self.waitInitialDecisionDeadline = waitInitialDecisionDeadline
+        self.requestHlsSession = requestHlsSession
+        self.readControlSequence = readControlSequence
     }
 
     /// The server retains 180 seconds behind the download frontier: the 120 s
@@ -1699,7 +1714,17 @@ final class PlayerController: ObservableObject {
     /// for it — which is exactly why it is not an `audioOverride`: overriding
     /// would force a copy session onto a choice the server judged direct-
     /// playable, downgrading delivery past what the verdict states.
-    private var prePlaySelection = PrePlaySelection.none
+    private struct InitialDecisionRequest {
+        var selection = PrePlaySelection.none
+        var quality = PlaybackQuality.auto
+        var explicitHeight: Int?
+    }
+    /// Desired input exists before metadata does. Resolved/displayed selections
+    /// below are outputs of this request, never defaults allowed to overwrite it.
+    private var initialDecisionRequest = InitialDecisionRequest()
+    private var prePlaySelection: PrePlaySelection { initialDecisionRequest.selection }
+    private var initialDecisionGeneration = 0
+    private var initialDecisionDeadlineTask: Task<Void, Never>?
     private weak var model: AppModel?
     private var timeObserver: Any?
     private var interactiveSeekTask: Task<Void, Never>?
@@ -1778,7 +1803,7 @@ final class PlayerController: ObservableObject {
     /// the rung a title *starts* on. It shapes the `/decision` request and
     /// resolves to `selectedHeight` once the ladder is known; the player's
     /// own quality menu owns every change after that.
-    private var startingQuality: PlaybackQuality = .auto
+    private var startingQuality: PlaybackQuality { initialDecisionRequest.quality }
     /// Sticky for this playback. Once a native text track has been asked for —
     /// by automatic selection at cold start, or by the viewer — the stream keeps
     /// its subtitle renditions, including after subtitles are turned off again:
@@ -2093,8 +2118,14 @@ final class PlayerController: ObservableObject {
         self.knownDurationMs = durationMs
         self.currentMs = max(0, startMs)
         self.title = title
-        self.prePlaySelection = selection
-        startingQuality = model.playbackQuality
+        let explicitHeight = initialHeight.flatMap { $0 > 0 ? $0 : nil }
+        initialDecisionRequest = InitialDecisionRequest(
+            selection: selection,
+            quality: explicitHeight.map { Self.initialQuality(height: $0) } ?? model.playbackQuality,
+            explicitHeight: explicitHeight
+        )
+        selectedAudio = selection.audioIndex
+        selectedSubtitle = selection.subtitleIndex.flatMap { $0 >= 0 ? $0 : nil }
         selectedHeight = initialHeight.flatMap { $0 > 0 ? $0 : nil }
         selectedQualityIsOriginal = initialHeight == nil && startingQuality == .original
         self.diagnosticProbesEnabled = diagnosticProbesEnabled
@@ -2154,7 +2185,7 @@ final class PlayerController: ObservableObject {
         addPeriodicObserver()
         startPlaybackRecoveryMonitor()
 
-        loadingTask = Task { await load(startMs: startMs, lifecycle: lifecycle) }
+        restartInitialDecision(lifecycle: lifecycle)
     }
 
     #if os(iOS)
@@ -2184,6 +2215,8 @@ final class PlayerController: ObservableObject {
         audioLanguage = model.audioLang
         playbackFailureTitle = Self.playbackStartFailureTitle
         selectedHeight = offline.actualHeight
+        selectedQualityIsOriginal = false
+        initialDecisionRequest = InitialDecisionRequest()
         selectedAudio = offline.audioLabel == nil ? nil : 0
         selectedSubtitle = offline.subtitleIndex == nil ? nil : 0
         deliveredRange = "sdr"
@@ -2368,7 +2401,7 @@ final class PlayerController: ObservableObject {
     /// an automatic loop while still offering recovery without dismissing the
     /// player.
     func retryAfterPlaybackFailure() {
-        guard started, failed, decision != nil else { return }
+        guard started, failed else { return }
         beginViewerAction()
         let position = currentMs
         failed = false
@@ -2378,18 +2411,31 @@ final class PlayerController: ObservableObject {
         // The viewer explicitly asked for another attempt; the automatic
         // brake must not carry a spent window into it.
         recoveryReopenBudget.reset()
-        wantsPlayback = true
+        if decision == nil {
+            // A decision timeout has no AVPlayerItem or server session yet.
+            // Retry the retained inputs and destination, including Pause.
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
+        // Retry authorizes another preparation, not a transport change.
+        let lifecycle = lifecycleGeneration
         #if os(iOS)
         if offlineAssetURL != nil {
-            Task { await reloadOffline(at: position) }
+            Task {
+                guard isCurrentLifecycle(lifecycle) else { return }
+                await reloadOffline(at: position)
+            }
             return
         }
         #endif
-        Task { await reopen(at: position) }
+        Task {
+            guard isCurrentLifecycle(lifecycle) else { return }
+            await reopen(at: position)
+        }
     }
 
     var canRetryPlaybackFailure: Bool {
-        started && decision != nil
+        started
     }
 
     func skip(seconds: Double) {
@@ -2574,7 +2620,11 @@ final class PlayerController: ObservableObject {
     }
 
     func selectSubtitle(_ index: Int?) {
-        guard index != selectedSubtitle else { return }
+        let cold = started && decision == nil
+        let requestedIndex = index ?? PrePlaySelection.subtitleOff
+        guard index != selectedSubtitle
+                || (cold && initialDecisionRequest.selection.subtitleIndex != requestedIndex)
+        else { return }
         if Self.subtitleUsesOverlay(index, in: subtitles), player.isExternalPlaybackActive {
             showPlaybackNotice(Self.pgsOverlayExternalPlaybackNotice)
             return
@@ -2591,6 +2641,16 @@ final class PlayerController: ObservableObject {
         let actionEpoch = beginViewerAction()
         let activeOverlay = pgsOverlayTrackIndex
         selectedSubtitle = index
+        if cold {
+            initialDecisionRequest.selection.subtitleIndex = requestedIndex
+            let destination = seekState.absolute(
+                positionForPlaybackIntent(), durationMs: knownDurationMs
+            )
+            currentMs = destination.target
+            recipeRevision.change()
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
         let route = Self.subtitleSelectionRoute(
             for: index,
             tracks: subtitles,
@@ -2734,8 +2794,15 @@ final class PlayerController: ObservableObject {
         )
         currentMs = destination.target
         selectedAudio = index
-        audioOverride = index
         recipeRevision.change()
+        if started && decision == nil {
+            // The selection-aware decision decides whether this track can
+            // play directly, exactly as it does for a detail-screen choice.
+            initialDecisionRequest.selection.audioIndex = index
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
+        audioOverride = index
         Task {
             retainControlSequence(await playbackControl.reportIntent())
             guard actionEpoch == viewerActionEpoch,
@@ -2747,7 +2814,12 @@ final class PlayerController: ObservableObject {
     }
 
     func selectQuality(_ height: Int?) {
-        guard height != selectedHeight || selectedQualityIsOriginal else { return }
+        let cold = started && decision == nil
+        let requestedQuality = height.map { Self.initialQuality(height: $0) } ?? .auto
+        guard height != selectedHeight || selectedQualityIsOriginal
+                || (cold && (initialDecisionRequest.quality != requestedQuality
+                    || initialDecisionRequest.explicitHeight != height))
+        else { return }
         let actionEpoch = beginViewerAction()
         let destination = seekState.absolute(
             positionForPlaybackIntent(),
@@ -2757,6 +2829,12 @@ final class PlayerController: ObservableObject {
         selectedHeight = height
         selectedQualityIsOriginal = false
         recipeRevision.change()
+        if cold {
+            initialDecisionRequest.quality = requestedQuality
+            initialDecisionRequest.explicitHeight = height
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
         Task {
             retainControlSequence(await playbackControl.reportIntent())
             guard actionEpoch == viewerActionEpoch,
@@ -2779,6 +2857,12 @@ final class PlayerController: ObservableObject {
         selectedHeight = nil
         selectedQualityIsOriginal = true
         recipeRevision.change()
+        if started && decision == nil {
+            initialDecisionRequest.quality = .original
+            initialDecisionRequest.explicitHeight = nil
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
         Task {
             retainControlSequence(await playbackControl.reportIntent())
             guard actionEpoch == viewerActionEpoch,
@@ -2849,7 +2933,7 @@ final class PlayerController: ObservableObject {
     /// in the right timeline.
     private func positionForPlaybackIntent() -> Int {
         if let pending = seekState.pendingMs { return pending }
-        return isChangingStream ? currentMs : realPositionMs()
+        return isChangingStream || player.currentItem == nil ? currentMs : realPositionMs()
     }
 
     /// Report the final position and hand any encoder back immediately.
@@ -2860,6 +2944,9 @@ final class PlayerController: ObservableObject {
         lifecycleGeneration &+= 1
         loadingTask?.cancel()
         loadingTask = nil
+        initialDecisionGeneration &+= 1
+        initialDecisionDeadlineTask?.cancel()
+        initialDecisionDeadlineTask = nil
         // Invalidate every in-flight open before any of its awaits can attach
         // a replacement item after this teardown.
         openGeneration &+= 1
@@ -2953,12 +3040,53 @@ final class PlayerController: ObservableObject {
         started && lifecycleGeneration == generation
     }
 
-    private func load(startMs: Int, lifecycle: Int) async {
-        guard isCurrentLifecycle(lifecycle), let model else { return }
+    private func restartInitialDecision(lifecycle: Int) {
+        guard isCurrentLifecycle(lifecycle), decision == nil else { return }
+        loadingTask?.cancel()
+        initialDecisionDeadlineTask?.cancel()
+        initialDecisionGeneration &+= 1
+        let generation = initialDecisionGeneration
+        let request = initialDecisionRequest
+        let file = fileId
+        let start = positionForPlaybackIntent()
+        failed = false
+        playbackError = nil
+        loadingTask = Task {
+            await load(startMs: start, lifecycle: lifecycle, generation: generation,
+                       file: file, request: request)
+        }
+        initialDecisionDeadlineTask = Task {
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  initialDecisionGeneration == generation, decision == nil else { return }
+            do { try await waitInitialDecisionDeadline() } catch { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  initialDecisionGeneration == generation, decision == nil
+            else { return }
+            initialDecisionGeneration &+= 1
+            loadingTask?.cancel()
+            fail(APIError.transport("Playback decision did not complete in time. Try again."))
+        }
+    }
+
+    private static func initialQuality(height: Int) -> PlaybackQuality {
+        // The decision endpoint accepts only a transcode category; the exact
+        // (including non-menu) height is retained for the session request.
+        PlaybackQuality(rawValue: String(height)) ?? .p1080
+    }
+
+    private func load(
+        startMs: Int, lifecycle: Int, generation: Int,
+        file: Int, request: InitialDecisionRequest
+    ) async {
+        guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+              initialDecisionGeneration == generation, let model else { return }
         do {
-            let playbackDecision = try await requestPlaybackDecision(model, fileId, prePlaySelection, startingQuality)
+            let playbackDecision = try await requestPlaybackDecision(model, file, request.selection, request.quality)
             let decision = playbackDecision.decision
-            guard isCurrentLifecycle(lifecycle) else { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  initialDecisionGeneration == generation else { return }
+            initialDecisionDeadlineTask?.cancel()
+            initialDecisionDeadlineTask = nil
             decisionCaps = playbackDecision.caps
             self.decision = decision
             if knownDurationMs <= 0 { knownDurationMs = decision.source?.durationMs ?? 0 }
@@ -2966,26 +3094,25 @@ final class PlayerController: ObservableObject {
             // now that the ladder says which rungs exist for this source. An
             // explicit `initialHeight` (debug acceptance) is a stronger
             // answer and is left alone.
-            if selectedHeight == nil {
-                selectedHeight = Self.startingHeight(
-                    for: startingQuality,
-                    ladder: decision.ladder ?? []
-                )
-            }
+            selectedHeight = request.explicitHeight ?? Self.startingHeight(
+                for: request.quality, ladder: decision.ladder ?? []
+            )
+            selectedQualityIsOriginal = request.quality == .original
             // `default` on a decision track is the server's own shared-policy
             // pick, not the muxer's flag (crates/plurxd http/stream.rs
             // overwrites both lists from `select_tracks`) — and for a
             // selection-aware request it is the *effective* pick, so a pre-play
             // audio choice already arrives marked here.
-            selectedAudio = decision.audio?.first(where: { $0.default })?.index
+            selectedAudio = request.selection.audioIndex
+                ?? decision.audio?.first(where: { $0.default })?.index
             let wantedSubtitle = Self.initialSubtitleIndex(
-                prePlay: prePlaySelection.subtitleIndex,
+                prePlay: request.selection.subtitleIndex,
                 serverSelection: decision.selection,
                 tracks: decision.subtitles ?? [],
                 deviceSubtitlesOff: model.subLang == "off"
             )
             let blockedByHDR = Self.startingSubtitleBlockedByHDR(
-                prePlaySubtitle: prePlaySelection.subtitleIndex,
+                prePlaySubtitle: request.selection.subtitleIndex,
                 wanted: wantedSubtitle,
                 serverSelection: decision.selection,
                 tracks: decision.subtitles ?? [],
@@ -3019,9 +3146,12 @@ final class PlayerController: ObservableObject {
                 request: PlayerReopenRequest(positionMs: initialPosition)
             )
         } catch {
-            guard isCurrentLifecycle(lifecycle) else { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  initialDecisionGeneration == generation else { return }
+            initialDecisionDeadlineTask?.cancel()
+            initialDecisionDeadlineTask = nil
             reopenQueue.clear()
-            seekState.clear()
+            // The request failed, not the viewer's retained destination.
             fail(error)
         }
     }
@@ -3054,8 +3184,10 @@ final class PlayerController: ObservableObject {
         } catch {
             guard isCurrentLifecycle(lifecycle) else { return }
             reopenQueue.clear()
-            seekState.clear()
-            currentMs = realPositionMs()
+            if player.currentItem != nil {
+                seekState.clear()
+                currentMs = realPositionMs()
+            }
             fail(error)
         }
     }
@@ -3103,6 +3235,8 @@ final class PlayerController: ObservableObject {
         intent: PlayerOpenIntent = .normal
     ) async throws {
         guard let model, started else { return }
+        let lifecycle = lifecycleGeneration
+        let requestedFile = fileId
         openGeneration &+= 1
         let generation = openGeneration
         let requestedRecipeRevision = recipeRevision.desired
@@ -3225,7 +3359,8 @@ final class PlayerController: ObservableObject {
             )
             let aac = copy ? needsAAC(audioIndex: chosenAudio, decision: decision)
                 : nil
-            let reporterControlSequence = await playbackControl.controlSequence
+            let reporterControlSequence = await readControlSequence(playbackControl)
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
             let orderedControlSequence = [reporterControlSequence, pendingControlSequence]
                 .compactMap { $0 }
                 .max()
@@ -3270,8 +3405,9 @@ final class PlayerController: ObservableObject {
             let hls: HlsStart
             do {
                 do {
-                    hls = try await model.createHlsSession(fileId: fileId, body: body)
+                    hls = try await requestHlsSession(model, requestedFile, body)
                 } catch let createError {
+                    guard !Task.isCancelled, isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
                     // The bound half of a stall reopen is the only part of this
                     // body the server can refuse on its own: the predecessor
                     // may have been superseded or retired between the stall and
@@ -3286,7 +3422,7 @@ final class PlayerController: ObservableObject {
                         for: body,
                         after: createError
                     ) else { throw createError }
-                    hls = try await model.createHlsSession(fileId: fileId, body: unbound)
+                    hls = try await requestHlsSession(model, requestedFile, unbound)
                 }
             } catch {
                 // A superseded attempt must not report its own failure over
@@ -4662,9 +4798,20 @@ final class PlayerController: ObservableObject {
 
     private func addPeriodicObserver() {
         let interval = CMTime(seconds: 1, preferredTimescale: 2)
-        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
+        let observe = makePeriodicPlaybackObservation()
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { _ in
+            MainActor.assumeIsolated { observe() }
+        }
+    }
+
+    /// The actual timer callback owns a title, and only samples an attached
+    /// item outside preparation. A no-item clock is not a resume position;
+    /// removing an observer does not revoke a callback already queued by AVF.
+    func makePeriodicPlaybackObservation() -> @MainActor () -> Void {
+        let lifecycle = lifecycleGeneration
+        return { [weak self] in
+                guard let self, self.isCurrentLifecycle(lifecycle),
+                      let item = self.player.currentItem, !self.isChangingStream else { return }
                 // Keep an interactive target on screen while its item is being
                 // prepared. Reading the predecessor here was the visible snap
                 // back after a progress-bar or skip-button command.
@@ -4700,8 +4847,11 @@ final class PlayerController: ObservableObject {
                     hasVideoSource: self.decision?.source?.videoCodec != nil,
                     playing: isActuallyPlaying
                 ) {
+                    let actionEpoch = self.viewerActionEpoch
                     Task { @MainActor [weak self] in
-                        guard let self else { return }
+                        guard let self, self.isCurrentLifecycle(lifecycle),
+                              self.player.currentItem === item, !self.isChangingStream,
+                              self.viewerActionEpoch == actionEpoch else { return }
                         await self.handleBlackFrameDecodeFailure(at: observedPosition)
                     }
                 }
@@ -4729,7 +4879,6 @@ final class PlayerController: ObservableObject {
                     self.report(self.currentMs)
                     self.reportObservedPlaybackStalls(at: self.currentMs)
                 }
-            }
         }
     }
 
@@ -6179,10 +6328,12 @@ final class PlayerController: ObservableObject {
     /// viewer's language there. Best effort: no match leaves AVPlayer's own
     /// default in place, which is what mismatched criteria used to produce.
     private func applyPreferredAudioSelection(to item: AVPlayerItem, expectedActionEpoch: Int) async {
-        guard audioOverride == nil, started, player.currentItem === item,
+        guard audioOverride == nil, prePlaySelection.audioIndex == nil,
+              started, player.currentItem === item,
               expectedActionEpoch == viewerActionEpoch else { return }
         let apply = await mediaSelectionPreparation.audio(audioLanguage, item)
         guard started, player.currentItem === item, audioOverride == nil,
+              prePlaySelection.audioIndex == nil,
               expectedActionEpoch == viewerActionEpoch else { return }
         apply?()
     }
