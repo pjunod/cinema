@@ -306,6 +306,21 @@ missing = "fail"
 timeout_seconds = 600
 
 [[checks]]
+id = "live-tv-two-node"
+title = "Two real daemons relay one tuner and never take it over on elapsed time alone"
+command = "make live-tv-two-node-check"
+profiles = ["full", "nightly"]
+platforms = ["linux"]
+requires = ["cargo", "make", "ffmpeg"]
+requires_files = ["crates/plurxd/tests/live_tv_two_node.rs"]
+# The fixture device answers on the ports a real HDHomeRun uses, because that is
+# what `pinned_url` addresses. A host that cannot bind 80 and 5004 cannot host
+# the device, and saying so is more honest than passing without a tuner.
+preflight = '''python3 -c "import socket; [socket.socket().bind(('0.0.0.0', p)) for p in (80, 5004)]"'''
+missing = "skip"
+timeout_seconds = 1800
+
+[[checks]]
 id = "playback-exhaustive"
 title = "Every browser playback fixture, quality, and restart case"
 command = "make playback-full"
@@ -630,9 +645,10 @@ paths = [
   "tests/web/live-tv.test.js",
   "scripts/live-tv-browser",
   "scripts/live-tv-endless",
+  "crates/plurxd/tests/live_tv_two_node.rs",
   "docs/HDHOMERUN-LIVE-TV-*.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]
