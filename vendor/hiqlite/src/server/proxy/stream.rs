@@ -5,7 +5,8 @@ use crate::network::api::{
 };
 use crate::network::handshake::HandshakeSecret;
 use crate::network::frame_io::{
-    write_close_frame_flushed, write_frame_flushed, write_socket_close_frame_flushed,
+    CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
+    write_socket_close_frame_flushed,
 };
 use crate::server::proxy::handlers::AppStateExt;
 use crate::store::state_machine::sqlite::state_machine::Query;
@@ -50,8 +51,7 @@ pub async fn handle_socket(
             match req {
                 WsWriteMsg::Payload(resp) => {
                     let bytes = serialize(&resp).unwrap();
-                    let frame = Frame::binary(Payload::Borrowed(&bytes));
-                    if let Err(err) = write_frame_flushed(&mut write, frame).await {
+                    if let Err(err) = write_proxy_response_frame(&mut write, &bytes).await {
                         error!("Error during WebSocket write: {}", err);
                         // // if we have a WebSocket error, save all open requests into the client_buffer
                         // let payload = bincode::serialize(&resp).unwrap();
@@ -122,6 +122,7 @@ pub async fn handle_socket(
         let _ = tx_reader_finished.send(outcome);
     });
 
+    let mut writer_failed = false;
     loop {
         let req = tokio::select! {
             biased;
@@ -131,6 +132,7 @@ pub async fn handle_socket(
                     Ok(Err(err)) => error!("proxy WebSocket writer failed: {err}"),
                     Err(_) => error!("proxy WebSocket writer panicked or was cancelled"),
                 }
+                writer_failed = true;
                 break;
             }
             reader = &mut rx_reader_finished => {
@@ -312,15 +314,38 @@ pub async fn handle_socket(
     }
 
     tx_connection_closed.send_replace(true);
-    let _ = tx_write.try_send(WsWriteMsg::Break);
+    let mut handle_write = handle_write;
+    let writer_finished = if writer_failed {
+        false
+    } else {
+        tokio::time::timeout(CLOSE_WRITE_TIMEOUT, async {
+            tx_write.send_async(WsWriteMsg::Break).await.ok()?;
+            Some((&mut handle_write).await)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    };
     drop(tx_write);
-
-    handle_write.abort();
+    if !writer_finished {
+        handle_write.abort();
+        let _ = handle_write.await;
+    }
     handle_read.abort();
-    let _ = handle_write.await;
     let _ = handle_read.await;
 
     Ok(())
+}
+
+async fn write_proxy_response_frame<S>(
+    write: &mut fastwebsockets::WebSocketWrite<S>,
+    bytes: &[u8],
+) -> Result<(), fastwebsockets::WebSocketError>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    write_frame_flushed(write, Frame::binary(Payload::Borrowed(bytes))).await
 }
 
 #[inline]

@@ -1,6 +1,7 @@
 use crate::network::handshake::HandshakeSecret;
 use crate::network::frame_io::{
-    write_close_frame_flushed, write_frame_flushed, write_socket_close_frame_flushed,
+    CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
+    write_socket_close_frame_flushed,
 };
 use crate::network::{AppStateExt, Error, serialize_network};
 use axum::response::IntoResponse;
@@ -193,8 +194,7 @@ async fn handle_socket(
             };
             match req {
                 WsWriteMsg::Payload(bytes) => {
-                    let frame = Frame::binary(Payload::Owned(bytes));
-                    if let Err(err) = write_frame_flushed(&mut write, frame).await {
+                    if let Err(err) = write_raft_response_frame(&mut write, bytes).await {
                         error!("Error during WebSocket write: {}", err);
                         break Err(err.to_string());
                     }
@@ -261,6 +261,7 @@ async fn handle_socket(
         let _ = tx_reader_finished.send(outcome);
     });
 
+    let mut writer_failed = false;
     loop {
         let req = tokio::select! {
             biased;
@@ -270,6 +271,7 @@ async fn handle_socket(
                     Ok(Err(err)) => error!("Raft server WebSocket writer failed: {err}"),
                     Err(_) => error!("Raft server WebSocket writer panicked or was cancelled"),
                 }
+                writer_failed = true;
                 break;
             }
             reader = &mut rx_reader_finished => {
@@ -291,78 +293,38 @@ async fn handle_socket(
             break;
         }
 
-        // Note: This was wrapped inside a `tokio::task` before just in case we would be able
-        // to achieve higher throughput. After in depth testing, at least with openraft 0.9, it
-        // has no benefit at all to do the extra work. Instead, it is actually a tiny performance
-        // penalty if we spawn a task each time - requests are coming in in-order anyway.
-        let (request_id, payload) = match req {
-            #[cfg(feature = "sqlite")]
-            RaftStreamRequest::AppendDB((request_id, req)) => {
-                let res = state.raft_db.raft.append_entries(req).await;
-                if let Err(RaftError::Fatal(Fatal::Stopped)) = &res {
-                    debug!("Raft DB stopped - exiting");
-                    state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
-                    break;
+        let mut work_connection_closed = tx_connection_closed.subscribe();
+        let work = execute_raft_request(&state, req, &mut work_connection_closed);
+        tokio::pin!(work);
+        let work_result = tokio::select! {
+            biased;
+            writer = &mut rx_writer_finished => {
+                match writer {
+                    Ok(Ok(())) => error!("Raft server WebSocket writer exited while connected"),
+                    Ok(Err(err)) => error!("Raft server WebSocket writer failed: {err}"),
+                    Err(_) => error!("Raft server WebSocket writer panicked or was cancelled"),
                 }
-                (request_id, RaftStreamResponsePayload::AppendDB(res))
+                writer_failed = true;
+                None
             }
-            #[cfg(feature = "sqlite")]
-            RaftStreamRequest::VoteDB((request_id, req)) => {
-                let res = state.raft_db.raft.vote(req).await;
-                (request_id, RaftStreamResponsePayload::VoteDB(res))
-            }
-            #[cfg(feature = "sqlite")]
-            RaftStreamRequest::SnapshotDB((request_id, req)) => {
-                let res = state.raft_db.raft.install_snapshot(req).await;
-                (request_id, RaftStreamResponsePayload::SnapshotDB(res))
-            }
-
-            #[cfg(feature = "cache")]
-            RaftStreamRequest::AppendCache((request_id, req)) => {
-                let res = state.raft_cache.raft.append_entries(req).await;
-                if let Err(RaftError::Fatal(Fatal::Stopped)) = &res {
-                    debug!("Raft Cache stopped - exiting");
-                    state
-                        .raft_cache
-                        .is_raft_stopped
-                        .store(true, Ordering::Relaxed);
-                    break;
+            reader = &mut rx_reader_finished => {
+                match reader {
+                    Ok(Ok(())) => debug!("Raft server WebSocket reader exited"),
+                    Ok(Err(err)) => error!("Raft server WebSocket reader failed: {err}"),
+                    Err(_) => error!("Raft server WebSocket reader panicked or was cancelled"),
                 }
-                (request_id, RaftStreamResponsePayload::AppendCache(res))
+                None
             }
-            #[cfg(feature = "cache")]
-            RaftStreamRequest::VoteCache((request_id, req)) => {
-                let res = state.raft_cache.raft.vote(req).await;
-                (request_id, RaftStreamResponsePayload::VoteCache(res))
-            }
-            #[cfg(feature = "cache")]
-            RaftStreamRequest::SnapshotCache((request_id, req)) => {
-                let res = state.raft_cache.raft.install_snapshot(req).await;
-                (request_id, RaftStreamResponsePayload::SnapshotCache(res))
-            }
-
-            #[cfg(feature = "cache")]
-            RaftStreamRequest::RemoveMembershipCache(node_id) => {
-                debug!("Node drop membership request for Node: {}\n", node_id);
-
-                // we want to hold the lock until we finished to not end up with race conditions
-                let _lock = state.raft_lock.lock().await;
-
-                let metrics = helpers::get_raft_metrics(&state, &RaftType::Cache).await;
-                let members = metrics.membership_config;
-
-                let mut nodes_set = BTreeSet::new();
-                for (id, _node) in members.nodes() {
-                    if *id != node_id {
-                        nodes_set.insert(*id);
-                    }
-                }
-
-                if let Err(err) =
-                    helpers::change_membership(&state, &RaftType::Cache, nodes_set, false).await
-                {
-                    error!("Error removing remote Cache Member: {:?}", err);
-                }
+            result = &mut work => Some(result),
+        };
+        let Some(work_result) = work_result else {
+            break;
+        };
+        let (request_id, payload) = match work_result {
+            Ok(Some(response)) => response,
+            Ok(None) => break,
+            Err(err) => {
+                error!("Raft snapshot request was not admitted or lost its response: {err:?}");
                 break;
             }
         };
@@ -381,6 +343,7 @@ async fn handle_socket(
                     Ok(Err(err)) => error!("Raft server WebSocket writer failed: {err}"),
                     Err(_) => error!("Raft server WebSocket writer panicked or was cancelled"),
                 }
+                writer_failed = true;
                 break;
             }
             _ = &mut rx_reader_finished => break,
@@ -394,14 +357,157 @@ async fn handle_socket(
     }
 
     tx_connection_closed.send_replace(true);
-    let _ = tx_write.try_send(WsWriteMsg::Break);
+    let mut handle_write = handle_write;
+    let writer_finished = if writer_failed {
+        false
+    } else {
+        tokio::time::timeout(CLOSE_WRITE_TIMEOUT, async {
+            tx_write.send_async(WsWriteMsg::Break).await.ok()?;
+            Some((&mut handle_write).await)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    };
     drop(tx_write);
-    handle_write.abort();
+    if !writer_finished {
+        handle_write.abort();
+        let _ = handle_write.await;
+    }
     handle_read.abort();
-    let _ = handle_write.await;
     let _ = handle_read.await;
 
     debug!("handle_socket exiting");
 
     Ok(())
+}
+
+async fn write_raft_response_frame<S>(
+    write: &mut fastwebsockets::WebSocketWrite<S>,
+    bytes: Vec<u8>,
+) -> Result<(), fastwebsockets::WebSocketError>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    write_frame_flushed(write, Frame::binary(Payload::Owned(bytes))).await
+}
+
+async fn execute_raft_request(
+    state: &AppStateExt,
+    request: RaftStreamRequest,
+    connection_closed: &mut watch::Receiver<bool>,
+) -> Result<
+    Option<(usize, RaftStreamResponsePayload)>,
+    crate::network::snapshot_executor::SubmitError,
+> {
+    let response = match request {
+        #[cfg(feature = "sqlite")]
+        RaftStreamRequest::AppendDB((request_id, request)) => {
+            let result = state.raft_db.raft.append_entries(request).await;
+            if let Err(RaftError::Fatal(Fatal::Stopped)) = &result {
+                debug!("Raft DB stopped - exiting");
+                state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
+                return Ok(None);
+            }
+            (request_id, RaftStreamResponsePayload::AppendDB(result))
+        }
+        #[cfg(feature = "sqlite")]
+        RaftStreamRequest::VoteDB((request_id, request)) => {
+            let result = state.raft_db.raft.vote(request).await;
+            (request_id, RaftStreamResponsePayload::VoteDB(result))
+        }
+        #[cfg(feature = "sqlite")]
+        RaftStreamRequest::SnapshotDB((request_id, request)) => {
+            let result = state
+                .raft_db
+                .snapshot_executor
+                .submit(
+                    request,
+                    crate::network::frame_io::FRAME_WRITE_TIMEOUT,
+                    connection_closed,
+                )
+                .await?;
+            (request_id, RaftStreamResponsePayload::SnapshotDB(result))
+        }
+        #[cfg(feature = "cache")]
+        RaftStreamRequest::AppendCache((request_id, request)) => {
+            let result = state.raft_cache.raft.append_entries(request).await;
+            if let Err(RaftError::Fatal(Fatal::Stopped)) = &result {
+                debug!("Raft Cache stopped - exiting");
+                state
+                    .raft_cache
+                    .is_raft_stopped
+                    .store(true, Ordering::Relaxed);
+                return Ok(None);
+            }
+            (request_id, RaftStreamResponsePayload::AppendCache(result))
+        }
+        #[cfg(feature = "cache")]
+        RaftStreamRequest::VoteCache((request_id, request)) => {
+            let result = state.raft_cache.raft.vote(request).await;
+            (request_id, RaftStreamResponsePayload::VoteCache(result))
+        }
+        #[cfg(feature = "cache")]
+        RaftStreamRequest::SnapshotCache((request_id, request)) => {
+            let result = state
+                .raft_cache
+                .snapshot_executor
+                .submit(
+                    request,
+                    crate::network::frame_io::FRAME_WRITE_TIMEOUT,
+                    connection_closed,
+                )
+                .await?;
+            (request_id, RaftStreamResponsePayload::SnapshotCache(result))
+        }
+        #[cfg(feature = "cache")]
+        RaftStreamRequest::RemoveMembershipCache(node_id) => {
+            debug!("Node drop membership request for Node: {}\n", node_id);
+            let _lock = state.raft_lock.lock().await;
+            let metrics = helpers::get_raft_metrics(state, &RaftType::Cache).await;
+            let members = metrics.membership_config;
+            let mut nodes_set = BTreeSet::new();
+            for (id, _node) in members.nodes() {
+                if *id != node_id {
+                    nodes_set.insert(*id);
+                }
+            }
+            if let Err(err) =
+                helpers::change_membership(state, &RaftType::Cache, nodes_set, false).await
+            {
+                error!("Error removing remote Cache Member: {:?}", err);
+            }
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fastwebsockets::Role;
+    use openraft::Vote;
+    use openraft::raft::InstallSnapshotResponse;
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_raft_response_writer_flushes_serialized_response_through_tls() {
+        let response = RaftStreamResponse {
+            request_id: 9,
+            payload: RaftStreamResponsePayload::SnapshotDB(Ok(InstallSnapshotResponse {
+                vote: Vote::new_committed(1, 1),
+            })),
+        };
+        let bytes = serialize_network(&response);
+        crate::network::frame_io::tests::exercise_gated_tls_writer(
+            Role::Server,
+            bytes,
+            true,
+            |mut write, bytes| async move { write_raft_response_frame(&mut write, bytes).await },
+        )
+        .await;
+    }
 }

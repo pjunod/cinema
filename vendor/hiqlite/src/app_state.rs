@@ -88,6 +88,8 @@ impl AppState {
 #[cfg(feature = "sqlite")]
 pub struct StateRaftDB {
     pub raft: openraft::Raft<TypeConfigSqlite>,
+    pub(crate) snapshot_executor:
+        crate::network::snapshot_executor::SnapshotExecutor<TypeConfigSqlite>,
     pub shutdown_handle: hiqlite_wal::ShutdownHandle,
     pub wal_status: hiqlite_wal::WalStatusHandle,
     pub sql_writer: flume::Sender<WriterRequest>,
@@ -100,6 +102,8 @@ pub struct StateRaftDB {
 #[cfg(feature = "cache")]
 pub struct StateRaftCache {
     pub raft: openraft::Raft<TypeConfigKV>,
+    pub(crate) snapshot_executor:
+        crate::network::snapshot_executor::SnapshotExecutor<TypeConfigKV>,
     pub tx_caches: Vec<flume::Sender<CacheRequestHandler>>,
     #[cfg(feature = "listen_notify")]
     pub tx_notify: flume::Sender<NotifyRequest>,

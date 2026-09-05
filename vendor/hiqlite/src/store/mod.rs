@@ -95,6 +95,8 @@ pub(crate) async fn start_raft_db(
     )
     .await
     .expect("Raft create failed");
+    let snapshot_executor =
+        crate::network::snapshot_executor::start_snapshot_executor(raft.clone());
 
     init::init_pristine_node_1_db(
         &raft,
@@ -112,6 +114,7 @@ pub(crate) async fn start_raft_db(
 
     Ok(StateRaftDB {
         raft,
+        snapshot_executor,
         shutdown_handle,
         wal_status,
         sql_writer,
@@ -193,6 +196,8 @@ where
 
         (raft, None)
     };
+    let snapshot_executor =
+        crate::network::snapshot_executor::start_snapshot_executor(raft.clone());
 
     init::init_pristine_node_1_cache(
         &raft,
@@ -211,6 +216,7 @@ where
 
     Ok(StateRaftCache {
         raft,
+        snapshot_executor,
         tx_caches,
         #[cfg(feature = "listen_notify")]
         tx_notify,

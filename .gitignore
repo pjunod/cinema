@@ -1,4 +1,6 @@
 /target
+/vendor/hiqlite/target
+/vendor/hiqlite-wal/target
 /fuzz/artifacts
 /fuzz/target
 /spikes/hiqlite-m0/target

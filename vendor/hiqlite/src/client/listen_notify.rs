@@ -53,11 +53,18 @@ pub(crate) mod remote {
                     info!("Connecting to listen SSE stream: {}", url);
 
                     // TODO what about tls_no_verify in this case?
-                    eventsource_client::ClientBuilder::for_url(&url)
+                    let builder = eventsource_client::ClientBuilder::for_url(&url)
                         .expect("invalid listen SSE URL")
                         .header(HEADER_NAME_SECRET, &api_secret)
-                        .unwrap()
-                        .build()
+                        .unwrap();
+                    if tls {
+                        Box::new(builder.build()) as Box<dyn ClientES>
+                    } else {
+                        // The HTTPS connector loads the native trust store even
+                        // for an http:// URL. Headless runners may have no
+                        // keychain, and plaintext listeners do not need one.
+                        Box::new(builder.build_http()) as Box<dyn ClientES>
+                    }
                 };
 
                 let mut stream = client.stream();

@@ -93,14 +93,14 @@ impl Client {
     #[cfg(feature = "sqlite")]
     pub(crate) async fn retry_db_after_leader_change<T, F, Fut>(
         &self,
-        mut request: F,
+        request: F,
     ) -> Result<T, Error>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
         retry_request_after_leader_change(
-            || request(),
+            request,
             |error| async move {
                 let recovered = self
                     .was_leader_update_error(

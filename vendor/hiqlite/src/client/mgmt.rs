@@ -150,7 +150,6 @@ impl Client {
     /// Subscribe to database Raft metrics only when this client owns the local
     /// node. Remote clients return an error; this method never performs IO.
     #[cfg(feature = "sqlite")]
-    #[must_use]
     pub fn local_db_raft_metrics(&self) -> Result<LocalDbRaftMetrics, Error> {
         let state = self.inner.state.as_ref().ok_or_else(|| {
             Error::Connect("local database Raft metrics require a local node client".to_owned())
@@ -165,7 +164,6 @@ impl Client {
     /// Remote clients fail immediately. Reading this handle performs no
     /// management request, storage operation, allocation, or lock acquisition.
     #[cfg(feature = "sqlite")]
-    #[must_use]
     pub fn local_db_snapshot_metrics(&self) -> Result<crate::LocalDbSnapshotMetrics, Error> {
         self.inner.state.as_ref().ok_or_else(|| {
             Error::Connect("local database snapshot metrics require a local node client".to_owned())
@@ -178,7 +176,6 @@ impl Client {
     /// The handle reads only the live log store's owned locks and never opens
     /// or walks WAL files. Remote clients fail immediately.
     #[cfg(feature = "sqlite")]
-    #[must_use]
     pub fn local_db_wal_status(&self) -> Result<hiqlite_wal::WalStatusHandle, Error> {
         let state = self.inner.state.as_ref().ok_or_else(|| {
             Error::Connect("local database WAL status requires a local node client".to_owned())
@@ -550,7 +547,18 @@ impl Client {
                 .raft_cache
                 .is_raft_stopped
                 .store(true, Ordering::Relaxed);
+            state.raft_cache.snapshot_executor.request_shutdown();
             state.raft_cache.raft.shutdown().await?;
+            if !state
+                .raft_cache
+                .snapshot_executor
+                .wait_for_shutdown(Duration::from_secs(5))
+                .await
+            {
+                return Err(Error::Error(
+                    "cache snapshot executor still owns work during shutdown".into(),
+                ));
+            }
             if let Some(handle) = &state.raft_cache.shutdown_handle {
                 handle.shutdown().await?;
             }
@@ -581,7 +589,18 @@ impl Client {
 
             state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
 
+            state.raft_db.snapshot_executor.request_shutdown();
             state.raft_db.raft.shutdown().await?;
+            if !state
+                .raft_db
+                .snapshot_executor
+                .wait_for_shutdown(Duration::from_secs(5))
+                .await
+            {
+                return Err(Error::Error(
+                    "sqlite snapshot executor still owns work during shutdown".into(),
+                ));
+            }
             info!("Shutting down sqlite logs writer");
             state.raft_db.shutdown_handle.shutdown().await?;
 

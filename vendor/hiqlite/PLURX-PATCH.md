@@ -57,13 +57,21 @@ deployments:
   connection deadline. The real-TLS frame regressions hold the ciphertext tail
   of both client and server writes, including 3 MiB frames, and prove that the
   same socket completes after backpressure clears.
+- Raft and cluster-API connection supervisors own and join both split socket
+  tasks. Reader EOF, malformed frames, writer errors, task panics, reset,
+  shutdown, and leader handoff all wake admission even when a bounded queue is
+  full. Accepted snapshot receive operations move to one node-owned executor
+  per Raft group with one running and one queued request; disconnecting a
+  socket drops its reply but cannot cancel a partial file write. Queued work
+  whose reply owner disappeared is skipped before execution, and graceful
+  node shutdown reports rather than detaches an unfinished snapshot owner.
 - A dropped OpenRaft RPC signals its WebSocket manager through a dedicated
   retained notification instead of best-effort enqueueing `Reset` behind the
   request itself. The old one-slot queue could be full at the hard deadline,
   lose the reset, and leave a leader permanently waiting on the abandoned
   connection after a follower had installed its snapshot. The
-  `dropping_rpc_wait_signals_stream_reset_when_request_queue_is_full` regression
-  keeps cancellation independent of request-queue pressure.
+  `handler_coordinator_consumes_retained_reset_when_request_queue_is_full`
+  regression keeps cancellation independent of request-queue pressure.
 - Snapshot build, install, read, and asynchronous cleanup share one
   file-ownership boundary. Completed files use fsync plus atomic rename, and a
   separately fsynced pointer publishes the exact current generation (including

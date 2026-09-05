@@ -559,20 +559,20 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 error!("Error during 'PRAGMA optimize': {}", err);
                             }
 
-                            let metadata = conn
-                                .query_row(
-                                    "SELECT data FROM _metadata WHERE key = 'meta'",
-                                    (),
-                                    |row| row.get::<_, Vec<u8>>(0),
-                                )
-                                .map_err(|err| StorageError::IO {
-                                    source: StorageIOError::read_state_machine(&err),
-                                })
-                                .and_then(|meta_bytes| {
+                            let metadata = match conn.query_row(
+                                "SELECT data FROM _metadata WHERE key = 'meta'",
+                                (),
+                                |row| row.get::<_, Vec<u8>>(0),
+                            ) {
+                                Ok(meta_bytes) => {
                                     deserialize(&meta_bytes).map_err(|err| StorageError::IO {
                                         source: StorageIOError::read_state_machine(&err),
                                     })
-                                });
+                                }
+                                Err(err) => Err(StorageError::IO {
+                                    source: StorageIOError::read_state_machine(&err),
+                                }),
+                            };
                             match metadata {
                                 Ok(metadata) => {
                                     sm_data = metadata;

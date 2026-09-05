@@ -1,6 +1,8 @@
 use crate::app_state::RaftType;
 use crate::helpers::deserialize;
-use crate::network::frame_io::{write_close_frame_flushed, write_frame_flushed};
+use crate::network::frame_io::{
+    CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
+};
 use crate::network::api::{ApiStreamResponse, ApiStreamResponsePayload};
 use crate::network::{serialize_network, web_socket_connect};
 use crate::{Client, Error, Node, NodeId};
@@ -11,7 +13,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
@@ -61,7 +63,6 @@ pub(crate) enum ClientStreamReq {
 
     // coming from the WebSocket reader
     StreamResponse(ApiStreamResponse),
-    StreamClosed,
     CleanupBuffer,
 
     // The embedded dashboard still reports a local ForwardToLeader through
@@ -198,7 +199,6 @@ impl ClientStreamReq {
             }
             Self::Shutdown
             | Self::StreamResponse(_)
-            | Self::StreamClosed
             | Self::CleanupBuffer
             | Self::RotateProxy(_) => {}
             #[cfg(feature = "dashboard")]
@@ -434,7 +434,12 @@ async fn client_stream(
         // IMPORTANT: the reader is NOT CANCEL SAFE in v0.8!
         let read = FragmentCollectorRead::new(rx);
 
-        let handle_read = task::spawn(stream_reader(read, tx_read.clone()));
+        let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
+        let reader_tx = tx_read.clone();
+        let handle_read = task::spawn(async move {
+            let outcome = stream_reader(read, reader_tx).await;
+            let _ = tx_reader_finished.send(outcome);
+        });
         let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
         let handle_write = task::spawn(stream_writer(write, rx_write, tx_writer_finished));
 
@@ -443,6 +448,8 @@ async fn client_stream(
         let handle_buf = cleanup_buffer_timeout(tx_read, 10);
         let mut awaiting_timeout = true;
         let mut rotate_after_disconnect = false;
+        let mut terminal_transport_failure = false;
+        let mut force_writer_abort = false;
 
         loop {
             let res = select! {
@@ -451,12 +458,24 @@ async fn client_stream(
                     shutdown = true;
                     None
                 }
+                reader_result = &mut rx_reader_finished => {
+                    match reader_result {
+                        Ok(Ok(())) => debug!("API WebSocket reader exited"),
+                        Ok(Err(err)) => error!("API WebSocket reader failed: {err}"),
+                        Err(_) => error!("API WebSocket reader task exited without an outcome"),
+                    }
+                    terminal_transport_failure = true;
+                    rotate_after_disconnect = client.inner.proxy_mode;
+                    None
+                }
                 writer_result = &mut rx_writer_finished => {
                     match writer_result {
                         Ok(Ok(())) => error!("API WebSocket writer exited while connected"),
                         Ok(Err(err)) => error!("API WebSocket writer failed: {err}"),
                         Err(_) => error!("API WebSocket writer task exited without an outcome"),
                     }
+                    terminal_transport_failure = true;
+                    force_writer_abort = true;
                     rotate_after_disconnect = client.inner.proxy_mode;
                     None
                 }
@@ -776,11 +795,6 @@ async fn client_stream(
                     None
                 }
 
-                ClientStreamReq::StreamClosed => {
-                    rotate_after_disconnect = client.inner.proxy_mode;
-                    break;
-                }
-
                 ClientStreamReq::CleanupBuffer => {
                     for (_, ack) in in_flight_buf {
                         let _ = ack.send(Err(Error::Connect("request timed out".to_string())));
@@ -797,16 +811,90 @@ async fn client_stream(
             };
 
             if let Some((payload, request_id, ack)) = payload {
-                let write_result = select! {
+                enum EnqueueEvent {
+                    Shutdown,
+                    LeaderChange(Result<ClientLeaderChange, flume::RecvError>),
+                    ReaderFinished(Result<(), String>),
+                    WriterFinished(Result<(), String>),
+                    Sent(Result<(), flume::SendError<WritePayload>>),
+                }
+                let enqueue = select! {
+                    biased;
                     _ = stream_shutdown.changed() => {
-                        shutdown = true;
-                        None
+                        EnqueueEvent::Shutdown
                     }
-                    result = tx_write.send_async(payload) => Some(result),
+                    change = rx_leader.recv_async() => EnqueueEvent::LeaderChange(change),
+                    result = &mut rx_reader_finished => EnqueueEvent::ReaderFinished(
+                        result.unwrap_or_else(|_| Err(
+                            "API reader task exited without reporting an outcome".into()
+                        ))
+                    ),
+                    result = &mut rx_writer_finished => EnqueueEvent::WriterFinished(
+                        result.unwrap_or_else(|_| Err(
+                            "API writer task exited without reporting an outcome".into()
+                        ))
+                    ),
+                    result = tx_write.send_async(payload) => EnqueueEvent::Sent(result),
                 };
-                let Some(write_result) = write_result else {
-                    let _ = ack.send(Err(Error::Connect("client stream manager stopped".into())));
-                    break;
+                let write_result = match enqueue {
+                    EnqueueEvent::Shutdown => {
+                        shutdown = true;
+                        let _ = ack.send(Err(Error::Connect(
+                            "client stream manager stopped".into(),
+                        )));
+                        break;
+                    }
+                    EnqueueEvent::LeaderChange(change) => {
+                        let Ok(ClientLeaderChange { leader_id, node, ready }) = change else {
+                            shutdown = true;
+                            let _ = ack.send(Err(Error::Connect(
+                                "client leader control channel closed".into(),
+                            )));
+                            break;
+                        };
+                        let target = (leader_id, node.addr_api.clone());
+                        if target == connected_leader {
+                            if let Some(ready) = ready {
+                                let _ = ready.send(());
+                            }
+                        } else {
+                            let _ = pending_leader_ready.register(target, ready);
+                            update_leader(&leader, Some(leader_id), Some(node)).await;
+                            for (_, in_flight_ack) in in_flight.drain() {
+                                let _ = in_flight_ack.send(Err(Error::LeaderChange(
+                                    "Action not allowed, Raft leader has changed".into(),
+                                )));
+                            }
+                        }
+                        let _ = ack.send(Err(Error::Connect(
+                            "API request was not dispatched before stream handoff".into(),
+                        )));
+                        break;
+                    }
+                    EnqueueEvent::ReaderFinished(outcome) => {
+                        if let Err(err) = outcome {
+                            error!("API WebSocket reader failed while enqueueing: {err}");
+                        }
+                        terminal_transport_failure = true;
+                        rotate_after_disconnect = client.inner.proxy_mode;
+                        let _ = ack.send(Err(Error::Connect(
+                            "API transport ended before request dispatch".into(),
+                        )));
+                        break;
+                    }
+                    EnqueueEvent::WriterFinished(outcome) => {
+                        if let Err(err) = outcome {
+                            error!("API WebSocket writer failed while enqueueing: {err}");
+                        }
+                        terminal_transport_failure = true;
+                        force_writer_abort = true;
+                        rotate_after_disconnect = client.inner.proxy_mode;
+                        let _ = ack.send(Err(Error::Connect(
+                            "API transport ended before request dispatch".into(),
+                        )));
+                        break;
+                    }
+                    EnqueueEvent::Sent(result) => result,
                 };
                 match write_result {
                     Ok(_) => {
@@ -814,6 +902,8 @@ async fn client_stream(
                     }
                     Err(err) => {
                         error!("Error sending txn request to writer: {}", err);
+                        terminal_transport_failure = true;
+                        force_writer_abort = true;
                         let _ =
                             ack.send(Err(Error::Connect("Connection to Raft leader lost".into())));
                         rotate_after_disconnect = client.inner.proxy_mode;
@@ -824,9 +914,24 @@ async fn client_stream(
         }
 
         handle_buf.abort();
-        handle_write.abort();
+        let mut handle_write = handle_write;
+        let writer_finished = if force_writer_abort {
+            false
+        } else {
+            time::timeout(CLOSE_WRITE_TIMEOUT, async {
+                tx_write.send_async(WritePayload::Close).await.ok()?;
+                Some((&mut handle_write).await)
+            })
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        };
+        if !writer_finished {
+            handle_write.abort();
+            let _ = handle_write.await;
+        }
         handle_read.abort();
-        let _ = handle_write.await;
         let _ = handle_read.await;
 
         debug!("make sure reader rx is empty and closed");
@@ -911,9 +1016,6 @@ async fn client_stream(
                 ClientStreamReq::StreamResponse(resp) => {
                     try_forward_response(&mut in_flight, &mut in_flight_buf, false, resp).await;
                 }
-                ClientStreamReq::StreamClosed => {
-                    // The outer manager already owns reconnect policy.
-                }
                 ClientStreamReq::CleanupBuffer => {
                     // ignore - we are re-connecting anyway
                 }
@@ -926,7 +1028,17 @@ async fn client_stream(
             break;
         }
 
-        if rotate_after_disconnect {
+        if terminal_transport_failure {
+            for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
+                let _ = ack.send(Err(Error::Connect(
+                    "API connection ended after dispatch; outcome unknown and request was not replayed"
+                        .into(),
+                )));
+            }
+            if rotate_after_disconnect {
+                rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
+            }
+        } else if rotate_after_disconnect {
             for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
                 let _ = ack.send(Err(Error::Connect(
                     "Connection to proxy endpoint lost".into(),
@@ -1046,12 +1158,16 @@ fn cleanup_buffer_timeout(tx: flume::Sender<ClientStreamReq>, seconds: u64) -> J
     })
 }
 
-async fn stream_reader(
-    mut read: FragmentCollectorRead<ReadHalf<TokioIo<Upgraded>>>,
+async fn stream_reader<S>(
+    mut read: FragmentCollectorRead<ReadHalf<S>>,
     tx: flume::Sender<ClientStreamReq>,
-) {
-    while let Ok(frame) = read
-        .read_frame(&mut |frame| async move {
+) -> Result<(), String>
+where
+    S: AsyncRead + Unpin,
+{
+    loop {
+        let frame = read
+            .read_frame(&mut |frame| async move {
             // TODO obligated sends should be auto ping / pong / close ? -> verify!
             debug!(
                 "Received obligated send in stream client: OpCode: {:?}: {:?}",
@@ -1060,20 +1176,19 @@ async fn stream_reader(
             );
             Ok::<(), Error>(())
         })
-        .await
-    {
+            .await
+            .map_err(|err| err.to_string())?;
         match frame.opcode {
             OpCode::Continuation => {}
             OpCode::Text => {}
             OpCode::Binary => {
                 let bytes = frame.payload.deref();
-                let payload = deserialize::<ApiStreamResponse>(bytes).unwrap();
-                if let Err(err) = tx
+                let payload = deserialize::<ApiStreamResponse>(bytes)
+                    .map_err(|err| format!("invalid API stream response: {err}"))?;
+                tx
                     .send_async(ClientStreamReq::StreamResponse(payload))
                     .await
-                {
-                    error!("Error sending Response to Client Stream Manager: {:?}", err);
-                }
+                    .map_err(|err| format!("API reader outcome channel closed: {err}"))?;
             }
             OpCode::Close => break,
             OpCode::Ping => {}
@@ -1081,8 +1196,8 @@ async fn stream_reader(
         }
     }
 
-    let _ = tx.send_async(ClientStreamReq::StreamClosed).await;
     debug!("Exiting Client Stream Reader");
+    Ok(())
 }
 
 async fn stream_writer(
@@ -1097,8 +1212,7 @@ async fn stream_writer(
         };
         match payload {
             WritePayload::Payload(bytes) => {
-                let frame = Frame::binary(Payload::from(bytes));
-                if let Err(err) = write_frame_flushed(&mut write, frame).await {
+                if let Err(err) = write_api_request_frame(&mut write, bytes).await {
                     error!("Client Stream error: {:?}", err);
                     break Err(err.to_string());
                 }
@@ -1114,6 +1228,16 @@ async fn stream_writer(
 
     let _ = finished.send(outcome);
     debug!("Exiting Client Stream Writer");
+}
+
+async fn write_api_request_frame<S>(
+    write: &mut WebSocketWrite<S>,
+    bytes: Vec<u8>,
+) -> Result<(), fastwebsockets::WebSocketError>
+where
+    S: AsyncWrite + Unpin,
+{
+    write_frame_flushed(write, Frame::binary(Payload::from(bytes))).await
 }
 
 async fn try_connect(
@@ -1143,6 +1267,54 @@ fn leader_change_matches_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fastwebsockets::Role;
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_api_request_writer_flushes_serialized_request_through_tls() {
+        let request = ApiStreamRequest {
+            request_id: 17,
+            payload: ApiStreamRequestPayload::Query(Query {
+                sql: "SELECT 1".into(),
+                params: Vec::new(),
+            }),
+        };
+        let bytes = serialize_network(&request);
+        crate::network::frame_io::tests::exercise_gated_tls_writer(
+            Role::Client,
+            bytes,
+            true,
+            |mut write, bytes| async move { write_api_request_frame(&mut write, bytes).await },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn production_api_reader_reports_malformed_frames() {
+        let (client_io, server_io) = tokio::io::duplex(4 * 1024);
+        let client = WebSocket::after_handshake(client_io, Role::Client);
+        let (read, _write) = client.split(tokio::io::split);
+        let read = FragmentCollectorRead::new(read);
+        let (tx, _rx) = flume::bounded(1);
+        let (finished, result) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = finished.send(stream_reader(read, tx).await);
+        });
+        let mut server = WebSocket::after_handshake(server_io, Role::Server);
+
+        crate::network::frame_io::write_socket_frame_flushed(
+            &mut server,
+            Frame::binary(Payload::Borrowed(b"not an API response")),
+        )
+        .await
+        .expect("send malformed server frame");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), result)
+            .await
+            .expect("reader must report promptly")
+            .expect("reader task must report an outcome");
+        assert!(matches!(outcome, Err(ref err) if err.contains("invalid API stream response")));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn duplicate_near_deadline_shares_the_connecting_target() {

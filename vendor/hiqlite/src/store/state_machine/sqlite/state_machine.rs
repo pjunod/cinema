@@ -812,16 +812,14 @@ impl StateMachineSqlite {
         let metadata = rx.await.map_err(|error| StorageError::IO {
             source: StorageIOError::read_state_machine(&error),
         })?;
-        metadata
-            .last_snapshot_id
-            .map(|snapshot_id| {
-                Uuid::parse_str(&snapshot_id)
-                    .map(|id| id.to_string())
-                    .map_err(|error| StorageError::IO {
-                        source: StorageIOError::read_state_machine(&error),
-                    })
-            })
-            .transpose()
+        match metadata.last_snapshot_id {
+            Some(snapshot_id) => Uuid::parse_str(&snapshot_id)
+                .map(|id| Some(id.to_string()))
+                .map_err(|error| StorageError::IO {
+                    source: StorageIOError::read_state_machine(&error),
+                }),
+            None => Ok(None),
+        }
     }
 
     async fn read_current_snapshot(&mut self) -> StorageResult<Option<StoredSnapshot>> {

@@ -3,7 +3,8 @@ use crate::app_state::RaftType;
 use crate::helpers::{deserialize, get_raft_metrics};
 use crate::network::handshake::HandshakeSecret;
 use crate::network::frame_io::{
-    write_close_frame_flushed, write_frame_flushed, write_socket_close_frame_flushed,
+    CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
+    write_socket_close_frame_flushed,
 };
 use crate::network::{AppStateExt, Error, serialize_network, validate_secret};
 use axum::extract::Path;
@@ -274,10 +275,32 @@ pub async fn ping() {}
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_ready_member;
+    use super::{
+        ApiStreamResponse, ApiStreamResponsePayload, ensure_ready_member,
+        write_api_response_frame,
+    };
     use crate::Node;
+    use crate::network::serialize_network;
+    use fastwebsockets::Role;
     use openraft::{Membership, ServerState, StoredMembership};
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_api_response_writer_flushes_serialized_response_through_tls() {
+        let response = ApiStreamResponse {
+            request_id: 17,
+            result: ApiStreamResponsePayload::Query(Ok(Vec::new())),
+        };
+        let bytes = serialize_network(&response);
+        crate::network::frame_io::tests::exercise_gated_tls_writer(
+            Role::Server,
+            bytes,
+            true,
+            |mut write, bytes| async move { write_api_response_frame(&mut write, &bytes).await },
+        )
+        .await;
+    }
 
     #[test]
     fn learner_only_readiness_accepts_committed_learner_member() {
@@ -537,8 +560,7 @@ async fn handle_socket_concurrent(
             match req {
                 WsWriteMsg::Payload(resp) => {
                     let bytes = serialize_network(&resp);
-                    let frame = Frame::binary(Payload::Borrowed(&bytes));
-                    if let Err(err) = write_frame_flushed(&mut write, frame).await {
+                    if let Err(err) = write_api_response_frame(&mut write, &bytes).await {
                         error!("Error during WebSocket write: {}", err);
                         break Err(err.to_string());
                     }
@@ -611,6 +633,7 @@ async fn handle_socket_concurrent(
         let _ = tx_reader_finished.send(outcome);
     });
 
+    let mut writer_failed = false;
     loop {
         let req = tokio::select! {
             biased;
@@ -620,6 +643,7 @@ async fn handle_socket_concurrent(
                     Ok(Err(err)) => error!("API server WebSocket writer failed: {err}"),
                     Err(_) => error!("API server WebSocket writer panicked or was cancelled"),
                 }
+                writer_failed = true;
                 break;
             }
             reader = &mut rx_reader_finished => {
@@ -958,15 +982,38 @@ async fn handle_socket_concurrent(
     }
 
     tx_connection_closed.send_replace(true);
-    let _ = tx_write.try_send(WsWriteMsg::Break);
+    let mut handle_write = handle_write;
+    let writer_finished = if writer_failed {
+        false
+    } else {
+        time::timeout(CLOSE_WRITE_TIMEOUT, async {
+            tx_write.send_async(WsWriteMsg::Break).await.ok()?;
+            Some((&mut handle_write).await)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    };
     drop(tx_write);
-
-    handle_write.abort();
+    if !writer_finished {
+        handle_write.abort();
+        let _ = handle_write.await;
+    }
     handle_read.abort();
-    let _ = handle_write.await;
     let _ = handle_read.await;
 
     debug!("handle_socket_concurrent exiting");
 
     Ok(())
+}
+
+async fn write_api_response_frame<S>(
+    write: &mut fastwebsockets::WebSocketWrite<S>,
+    bytes: &[u8],
+) -> Result<(), fastwebsockets::WebSocketError>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    write_frame_flushed(write, Frame::binary(Payload::Borrowed(bytes))).await
 }
