@@ -326,6 +326,54 @@ pub(crate) struct ClientSelection {
 }
 
 impl ClientSelection {
+    /// The normalized policy this wire selection expresses.
+    ///
+    /// Total by construction, which the wire type is not: the subtitle track
+    /// moves inside the mode that uses it, so the two pairings `validate`
+    /// rejects at runtime — off with a track, and a rendering mode without one
+    /// — cannot survive the conversion as values. A validated selection always
+    /// converts faithfully; an unvalidated one converts to the nearest legal
+    /// reading rather than panicking, because a decision this feeds must not be
+    /// able to take the process down.
+    pub(crate) fn desired(&self) -> plurx_core::playback::DesiredSelection {
+        use plurx_core::playback::{
+            DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,
+        };
+        DesiredSelection {
+            quality: match self.quality {
+                QualitySelection::Auto => DesiredQuality::Auto,
+                QualitySelection::Original => DesiredQuality::Original,
+                QualitySelection::Manual { height } => DesiredQuality::Manual { height },
+            },
+            codec: match self.codec {
+                CodecPolicy::Auto => DesiredCodec::Auto,
+                CodecPolicy::H264 => DesiredCodec::H264,
+                CodecPolicy::Hevc => DesiredCodec::Hevc,
+                CodecPolicy::Av1 => DesiredCodec::Av1,
+            },
+            dynamic_range: match self.dynamic_range {
+                DynamicRangePolicy::Auto => DesiredDynamicRange::Auto,
+                DynamicRangePolicy::DolbyVision => DesiredDynamicRange::DolbyVision,
+                DynamicRangePolicy::Hdr10 => DesiredDynamicRange::Hdr10,
+                DynamicRangePolicy::Hlg => DesiredDynamicRange::Hlg,
+                DynamicRangePolicy::Sdr => DesiredDynamicRange::Sdr,
+            },
+            audio_track: self.audio_track,
+            audio_offset_ms: self.audio_offset_ms,
+            subtitles: match (self.subtitle.mode, self.subtitle.track) {
+                (SubtitleMode::Off, _) => DesiredSubtitles::Off,
+                (SubtitleMode::Native, Some(track)) => DesiredSubtitles::Native { track },
+                (SubtitleMode::Overlay, Some(track)) => DesiredSubtitles::Overlay { track },
+                (SubtitleMode::Burn, Some(track)) => DesiredSubtitles::Burn { track },
+                // A rendering mode with no track is the shape `validate`
+                // refuses, so this arm is unreachable for anything accepted.
+                // Reading it as "no subtitles" is the closest legal answer and
+                // the only one that cannot mislabel a track the viewer chose.
+                (_, None) => DesiredSubtitles::Off,
+            },
+        }
+    }
+
     fn validate(&self) -> Result<(), &'static str> {
         if let QualitySelection::Manual { height } = self.quality {
             if !(crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(&height) {
@@ -3503,15 +3551,25 @@ impl ControlState {
     /// Both answers together, because a consumer that wants to know what the
     /// viewer changed also wants to know what the device can do about it —
     /// and reading either off the live exchange is wrong for the same reason.
+    /// Record what the viewer is asking for, and say whether it changed.
+    ///
+    /// "Changed" is answered on the normalized selection rather than on the
+    /// wire struct. Today the two agree exactly — the conversion is total and
+    /// injective, and a test pins that — so this changes no decision. What it
+    /// changes is what the word means: the comparison is now against a policy
+    /// that preserves Auto, Original and Manual as different asks, rather than
+    /// against a transport-shaped struct that happens not to carry transport
+    /// yet. Everything §1 needs to compare durably compares *this*.
     pub(crate) fn observe(
         &mut self,
         selection: &ClientSelection,
         capabilities: Option<&DynamicCapabilities>,
     ) -> SelectionObservation {
+        let desired = selection.desired();
         let changed = self
             .last_selection
             .as_ref()
-            .is_some_and(|previous| previous != selection);
+            .is_some_and(|previous| previous.desired() != desired);
         self.last_selection = Some(selection.clone());
         if let Some(capabilities) = capabilities {
             self.last_capabilities = Some(capabilities.clone());
@@ -20463,6 +20521,117 @@ mod tests {
             preserve_dolby_vision: true,
             convert_dolby_vision: true,
         })
+    }
+
+    /// The normalized selection loses nothing the wire struct distinguishes.
+    ///
+    /// `observe` now answers "did the viewer ask for something else" by
+    /// comparing normalized selections rather than wire structs, so that claim
+    /// has to be proved rather than asserted in a comment: if the conversion
+    /// collapsed any two distinct legal asks, a real change would be reported
+    /// as unchanged and the successor it should have staged would never be
+    /// staged at all.
+    ///
+    /// Proved by injectivity over every legal shape rather than by a handful
+    /// of examples. The cross product below is exhaustive per axis — three
+    /// quality policies including Original beside a manual pick, every codec,
+    /// every dynamic range, the default audio track beside two named ones, a
+    /// zero and two signed offsets, and every subtitle mode with each of two
+    /// track numbers — and every member is validated first, so the claim is
+    /// scoped to exactly the selections this server accepts. Distinct wire
+    /// selections must produce distinct normalized ones, and distinct digests;
+    /// the converse is free, because the conversion is a function.
+    #[test]
+    fn the_normalized_selection_distinguishes_every_ask_the_wire_does() {
+        let qualities = [
+            QualitySelection::Auto,
+            QualitySelection::Original,
+            QualitySelection::Manual { height: 720 },
+        ];
+        let codecs = [
+            CodecPolicy::Auto,
+            CodecPolicy::H264,
+            CodecPolicy::Hevc,
+            CodecPolicy::Av1,
+        ];
+        let ranges = [
+            DynamicRangePolicy::Auto,
+            DynamicRangePolicy::DolbyVision,
+            DynamicRangePolicy::Hdr10,
+            DynamicRangePolicy::Hlg,
+            DynamicRangePolicy::Sdr,
+        ];
+        let audio_tracks = [None, Some(0), Some(2)];
+        let offsets = [0, -250, 1_000];
+        let subtitles = {
+            let mut shapes = vec![SubtitleSelection {
+                mode: SubtitleMode::Off,
+                track: None,
+            }];
+            for mode in [
+                SubtitleMode::Native,
+                SubtitleMode::Overlay,
+                SubtitleMode::Burn,
+            ] {
+                for track in [0, 3] {
+                    shapes.push(SubtitleSelection {
+                        mode,
+                        track: Some(track),
+                    });
+                }
+            }
+            shapes
+        };
+
+        let mut wire = Vec::new();
+        for quality in qualities {
+            for codec in codecs {
+                for dynamic_range in ranges {
+                    for audio_track in audio_tracks {
+                        for audio_offset_ms in offsets {
+                            for subtitle in &subtitles {
+                                wire.push(ClientSelection {
+                                    quality,
+                                    audio_track,
+                                    subtitle: subtitle.clone(),
+                                    audio_offset_ms,
+                                    codec,
+                                    dynamic_range,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            wire.len(),
+            qualities.len()
+                * codecs.len()
+                * ranges.len()
+                * audio_tracks.len()
+                * offsets.len()
+                * subtitles.len()
+        );
+
+        let mut normalized = std::collections::BTreeSet::new();
+        let mut digests = std::collections::BTreeSet::new();
+        for selection in &wire {
+            selection
+                .validate()
+                .expect("every shape in the cross product is one the server accepts");
+            let desired = selection.desired();
+            assert!(
+                normalized.insert(desired.canonical_form()),
+                "two distinct asks normalized to the same policy: {selection:?}"
+            );
+            assert!(
+                digests.insert(desired.digest()),
+                "two distinct policies digested the same: {selection:?}"
+            );
+        }
+        assert_eq!(normalized.len(), wire.len());
+        assert_eq!(digests.len(), wire.len());
     }
 
     fn selection_at(quality: QualitySelection) -> ClientSelection {
