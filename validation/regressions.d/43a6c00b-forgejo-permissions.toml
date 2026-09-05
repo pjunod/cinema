@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["43a6c00b"]
+points = ["operations.packaging", "validation.framework"]
+checks = ["operations-contract"]
+reason = "Forgejo ignores GitHub Actions permissions blocks and emits a warning for every affected workflow job. The operations contract scans every Forgejo workflow, including both .yml and .yaml names, and fails if any top-level or job-level permissions key returns. Existing jobs retain their effective Forgejo authentication through the automatic same-repository token or their explicit FORGEJO_TOKEN and LOCAL_REGISTRY_TOKEN secrets."

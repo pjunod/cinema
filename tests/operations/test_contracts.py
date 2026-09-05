@@ -1952,21 +1952,23 @@ for (const startupDelay of [0, 1600, 7000]) {
                 ]
                 self.assertEqual([], missing, f"jobs without timeouts in {path}")
 
+    def test_forgejo_workflows_do_not_declare_ignored_github_permissions(self):
+        workflow_dir = ROOT / ".github/workflows"
+        paths = sorted((*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")))
+        for path in paths:
+            with self.subTest(path=path.relative_to(ROOT)):
+                workflow = path.read_text(encoding="utf-8")
+                self.assertNotRegex(workflow, r"(?m)^\s*permissions:\s*$")
+
     def test_rust_audit_can_report_informational_advisories(self):
         workflow = read(".github/workflows/rust-audit.yml")
-        permissions = workflow.split("permissions:\n", 1)[1].split("\njobs:\n", 1)[0]
         jobs = workflow_job_blocks(".github/workflows/rust-audit.yml")
 
-        self.assertEqual(permissions, "  contents: read\n")
         for name in ("workspace", "fuzz"):
             with self.subTest(name=name):
                 self.assertIn("if: github.event_name != 'schedule'", jobs[name])
-                self.assertIn("      checks: write", jobs[name])
-                self.assertNotIn("      issues: write", jobs[name])
         scheduled = jobs["scheduled"]
         self.assertIn("if: github.event_name == 'schedule'", scheduled)
-        self.assertIn("      issues: write", scheduled)
-        self.assertNotIn("      checks: write", scheduled)
         self.assertEqual(scheduled.count("uses: https://github.com/rustsec/audit-check@"), 1)
         self.assertIn("--additional-lock fuzz/Cargo.lock", scheduled)
         self.assertIn("working-directory: target/rust-audit", scheduled)
