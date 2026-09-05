@@ -126,6 +126,21 @@ class LiveTvTest {
         assertTrue(other.events.isEmpty())
     }
 
+    @Test fun unrecognisedStartFailureKeepsTheDurableMarker() = runTest {
+        // A typed 5xx this client has never seen. The owner may already have
+        // opened a tuner, so the barrier must arm and refuse the retry rather
+        // than let a second physical tuner be allocated for one viewer.
+        val store = Store()
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        val barrier = LiveTvStartBarrier(store) { 0 }
+        val requests = Requests().apply { error = "encoder_spawn_failed" }
+        failure("start_outcome_unknown") { LiveTvLease(requests, barrier, scope).start("one").await() }
+        assertTrue("an unknown failure must leave the durable marker", store.value)
+        assertTrue(barrier.pending)
+        failure("start_outcome_unknown") { LiveTvLease(requests, barrier, scope).start("two").await() }
+        assertEquals(listOf("start:one"), requests.events)
+    }
+
     @Test fun definitiveCapacityRejectionClearsMarker() = runTest {
         val store = Store()
         val requests = Requests().apply { error = "tuner_capacity" }
@@ -162,14 +177,19 @@ class LiveTvTest {
         assertEquals(listOf("start:one", "release:cap-one"), requests.events)
     }
 
-    @Test fun renderedFramesSurviveSlidingWindowPositionsAndFrozenVideoExpires() {
+    @Test fun renderedFrameCountRenewsOnChangeAndFrozenVideoExpires() {
         var now = 0L
         val watchdog = LiveTvWatchdog { now }
-        // These healthy window-relative positions regress; they must not be
-        // used as an all-time progress maximum. Only rendered frames count.
-        listOf(20, 21, 18, 19, 16, 17, 14, 15, 12).forEachIndexed { index, _ ->
+        // This pins the counter semantics the call site depends on: a changed
+        // count is progress, a repeated count is a frozen picture. It does NOT
+        // prove the position-versus-frames choice — the watchdog takes no
+        // position at all. That choice lives at the call site in LiveTvPlayer,
+        // which feeds videoDecoderCounters.renderedOutputBufferCount because
+        // the sliding live window moves position backwards while healthy, and
+        // it is unproven until a fake player drives that heartbeat.
+        listOf(120, 240, 360, 480, 600, 720, 840, 960, 1080).forEach { frames ->
             now += 5_000
-            assertTrue(watchdog.observe((index + 1) * 120, true))
+            assertTrue(watchdog.observe(frames, true))
             assertFalse(watchdog.expired)
         }
         now += 29_999

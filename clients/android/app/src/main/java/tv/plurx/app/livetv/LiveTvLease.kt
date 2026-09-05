@@ -10,6 +10,24 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
 
+/**
+ * Failures that are decided before the owner can open a tuner, so forgetting
+ * the start is safe. This is an allowlist on purpose: a code this client does
+ * not recognise — including one a newer server adds — may already hold a
+ * physical tuner whose release never reached us, and a denylist would make
+ * every new server error code silently less safe.
+ */
+internal val DEFINITIVE_START_REFUSALS = setOf(
+    "live_tv_disabled",
+    "live_tv_protocol_unready",
+    "drm_unsupported",
+    "channel_not_found",
+    "settings_conflict",
+    "tuner_capacity",
+    "admin_required",
+    "invalid_settings",
+)
+
 internal interface LiveTvBarrierStore {
     fun pending(): Boolean
     fun setPending(pending: Boolean)
@@ -54,6 +72,15 @@ internal class LiveTvStartBarrier(
         until = now() + 90_000
     }
     fun acquired() { until = null } // The disk marker survives an active-session crash.
+
+    /**
+     * Refresh the in-process deadline without touching storage. The durable
+     * marker is already on disk for the whole session — `acquired()` clears
+     * only the in-memory deadline — so re-arming it on every heartbeat wrote
+     * and fsynced an unchanged byte on the main thread every five seconds,
+     * which no observer can distinguish from this.
+     */
+    fun refresh() { until = now() + 90_000 }
     fun confirm() {
         try { store.setPending(false); until = null } catch (_: Exception) {
             // A confirmed server release is safe, but storage failure cannot
@@ -83,7 +110,7 @@ internal class LiveTvLease(
                 if (mine != generation) return@withLock null
                 barrier.begin()
                 val info = try { requests.start(channel) } catch (error: Exception) {
-                    if (error !is LiveTvFailure || error.code in setOf("start_outcome_unknown", "owner_unavailable", "startup_timeout", "stream_failed")) {
+                    if (error !is LiveTvFailure || error.code !in DEFINITIVE_START_REFUSALS) {
                         runCatching { barrier.arm() }
                         throw LiveTvFailure("start_outcome_unknown")
                     }
@@ -104,7 +131,7 @@ internal class LiveTvLease(
         ++generation
         return scope.async { mutex.withLock { releaseCurrent() } }
     }
-    fun heartbeatMarker() { if (current != null) barrier.arm() }
+    fun heartbeatMarker() { if (current != null) barrier.refresh() }
     private suspend fun releaseCurrent() {
         val previous = current ?: return
         runCatching { barrier.arm() } // Storage failure must not prevent DELETE.
