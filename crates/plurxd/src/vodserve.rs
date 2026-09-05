@@ -83,6 +83,15 @@ const DORMANT_RENDITION_TTL: Duration = Duration::from_secs(1800);
 /// read proves the capability is no longer active.
 const TERMINAL_TOMBSTONE_RETENTION: Duration = Duration::from_secs(60);
 const TERMINAL_ROUTE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long one maintenance pass will wait on outstanding terminal cleanups
+/// before proceeding without them.
+///
+/// Sized against the slowest legitimate cleanup — a reader detach that waits
+/// on a subtitle ffmpeg to settle, plus a durable terminal commit — with room
+/// to spare, because the cost of waiting slightly too long is one late
+/// maintenance pass and the cost of not bounding it at all is a node whose
+/// maintenance never runs again.
+const TERMINAL_CLEANUP_MAINTENANCE_WAIT: Duration = Duration::from_secs(30);
 const TERMINAL_ROUTE_CONFIRM_FANOUT: usize = 16;
 /// Begin speculative marker work this many seconds of playback time before a
 /// stored marker. The distance in film time is scaled by the client's current
@@ -115,9 +124,14 @@ const PENDING_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// pool's; a refused wait answers a typed 503 immediately, no state.
 const PER_SESSION_WAIT_CAP: usize = 4;
 
-/// Blocked GETs across the node. TODO(m3-wire): becomes a setting when the
-/// manager exposes the wait caps through `/api/v1/settings`.
-const GLOBAL_WAIT_CAP: usize = 64;
+/// Blocked GETs across the node when the setting is absent.
+///
+/// Now the default rather than the law: `playback.vod_blocked_get_cap` sets
+/// it, and `try_create` applies the current value, so an operator watching
+/// `pool_full` refusals can size it for their own deployment without a
+/// restart. The per-session cap stays a constant because it bounds one viewer
+/// rather than the node.
+const DEFAULT_GLOBAL_WAIT_CAP: usize = 64;
 
 /// The rendition's persisted init identity, beside its `init.mp4`.
 const IDENTITY_NAME: &str = "identity.json";
@@ -136,6 +150,9 @@ pub struct VodSettings {
     pub block_budget: Duration,
     /// From one segment's first blocked demand to bytes or typed failure.
     pub materialize_budget: Duration,
+    /// Node-wide ceiling on blocked segment GETs, from
+    /// `playback.vod_blocked_get_cap`.
+    pub blocked_get_cap: usize,
 }
 
 /// Why a session ended for good. Every cause answers 410 and never resurrects.
@@ -2208,7 +2225,7 @@ impl VodServe {
                 rendition_builds: StdMutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
                 head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
-                pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
+                pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
                 completed_cache: AtomicU64::new(0),
                 terminal_eviction_cursor: AtomicU64::new(0),
@@ -2556,6 +2573,14 @@ impl VodServe {
         session_id: String,
         fences: VodCreateFences<'_>,
     ) -> Result<VodStart, String> {
+        // The one funnel every create passes through: the plain entry point,
+        // the cluster one that every shipped caller actually uses, and the
+        // resurrection of a session from its durable route. Applying the
+        // ceiling here rather than at construction is what lets an operator
+        // change it without a restart — a cap set only in `WaitPool::new`
+        // would be frozen at whatever the node booted with — and applying it
+        // at `try_create` alone reached no production path at all.
+        self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -3282,16 +3307,41 @@ impl VodServe {
             } else {
                 let cleanup = Arc::new(TerminalCleanup::new());
                 session.terminal_cleanup = Some(Arc::clone(&cleanup));
-                let rendition = session.rendition.as_ref().map(Arc::clone)?;
-                let work = (
-                    session_id.to_owned(),
-                    rendition,
-                    session.file.id,
-                    session.target_height,
-                    session.kind,
-                    terminal_cause,
-                );
-                (cleanup, Some(work))
+                match session.rendition.as_ref().map(Arc::clone) {
+                    Some(rendition) => {
+                        let work = (
+                            session_id.to_owned(),
+                            rendition,
+                            session.file.id,
+                            session.target_height,
+                            session.kind,
+                            terminal_cause,
+                        );
+                        (cleanup, Some(work))
+                    }
+                    // A session whose rendition is already gone has nothing to
+                    // detach, so this cleanup owns no work and has to say so
+                    // here. Leaving it standing unfinished is far worse than
+                    // the ending it is refusing: `maintain` waits on every
+                    // unfinished cleanup belonging to a tombstoned session
+                    // with nothing bounding the wait, so one of these stops
+                    // the idle reap, the dormant purge, the tombstone eviction
+                    // and every driver kick — node-wide, for good.
+                    //
+                    // Today the compaction that clears `rendition` writes the
+                    // tombstone first under the same pointer identity, so this
+                    // arm is unreachable and the assertion states that rather
+                    // than trusting it. The completion is what a later change
+                    // to that ordering lands on instead of a wedged node.
+                    None => {
+                        debug_assert!(
+                            session.tombstone.is_some(),
+                            "a VOD session lost its rendition without a tombstone"
+                        );
+                        cleanup.complete();
+                        (cleanup, None)
+                    }
+                }
             }
         };
         if let Some((session_id, rendition, file_id, height, kind, cause)) = work {
@@ -3416,6 +3466,12 @@ impl VodServe {
             let cleanup = Arc::new(TerminalCleanup::new());
             session.terminal_cleanup = Some(Arc::clone(&cleanup));
             let Some(rendition) = session.rendition.as_ref().map(Arc::clone) else {
+                // Same hazard as `begin_end`'s: this victim now carries a
+                // tombstone and a cleanup, and skipping to the next one would
+                // leave that cleanup unfinished forever, which is the one
+                // thing `maintain` waits on without a bound. Nothing to
+                // detach means finished, not abandoned.
+                cleanup.complete();
                 continue;
             };
             work.push((
@@ -4223,12 +4279,36 @@ impl VodServe {
                 .filter(|cleanup| !cleanup.is_finished())
                 .collect::<Vec<_>>()
         };
-        futures_util::future::join_all(
-            terminal_cleanups
-                .into_iter()
-                .map(|cleanup| async move { cleanup.wait().await }),
+        // Bounded, because every later step in this function is behind it and
+        // this task is the node's only maintenance loop. A cleanup that never
+        // completes — a task the runtime dropped mid-flight, a future ordering
+        // change that installs one with no owner — would otherwise stop the
+        // idle reap, the dormant purge, the tombstone eviction and every
+        // driver kick on the node, permanently and silently.
+        //
+        // Giving up on the wait gives up nothing else: each step below re-reads
+        // what it needs, and tombstone eviction independently requires
+        // `is_finished()`, so a cleanup still legitimately running is simply
+        // waited for on the next tick. The bound is generous against real
+        // settlement — a terminal commit is the slow part — so reaching it is
+        // a defect worth a loud line rather than a busy node.
+        if tokio::time::timeout(
+            TERMINAL_CLEANUP_MAINTENANCE_WAIT,
+            futures_util::future::join_all(
+                terminal_cleanups
+                    .into_iter()
+                    .map(|cleanup| async move { cleanup.wait().await }),
+            ),
         )
-        .await;
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                "a VOD terminal cleanup outlived {:?} of maintenance waiting; \
+                 continuing this pass without it",
+                TERMINAL_CLEANUP_MAINTENANCE_WAIT
+            );
+        }
 
         // End tombstones outlive the response-recovery operation so late or
         // mismatched control cannot resurrect a detached reader. Once the
@@ -5507,9 +5587,59 @@ fn spawn_driver(shared: Arc<Shared>, rendition: Arc<Rendition>) {
     });
 }
 
+/// Reclaim what a rendition that has already failed is still holding.
+///
+/// A recorded failure is first-wins and never cleared for the life of the
+/// rendition, and `record_failure` answers every waiter — the pool, and the
+/// init `Notify` — at the moment it lands. From that instant the producer is
+/// serving nobody and no later pass can change that.
+///
+/// The bare early return that used to stand in `driver_pass` left two things
+/// behind. The child was one. `Action::Idle` is what normally reclaims a
+/// producer, and it is only ever reached through the pass that return skipped,
+/// so what remained were the dormant purge — which refuses an admitted
+/// rendition outright — and the last `Arc<Rendition>` drop, which an in-flight
+/// generation task or a parked materialize watchdog can defer for as long as
+/// they live. On an admitted rendition that combination reaps nothing: a live
+/// ffmpeg, or a SIGSTOP'd one still sitting on its codec session, stayed on the
+/// node until the process exited.
+///
+/// The capacity hold is the other, and it is worth being exact about what it
+/// is not. `capacity_hold` is written in exactly one place — the pass below —
+/// so the value from the last pass before the failure latched for the life of
+/// the rendition. It changes nothing a client sees: `status` answers `failed`
+/// ahead of every belief arm, so the stale hold was already shielded from the
+/// wire. Clearing it here removes dead state that contradicts the rendition it
+/// belongs to, so that the next reader of it — a status reordering, an
+/// operator surface, a decision that consults it — is not the one that has to
+/// discover it was never true.
+///
+/// `Termination::Idle` is the existing spelling for "reclaim it"; `after` reads
+/// nothing from the `why` and no wire carries it, so this is not a claim that a
+/// failed rendition is idle.
+async fn retire_failed_rendition(rendition: &Arc<Rendition>) {
+    *rendition.capacity_hold.lock().expect("capacity hold") = None;
+    if matches!(rendition.slot.belief().await, Producer::Absent { .. }) {
+        return;
+    }
+    // Ignored exactly as the dormant purge and generation-end terminations
+    // ignore it: a slot that lost its child between the belief read and here
+    // is the outcome this asked for.
+    let _ = rendition
+        .slot
+        .perform(
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+            || {},
+        )
+        .await;
+}
+
 /// One pass: demand → decide → step → carry it out.
 async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
     if rendition.failure().is_some() {
+        retire_failed_rendition(rendition).await;
         return;
     }
     let belief = rendition.slot.belief().await;
@@ -6008,7 +6138,15 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
     // below (a purge committing on the maintain task). Attaching would leave
     // a live ffmpeg in a slot whose driver has already exited — a child
     // nothing reaps until the Arc drops.
-    if rendition.closed.load(Relaxed) {
+    //
+    // A failure recorded in that same gap is the other half of the same
+    // hazard, and it was not guarded. The driver does not exit on a failure,
+    // it switches to reclaiming, and a reclaiming pass that has already read
+    // an absent belief will not look again until something kicks it — so an
+    // attach landing just behind it puts a live child in a slot whose only
+    // remaining reader answers `ProducerFailed`. Refuse the attach instead,
+    // here, where the child is still ours to kill.
+    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
         let _ = child.kill().await;
         return;
     }
@@ -6415,6 +6553,13 @@ fn record_failure(
     // this, a GET waiting for `init.mp4` sleeps its whole budget to learn
     // what every segment waiter was told immediately.
     rendition.init_notify.notify_waiters();
+    // And wake the driver, whose only remaining job for this rendition is to
+    // reclaim the producer. Without it the first reclaiming pass waits for the
+    // next maintenance tick's `kick_all`, so a failure recorded a moment after
+    // one tick leaves a doomed ffmpeg holding a codec session for the whole
+    // interval. This is a `notify_one` on the rendition's own wake, so it
+    // cannot outlive the driver task or wake anything else.
+    rendition.kick();
 }
 
 /// One recorded rendition failure: what a client can act on, and what an
@@ -7329,6 +7474,7 @@ mod tests {
             completed_cache_bytes: 50 << 30,
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
+            blocked_get_cap: DEFAULT_GLOBAL_WAIT_CAP,
         }
     }
 
@@ -7523,6 +7669,15 @@ mod tests {
     ) {
         let cleanup = Arc::new(TerminalCleanup::new());
         cleanup.complete();
+        insert_terminal_session(serve, session_id, rendition, cleanup).await;
+    }
+
+    async fn insert_terminal_session(
+        serve: &VodServe,
+        session_id: &str,
+        rendition: Arc<Rendition>,
+        cleanup: Arc<TerminalCleanup>,
+    ) {
         let rendition_key = rendition.key.clone();
         let file = Arc::new(rendition.recipe.file.clone());
         serve.shared.sessions.lock().await.insert(
@@ -9998,6 +10153,41 @@ mod tests {
         );
     }
 
+    /// The configured node cap reaches the pool, on create.
+    ///
+    /// Settings are re-read per create, so that is where the ceiling is
+    /// applied — which is what lets an operator change it without a restart.
+    /// A cap that lived only at construction would be frozen at whatever the
+    /// node booted with, and the plan promised a setting.
+    #[tokio::test]
+    async fn the_configured_blocked_get_cap_reaches_the_pool() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            DEFAULT_GLOBAL_WAIT_CAP,
+            "an unconfigured node still bounds its parked work"
+        );
+
+        let mut tuned = settings();
+        tuned.blocked_get_cap = 3;
+        create(&serve, &file, "sess-a", "play-a", &tuned).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            3,
+            "the operator's number, applied where settings are read"
+        );
+
+        let mut raised = settings();
+        raised.blocked_get_cap = 128;
+        create(&serve, &file, "sess-b", "play-b", &raised).await;
+        assert_eq!(
+            serve.shared.pool.global_cap(),
+            128,
+            "and it tracks a later change rather than latching the first"
+        );
+    }
+
     /// A detached viewer stops being demand at the moment their reader goes,
     /// not when their abandoned request finally times out.
     ///
@@ -10366,6 +10556,156 @@ mod tests {
                 .expect("touch lock"),
             touched,
             "a timed-out VOD materialization must not renew the session",
+        );
+    }
+
+    /// A rendition that has recorded a failure gives its producer back.
+    ///
+    /// The failure is permanent — first-wins, never cleared — and it answers
+    /// every waiter at the moment it lands, so the child that is still running
+    /// is producing for nobody. The driver used to return the instant it saw a
+    /// failure, and `Action::Idle` is the only thing that reclaims a producer,
+    /// so nothing was left to reap it: the dormant purge refuses an admitted
+    /// rendition outright and the last `Arc` drop waits on whichever generation
+    /// task or watchdog outlives it. This drives the case that costs the most —
+    /// a SIGSTOP'd child, which goes on holding the codec session a running one
+    /// held — and asserts the physical outcome, that the pid is gone and
+    /// reaped, not merely that a belief was rewritten.
+    ///
+    /// The latched capacity hold is checked here too, and deliberately not
+    /// dressed up as a wire defect. The first version of this test asserted
+    /// that a failed rendition published `producer_hold: no_room`, and it does
+    /// not: `status` answers `failed` ahead of every belief arm, so the stale
+    /// hold was already shielded. What is asserted is what is true — the field
+    /// is cleared rather than latched for the life of the rendition, so the
+    /// next reader of it is not the one who discovers it was never true.
+    #[tokio::test]
+    async fn a_failed_rendition_reclaims_its_producer_and_drops_its_hold() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = rendition_of(&serve, "sess-a").await;
+
+        wait_until("the producer spawned", Duration::from_secs(10), || {
+            let rendition = Arc::clone(&rendition);
+            async move { rendition.last_child_pid.load(Relaxed) != 0 }
+        })
+        .await;
+        let pid = rendition.last_child_pid.load(Relaxed) as libc::pid_t;
+
+        // The expensive shape: stopped, so it makes no progress, and alive, so
+        // it still owns everything a running producer owned.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+        *rendition.capacity_hold.lock().expect("capacity hold") =
+            Some(crate::prodsched::Hold::NoRoom { wanted: 4_096 });
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the fixture needs a live child to reclaim"
+        );
+
+        record_failure(
+            &serve.shared,
+            &rendition,
+            crate::playback_control::ProducerDecisionReason::EngineChanged,
+            "the fixture recorded a permanent rendition failure".to_owned(),
+        );
+
+        wait_until(
+            "the producer was reclaimed",
+            Duration::from_secs(10),
+            || {
+                let rendition = Arc::clone(&rendition);
+                async move { matches!(rendition.slot.belief().await, Producer::Absent { .. }) }
+            },
+        )
+        .await;
+        // Reaped, not merely signalled: `perform(Terminate)` is `start_kill`
+        // then `wait`, so a pid that still answers here is a zombie this
+        // process owns and never collected.
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the failed rendition's child is gone, not left holding its codec session"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "gone because it was reaped, not because signalling was refused"
+        );
+        assert!(
+            rendition
+                .capacity_hold
+                .lock()
+                .expect("capacity hold")
+                .is_none(),
+            "and the hold is cleared rather than latched for the rendition's life"
+        );
+        let status = serve.status("sess-a").await.expect("status");
+        assert_eq!(status.producer_state, "failed");
+        assert_eq!(
+            status.producer_hold, None,
+            "which the status already answered ahead of the belief, and still does"
+        );
+    }
+
+    /// One unfinished terminal cleanup cannot stop the node's maintenance.
+    ///
+    /// `maintain` waits on every unfinished cleanup belonging to a tombstoned
+    /// session before it does anything else, and that wait had no bound. A
+    /// single cleanup that never completes therefore stopped the idle reap,
+    /// the dormant-rendition purge, the tombstone eviction and every driver
+    /// kick — for the life of the process, with nothing said.
+    ///
+    /// Two arms could install one: `begin_end` and the supersession sweep both
+    /// wrote the tombstone and the cleanup before reading a rendition that may
+    /// be `None`, and both then returned without an owner for it. Both now
+    /// complete it, so this fixture has to install one by hand — which is the
+    /// point. The bound is what holds when the next change to that ordering
+    /// gets it wrong.
+    #[tokio::test(start_paused = true)]
+    async fn one_unfinished_terminal_cleanup_cannot_wedge_node_maintenance() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+
+        let wedged = Arc::new(TerminalCleanup::new());
+        insert_terminal_session(
+            &serve,
+            "sess-wedged",
+            synthetic_rendition(base.path()).await,
+            Arc::clone(&wedged),
+        )
+        .await;
+        let reapable = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_ended_route(store.as_ref(), &reapable, &generation).await;
+        insert_finished_terminal_session(&serve, &reapable, synthetic_rendition(base.path()).await)
+            .await;
+
+        tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION + Duration::from_secs(1)).await;
+        // Paused time auto-advances to the next timer whenever the runtime is
+        // idle, so the elapsed span is exactly the bound the wait armed — which
+        // is what makes this an assertion about the documented number rather
+        // than about finiteness. Without the timeout there is no timer to
+        // advance to and the pass never returns at all.
+        let before = tokio::time::Instant::now();
+        serve.maintain().await;
+        assert_eq!(
+            tokio::time::Instant::now() - before,
+            TERMINAL_CLEANUP_MAINTENANCE_WAIT,
+            "the pass gave up on the wedged cleanup after exactly the documented bound"
+        );
+
+        assert!(
+            !wedged.is_finished(),
+            "the fixture's whole point is a cleanup that never completes"
+        );
+        // And the pass ran to its end anyway, which is the thing that matters:
+        // the work behind the wait still happened.
+        assert!(
+            serve.playlist(&reapable).await.is_none(),
+            "maintenance past its retention window still evicted the other tombstone"
         );
     }
 

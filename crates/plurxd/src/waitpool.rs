@@ -41,6 +41,7 @@
 // nothing outside the tests calls it yet.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -182,7 +183,14 @@ pub struct WaitDemand {
 /// (which fails), and the lifecycle path (which closes).
 pub struct WaitPool {
     state: Arc<Mutex<State>>,
-    global_cap: usize,
+    /// Node-wide, and settable at runtime: the right number is a property of
+    /// the deployment rather than of the code, so an operator watching
+    /// `pool_full` refusals can raise or lower it without a restart. Read
+    /// once per admission, so a change takes effect on the next blocked GET
+    /// and never retroactively refuses a request already parked.
+    global_cap: AtomicUsize,
+    /// Fixed, because it bounds one viewer rather than the node. A viewer who
+    /// could raise their own ceiling is not capped.
     per_session_cap: usize,
 }
 
@@ -190,9 +198,31 @@ impl WaitPool {
     pub fn new(global_cap: usize, per_session_cap: usize) -> WaitPool {
         WaitPool {
             state: Arc::new(Mutex::new(State::default())),
-            global_cap,
+            global_cap: AtomicUsize::new(global_cap),
             per_session_cap,
         }
+    }
+
+    /// Apply the configured node-wide cap.
+    ///
+    /// Lowering it below what is already parked refuses the *next* admission
+    /// rather than evicting a request that is already waiting: a parked GET
+    /// holds a client's response open, and answering it early to satisfy a
+    /// number an operator has just changed would turn a settings edit into a
+    /// visible playback failure.
+    pub fn set_global_cap(&self, cap: usize) {
+        self.global_cap.store(cap.max(1), Relaxed);
+    }
+
+    /// The ceiling currently in force.
+    ///
+    /// Test-only for now: nothing on the status surface reports it, which is
+    /// a gap worth closing — an operator reading `pool_full` refusals cannot
+    /// see the number those refusals are against — but publishing it is its
+    /// own plumbing and does not belong in the change that made it settable.
+    #[cfg(test)]
+    pub fn global_cap(&self) -> usize {
+        self.global_cap.load(Relaxed)
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -220,7 +250,7 @@ impl WaitPool {
         if state.per_session.get(session).copied().unwrap_or(0) >= self.per_session_cap {
             return Err(WaitRefused::SessionBusy);
         }
-        if state.total >= self.global_cap {
+        if state.total >= self.global_cap.load(Relaxed) {
             return Err(WaitRefused::PoolFull);
         }
         let id = state.next_id;
@@ -633,6 +663,102 @@ mod tests {
         assert_eq!(a.await, Ok(WaitOutcome::Gone));
         assert_eq!(b.await, Ok(WaitOutcome::Gone));
         assert!(pool.is_empty());
+    }
+
+    /// The node-wide cap is the operator's, and takes effect on the next
+    /// admission rather than on requests already parked.
+    ///
+    /// Lowering it below what is waiting must not answer a live request
+    /// early: a parked GET holds a client's response open, and turning a
+    /// settings edit into a visible playback failure is worse than briefly
+    /// running over the new number.
+    #[test]
+    fn the_node_cap_is_settable_and_never_evicts_what_is_already_waiting() {
+        let pool = WaitPool::new(64, 4);
+        let _first = pool.register(key(1), "a").expect("first");
+        let _second = pool.register(key(2), "b").expect("second");
+        assert_eq!(pool.len(), 2);
+
+        pool.set_global_cap(1);
+        assert_eq!(pool.global_cap(), 1);
+        assert_eq!(
+            pool.len(),
+            2,
+            "the requests already parked are not answered early"
+        );
+        assert!(
+            matches!(pool.register(key(3), "c"), Err(WaitRefused::PoolFull)),
+            "the new ceiling binds the next admission"
+        );
+
+        // A zero would refuse every blocked GET, so every seek past the
+        // materialized run would answer 503 immediately. The floor is what
+        // stops a settings edit from reading like "no limit" and behaving
+        // like "no playback".
+        pool.set_global_cap(0);
+        assert_eq!(pool.global_cap(), 1, "the cap floors at one, never zero");
+    }
+
+    /// What the two caps actually promise, including what they do not.
+    ///
+    /// The per-session cap bounds one viewer: a session at its own ceiling is
+    /// refused `SessionBusy` while node room remains, so a newcomer takes that
+    /// room. That refusal wins even when the node is *also* full, because the
+    /// two answers mean different things to a client — `SessionBusy` says slow
+    /// down, `PoolFull` says the node is out — and conflating them would
+    /// inflate the very counter an operator sizes the node cap from.
+    ///
+    /// What neither cap provides is a fair share. Admission is
+    /// first-come-first-served under a per-session ceiling, so with sixteen
+    /// sessions each holding four, a seventeenth viewer holding *none* is
+    /// refused. This states that outcome rather than hiding it: the
+    /// fair-service item is still open, and a test implying otherwise would
+    /// close it by assertion.
+    #[test]
+    fn the_two_caps_bound_a_viewer_and_the_node_but_do_not_share_fairly() {
+        let pool = WaitPool::new(6, 4);
+        let mut storm = Vec::new();
+        for index in 0..4 {
+            storm.push(
+                pool.register(key(index), "storm")
+                    .expect("within its own cap"),
+            );
+        }
+        assert!(
+            matches!(
+                pool.register(key(9), "storm"),
+                Err(WaitRefused::SessionBusy)
+            ),
+            "one viewer is bounded by its own cap, not by the node's"
+        );
+        assert_eq!(pool.len(), 4, "and the node still has room");
+
+        let _quiet = pool
+            .register(key(20), "quiet")
+            .expect("a newcomer takes the room the storm could not");
+        let _also = pool.register(key(21), "quiet").expect("and the rest of it");
+
+        // A session at its own ceiling on a node that is also full still
+        // hears `SessionBusy`. The per-session bound is the more specific
+        // truth and the one a client can act on.
+        assert!(
+            matches!(
+                pool.register(key(30), "storm"),
+                Err(WaitRefused::SessionBusy)
+            ),
+            "the per-session refusal is not swallowed by the node being full"
+        );
+        // And a viewer holding nothing at all is refused for the node — the
+        // fair-share gap, stated rather than hidden.
+        assert!(
+            matches!(pool.register(key(22), "third"), Err(WaitRefused::PoolFull)),
+            "first-come-first-served: a newcomer with no slots is still refused"
+        );
+        drop(storm);
+        assert!(
+            pool.register(key(23), "third").is_ok(),
+            "and the room comes back when the storm's requests finish"
+        );
     }
 
     /// A departing session's parked requests leave with it.

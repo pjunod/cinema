@@ -1053,7 +1053,12 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-vod-terminal-compaction-owner"
 pattern = "TerminalCleanup"
-expected_occurrences = 18
+# 18 -> 20 with the failed-rendition reclaim: the terminal-session test
+# helper gained an `Arc<TerminalCleanup>` parameter so a fixture can install
+# one that never completes, and that fixture constructs it. Both are test
+# scaffolding for the maintenance bound; neither adds a cleanup owner to the
+# production graph, which still mints exactly one per tombstoned session.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-vod-terminal-rendition-compaction"
@@ -1353,7 +1358,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # its exact predecessor, the same shape reviewed at 555 -> 557. Production
 # gains no constructor: the correction replaces one arithmetic expression.
 # Neither timer owns a process, producer, recipe or recovery decision.
-expected_occurrences = 582
+# 582 -> 583 with the failed-rendition reclaim: `tokio::time::timeout` now
+# bounds the wait `maintain` takes on outstanding terminal cleanups. It is the
+# one timer this adds and it owns nothing — no task, no child, no lease — it
+# only stops the node's single maintenance loop from being wedged forever by a
+# cleanup that never completes.
+expected_occurrences = 583
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1496,7 +1506,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `VodServe::status` reads, in the proof that a stall still says `no_room` after
 # the producer it terminated is gone (healthy, held, and cleared again). Registry
 # reads; they launch nothing.
-expected_occurrences = 242
+# +1 for the failed-rendition reclaim test: one more `VodServe::status()` read,
+# asserting that a rendition that has failed reports `failed` with no capacity
+# hold. It is an in-process read of session and belief state; it launches no
+# process and owns no producer.
+expected_occurrences = 243
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1544,7 +1558,14 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # 32 -> 33 with abb872ba: this deliberately conservative pattern also matches
 # the new `pub async fn wait(` declaration on RegisteredWait. It is the
 # oneshot/timeout method inventoried above, not a free OS wait or reap call.
-expected_occurrences = 33
+# 33 -> 36 with the failed-rendition reclaim: three `libc::kill` calls in the
+# new regression, and none of them is a reap this code owns. One sends SIGSTOP
+# to build the fixture's expensive shape — a child that makes no progress and
+# still holds its codec session — and two are `kill(pid, 0)` liveness probes,
+# the before and the after. The actual termination is still `ProducerSlot`'s,
+# through `Step::Terminate`; the probes are how the test proves that happened
+# to a real process rather than only to a belief.
+expected_occurrences = 36
 
 [[module_structures]]
 id = "kill-on-drop-construction"
