@@ -16,7 +16,9 @@ VIDEO_DECODE_ERROR_LIMIT = 5
 DIAGNOSTIC_DRAIN_BUDGET_MS = 2_000
 MAX_DIAGNOSTIC_LINE_BYTES = 16 * 1024
 MAX_FIXTURE_PREFIX_BYTES = 32
-MAX_FIXTURE_RECORD_BYTES = MAX_FIXTURE_PREFIX_BYTES + MAX_DIAGNOSTIC_LINE_BYTES + 1
+MAX_FIXTURE_RECORD_BYTES = (
+    MAX_FIXTURE_PREFIX_BYTES + 1 + MAX_DIAGNOSTIC_LINE_BYTES + 1
+)
 
 CONTEXT = r"(?: @ (?:0x[0-9a-fA-F]+|<address>))?"
 PRIMARY_VIDEO_ERROR = re.compile(
@@ -27,7 +29,10 @@ PRIMARY_VIDEO_ERROR = re.compile(
 SUBORDINATE_NO_FRAME = re.compile(
     rf"^\[[^\]@]+{CONTEXT}\]\s+(?:\[error\]\s+)?No frame decoded\?"
 )
-LEGACY_REPEAT = re.compile(r"^\s*Last message repeated (?P<count>\d+) times$")
+LEGACY_REPEAT = re.compile(
+    r"^\s*Last message repeated (?P<count>[0-9]{1,20}) times$"
+)
+LEGACY_REPEAT_PREFIX = re.compile(r"^\s*Last message repeated ")
 
 
 class QualificationError(ValueError):
@@ -151,6 +156,10 @@ def qualify(
             else:
                 unrelated_repeat_summaries += 1
             prior_class = "repeat_summary"
+            continue
+        if LEGACY_REPEAT_PREFIX.match(message):
+            malformed_lines += 1
+            prior_class = None
             continue
         if SUBORDINATE_NO_FRAME.match(message):
             subordinate += 1
