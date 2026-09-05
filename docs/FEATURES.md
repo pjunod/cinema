@@ -501,15 +501,22 @@ two of its tuners were held and then free again, and a tuner another household
 client was already using was left alone throughout. A DRM-flagged channel was
 refused with `drm_unsupported`.
 
-**ATSC 3.0 does not play yet, and it is not the codec's fault.** On that same
-device an ATSC 3.0 channel (HEVC Main 10 1080 with AC-3) publishes its first
-segment at **18.1 s** — past the 15 s startup budget — so plurx lists it as
-playable and then always refuses it with `startup_timeout`, even though it plays
-perfectly well once started. The ATSC 1.0 channel on the same device and host
-took 7.0 s. Decoding is not the limit either: that HEVC source transcodes to
-720p at 2.37× realtime in software on the same machine. Two other ATSC 3.0
-channels on that antenna deliver no bytes at all from the device, which is
-reception rather than software. See
+**ATSC 3.0: the fatal bug is fixed, the latency is not settled.** Chasing an
+ATSC 3.0 channel on that device turned up three real defects, all now repaired.
+Every ATSC 3.0 channel carries HEVC **Main 10**, and the live filter chain
+pinned no pixel format, so libx264 — which is handed `-profile:v high` — was
+given 10-bit frames and refused outright ("high profile doesn't support a bit
+depth of 10"), killing FFmpeg before it published anything. That affected any
+10-bit live source, not just ATSC 3.0. It stayed hidden because a flat 15 s
+startup budget expired first, giving one message to both a channel that is
+quietly working and one that sent nothing at all. And `-probesize` was 8 MiB of
+*tuner stream*, which on a 2.8 Mbps mux is about 23 s of waiting on its own.
+
+What remains is startup time on a weak mux, not a codec: that antenna's only
+feeding ATSC 3.0 mux carries 58% signal quality with visible decode errors, and
+two more ATSC 3.0 channels on it return no bytes at all from the device, which
+is reception rather than software. So Live TV is accepted on ATSC 1.0 and honest
+about ATSC 3.0 being unfinished. See
 [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
 
 **What else is limited, honestly.** Losing the owner node ends the live session
