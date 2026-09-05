@@ -1,7 +1,8 @@
 # HDHomeRun Live TV — one tuner, every plurx client
 
-**Status:** M0/M1 merged; M2 review fixes under verification · **Effort:**
-`effort/hdhomerun-live-tv` · **Written:** 2026-09-04
+**Status:** M0, M1, M2 and M4 Apple merged to the effort; the web and Android
+task PRs are open with green effort gates and await review · **Effort:**
+`effort/hdhomerun-live-tv` · **Written:** 2026-09-04 · **Updated:** 2026-09-05
 
 Companion to [PLAYBACK.md](PLAYBACK.md) (how finite files become streams),
 [ARCHITECTURE.md](ARCHITECTURE.md) (how nodes and clients fit together), and
@@ -284,11 +285,25 @@ Controls are Play/Pause · Mute/volume · captions when proved · Fullscreen ·
 Close. The timeline reads **LIVE** and exposes no forward/back seek controls.
 Changing channels deletes the old session before creating the new one.
 Owner loss, producer stall, capability expiry, or returning from background
-after idle reap stops the live adapter, attempts one best-effort DELETE, and
+after idle reap stops the live adapter, attempts bounded DELETE retries, and
 shows a typed Watch-again state. It never invokes VOD recovery or resume.
+
+No-progress or intentional pause releases the tuner after 30 seconds. Unknown
+start outcomes require a 90-second monotonic grace period. A token-free local
+marker is written before POST, retained during active ownership, and cleared
+only after confirmed DELETE or a definitive start refusal. Reload/restart with
+that marker earns a fresh 90-second grace; wall-clock adjustments cannot bypass
+it. Saving the marker must succeed before allocation. This is conservative:
+web tabs sharing one origin wait while another tab refreshes its ownership
+marker, and a restart may wait even when the old session has already expired.
+Other devices retain the server's normal configured concurrency limit.
 
 **Acceptance:** web, Apple, and Android client tests assert that live playback
 starts and closes exactly one session and issues zero finite-file state writes.
+`python3 scripts/live-tv-browser --self-host --out target/live-tv-browser`
+uses generated H.264/AAC HLS with a fake tuner API to require actual advancing
+browser media time, pause/resume, fullscreen stop, channel switching, route
+cleanup, typed refusal and late-start release. It never opens household tuners.
 
 ## 3. Protocol and trust boundary — the tuner is untrusted LAN input
 
@@ -652,7 +667,7 @@ partition/owner-transition two-node relay suite · pinned check/Clippy/rustfmt �
 
 ### 8.4 M3 — web Live TV
 
-Add `#/live`, navigation, accessible channel cards, readiness/unsupported
+Add `#/live-tv`, navigation, accessible channel cards, readiness/unsupported
 states, the live-player adapter, HLS startup/status/keepalive, channel switch,
 and cleanup. Extend the UI golden and browser contract tests.
 Open the task PR to the effort, obtain exact-diff adversarial review, implement
@@ -660,8 +675,9 @@ accepted findings, and re-review to Approve before merge. Record every state
 transition in both status pages.
 
 **Focused acceptance:** Node policy/unit tests · UI structure golden ·
-Playwright live fixture, including zero progress/scrobble calls, exactly one
-DELETE on close/switch, and typed recovery after owner loss, producer stall,
+Playwright live fixture, including zero progress/scrobble calls, one confirmed
+release per capability (bounded idempotent DELETE retries after transport failure),
+and typed recovery after owner loss, producer stall,
 capability expiry, and background idle reap.
 
 ### 8.5 M4 — Apple and Android parity

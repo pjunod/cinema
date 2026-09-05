@@ -362,6 +362,7 @@ ui-baseline: ## Capture the UI baseline for every layout (both tiers, into targe
 .PHONY: ui-check
 ui-check: ## Sweep every layout and fail if the structural golden moved
 	@scripts/ui-baseline --self-host --check
+	@python3 scripts/live-tv-browser --self-host --out target/live-tv-browser
 
 # Every other web test reads the reporter as text. This one runs it. The M5
 # fleet run was the first execution the web control plane ever had, and it
@@ -390,6 +391,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/player-dom.test.js
 	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
+	@node tests/web/live-tv.test.js
 	@node tests/web/page-read-budget.test.js
 	@node tests/web/theme-family.test.js
 	@node tests/web/activity-node-names.test.js

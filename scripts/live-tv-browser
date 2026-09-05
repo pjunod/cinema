@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""Exercise the shipped Live TV UI with real generated HLS and a fake tuner API.
+
+Run: python3 scripts/live-tv-browser --self-host --out target/live-tv-browser
+Uses ui-baseline's isolated seeded daemon. No household tuner is opened and no
+production settings are changed. A failed assertion exits nonzero; screenshots
+are evidence of the player, not a substitute for advancing media time.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import sys
+import time
+from urllib.parse import urlsplit
+
+ROOT = Path(__file__).resolve().parents[1]
+HARNESS = runpy.run_path(str(ROOT / "scripts/ui-baseline"), run_name="live_tv_fixture_harness")
+
+
+def main(argv: list[str]) -> int:
+    from playwright.sync_api import sync_playwright
+
+    args = HARNESS["parse_args"](argv)
+    if not args.self_host:
+        raise SystemExit("live-tv-browser only accepts --self-host; production servers are not test fixtures")
+    HARNESS["preflight"](args)
+    out = Path(args.out).resolve()
+    media = out / "live-hls"
+    media.mkdir(parents=True, exist_ok=True)
+    subprocess.run([
+        args.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+        "-t", "90", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-g", "48", "-keyint_min", "48", "-sc_threshold", "0", "-c:a", "aac",
+        "-b:a", "96k", "-f", "hls", "-hls_time", "2", "-hls_list_size", "0",
+        "-hls_segment_filename", str(media / "%d.ts"), str(media / "source.m3u8"),
+    ], check=True, timeout=90)
+
+    host = HARNESS["SelfHost"](args)
+    try:
+        host.start()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=[
+                "--no-sandbox", "--disable-dev-shm-usage", "--mute-audio",
+                "--autoplay-policy=no-user-gesture-required", "--disable-features=HardwareMediaKeyHandling",
+            ])
+            context = browser.new_context(viewport={"width": 1280, "height": 860})
+            context.add_init_script("if (location.origin === %s) localStorage.setItem('plurx_token', %s);" %
+                                    (json.dumps(host.base_url.rstrip('/')), json.dumps(host.token)))
+            channels = [
+                {"id": "one", "guide_number": "7.1", "guide_name": "Fixture News", "drm": False, "favorite": True, "support": "ready"},
+                {"id": "two", "guide_number": "10.2", "guide_name": "Fixture Public TV", "drm": False, "favorite": False, "support": "ready"},
+                {"id": "protected", "guide_number": "107.1", "guide_name": "Fixture Protected", "drm": True, "favorite": False, "support": "drm_unsupported"},
+            ]
+            sessions: dict[str, dict] = {}
+            events: list[str] = []
+            errors: list[str] = []
+            forbidden: list[str] = []
+            pending: list = []
+            deletes: list[str] = []
+            mode = {"next": "normal", "drop_delete": False}
+
+            def active() -> list[str]:
+                return [key for key, value in sessions.items() if not value["closed"]]
+
+            def intercept(route):
+                request = route.request
+                path = urlsplit(request.url).path.removeprefix("/api/v1/live-tv/")
+                method = request.method
+                if path == "channels":
+                    route.fulfill(json={"channels": channels, "freshness": "fresh", "age_seconds": 0})
+                    return
+                start = re.fullmatch(r"channels/(one|two)/sessions", path)
+                if start and method == "POST":
+                    assert request.headers.get("authorization") == "Bearer " + host.token
+                    if mode["next"] == "capacity":
+                        mode["next"] = "normal"
+                        route.fulfill(status=503, json={"code": "tuner_capacity", "message": "Fixture is busy"})
+                        return
+                    assert not active(), "a new tuner was allocated before the old capability was released"
+                    capability = "fixture-" + str(len(sessions) + 1)
+                    channel = next(c for c in channels if c["id"] == start[1])
+                    sessions[capability] = {"opened": time.monotonic(), "closed": False, "channel": channel}
+                    events.append("start:" + capability)
+                    result = {"session_id": capability, "playlist_url": "https://untrusted.invalid/ignored",
+                              "channel": channel, "live": True, "output": {"video": "h264", "audio": "aac"}}
+                    if mode["next"] == "late":
+                        mode["next"] = "normal"
+                        pending.append((route, result))
+                    else:
+                        route.fulfill(json=result)
+                    return
+                resource = re.fullmatch(r"sessions/(fixture-\d+)(?:/(.*))?", path)
+                assert resource, "unexpected Live TV fixture route: " + path
+                assert "authorization" not in request.headers, "account token escaped onto a capability route"
+                capability, suffix = resource.groups()
+                session = sessions[capability]
+                if method == "DELETE":
+                    deletes.append(capability)
+                    if mode["drop_delete"]:
+                        route.abort("failed")
+                        return
+                    if not session["closed"]:
+                        session["closed"] = True
+                        events.append("release:" + capability)
+                    route.fulfill(status=204)
+                elif session["closed"]:
+                    route.fulfill(status=410, json={"code": "capability_expired"})
+                elif suffix in {"keepalive", "status"} and session.get("failure"):
+                    code = session["failure"]
+                    route.fulfill(status=410 if code == "capability_expired" else 503, json={"code": code})
+                elif suffix == "keepalive":
+                    route.fulfill(status=204)
+                elif suffix == "status":
+                    route.fulfill(json={"state": "active", "owner_node_id": "fixture-owner", "encoder": "fixture", "output_height": 180})
+                elif suffix == "index.m3u8":
+                    end = min(44, 3 + int((time.monotonic() - session["opened"]) / 2))
+                    first = max(0, end - 5)
+                    playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:%d\n" % first
+                    playlist += "".join("#EXTINF:2.000000,\n%d.ts\n" % i for i in range(first, end + 1))
+                    route.fulfill(content_type="application/vnd.apple.mpegurl", body=playlist)
+                else:
+                    assert re.fullmatch(r"\d+\.ts", suffix or "")
+                    route.fulfill(content_type="video/mp2t", body=(media / suffix).read_bytes())
+
+            def observe(request):
+                path = urlsplit(request.url).path
+                if request.method in {"POST", "PUT", "PATCH", "DELETE"} and "/api/v1/" in path and "/live-tv/" not in path:
+                    forbidden.append(request.method + " " + path)
+
+            context.route("**/api/v1/live-tv/**", intercept)
+            context.on("request", observe)
+            page = context.new_page()
+            page.on("pageerror", lambda error: errors.append(str(error)))
+
+            def until(predicate, message: str, timeout: float = 10):
+                deadline = time.monotonic() + timeout
+                while not predicate():
+                    assert time.monotonic() < deadline, message
+                    # Pump Playwright events while the fake tuner services requests.
+                    page.wait_for_timeout(50)
+
+            def frames_advance():
+                sample = page.locator("#live-tv-video").evaluate("""video => ({
+                    time: video.currentTime,
+                    frames: video.getVideoPlaybackQuality?.().totalVideoFrames ?? video.webkitDecodedFrameCount ?? 0
+                })""")
+                page.wait_for_function("""sample => {
+                    const video = document.querySelector('#live-tv-video');
+                    const frames = video.getVideoPlaybackQuality?.().totalVideoFrames ?? video.webkitDecodedFrameCount ?? 0;
+                    return !video.paused && video.videoWidth > 0 && video.videoHeight > 0
+                        && video.currentTime > sample.time + 1 && frames > sample.frames + 12;
+                }""", arg=sample, timeout=30000)
+
+            def watch():
+                page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+                frames_advance()
+
+            page.goto(host.base_url + "/#/live-tv")
+            page.get_by_role("button", name="DRM unsupported", exact=True).wait_for()
+            assert page.get_by_role("button", name="DRM unsupported", exact=True).is_disabled()
+            watch()
+            page.screenshot(path=str(out / "live-tv-playing.png"), full_page=True)
+            page.get_by_role("button", name="Pause", exact=True).click()
+            assert page.locator("#live-tv-video").evaluate("video => video.paused")
+            page.get_by_role("button", name="Play live", exact=True).click()
+            frames_advance()
+            page.get_by_role("button", name="Fullscreen", exact=True).click()
+            page.wait_for_function("document.fullscreenElement?.id === 'live-tv-player'")
+            page.get_by_role("button", name="Stop", exact=True).click()
+            page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-player').hidden")
+            until(lambda: not active(), "fullscreen stop did not release")
+
+            watch()
+            page.get_by_role("button", name="Watch live", exact=True).nth(1).click()
+            page.wait_for_function("document.querySelector('#live-tv-title').textContent.includes('10.2')")
+            page.evaluate("location.hash = '#/settings'")
+            page.wait_for_function("location.hash.startsWith('#/settings') && !document.querySelector('#live-tv-video')")
+            until(lambda: not active(), "navigation did not release")
+
+            page.goto(host.base_url + "/#/live-tv")
+            page.get_by_role("button", name="Watch live", exact=True).nth(0).wait_for()
+            mode["next"] = "capacity"
+            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+            page.get_by_text("All Live TV slots are busy.", exact=False).wait_for()
+            mode["next"] = "late"
+            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+            until(lambda: len(pending) == 1, "late start never reached the tuner")
+            page.evaluate("location.hash = '#/settings'")
+            page.wait_for_function("location.hash.startsWith('#/settings') && !document.querySelector('#live-tv-video')")
+            late_route, late_result = pending.pop()
+            late_route.fulfill(json=late_result)
+            until(lambda: not active(), "late start after navigation was not released")
+
+            page.goto(host.base_url + "/#/live-tv")
+            for failure in ("owner_unavailable", "stream_failed", "capability_expired"):
+                watch()
+                sessions[active()[0]]["failure"] = failure
+                until(lambda: not active(), "active " + failure + " did not release", timeout=25)
+                page.wait_for_function("document.querySelector('#live-tv-player').hidden")
+
+            watch()
+            page.get_by_role("button", name="Pause", exact=True).click()
+            until(lambda: not active(), "paused tuner was renewed instead of released", timeout=42)
+            page.wait_for_function("document.querySelector('#live-tv-player').hidden")
+
+            watch()
+            # Exercise the shipped visibility handler. Headless Chromium does
+            # not model an OS app switch, so this is explicitly an event test.
+            page.evaluate("""() => {
+                Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'});
+                document.dispatchEvent(new Event('visibilitychange'));
+            }""")
+            until(lambda: not active(), "visibility loss did not release")
+            page.evaluate("delete document.visibilityState")
+
+            watch()
+            mode["drop_delete"] = True
+            page.goto("about:blank")
+            # Unload delivery is not guaranteed. Deliberately lose DELETE and
+            # prove a replacement document cannot allocate a second tuner.
+            page.goto(host.base_url + "/#/live-tv")
+            assert page.evaluate("Object.keys(localStorage).some(key => key.startsWith('plurx_live_tv_pending_v1:'))")
+            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+            page.get_by_text("90 seconds", exact=False).wait_for()
+            assert active() == ["fixture-10"] and len(sessions) == 10
+            assert not forbidden, "Live TV wrote VOD/account state: " + repr(forbidden)
+            assert not errors, "browser page errors: " + repr(errors)
+            assert events == [entry for i in range(1, 10) for entry in (f"start:fixture-{i}", f"release:fixture-{i}")] + ["start:fixture-10"], events
+            # The last capability intentionally has no confirmed DELETE.
+            # Its backend orphan expiry belongs to backend/hardware acceptance,
+            # not an invented reaper inside this browser fixture.
+            assert all(deletes.count(f"fixture-{i}") == 1 for i in range(1, 10)), deletes
+            assert deletes.count("fixture-10") <= 3, deletes
+            print("PASS decoded H.264/AAC frames advance; pause/resume, fullscreen stop, switch, navigation, typed refusal and late-start cleanup")
+            print("PASS active owner loss, producer failure, capability expiry, paused timeout, visibility event and lost-unload reload quarantine")
+            print("PASS no account token on capability requests; zero VOD/account writes; ten starts, nine confirmed releases, one deliberately orphaned start blocks replacement")
+            context.close()
+            browser.close()
+        return 0
+    finally:
+        host.stop()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
