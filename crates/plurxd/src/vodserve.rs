@@ -1326,9 +1326,14 @@ impl Rendition {
         // viewer's abandoned request outranks a present viewer's and aims the
         // producer at media nobody is watching until its deadline expires.
         pool.retire_session(&self.key, session_id);
-        // Every VOD session end converges here — terminal, idle reap and
-        // reattachment alike — so this is the one place a departing viewer's
-        // subtitle window is released. The readers guard is deliberately
+        // Every VOD session *ending* converges here — terminal and idle reap
+        // alike — so this is the one place a departing viewer's subtitle
+        // window is released. Reattachment is deliberately not one of them:
+        // it is not an ending, the id it reuses belongs to a viewer who is
+        // still watching, and releasing fences that id for half a minute. It
+        // stops its own obsolete flight by name instead, without the fence,
+        // which the comment here used to claim it did through this function.
+        // The readers guard is deliberately
         // dropped first: releasing waits for a real ffmpeg to settle, and
         // holding a rendition-wide lifecycle lock across that await would let
         // one leaving viewer stall every other reader of the same rendition.
@@ -2779,6 +2784,13 @@ impl VodServe {
             }
             _ => None,
         };
+        // Set only where this attachment actually moves the viewer off another
+        // rendition. Stopping the flight has to happen after the guards below
+        // are dropped — settlement waits on a real ffmpeg, and holding a
+        // rendition-wide lock across that would let one viewer's recipe change
+        // stall every other reader of the same rendition — so what crosses the
+        // drop is the flight's identity, not the decision to stop it.
+        let mut obsolete_window_flight: Option<u64> = None;
         let mut replacement_readers = rendition.readers.lock().await;
         let _serving_transition = if let Some(admission) = fences.serving_admission.as_ref() {
             Some(admission.commit_guard_before().await.ok_or_else(|| {
@@ -2804,6 +2816,22 @@ impl VodServe {
             if let Some(previous) = previous_rendition.as_ref() {
                 self.shared.pool.retire_session(&previous.key, &session_id);
             }
+            // The third thing `detach_reader` does, which this path was
+            // missing, and which it cannot do the same way. A subtitle window
+            // is keyed by session id alone, so the flight this viewer left
+            // behind is a live ffmpeg extracting a span for the recipe they
+            // just moved off — worth stopping, and `detach_reader`'s comment
+            // claims every ending converges here to stop it.
+            //
+            // It cannot call `release_session_window`, because releasing also
+            // fences the id for half a minute and this id belongs to a viewer
+            // who is still watching: the fence would refuse the first window
+            // of the attachment replacing it and turn a recipe change into
+            // half a minute without subtitles. It names the exact flight
+            // instead, read here under the same guard that decides it is
+            // obsolete, so a successor claiming the session between this read
+            // and the stop is left alone.
+            obsolete_window_flight = crate::subtitles::session_window_flight(&session_id);
         }
         replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
         *rendition.dormant_since.lock().expect("dormant lock") = None;
@@ -2818,8 +2846,19 @@ impl VodServe {
             outgoing.abort_staged_preparation();
         }
         sessions.insert(session_id.clone(), replacement);
+        // Both reader graphs are committed, so the rendition-wide guards have
+        // no further work. They used to live to the end of the function, which
+        // was free while nothing here awaited; the window stop below does, and
+        // settlement waits on a real ffmpeg. Holding either guard across that
+        // would let one viewer's recipe change stall every other reader of the
+        // rendition they left or the one they joined.
+        drop(replacement_readers);
+        drop(previous_readers);
         drop(_serving_transition);
         drop(sessions);
+        if let Some(flight) = obsolete_window_flight {
+            crate::subtitles::abandon_session_window(&session_id, flight).await;
+        }
         self.emit_lifecycle(
             &session_id,
             file.id,
@@ -10151,6 +10190,121 @@ mod tests {
             serve.shared.pool.demands(&first.key).is_empty(),
             "the request left behind goes with the reader that made it"
         );
+    }
+
+    /// Reattachment also stops the subtitle window the viewer left behind, and
+    /// does it without fencing the id they are still watching under.
+    ///
+    /// A window is keyed by session id alone, so a viewer moving to another
+    /// rendition leaves a live ffmpeg extracting a span for the recipe they
+    /// moved off. `detach_reader` releases one on every real ending and its
+    /// comment claimed reattachment converged there too; it did not, and it
+    /// must not — releasing fences the id for half a minute, and this id
+    /// belongs to somebody who is still watching, so the fence would refuse
+    /// the first window of the attachment that just replaced it. The flight is
+    /// stopped by name instead, which is what this pins from the serving side:
+    /// gone, and the session still able to start the next one.
+    #[tokio::test]
+    async fn reattaching_elsewhere_stops_the_window_flight_it_left_behind() {
+        // The window registry is process-global and keyed by session id
+        // alone, so this fixture cannot use the shared `sess-a` literal: a
+        // concurrent test releasing that id would fence or clear this one's
+        // flight and the failure would read as a defect in the code.
+        let session_id = &uuid::Uuid::new_v4().to_string();
+        let base = crate::test_tempdir().expect("base");
+        let (serve, mut file) = serve_on(base.path()).await;
+        let subs = crate::test_tempdir().expect("subs");
+        // Long enough that a window is a fraction of the runtime, which is the
+        // only condition windowing asks about. The extraction itself is
+        // injected, so nothing here reads the media.
+        file.duration_ms = Some(4 * 60 * 60 * 1_000);
+        create(&serve, &file, session_id, "play-a", &settings()).await;
+        let first = rendition_of(&serve, session_id).await;
+
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        let warm = |anchor: i64| {
+            let started = Arc::clone(&started);
+            let hold = Arc::clone(&hold);
+            let subs_dir = subs.path().to_owned();
+            let file = file.clone();
+            async move {
+                crate::subtitles::warm_vtt_window_with(
+                    session_id,
+                    Some(1),
+                    &subs_dir,
+                    &file,
+                    0,
+                    anchor,
+                    30,
+                    move |_tmp, _, _, _, _| async move {
+                        started.add_permits(1);
+                        hold.acquire().await.expect("hold").forget();
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        };
+        let running = || {
+            let started = Arc::clone(&started);
+            async move {
+                tokio::time::timeout(Duration::from_secs(5), started.acquire())
+                    .await
+                    .expect("the injected extractor starts")
+                    .expect("started semaphore remains open")
+                    .forget();
+            }
+        };
+
+        assert!(warm(600).await, "the viewer owns a window on the way in");
+        running().await;
+        assert!(crate::subtitles::owned_window_for_test(session_id).is_some());
+
+        // Same session, a different recipe: a different rendition key, and the
+        // reader moves to it.
+        let mut moved = request("play-a", 0.0);
+        moved.kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        serve
+            .try_create(
+                &moved,
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                session_id.to_string(),
+            )
+            .await
+            .expect("the replacement is VOD-presentable");
+        assert!(
+            !Arc::ptr_eq(&first, &rendition_of(&serve, session_id).await),
+            "the fixture must actually move the viewer to another rendition"
+        );
+
+        assert!(
+            crate::subtitles::owned_window_for_test(session_id).is_none(),
+            "the flight for the recipe they left does not outlive the move"
+        );
+        assert!(
+            warm(900).await,
+            "and the viewer who is still watching is not fenced out of the next one"
+        );
+        running().await;
+        assert_eq!(
+            crate::subtitles::peak_window_flights_for_test(session_id),
+            1,
+            "one live flight per playback, across the move"
+        );
+
+        hold.add_permits(8);
+        crate::subtitles::release_session_window(session_id).await;
     }
 
     /// The configured node cap reaches the pool, on create.

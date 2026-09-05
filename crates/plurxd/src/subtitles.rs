@@ -538,6 +538,52 @@ pub async fn release_session_window(session: &str) {
         owners.fence(session, std::time::Instant::now());
         owners.live.remove(session)
     };
+    stop_window_flight(live).await;
+}
+
+/// Which flight this session holds right now, if any.
+///
+/// The caller that wants to stop a *particular* flight has to name it, because
+/// between reading and stopping it the session may legitimately have started
+/// another. Synchronous on purpose: it is meant to be read inside the same
+/// guard that decides the flight is obsolete.
+pub fn session_window_flight(session: &str) -> Option<u64> {
+    window_owners().live.get(session).map(|live| live.id)
+}
+
+/// Stop one named flight without ending the session that owns it.
+///
+/// Reattachment moves a viewer to a different rendition under the same session
+/// id. The flight they leave behind is a real ffmpeg extracting a span for the
+/// recipe they just left, so it is worth stopping — but
+/// [`release_session_window`] is the wrong instrument. Releasing also fences
+/// the id for [`WINDOW_RELEASE_FENCE`], and this id belongs to a viewer who is
+/// still watching: the fence would refuse the first window of the attachment
+/// that replaced it, turning a recipe change into half a minute without
+/// subtitles.
+///
+/// `flight` is the identity read when the flight was judged obsolete. A
+/// successor claiming the same session between that read and this call carries
+/// a different id and is left alone, which is the same guarantee
+/// [`WindowFlightGuard`] relies on for its own removal.
+pub async fn abandon_session_window(session: &str, flight: u64) {
+    let live = {
+        let mut owners = window_owners();
+        match owners.live.get(session) {
+            Some(live) if live.id == flight => owners.live.remove(session),
+            _ => None,
+        }
+    };
+    stop_window_flight(live).await;
+}
+
+/// Cancel and wait out a flight taken out of the registry.
+///
+/// Cancellation-safe in the sense session teardown needs: the slot is already
+/// gone and the cancel is signalled before the first await, so a caller that is
+/// itself dropped mid-stop still leaves the flight stopping rather than
+/// orphaned and still owning a session id a later playback may reuse.
+async fn stop_window_flight(live: Option<SessionWindow>) {
     let Some(mut live) = live else {
         return;
     };
