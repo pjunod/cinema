@@ -205,11 +205,19 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
-	  client::stream::tests::dedicated_proxy_control_bypasses_application_backlog_during_writer_backpressure \
+	  client::stream::tests::dedicated_leader_control_bypasses_application_backlog_during_writer_backpressure \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  client::stream::tests::proxy_handoff_settles_decoded_response_before_failing_unresolved_requests \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::stream::tests::concurrent_proxy_refusals_coalesce_into_one_endpoint_advance \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::stream::tests::teardown_drained_proxy_refusal_claims_the_socket_handoff \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \

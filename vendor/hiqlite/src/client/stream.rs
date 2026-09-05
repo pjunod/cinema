@@ -84,10 +84,6 @@ pub(crate) enum ClientStreamControl {
     Leader(ClientLeaderChange),
     #[cfg(feature = "dashboard")]
     DashboardLeader((Option<NodeId>, Option<Node>), Option<oneshot::Sender<()>>),
-    /// Advance only within the caller-configured proxy pool. The stream
-    /// manager acknowledges after closing the old stream and failing every
-    /// unresolved in-flight request without replay.
-    RotateProxy(oneshot::Sender<()>),
 }
 
 #[derive(Default)]
@@ -386,10 +382,8 @@ fn reconnect_delay(
 }
 
 async fn apply_disconnected_control(
-    client: &Client,
     leader: &Arc<RwLock<(NodeId, String)>>,
     pending_leader_ready: &mut PendingLeaderReady,
-    proxy_index: &mut usize,
     connecting_target: Option<&(NodeId, String)>,
     control: ClientStreamControl,
 ) -> bool {
@@ -430,14 +424,6 @@ async fn apply_disconnected_control(
                 }
             }
             update_leader(leader, node_id, node).await;
-            true
-        }
-        ClientStreamControl::RotateProxy(ack) => {
-            if ack.is_closed() {
-                return false;
-            }
-            rotate_proxy_endpoint(client, leader, proxy_index).await;
-            let _ = ack.send(());
             true
         }
     }
@@ -523,10 +509,8 @@ async fn client_stream(
                         return;
                     };
                     if apply_disconnected_control(
-                        &client,
                         &leader,
                         &mut pending_leader_ready,
-                        &mut proxy_index,
                         Some(&connecting_target),
                         control,
                     ).await {
@@ -575,10 +559,8 @@ async fn client_stream(
                                     return;
                                 };
                                 if apply_disconnected_control(
-                                    &client,
                                     &leader,
                                     &mut pending_leader_ready,
-                                    &mut proxy_index,
                                     None,
                                     control,
                                 ).await {
@@ -616,10 +598,8 @@ async fn client_stream(
                                     return;
                                 };
                                 if apply_disconnected_control(
-                                    &client,
                                     &leader,
                                     &mut pending_leader_ready,
-                                    &mut proxy_index,
                                     None,
                                     control,
                                 ).await {
@@ -666,7 +646,7 @@ async fn client_stream(
         let mut terminal_transport_failure = false;
         let mut force_writer_abort = false;
         let mut leader_handoff = false;
-        let mut proxy_handoff_ack = None;
+        let mut proxy_handoff = false;
 
         'connected: loop {
             let event = next_client_connected_event(
@@ -750,14 +730,6 @@ async fn client_stream(
                                 let _ = pending_leader_ready.register(target, Some(ready));
                             }
                             leader_handoff = true;
-                            break;
-                        }
-                        ClientStreamControl::RotateProxy(ack) => {
-                            if ack.is_closed() {
-                                continue;
-                            }
-                            let _ = tx_write.try_send(WritePayload::Close);
-                            proxy_handoff_ack = Some(ack);
                             break;
                         }
                     }
@@ -989,13 +961,20 @@ async fn client_stream(
                 }
 
                 ClientStreamReq::StreamResponse(resp) => {
-                    try_forward_response(
+                    let proxy_refused = try_forward_response(
                         &mut in_flight,
                         &mut in_flight_buf,
                         awaiting_timeout,
                         resp,
                     )
                     .await;
+                    if client.inner.proxy_mode && proxy_refused {
+                        // This response belongs to the current socket. Claim
+                        // its one handoff before yielding so the exact retry
+                        // cannot return through the refusing proxy.
+                        proxy_handoff = true;
+                        break;
+                    }
                     None
                 }
 
@@ -1088,13 +1067,21 @@ async fn client_stream(
                             };
                             match reader_request {
                                 ClientStreamReq::StreamResponse(response) => {
-                                    try_forward_response(
+                                    let proxy_refused = try_forward_response(
                                         &mut in_flight,
                                         &mut in_flight_buf,
                                         awaiting_timeout,
                                         response,
                                     )
                                     .await;
+                                    if client.inner.proxy_mode && proxy_refused {
+                                        proxy_handoff = true;
+                                        let _ = ack.send(Err(Error::Connect(
+                                            "API request was not dispatched before proxy handoff"
+                                                .into(),
+                                        )));
+                                        break 'connected;
+                                    }
                                 }
                                 ClientStreamReq::CleanupBuffer => {
                                     for (_, buffered_ack) in in_flight_buf.drain() {
@@ -1134,46 +1121,34 @@ async fn client_stream(
                             )));
                             break 'connected;
                         }
-                        ClientEnqueueEvent::Control(Ok(control)) => match control {
-                            ClientStreamControl::RotateProxy(proxy_ack) => {
-                                if proxy_ack.is_closed() {
-                                    continue;
+                        #[cfg(feature = "dashboard")]
+                        ClientEnqueueEvent::Control(Ok(ClientStreamControl::DashboardLeader(
+                            (node_id, node),
+                            ready,
+                        ))) => {
+                            if leader_change_matches_connection(
+                                &connected_leader,
+                                node_id,
+                                node.as_ref(),
+                            ) {
+                                if let Some(ready) = ready {
+                                    let _ = ready.send(());
                                 }
-                                proxy_handoff_ack = Some(proxy_ack);
-                                let _ = ack.send(Err(Error::Connect(
-                                    "API request was not dispatched before proxy handoff".into(),
-                                )));
-                                break 'connected;
+                                continue;
                             }
-                            #[cfg(feature = "dashboard")]
-                            ClientStreamControl::DashboardLeader((node_id, node), ready) => {
-                                if leader_change_matches_connection(
-                                    &connected_leader,
-                                    node_id,
-                                    node.as_ref(),
-                                ) {
-                                    if let Some(ready) = ready {
-                                        let _ = ready.send(());
-                                    }
-                                    continue;
-                                }
-                                let ready_target = node_id
-                                    .zip(node.as_ref())
-                                    .map(|(node_id, node)| (node_id, node.addr_api.clone()));
-                                update_leader(&leader, node_id, node).await;
-                                if let (Some(target), Some(ready)) = (ready_target, ready) {
-                                    let _ = pending_leader_ready.register(target, Some(ready));
-                                }
-                                leader_handoff = true;
-                                let _ = ack.send(Err(Error::Connect(
-                                    "API request was not dispatched before stream handoff".into(),
-                                )));
-                                break 'connected;
+                            let ready_target = node_id
+                                .zip(node.as_ref())
+                                .map(|(node_id, node)| (node_id, node.addr_api.clone()));
+                            update_leader(&leader, node_id, node).await;
+                            if let (Some(target), Some(ready)) = (ready_target, ready) {
+                                let _ = pending_leader_ready.register(target, Some(ready));
                             }
-                            ClientStreamControl::Leader(_) => {
-                                unreachable!("leader control is handled by the preceding match arm")
-                            }
-                        },
+                            leader_handoff = true;
+                            let _ = ack.send(Err(Error::Connect(
+                                "API request was not dispatched before stream handoff".into(),
+                            )));
+                            break 'connected;
+                        }
                         ClientEnqueueEvent::Control(Err(_)) => {
                             shutdown = true;
                             let _ = ack.send(Err(Error::Connect(
@@ -1210,6 +1185,7 @@ async fn client_stream(
         }
 
         handle_buf.abort();
+        let _ = handle_buf.await;
         let mut handle_write = handle_write;
         let writer_finished = if force_writer_abort {
             false
@@ -1297,7 +1273,8 @@ async fn client_stream(
                     unreachable!("we should never receive ClientStreamReq::Shutdown from WS reader")
                 }
                 ClientStreamReq::StreamResponse(resp) => {
-                    try_forward_response(&mut in_flight, &mut in_flight_buf, false, resp).await;
+                    proxy_handoff |=
+                        try_forward_response(&mut in_flight, &mut in_flight_buf, false, resp).await;
                 }
                 ClientStreamReq::CleanupBuffer => {
                     // ignore - we are re-connecting anyway
@@ -1311,19 +1288,9 @@ async fn client_stream(
             break;
         }
 
-        if let Some(proxy_ack) = proxy_handoff_ack {
-            if proxy_ack.is_closed() {
-                for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
-                    let _ = ack.send(Err(Error::Connect(
-                        "API connection ended after dispatch; outcome unknown and request was not replayed"
-                            .into(),
-                    )));
-                }
-            } else {
-                fail_client_stream_proxy_handoff(&mut in_flight, &mut in_flight_buf);
-                rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
-                let _ = proxy_ack.send(());
-            }
+        if proxy_handoff {
+            fail_client_stream_proxy_handoff(&mut in_flight, &mut in_flight_buf);
+            rotate_proxy_endpoint(&client, &leader, &mut proxy_index).await;
         } else if leader_handoff {
             fail_client_stream_leader_handoff(&mut in_flight, &mut in_flight_buf);
         } else if terminal_transport_failure {
@@ -1390,42 +1357,99 @@ fn fail_client_stream_proxy_handoff(
 }
 
 #[inline(always)]
+fn api_response_is_forward_to_leader(payload: &ApiStreamResponsePayload) -> bool {
+    match payload {
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::Execute(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::ExecuteReturning(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::Transaction(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::Query(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::QueryConsistent(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::Batch(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "sqlite")]
+        ApiStreamResponsePayload::Migrate(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "backup")]
+        ApiStreamResponsePayload::Backup(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "cache")]
+        ApiStreamResponsePayload::KV(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+        #[cfg(feature = "dlock")]
+        ApiStreamResponsePayload::Lock(_) => false,
+        #[cfg(feature = "listen_notify_local")]
+        ApiStreamResponsePayload::Notify(result) => result
+            .as_ref()
+            .is_err_and(|err| err.is_forward_to_leader().is_some()),
+    }
+}
+
+#[inline(always)]
 async fn try_forward_response(
     in_flight: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
     in_flight_buf: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
     awaiting_timeout: bool,
     response: ApiStreamResponse,
-) {
-    match in_flight.remove(&response.request_id) {
+) -> bool {
+    let proxy_refused = api_response_is_forward_to_leader(&response.result);
+    let delivered = match in_flight.remove(&response.request_id) {
         None => {
             if awaiting_timeout {
                 match in_flight_buf.remove(&response.request_id) {
                     None => {
                         error!("client ack for ApiStreamResponse missing");
+                        false
                     }
                     Some(ack) => match ack.send(Ok(response.result)) {
                         Ok(_) => {
                             debug!("ApiStreamResponse sent to client from in_flight_buf");
+                            true
                         }
                         Err(err) => {
                             error!("client ack could not be sent for {:?}", err);
+                            false
                         }
                     },
                 }
             } else {
                 error!("client ack for ApiStreamResponse missing");
+                false
             }
         }
 
         Some(ack) => match ack.send(Ok(response.result)) {
             Ok(_) => {
                 debug!("ApiStreamResponse sent to client");
+                true
             }
             Err(err) => {
                 error!("client ack could not be sent for {:?}", err);
+                false
             }
         },
-    }
+    };
+
+    proxy_refused && delivered
 }
 
 async fn update_leader(
@@ -1588,6 +1612,18 @@ fn leader_change_matches_connection(
 mod tests {
     use super::*;
     use fastwebsockets::Role;
+
+    #[cfg(feature = "sqlite")]
+    fn forward_to_leader_error() -> Error {
+        use openraft::error::{CheckIsLeaderError, ForwardToLeader, RaftError};
+
+        Error::CheckIsLeaderError(Box::new(RaftError::APIError(
+            CheckIsLeaderError::ForwardToLeader(ForwardToLeader {
+                leader_id: None,
+                leader_node: None,
+            }),
+        )))
+    }
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
@@ -1808,22 +1844,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dedicated_proxy_control_bypasses_application_backlog_during_writer_backpressure() {
+    async fn dedicated_leader_control_bypasses_application_backlog_during_writer_backpressure() {
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reader_finished_tx, mut reader_finished_rx) = oneshot::channel();
         let (_writer_finished_tx, mut writer_finished_rx) = oneshot::channel();
         let (control_tx, control_rx) = flume::bounded(1);
         let (_socket_reader_tx, socket_reader_rx) = flume::bounded(1);
         let (request_tx, request_rx) = flume::bounded(1);
-        let (proxy_ack, _proxy_ack_rx) = oneshot::channel();
         request_tx
             .send_async(ClientStreamReq::Shutdown)
             .await
             .expect("fill application queue");
         control_tx
-            .send_async(ClientStreamControl::RotateProxy(proxy_ack))
+            .send_async(ClientStreamControl::Leader(ClientLeaderChange {
+                leader_id: 8,
+                node: Node {
+                    id: 8,
+                    addr_raft: "node-eight:21000".into(),
+                    addr_api: "node-eight:21001".into(),
+                },
+                ready: None,
+            }))
             .await
-            .expect("queue priority proxy handoff");
+            .expect("queue priority leader handoff");
 
         let (writer_tx, writer_rx) = flume::bounded(1);
         writer_tx
@@ -1838,11 +1881,14 @@ mod tests {
             &socket_reader_rx,
             &control_rx,
         )
-        .expect("queued proxy handoff must wake backpressured admission");
+        .expect("queued leader handoff must wake backpressured admission");
 
         assert!(matches!(
             event,
-            ClientEnqueueEvent::Control(Ok(ClientStreamControl::RotateProxy(_)))
+            ClientEnqueueEvent::Control(Ok(ClientStreamControl::Leader(ClientLeaderChange {
+                leader_id: 8,
+                ..
+            })))
         ));
         assert!(matches!(
             request_rx.try_recv(),
@@ -1865,16 +1911,18 @@ mod tests {
         in_flight.insert(51, settled_tx);
         in_flight.insert(52, unresolved_tx);
 
-        try_forward_response(
-            &mut in_flight,
-            &mut in_flight_buf,
-            false,
-            ApiStreamResponse {
-                request_id: 51,
-                result: ApiStreamResponsePayload::Execute(Ok(1)),
-            },
-        )
-        .await;
+        assert!(
+            !try_forward_response(
+                &mut in_flight,
+                &mut in_flight_buf,
+                false,
+                ApiStreamResponse {
+                    request_id: 51,
+                    result: ApiStreamResponsePayload::Execute(Ok(1)),
+                },
+            )
+            .await
+        );
         fail_client_stream_leader_handoff(&mut in_flight, &mut in_flight_buf);
 
         assert!(matches!(
@@ -1899,16 +1947,18 @@ mod tests {
         in_flight.insert(61, settled_tx);
         in_flight.insert(62, unresolved_tx);
 
-        try_forward_response(
-            &mut in_flight,
-            &mut in_flight_buf,
-            false,
-            ApiStreamResponse {
-                request_id: 61,
-                result: ApiStreamResponsePayload::Execute(Ok(1)),
-            },
-        )
-        .await;
+        assert!(
+            !try_forward_response(
+                &mut in_flight,
+                &mut in_flight_buf,
+                false,
+                ApiStreamResponse {
+                    request_id: 61,
+                    result: ApiStreamResponsePayload::Execute(Ok(1)),
+                },
+            )
+            .await
+        );
         fail_client_stream_proxy_handoff(&mut in_flight, &mut in_flight_buf);
 
         assert!(matches!(
@@ -1920,6 +1970,81 @@ mod tests {
                 .await
                 .expect("unresolved request acknowledgement"),
             Err(Error::LeaderChange(_))
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn concurrent_proxy_refusals_coalesce_into_one_endpoint_advance() {
+        let mut in_flight = HashMap::new();
+        let mut in_flight_buf = HashMap::new();
+        let mut acknowledgements = Vec::new();
+        for request_id in [71, 72] {
+            let (ack, response) = oneshot::channel();
+            in_flight.insert(request_id, ack);
+            acknowledgements.push(response);
+        }
+
+        let mut proxy_handoff = false;
+        for request_id in [71, 72] {
+            proxy_handoff |= try_forward_response(
+                &mut in_flight,
+                &mut in_flight_buf,
+                false,
+                ApiStreamResponse {
+                    request_id,
+                    result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
+                },
+            )
+            .await;
+        }
+
+        for response in acknowledgements {
+            let payload = response.await.expect("proxy refusal acknowledgement");
+            assert!(matches!(
+                payload,
+                Ok(ApiStreamResponsePayload::Execute(Err(ref err)))
+                    if err.is_forward_to_leader().is_some()
+            ));
+        }
+        assert!(proxy_handoff, "the refusing socket must claim one handoff");
+
+        let nodes = vec!["proxy-a:21000".to_owned(), "proxy-b:21000".to_owned()];
+        let mut proxy_index = 0;
+        let next = proxy_handoff
+            .then(|| next_configured_proxy(&nodes, &mut proxy_index))
+            .flatten();
+        assert_eq!(next.as_deref(), Some("proxy-b:21000"));
+        assert_eq!(proxy_index, 1, "two refusals must rotate only once");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn teardown_drained_proxy_refusal_claims_the_socket_handoff() {
+        let mut in_flight = HashMap::new();
+        let mut in_flight_buf = HashMap::new();
+        let (ack, response) = oneshot::channel();
+        in_flight.insert(81, ack);
+
+        // The supervisor may observe EOF before consuming a response that the
+        // reader already decoded. Teardown drains that response before it
+        // decides whether the exact socket owns a proxy handoff.
+        let proxy_handoff = try_forward_response(
+            &mut in_flight,
+            &mut in_flight_buf,
+            false,
+            ApiStreamResponse {
+                request_id: 81,
+                result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
+            },
+        )
+        .await;
+
+        assert!(proxy_handoff);
+        assert!(matches!(
+            response.await.expect("drained refusal acknowledgement"),
+            Ok(ApiStreamResponsePayload::Execute(Err(ref err)))
+                if err.is_forward_to_leader().is_some()
         ));
     }
 

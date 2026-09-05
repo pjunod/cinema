@@ -172,11 +172,7 @@ pub async fn handle_socket(
                         },
                         Err(err) => {
                             if client
-                                .was_leader_update_error(
-                                    &err,
-                                    &client.inner.leader_db,
-                                    &client.inner.tx_client_db,
-                                )
+                                .was_leader_update_error(&err, &client.inner.leader_db)
                                 .await
                             {
                                 let res = client.execute_returning_req(query).await;
@@ -199,11 +195,7 @@ pub async fn handle_socket(
                         Ok(res) => Ok(res),
                         Err(err) => {
                             if client
-                                .was_leader_update_error(
-                                    &err,
-                                    &client.inner.leader_db,
-                                    &client.inner.tx_client_db,
-                                )
+                                .was_leader_update_error(&err, &client.inner.leader_db)
                                 .await
                             {
                                 client.txn_execute(queries).await
@@ -235,11 +227,7 @@ pub async fn handle_socket(
                         Ok(res) => Ok(res),
                         Err(err) => {
                             if client
-                                .was_leader_update_error(
-                                    &err,
-                                    &client.inner.leader_db,
-                                    &client.inner.tx_client_db,
-                                )
+                                .was_leader_update_error(&err, &client.inner.leader_db)
                                 .await
                             {
                                 client.migrate_execute(migrations).await
@@ -380,7 +368,7 @@ async fn query(
         Ok(res) => Ok(res),
         Err(err) => {
             if client
-                .was_leader_update_error(&err, &client.inner.leader_db, &client.inner.tx_client_db)
+                .was_leader_update_error(&err, &client.inner.leader_db)
                 .await
             {
                 client.query_remote_req(query, consistent).await

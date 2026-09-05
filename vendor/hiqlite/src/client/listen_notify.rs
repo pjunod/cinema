@@ -196,11 +196,7 @@ impl Client {
             Ok(_) => Ok(()),
             Err(err) => {
                 if self
-                    .was_leader_update_error(
-                        &err,
-                        &self.inner.leader_cache,
-                        &self.inner.tx_client_cache,
-                    )
+                    .was_leader_update_error(&err, &self.inner.leader_cache)
                     .await
                 {
                     self.notify_req(CacheRequest::Notify((now, serialize_network(payload))))

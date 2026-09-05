@@ -27,7 +27,7 @@ change.
 
 | Milestone | Task branch | PR | State | Blocking evidence |
 |---|---|---|---|---|
-| M1 · frame completion | `codex/cluster-transport-m1` | not opened | sixth-review dedicated-control fix in validation; seventh exact review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
+| M1 · frame completion | `codex/cluster-transport-m1` | not opened | seventh-review proxy-generation fixes in validation; eighth exact review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same review | foundations implemented; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | implementation in progress | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
@@ -47,14 +47,14 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | Production writer regressions | pass · 5 surfaces | Serialized Raft/API requests and responses plus the proxy response use their production writer seams over real TLS; queue-consuming Raft/API client and server writers report injected flush failures to their supervisors |
 | Deadline and failure regressions | pass | Flush error, blocked combined write/flush budget, 250 ms Close budget, and scaled server-handshake budget all terminate at their documented boundary |
 | Vendored network suite | pass · 46 tests | Prescribed SQLite+cache+auto-heal+macros `network::` library filter on Rust 1.97.1; no failures or ignored tests |
-| API client stream suite | pass · 17 tests | Includes cancellation-safe mutation ownership, decoded-response-before-handoff ordering, a dedicated recovery-control queue that bypasses an application backlog during writer backpressure, stale/same-target leader handling, production request writer, and malformed-frame reader outcome |
+| API client stream suite | pass · 19 tests | Includes cancellation-safe mutation ownership, decoded-response-before-handoff ordering, exact-socket proxy refusal ownership, concurrent-refusal coalescing, EOF-before-drain handling, a dedicated leader-control queue that bypasses an application backlog during writer backpressure, stale/same-target leader handling, production request writer, and malformed-frame reader outcome |
 | Snapshot ownership foundations | pass · 6 executor tests + 5 real SQLite state-machine tests | One running/one queued admission, cancellation-safe deadline/shutdown ownership, a controlled real-file partial write with digest verification, and real SQLite pending/current recovery pass. The remaining full Raft/socket-disconnect acceptance is explicitly open for M5. |
 | Broad optional-feature probe | invalid baseline lane | `--all-features` enables mutually exclusive `cast_ints` modes and reaches unrelated existing optional-feature compile defects; the repository-prescribed feature matrices remain authoritative |
 | Daemon check and denied-warning Clippy | pass | `plurxd --all-targets` completed on Rust 1.97.1 with no warnings |
-| Vendored denied-warning Clippy | pass | Prescribed auto-heal+cache+macros+SQLite library lane passes with `-D warnings`; seven pre-existing Rust 1.97.1 lint findings were corrected rather than suppressed |
+| Vendored denied-warning Clippy | pass | Prescribed auto-heal+cache+macros+SQLite and cache-only library lanes pass with `-D warnings`; seven pre-existing Rust 1.97.1 lint findings were corrected rather than suppressed |
 | Dependency resolution | pass | Standalone vendor lock now matches the daemon transport stack: Tokio 1.53.1 and rustls 0.23.42 |
 | Persistent regression map | pass | The transport tests are in `cluster-wal-check`; a command wrapper fails exact filters unless one test executes, the broad snapshot filter requires ten passing tests, and operations contracts preserve both guards |
-| Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the sixth-review fixes, including the dedicated-control/backpressure regression and enforced nonzero counts for every exact filter; loopback tests used the normal unsandboxed allowance |
+| Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the seventh-review fixes, including exact-socket proxy refusal/coalescing and dedicated leader-control/backpressure regressions, with enforced nonzero counts for every exact filter; loopback tests used the normal unsandboxed allowance |
 | Operations contracts | pass · 186 tests | Persistent command/count guards and the existing deployment, CI, and UI-baseline contracts pass; the port-reservation fixture used the normal unsandboxed loopback allowance |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -81,18 +81,19 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    the pushed task branch are available. PR creation follows after the current
    exact candidate passes its focused lane and an adversarial review round.
 
-## Next checkpoint — exact-SHA seventh review, then the milestone PR
+## Next checkpoint — exact-SHA eighth review, then the milestone PR
 
-The sixth adversarial round demonstrated that retaining one ordinary request
-could still hide a later recovery control in the same one-slot FIFO until its
-caller expired. Recovery controls now have a dedicated priority channel that
-is observed during connection attempts, discovery, retry delay, steady-state
-traffic, and writer backpressure. Expired proxy controls are discarded before
-endpoint mutation and checked again after teardown. The lifecycle evidence
+The seventh adversarial round found that a caller-issued proxy rotation could
+outlive the socket whose refusal created it, or duplicate an EOF-triggered
+rotation. Proxy recovery now has one authority: the stream manager recognizes
+the refusal on the exact response it receives, settles that response, drains
+and coalesces any additional refusals from the same socket, then advances the
+configured proxy pool once. Callers only retry the definitively refused
+request; they cannot enqueue a stale endpoint mutation. The lifecycle evidence
 remains explicitly bounded to 100 in-memory WebSocket task cycles; real
 socket/install acceptance is open for M5. The next checkpoint validates and
-pushes the exact revision, obtains a clean seventh adversarial review, and
-opens the task PR into the effort branch.
+pushes the exact revision, obtains a clean eighth adversarial review, and opens
+the task PR into the effort branch.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only

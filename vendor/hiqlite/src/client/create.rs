@@ -10,9 +10,8 @@ use tokio::sync::{RwLock, watch};
 #[cfg(feature = "listen_notify")]
 use crate::client::listen_notify::remote::RemoteListener;
 
-use crate::client::stream::ClientStreamControl;
 #[cfg(feature = "sqlite")]
-use crate::client::stream::ClientStreamReq;
+use crate::client::stream::{ClientStreamControl, ClientStreamReq};
 
 const RATE_LIMIT_AWAIT_SIZE: usize = 64;
 

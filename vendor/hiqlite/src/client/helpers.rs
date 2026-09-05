@@ -1,6 +1,6 @@
 use crate::app_state::AppState;
 use crate::client::LeaderRecovery;
-use crate::client::stream::{ClientLeaderChange, ClientStreamControl, ClientStreamReq};
+use crate::client::stream::{ClientLeaderChange, ClientStreamControl};
 use crate::{Client, Error, LEADER_DISCOVERY_TIMEOUT, LEADER_STREAM_HANDOFF_TIMEOUT, Node, NodeId};
 use openraft::RaftMetrics;
 use std::clone::Clone;
@@ -14,7 +14,6 @@ use tokio::task::JoinSet;
 use tokio::time;
 use tracing::{debug, error, warn};
 
-const PROXY_ROTATION_TIMEOUT: Duration = Duration::from_secs(2);
 /// One election can expose an old leader and then a replacement that has not
 /// learned the winner yet. Both replies are definitive `ForwardToLeader`
 /// refusals, so retry the same unaccepted request after each bounded recovery.
@@ -99,7 +98,7 @@ impl Client {
     {
         retry_request_after_leader_change(request, |error| async move {
             let recovered = self
-                .was_leader_update_error(&error, &self.inner.leader_db, &self.inner.tx_client_db)
+                .was_leader_update_error(&error, &self.inner.leader_db)
                 .await;
             (error, recovered)
         })
@@ -436,7 +435,6 @@ impl Client {
         &self,
         err: &Error,
         lock: &Arc<RwLock<(NodeId, String)>>,
-        _tx: &flume::Sender<ClientStreamReq>,
     ) -> bool {
         let Some((leader_id, node)) = err.is_forward_to_leader() else {
             return false;
@@ -447,23 +445,11 @@ impl Client {
         };
 
         if self.inner.proxy_mode {
-            // Try the next configured proxy endpoint. The proxies own leader
-            // discovery; accepting an advertised voter (or probing the
-            // authenticated roster directly) would silently escape the
-            // caller's network and trust boundary.
-            let (ack, rotated) = tokio::sync::oneshot::channel();
-            return time::timeout(PROXY_ROTATION_TIMEOUT, async {
-                if leader_tx
-                    .send_async(ClientStreamControl::RotateProxy(ack))
-                    .await
-                    .is_err()
-                {
-                    return false;
-                }
-                rotated.await.is_ok()
-            })
-            .await
-            .unwrap_or(false);
+            // The stream manager observes the exact ForwardToLeader response
+            // before delivering it and owns the one proxy rotation for that
+            // socket generation. Retrying here cannot enqueue a second,
+            // stale rotation after EOF or a concurrent refusal.
+            return true;
         }
 
         if let (Some(leader_id), Some(node)) = (leader_id, node.clone()) {
@@ -541,7 +527,6 @@ mod tests {
             crate::LEADER_RETRY_RECOVERY_TIMEOUT,
             Duration::from_secs(14)
         );
-        assert_eq!(PROXY_ROTATION_TIMEOUT, Duration::from_secs(2));
     }
 
     #[cfg(feature = "sqlite")]
@@ -666,10 +651,10 @@ mod tests {
             addr_api: "node-nine:21000".to_owned(),
         };
         let recovery = tokio::spawn(async move { change_leader_and_wait(&tx, 9, node).await });
-        let ClientStreamControl::Leader(request) =
-            rx.recv_async().await.expect("leader change request")
-        else {
-            panic!("expected leader control");
+        let request = match rx.recv_async().await.expect("leader change request") {
+            ClientStreamControl::Leader(request) => request,
+            #[cfg(feature = "dashboard")]
+            ClientStreamControl::DashboardLeader(..) => panic!("expected leader control"),
         };
         let Some(ready) = request.ready else {
             panic!("expected an acknowledged leader change");
@@ -733,10 +718,10 @@ mod tests {
         tokio::task::yield_now().await;
         time::advance(Duration::from_millis(500)).await;
         let _queued = rx.recv_async().await.expect("drain queued control message");
-        let ClientStreamControl::Leader(request) =
-            rx.recv_async().await.expect("receive leader handoff")
-        else {
-            panic!("expected leader control");
+        let request = match rx.recv_async().await.expect("receive leader handoff") {
+            ClientStreamControl::Leader(request) => request,
+            #[cfg(feature = "dashboard")]
+            ClientStreamControl::DashboardLeader(..) => panic!("expected leader control"),
         };
         let Some(ready) = request.ready else {
             panic!("expected handoff acknowledgement");
