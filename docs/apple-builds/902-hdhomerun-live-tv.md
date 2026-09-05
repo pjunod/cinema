@@ -16,7 +16,8 @@ DRM, DVR, guide scheduling and captions are not supported by this first profile.
 
 One app-wide serialized lease releases the previous capability before opening
 another. A token-free durable marker blocks ambiguous starts across app death
-and profile changes; playback without media progress stops within 30 seconds.
+and profile changes; a monotonic 30-second no-progress budget ends stalled
+playback when the next observation sees it expire.
 Fourteen focused tests pass on both iOS and tvOS simulators. Hardware playback
 and final effort qualification remain separate acceptance steps; compilation
 does not prove a household tuner or decoder works.
