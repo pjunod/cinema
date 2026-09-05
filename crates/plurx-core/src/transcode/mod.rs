@@ -1969,6 +1969,108 @@ mod tests {
         }
     }
 
+    fn normalized_m0_args(
+        source: &MediaFile,
+        encoder: Encoder,
+        options: &TranscodeOptions,
+    ) -> Vec<String> {
+        hls_args(
+            source,
+            encoder,
+            options,
+            Pacing::unpaced(),
+            "/tmp/m0-output",
+        )
+        .into_iter()
+        .map(|argument| {
+            argument
+                .replace("/media/movie.mkv", "<source>")
+                .replace("/tmp/m0-output", "<output>")
+        })
+        .collect()
+    }
+
+    /// M0 migration fixture: M1 and M2 may change only the cases whose policy
+    /// change is named in the decoder plan. Every other token stays stable.
+    #[test]
+    fn decoder_selection_m0_argument_baseline_is_stable() {
+        let mut light_h264 = file(None);
+        light_h264.container = Some("mkv".into());
+        light_h264.video_codec = Some("h264".into());
+        light_h264.video_profile = Some("High".into());
+        light_h264.width = Some(1920);
+        light_h264.height = Some(1080);
+        light_h264.bit_depth = Some(8);
+        light_h264.hdr = None;
+
+        let mut incident_mpeg4 = light_h264.clone();
+        incident_mpeg4.container = Some("avi".into());
+        incident_mpeg4.video_codec = Some("mpeg4".into());
+        incident_mpeg4.video_profile = Some("Advanced Simple Profile".into());
+        incident_mpeg4.width = Some(624);
+        incident_mpeg4.height = Some(352);
+        incident_mpeg4.bitrate = None;
+
+        let heavy_hevc = file(Some("hdr10"));
+        let mut vendor_options = TranscodeOptions::default();
+        vendor_options.pipeline = Pipeline::VppQsv;
+
+        let cases = [
+            (
+                "software-sdr-h264",
+                &light_h264,
+                Encoder::Software,
+                TranscodeOptions::default(),
+            ),
+            (
+                "qsv-light-h264",
+                &light_h264,
+                Encoder::Qsv,
+                TranscodeOptions::default(),
+            ),
+            (
+                "qsv-heavy-hevc-hdr",
+                &heavy_hevc,
+                Encoder::Qsv,
+                TranscodeOptions::default(),
+            ),
+            (
+                "qsv-vendor-renderer",
+                &heavy_hevc,
+                Encoder::Qsv,
+                vendor_options,
+            ),
+            (
+                "nvenc-light-h264",
+                &light_h264,
+                Encoder::Nvenc,
+                TranscodeOptions::default(),
+            ),
+            (
+                "videotoolbox-avi-mpeg4",
+                &incident_mpeg4,
+                Encoder::VideoToolbox,
+                TranscodeOptions::default(),
+            ),
+        ];
+        let actual = cases
+            .into_iter()
+            .map(|(name, source, encoder, options)| {
+                serde_json::json!({
+                    "name": name,
+                    "encoder": encoder.label(),
+                    "renderer": options.pipeline.name(),
+                    "args": normalized_m0_args(source, encoder, &options),
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/playback/decoder-selection-m0-args.json"
+        ))
+        .expect("M0 argument fixture is JSON");
+        assert_eq!(serde_json::Value::Array(actual), expected);
+    }
+
     #[test]
     fn software_hls_args_are_well_formed() {
         let opts = TranscodeOptions {

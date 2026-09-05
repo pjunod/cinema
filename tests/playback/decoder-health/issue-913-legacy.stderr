@@ -1,13 +1,13 @@
 # Sanitized from issue #913. Times are monotonic offsets from the first retained
 # line. Pointer values, session identity, media path, and user data are removed.
-0	[aist#0:1/mp3] [dec:mp3float] Error submitting packet to decoder: Invalid data found when processing input
-89	[vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
-89	[mpeg4] No frame decoded?
-89	[vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
+0	[aist#0:1/mp3 @ <address>] [dec:mp3float @ <address>] Error submitting packet to decoder: Invalid data found when processing input
+89	[vist#0:0/mpeg4 @ <address>] [dec:mpeg4 @ <address>] Error submitting packet to decoder: Unknown error occurred
+89	[mpeg4 @ <address>] No frame decoded?
+89	[vist#0:0/mpeg4 @ <address>] [dec:mpeg4 @ <address>] Error submitting packet to decoder: Unknown error occurred
 383	    Last message repeated 36 times
-383	[mpeg4] No frame decoded?
-383	[vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
-388	[vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
+383	[mpeg4 @ <address>] No frame decoded?
+383	[vist#0:0/mpeg4 @ <address>] [dec:mpeg4 @ <address>] Error submitting packet to decoder: Unknown error occurred
+388	[vist#0:0/mpeg4 @ <address>] [dec:mpeg4 @ <address>] Error submitting packet to decoder: Unknown error occurred
 450	    Last message repeated 13 times
-450	[mpeg4] No frame decoded?
-450	[vist#0:0/mpeg4] [dec:mpeg4] Error submitting packet to decoder: Unknown error occurred
+450	[mpeg4 @ <address>] No frame decoded?
+450	[vist#0:0/mpeg4 @ <address>] [dec:mpeg4 @ <address>] Error submitting packet to decoder: Unknown error occurred

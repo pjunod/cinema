@@ -1,0 +1,260 @@
+version = 1
+
+# Shipping command builders. A new production hls_args call must be added here.
+[[surfaces]]
+id = "builder.prepublication_retry"
+kind = "hls_builder"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "impl PrepublicationTranscodeRetry"
+obligation = "freeze the validated alternate plan and shared recovery budget"
+
+[[surfaces]]
+id = "builder.resumable_part"
+kind = "hls_builder"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn produce_into("
+obligation = "carry plan identity and health evidence through every retained part"
+
+[[surfaces]]
+id = "builder.live_hls"
+kind = "hls_builder"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn start_with_audio_offset("
+obligation = "resolve once from the held source for command, identity, and admission"
+
+# Process owners and consumers. Support-only subprocesses remain explicit so
+# their success cannot be mistaken for decoded-video producer health.
+[[surfaces]]
+id = "process.observed_ffmpeg"
+kind = "process_owner"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "fn spawn_ffmpeg("
+obligation = "return one owned child and joined diagnostic observation"
+
+[[surfaces]]
+id = "process.fragmented_ffmpeg"
+kind = "process_owner"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "fn spawn_ffmpeg_pipe("
+obligation = "preserve the media pipe while joining progress and diagnostics"
+
+[[surfaces]]
+id = "process.vod_generation"
+kind = "process_owner"
+source = "crates/plurxd/src/vodserve.rs"
+anchor = "async fn spawn_generation("
+obligation = "classify copied VOD output separately and own stderr completion"
+
+[[surfaces]]
+id = "process.vod_head_regeneration"
+kind = "process_owner"
+source = "crates/plurxd/src/vodserve.rs"
+anchor = "async fn regenerate_init_head("
+obligation = "remain probe/head-only and never attest a complete producer"
+
+[[surfaces]]
+id = "process.vod_pipe_consumer"
+kind = "process_consumer"
+source = "crates/plurxd/src/vodgen.rs"
+anchor = "pub async fn run<R, S>("
+obligation = "consume the producer pipe without becoming a second child owner"
+
+[[surfaces]]
+id = "process.pgs_demux"
+kind = "support_process"
+source = "crates/plurxd/src/pgs_overlay.rs"
+anchor = "async fn prepare_stage("
+obligation = "remain subtitle demux support and never attest video decode health"
+
+# Renderer constraints that the future candidate validator must consume.
+[[surfaces]]
+id = "renderer.pairing"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn pairs_with("
+obligation = "validate encoder and surface-family pairing"
+
+[[surfaces]]
+id = "renderer.dynamic_range"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn handles("
+obligation = "preserve HDR and Dolby Vision correctness restrictions"
+
+[[surfaces]]
+id = "renderer.decode_arguments"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn decode_args("
+obligation = "fold required surface flags into the resolved decoder"
+
+[[surfaces]]
+id = "renderer.software_requirement"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn requires_software_decode("
+obligation = "retain frame side data and system-memory requirements"
+
+[[surfaces]]
+id = "renderer.session_selection"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn for_session("
+obligation = "replace legacy session inference with candidate validation"
+
+[[surfaces]]
+id = "renderer.fallback"
+kind = "renderer_contract"
+source = "crates/plurx-core/src/transcode/pipeline.rs"
+anchor = "pub fn fallback("
+obligation = "map only presentation-compatible alternatives"
+
+# Local and shared transcode cache boundaries.
+[[surfaces]]
+id = "cache.local_publish"
+kind = "cache_write"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn publish_from("
+obligation = "publish a receipt with the immutable generation"
+
+[[surfaces]]
+id = "cache.manifest_publish"
+kind = "cache_write"
+source = "crates/plurx-core/src/transcode/manifest.rs"
+anchor = "pub async fn publish_controlled<F>("
+obligation = "bind receipt identity to pathname-backed publication"
+
+[[surfaces]]
+id = "cache.manifest_capability_publish"
+kind = "cache_write"
+source = "crates/plurx-core/src/transcode/manifest.rs"
+anchor = "pub async fn publish_controlled_directory<F>("
+obligation = "bind receipt identity to descriptor-backed publication"
+
+[[surfaces]]
+id = "cache.shared_publish"
+kind = "cache_write"
+source = "crates/plurxd/src/shared_cache.rs"
+anchor = "pub(crate) async fn publish_generation("
+obligation = "copy and reverify the same qualified manifest and receipt"
+
+[[surfaces]]
+id = "cache.location_read"
+kind = "cache_lookup"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn cache_read_location("
+obligation = "require a compatible receipt from either storage class"
+
+[[surfaces]]
+id = "cache.local_location_read"
+kind = "cache_lookup"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn local_cache_read_location("
+obligation = "apply the same receipt rule to node-local fallback"
+
+[[surfaces]]
+id = "cache.speculative_hit"
+kind = "cache_lookup"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn verified_cache_hit("
+obligation = "never report a hit from bytes without qualified completion"
+
+[[surfaces]]
+id = "cache.offer_verification"
+kind = "cache_lookup"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn verify_cache_offer_location("
+obligation = "authenticate the offered generation and receipt"
+
+[[surfaces]]
+id = "cache.shared_read_prepare"
+kind = "cache_lookup"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn prepare_shared_cached_read("
+obligation = "pin the exact shared generation before receipt validation"
+
+[[surfaces]]
+id = "cache.session_serve"
+kind = "cache_serve"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "async fn serve_cached("
+obligation = "install only a receipt-compatible cached session"
+
+[[surfaces]]
+id = "cache.playlist_read"
+kind = "cache_serve"
+source = "crates/plurx-core/src/transcode/manifest.rs"
+anchor = "pub async fn read_verified_playlist("
+obligation = "serve the authenticated playlist snapshot"
+
+[[surfaces]]
+id = "cache.object_read"
+kind = "cache_serve"
+source = "crates/plurx-core/src/transcode/manifest.rs"
+anchor = "pub async fn open_verified_object("
+obligation = "serve the same object handle that was authenticated"
+
+# Offline lookup and delivery are separate call paths over the transcode cache.
+[[surfaces]]
+id = "offline.prepare"
+kind = "offline_owner"
+source = "crates/plurxd/src/offline.rs"
+anchor = "async fn prepare("
+obligation = "persist one job-scoped recovery budget across claims and restarts"
+
+[[surfaces]]
+id = "offline.publish_ready"
+kind = "offline_owner"
+source = "crates/plurxd/src/offline.rs"
+anchor = "async fn publish_ready("
+obligation = "refuse ready state without complete qualified producer evidence"
+
+[[surfaces]]
+id = "offline.generation_cache"
+kind = "offline_lookup"
+source = "crates/plurxd/src/http/offline.rs"
+anchor = "fn cached_offline_generation("
+obligation = "cache decoded manifests without weakening receipt validation"
+
+[[surfaces]]
+id = "offline.location_validation"
+kind = "offline_lookup"
+source = "crates/plurxd/src/http/offline.rs"
+anchor = "async fn validate_package_candidate("
+obligation = "validate local or shared location and its qualified receipt"
+
+[[surfaces]]
+id = "offline.playlist"
+kind = "offline_serve"
+source = "crates/plurxd/src/http/offline.rs"
+anchor = "pub async fn playlist("
+obligation = "serve only a verified playlist from the qualified generation"
+
+[[surfaces]]
+id = "offline.segment"
+kind = "offline_serve"
+source = "crates/plurxd/src/http/offline.rs"
+anchor = "pub async fn segment("
+obligation = "serve only the authenticated object handle"
+
+# Client declarations are capabilities, not two-player handoff evidence.
+[[surfaces]]
+id = "client.web_actions"
+kind = "client_capability"
+source = "crates/plurxd/src/web/playback-control.js"
+anchor = 'Object.freeze(["hold", "retry_resource", "terminal"])'
+obligation = "add and physically qualify prepare_replacement before full recovery"
+
+[[surfaces]]
+id = "client.apple_actions"
+kind = "client_capability"
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+anchor = 'static let supportedActions = ["hold", "retry_resource", "terminal"]'
+obligation = "implement and physically qualify two-player replacement"
+
+[[surfaces]]
+id = "client.android_actions"
+kind = "client_capability"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+anchor = 'val SUPPORTED_ACTIONS = listOf("hold", "retry_resource", "terminal")'
+obligation = "implement and physically qualify two-player replacement"

@@ -1,0 +1,9 @@
+# Sanitized host FFmpeg 8.0.1 repeat+level+error shape from nynuc, replayed at
+# the five explicit #913 observation offsets. Context positions are preserved.
+0	[rawvideo @ <address>] [error] Packet too small (1)
+0	[vist#0:0/rawvideo @ <address>] [dec:rawvideo @ <address>] [error] Error submitting packet to decoder: Invalid data found when processing input
+1	[vist#0:0/rawvideo @ <address>] [dec:rawvideo @ <address>] [error] Error submitting packet to decoder: Invalid data found when processing input
+294	[vist#0:0/rawvideo @ <address>] [dec:rawvideo @ <address>] [error] Error submitting packet to decoder: Invalid data found when processing input
+299	[vist#0:0/rawvideo @ <address>] [dec:rawvideo @ <address>] [error] Error submitting packet to decoder: Invalid data found when processing input
+361	[vist#0:0/rawvideo @ <address>] [dec:rawvideo @ <address>] [error] Error submitting packet to decoder: Invalid data found when processing input
+362	[vist#0:0/rawvideo @ <address>] [dec:rawvideo @ <address>] [fatal] Decode error rate 1 exceeds maximum 0.666667
