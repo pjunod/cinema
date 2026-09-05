@@ -134,6 +134,41 @@ hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 .PHONY: cluster-wal-check
 cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::handler_coordinator_consumes_retained_reset_when_request_queue_is_full \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::replacement_socket_drops_cancelled_request_after_consuming_reset \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::live_request_on_stale_socket_requires_reconnect \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::reset_interrupts_write_enqueue_under_backpressure \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::forced_reset_cleanup_does_not_wait_for_full_writer_queue \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::sqlite_install_snapshot_preserves_mismatch_for_offset_reset \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::cache_install_snapshot_preserves_mismatch_for_offset_reset \
+	  --lib -- --exact
+	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
+	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \
+	  | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["manifest_path"] for p in data["packages"] if p["name"] == "openraft" and p["version"] == "0.9.25"))' )"; \
+	  CARGO_TARGET_DIR="$(CURDIR)/target/openraft-regression" $(CARGO) test --locked \
+	  --manifest-path "$$OPENRAFT_MANIFEST" --features generic-snapshot-data \
+	  network::snapshot_transport::tests::test_chunked_reset_offset_if_snapshot_id_mismatch \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -453,12 +488,20 @@ container-smoke: docker ## Build, start, probe, restart, and re-probe the contai
 # `-f` also moves the project directory to the repo root, so `deploy/.env` stops
 # being read on the way past.
 #
-# The recipe below is character-for-character what somebody runs by hand in
+# Resolve Compose first so shell variables, deploy/.env, defaults, and override
+# files are evaluated with the same precedence as the mutation below. The
+# checker refuses a health grace shorter than snapshot recovery plus the named
+# startup phases before `compose up` can replace a container.
+.PHONY: docker-startup-budget-check
+docker-startup-budget-check: ## Prove the resolved Compose startup budget before deployment
+	cd deploy && python3 ../scripts/validate-docker-startup-budget
+
+# The mutation below is character-for-character what somebody runs by hand in
 # `deploy/`, with only the build arg added. That is the point: a convenience
 # target that is not equivalent to the command it replaces is a trap, and this
 # one sprang on the first real deploy.
 .PHONY: docker-up
-docker-up: ## Build + (re)start the Compose stack, stamping this commit into the image
+docker-up: docker-startup-budget-check ## Build + (re)start Compose after its startup budget passes
 	cd deploy && PLURX_BUILD_REF="$(BUILD_REF)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 

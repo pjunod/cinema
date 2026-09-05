@@ -19,6 +19,31 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def make_dry_run_commands(target: str) -> list[str]:
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-n", target],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    commands: list[str] = []
+    continued: list[str] = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith("\\"):
+            continued.append(line[:-1].rstrip())
+            continue
+        continued.append(line)
+        commands.append(" ".join(continued))
+        continued = []
+    if continued:
+        raise AssertionError(f"unterminated recipe continuation for make {target}")
+    return commands
+
+
 def workflow_job_blocks(path: str) -> dict[str, str]:
     jobs = read(path).split("\njobs:\n", 1)[1]
     starts = list(re.finditer(r"(?m)^  ([a-zA-Z0-9_-]+):\n", jobs))
@@ -397,6 +422,14 @@ for (const startupDelay of [0, 1600, 7000]) {
             "stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}", compose
         )
         self.assertIn(
+            'start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"', compose
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"',
+            compose,
+        )
+        self.assertIn(
             'PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"',
             compose,
         )
@@ -412,14 +445,21 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn(f"PLURX_BIND: {configured_bind}", discovery)
 
     def test_docker_up_preserves_override_discovery_and_stamps_the_build(self):
-        result = subprocess.run(
-            ["make", "-n", "docker-up"],
-            cwd=ROOT,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-        )
-        command = result.stdout
+        commands = make_dry_run_commands("docker-up")
+        command = "\n".join(commands)
+        preflight_commands = [
+            index
+            for index, line in enumerate(commands)
+            if line == "cd deploy && python3 ../scripts/validate-docker-startup-budget"
+        ]
+        mutation_commands = [
+            index
+            for index, line in enumerate(commands)
+            if "docker compose up -d --build" in line
+        ]
+        self.assertEqual(preflight_commands, [0])
+        self.assertEqual(len(mutation_commands), 1)
+        self.assertLess(preflight_commands[0], mutation_commands[0])
         self.assertIn("cd deploy && PLURX_BUILD_REF=", command)
         self.assertIn("PLURX_NODE_HOSTNAME=", command)
         self.assertIn("docker compose up -d --build", command)
@@ -437,10 +477,107 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}", dockerfile)
         self.assertIn("PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}", compose)
 
-        # Replicated startup can legitimately use 120s for snapshot transfer
-        # and another 45s to prove the quorum watermark. Docker must not fail
-        # the dependent discovery service before that bounded recovery ends.
-        self.assertIn("--start-period=3m", dockerfile)
+        stages = list(re.finditer(r"(?im)^[ \t]*from\b.*$", dockerfile))
+        runtime_stage = re.search(
+            r"(?im)^[ \t]*from[ \t]+runtime-assets[ \t]+as[ \t]+runtime[ \t]*$",
+            dockerfile,
+        )
+        self.assertIsNotNone(runtime_stage)
+        assert runtime_stage is not None
+        self.assertEqual(runtime_stage.start(), stages[-1].start())
+        runtime = dockerfile[runtime_stage.end() :]
+        healthcheck_instructions = list(
+            re.finditer(r"(?im)^[ \t]*healthcheck\b", dockerfile)
+        )
+        self.assertEqual(len(healthcheck_instructions), 1)
+        self.assertGreater(healthcheck_instructions[0].start(), runtime_stage.end())
+        healthcheck = re.search(
+            r'(?im)^[ \t]*healthcheck[ \t]+--interval=(\S+)[ \t]+'
+            r'--timeout=(\S+)[ \t]+'
+            r'--start-period=(\S+) \\\n'
+            r'[ \t]+cmd[ \t]+\["plurxd",[ \t]*"healthcheck"\][ \t]*$',
+            runtime,
+        )
+        self.assertIsNotNone(healthcheck)
+        assert healthcheck is not None
+        interval, timeout, start_period = healthcheck.groups()
+        self.assertEqual((interval, timeout), ("30s", "5s"))
+
+        checker = runpy.run_path(str(ROOT / "scripts/validate-docker-startup-budget"))
+        parse_duration = checker["parse_duration"]
+        start_period_seconds = parse_duration(start_period, "Dockerfile start period")
+
+        compose_start = re.search(
+            r'(?m)^[ \t]*start_period:[ \t]*'
+            r'"\$\{PLURX_HEALTH_START_PERIOD:-([^}]+)\}"[ \t]*$',
+            compose,
+        )
+        self.assertIsNotNone(compose_start)
+        assert compose_start is not None
+        compose_start_seconds = parse_duration(
+            compose_start.group(1), "Compose default start period"
+        )
+        self.assertEqual(compose_start_seconds, start_period_seconds)
+
+        config_source = read("crates/plurx-core/src/config.rs")
+        default_snapshot = re.search(
+            r"(?m)^pub const DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = "
+            r"([\d_]+);$",
+            config_source,
+        )
+        source_max_snapshot = re.search(
+            r"(?m)^pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);$",
+            config_source,
+        )
+        migration_source = read("crates/plurx-core/src/cluster/migration.rs")
+        phase_names = (
+            "HIQLITE_HEALTH_TIMEOUT",
+            "MEMBERSHIP_ADMISSION_TIMEOUT",
+            "SNAPSHOT_CATCHUP_GRACE",
+        )
+        phases = {
+            name: re.search(
+                rf"(?m)^const {name}: Duration = Duration::from_secs\((\d+)\);$",
+                migration_source,
+            )
+            for name in phase_names
+        }
+        self.assertIsNotNone(default_snapshot)
+        self.assertIsNotNone(source_max_snapshot)
+        self.assertTrue(all(value is not None for value in phases.values()))
+        assert default_snapshot is not None and source_max_snapshot is not None
+
+        # Dockerfile owns the image default. Compose exposes a paired override
+        # for operators who deliberately extend the snapshot deadline.
+        supported_default_startup_seconds = int(
+            default_snapshot.group(1).replace("_", "")
+        ) + sum(int(value.group(1)) for value in phases.values() if value)
+        self.assertGreaterEqual(
+            start_period_seconds, supported_default_startup_seconds
+        )
+
+        env_example = read("deploy/.env.example")
+        max_snapshot = re.search(
+            r"# PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS=(\d+)", env_example
+        )
+        max_health = re.search(
+            r"# PLURX_HEALTH_START_PERIOD=(\d+)([smh])", env_example
+        )
+        self.assertIsNotNone(max_snapshot)
+        self.assertIsNotNone(max_health)
+        assert max_snapshot is not None and max_health is not None
+        env_max_snapshot_seconds = int(max_snapshot.group(1))
+        source_max_snapshot_seconds = int(
+            source_max_snapshot.group(1).replace("_", "")
+        )
+        self.assertEqual(env_max_snapshot_seconds, source_max_snapshot_seconds)
+        max_health_seconds = parse_duration(
+            "".join(max_health.groups()), ".env.example maximum health period"
+        )
+        supported_max_startup_seconds = source_max_snapshot_seconds + sum(
+            int(value.group(1)) for value in phases.values() if value
+        )
+        self.assertGreaterEqual(max_health_seconds, supported_max_startup_seconds)
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
@@ -1007,6 +1144,46 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("make cluster-harness-check", jobs["cluster_topology"])
         self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
         self.assertIn("run: make cluster-wal-check", workflow)
+        wal_commands = make_dry_run_commands("cluster-wal-check")
+        hiqlite_snapshot_tests = (
+            "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
+            "replacement_socket_drops_cancelled_request_after_consuming_reset",
+            "live_request_on_stale_socket_requires_reconnect",
+            "reset_interrupts_write_enqueue_under_backpressure",
+            "forced_reset_cleanup_does_not_wait_for_full_writer_queue",
+            "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
+            "cache_install_snapshot_preserves_mismatch_for_offset_reset",
+        )
+        for test_name in hiqlite_snapshot_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn(
+                "cargo test --locked --manifest-path vendor/hiqlite/Cargo.toml",
+                command,
+            )
+            self.assertIn(
+                "--no-default-features --features auto-heal,cache,macros,sqlite",
+                command,
+            )
+            self.assertIn("--lib -- --exact", command)
+
+        openraft_test = (
+            "network::snapshot_transport::tests::"
+            "test_chunked_reset_offset_if_snapshot_id_mismatch"
+        )
+        matching = [command for command in wal_commands if openraft_test in command]
+        self.assertEqual(len(matching), 1)
+        openraft_command = matching[0]
+        self.assertIn(
+            "cargo metadata --locked --manifest-path vendor/hiqlite/Cargo.toml",
+            openraft_command,
+        )
+        self.assertIn('p["version"] == "0.9.25"', openraft_command)
+        self.assertIn("cargo test --locked", openraft_command)
+        self.assertIn('--manifest-path "$OPENRAFT_MANIFEST"', openraft_command)
+        self.assertIn("--features generic-snapshot-data", openraft_command)
+        self.assertIn("--lib -- --exact", openraft_command)
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
