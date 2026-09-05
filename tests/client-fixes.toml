@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "clients.atomic-control-capture-envelope"
+commits = ["fc544fad"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = "private fun newestCapture(value: PlaybackControlCapture?): PlaybackControlCapture?"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "reversed enqueue keeps newest source for changed and unchanged intent"
+
+[[fixes]]
 id = "apple.cold-decision-recipe-and-lifecycle"
 commits = ["3155bfe9"]
 source = "clients/apple/Sources/PlayerController.swift"
