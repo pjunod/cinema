@@ -1061,15 +1061,23 @@ pub fn heavy_source(source: &MediaFile) -> bool {
     ) && (source.hdr.is_some() || source.height.unwrap_or(0) >= 2160)
 }
 
-fn decode_setup(encoder: Encoder, source: &MediaFile) -> (Vec<String>, Option<String>) {
+fn compatibility_forces_software_decode() -> bool {
+    matches!(
+        std::env::var("PLURX_HWDECODE").as_deref(),
+        Ok("off" | "0" | "false" | "no")
+    )
+}
+
+fn decode_setup_with_compatibility(
+    encoder: Encoder,
+    source: &MediaFile,
+    force_software_decode: bool,
+) -> (Vec<String>, Option<String>) {
     let arg = |x: &str| x.to_owned();
     // Escape hatch: force software decode (still hardware-encodes). Set when a
     // GPU decodes a stream to garbage — some Dolby Vision profiles — so you can
     // fall back without giving up the hardware encoder.
-    if matches!(
-        std::env::var("PLURX_HWDECODE").as_deref(),
-        Ok("off" | "0" | "false" | "no")
-    ) {
+    if force_software_decode {
         return (Vec::new(), None);
     }
     let heavy = heavy_source(source);
@@ -1147,6 +1155,24 @@ pub fn hls_args(
     pacing: Pacing,
     out_dir: &str,
 ) -> Vec<String> {
+    hls_args_with_compatibility(
+        source,
+        encoder,
+        opts,
+        pacing,
+        out_dir,
+        compatibility_forces_software_decode(),
+    )
+}
+
+fn hls_args_with_compatibility(
+    source: &MediaFile,
+    encoder: Encoder,
+    opts: &TranscodeOptions,
+    pacing: Pacing,
+    out_dir: &str,
+    force_software_decode: bool,
+) -> Vec<String> {
     let source_path = source.path.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
 
@@ -1175,7 +1201,7 @@ pub fn hls_args(
     let (decode_args, hwdownload) = if opts.pipeline.requires_software_decode() {
         (Vec::new(), None)
     } else if pipeline_decode.is_empty() {
-        decode_setup(encoder, source)
+        decode_setup_with_compatibility(encoder, source, force_software_decode)
     } else {
         (pipeline_decode, None)
     };
@@ -1973,21 +1999,29 @@ mod tests {
         source: &MediaFile,
         encoder: Encoder,
         options: &TranscodeOptions,
+        force_software_decode: bool,
     ) -> Vec<String> {
-        hls_args(
+        let mut arguments = hls_args_with_compatibility(
             source,
             encoder,
             options,
             Pacing::unpaced(),
             "/tmp/m0-output",
-        )
-        .into_iter()
-        .map(|argument| {
-            argument
-                .replace("/media/movie.mkv", "<source>")
-                .replace("/tmp/m0-output", "<output>")
-        })
-        .collect()
+            force_software_decode,
+        );
+        for index in 1..arguments.len() {
+            if arguments[index - 1] == "-vaapi_device" {
+                arguments[index] = "<vaapi-device>".to_owned();
+            }
+        }
+        arguments
+            .into_iter()
+            .map(|argument| {
+                argument
+                    .replace("/media/movie.mkv", "<source>")
+                    .replace("/tmp/m0-output", "<output>")
+            })
+            .collect()
     }
 
     /// M0 migration fixture: M1 and M2 may change only the cases whose policy
@@ -2012,8 +2046,11 @@ mod tests {
         incident_mpeg4.bitrate = None;
 
         let heavy_hevc = file(Some("hdr10"));
-        let mut vendor_options = TranscodeOptions::default();
-        vendor_options.pipeline = Pipeline::VppQsv;
+        let dovi = file(Some("dolby_vision"));
+        let options = |pipeline| TranscodeOptions {
+            pipeline,
+            ..TranscodeOptions::default()
+        };
 
         let cases = [
             (
@@ -2021,46 +2058,121 @@ mod tests {
                 &light_h264,
                 Encoder::Software,
                 TranscodeOptions::default(),
+                false,
             ),
             (
                 "qsv-light-h264",
                 &light_h264,
                 Encoder::Qsv,
                 TranscodeOptions::default(),
+                false,
             ),
             (
                 "qsv-heavy-hevc-hdr",
                 &heavy_hevc,
                 Encoder::Qsv,
                 TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "vaapi-heavy-hevc-hdr",
+                &heavy_hevc,
+                Encoder::Vaapi,
+                TranscodeOptions::default(),
+                false,
             ),
             (
                 "qsv-vendor-renderer",
                 &heavy_hevc,
                 Encoder::Qsv,
-                vendor_options,
+                options(Pipeline::VppQsv),
+                false,
+            ),
+            (
+                "vaapi-vendor-renderer",
+                &heavy_hevc,
+                Encoder::Vaapi,
+                options(Pipeline::TonemapVaapi),
+                false,
+            ),
+            (
+                "nvenc-libplacebo-renderer",
+                &heavy_hevc,
+                Encoder::Nvenc,
+                options(Pipeline::Libplacebo),
+                false,
+            ),
+            (
+                "vaapi-opencl-renderer",
+                &heavy_hevc,
+                Encoder::Vaapi,
+                options(Pipeline::TonemapOpencl),
+                false,
             ),
             (
                 "nvenc-light-h264",
                 &light_h264,
                 Encoder::Nvenc,
                 TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "videotoolbox-sdr-h264",
+                &light_h264,
+                Encoder::VideoToolbox,
+                TranscodeOptions::default(),
+                false,
             ),
             (
                 "videotoolbox-avi-mpeg4",
                 &incident_mpeg4,
                 Encoder::VideoToolbox,
                 TranscodeOptions::default(),
+                false,
+            ),
+            (
+                "qsv-heavy-hevc-hdr-forced-software",
+                &heavy_hevc,
+                Encoder::Qsv,
+                TranscodeOptions::default(),
+                true,
+            ),
+            (
+                "dovi-tonemapx-videotoolbox",
+                &dovi,
+                Encoder::VideoToolbox,
+                options(Pipeline::DoviTonemapx),
+                false,
+            ),
+            (
+                "dovi-passthrough-qsv",
+                &dovi,
+                Encoder::Qsv,
+                options(Pipeline::DoviPassthrough),
+                false,
+            ),
+            (
+                "hdr10-passthrough-qsv",
+                &heavy_hevc,
+                Encoder::Qsv,
+                options(Pipeline::Hdr10Passthrough),
+                false,
             ),
         ];
         let actual = cases
             .into_iter()
-            .map(|(name, source, encoder, options)| {
+            .map(|(name, source, encoder, options, force_software_decode)| {
                 serde_json::json!({
                     "name": name,
                     "encoder": encoder.label(),
                     "renderer": options.pipeline.name(),
-                    "args": normalized_m0_args(source, encoder, &options),
+                    "compatibility_force_software_decode": force_software_decode,
+                    "args": normalized_m0_args(
+                        source,
+                        encoder,
+                        &options,
+                        force_software_decode,
+                    ),
                 })
             })
             .collect::<Vec<_>>();

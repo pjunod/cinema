@@ -1,115 +1,77 @@
 [
   {
-    "name": "software-sdr-h264",
-    "encoder": "software (x264)",
-    "renderer": "cpu",
-    "args": [
-      "-hide_banner", "-loglevel", "error", "-i", "<source>",
-      "-map", "0:v:0", "-map", "0:a:0?", "-vf",
-      "scale=-2:'min(1080,ih)',format=yuv420p", "-c:v", "libx264",
-      "-preset", "veryfast", "-b:v", "8000k", "-maxrate", "12000k",
-      "-bufsize", "16000k", "-profile:v", "high", "-force_key_frames",
-      "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a",
-      "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls",
-      "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags",
-      "independent_segments+temp_file", "-hls_segment_type", "mpegts",
-      "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number",
-      "0", "<output>/index.m3u8"
-    ]
+    "name": "software-sdr-h264", "encoder": "software (x264)", "renderer": "cpu",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(1080,ih)',format=yuv420p", "-c:v", "libx264", "-preset", "veryfast", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-profile:v", "high", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
   },
   {
-    "name": "qsv-light-h264",
-    "encoder": "Intel QuickSync",
-    "renderer": "cpu",
-    "args": [
-      "-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw",
-      "-filter_hw_device", "hw", "-i", "<source>", "-map", "0:v:0",
-      "-map", "0:a:0?", "-vf",
-      "scale=-2:'min(1080,ih)',format=yuv420p,hwupload=extra_hw_frames=64,format=qsv",
-      "-c:v", "h264_qsv", "-b:v", "8000k", "-maxrate", "12000k",
-      "-bufsize", "16000k", "-force_key_frames",
-      "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a",
-      "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls",
-      "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags",
-      "independent_segments+temp_file", "-hls_segment_type", "mpegts",
-      "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number",
-      "0", "<output>/index.m3u8"
-    ]
+    "name": "qsv-light-h264", "encoder": "Intel QuickSync", "renderer": "cpu",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(1080,ih)',format=yuv420p,hwupload=extra_hw_frames=64,format=qsv", "-c:v", "h264_qsv", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
   },
   {
-    "name": "qsv-heavy-hevc-hdr",
-    "encoder": "Intel QuickSync",
-    "renderer": "cpu",
-    "args": [
-      "-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw",
-      "-filter_hw_device", "hw", "-hwaccel", "qsv",
-      "-hwaccel_output_format", "qsv", "-i", "<source>", "-map",
-      "0:v:0", "-map", "0:a:0?", "-vf",
-      "hwdownload,format=p010le,scale=-2:'min(1080,ih)',zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p,hwupload=extra_hw_frames=64,format=qsv",
-      "-c:v", "h264_qsv", "-b:v", "8000k", "-maxrate", "12000k",
-      "-bufsize", "16000k", "-force_key_frames",
-      "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a",
-      "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls",
-      "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags",
-      "independent_segments+temp_file", "-hls_segment_type", "mpegts",
-      "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number",
-      "0", "<output>/index.m3u8"
-    ]
+    "name": "qsv-heavy-hevc-hdr", "encoder": "Intel QuickSync", "renderer": "cpu",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw", "-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "hwdownload,format=p010le,scale=-2:'min(1080,ih)',zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p,hwupload=extra_hw_frames=64,format=qsv", "-c:v", "h264_qsv", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
   },
   {
-    "name": "qsv-vendor-renderer",
-    "encoder": "Intel QuickSync",
-    "renderer": "vpp_qsv",
-    "args": [
-      "-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw",
-      "-filter_hw_device", "hw", "-hwaccel", "qsv",
-      "-hwaccel_output_format", "qsv", "-i", "<source>", "-map",
-      "0:v:0", "-map", "0:a:0?", "-vf",
-      "vpp_qsv=w=1920:h=1080:tonemap=1:format=nv12", "-c:v",
-      "h264_qsv", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize",
-      "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a",
-      "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0",
-      "-muxpreload", "0", "-f", "hls", "-hls_time", "2",
-      "-hls_playlist_type", "event", "-hls_flags",
-      "independent_segments+temp_file", "-hls_segment_type", "mpegts",
-      "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number",
-      "0", "<output>/index.m3u8"
-    ]
+    "name": "vaapi-heavy-hevc-hdr", "encoder": "VA-API", "renderer": "cpu",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-vaapi_device", "<vaapi-device>", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "hwdownload,format=p010le,scale=-2:'min(1080,ih)',zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p,format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
   },
   {
-    "name": "nvenc-light-h264",
-    "encoder": "NVIDIA NVENC",
-    "renderer": "cpu",
-    "args": [
-      "-hide_banner", "-loglevel", "error", "-hwaccel", "cuda", "-i",
-      "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf",
-      "scale=-2:'min(1080,ih)',format=yuv420p", "-c:v", "h264_nvenc",
-      "-preset", "p4", "-b:v", "8000k", "-maxrate", "12000k",
-      "-bufsize", "16000k", "-force_key_frames",
-      "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a",
-      "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls",
-      "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags",
-      "independent_segments+temp_file", "-hls_segment_type", "mpegts",
-      "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number",
-      "0", "<output>/index.m3u8"
-    ]
+    "name": "qsv-vendor-renderer", "encoder": "Intel QuickSync", "renderer": "vpp_qsv",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw", "-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "vpp_qsv=w=1920:h=1080:tonemap=1:format=nv12", "-c:v", "h264_qsv", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
   },
   {
-    "name": "videotoolbox-avi-mpeg4",
-    "encoder": "Apple VideoToolbox",
-    "renderer": "cpu",
-    "args": [
-      "-hide_banner", "-loglevel", "error", "-hwaccel", "videotoolbox",
-      "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf",
-      "scale=-2:'min(1080,ih)',format=yuv420p", "-c:v",
-      "h264_videotoolbox", "-b:v", "8000k", "-maxrate", "12000k",
-      "-bufsize", "16000k", "-force_key_frames",
-      "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a",
-      "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls",
-      "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags",
-      "independent_segments+temp_file", "-hls_segment_type", "mpegts",
-      "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number",
-      "0", "<output>/index.m3u8"
-    ]
+    "name": "vaapi-vendor-renderer", "encoder": "VA-API", "renderer": "tonemap_vaapi",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-vaapi_device", "<vaapi-device>", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale_vaapi=w=1920:h=1080:format=p010,tonemap_vaapi=format=nv12:matrix=bt709:transfer=bt709:primaries=bt709", "-c:v", "h264_vaapi", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "nvenc-libplacebo-renderer", "encoder": "NVIDIA NVENC", "renderer": "libplacebo",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk", "-hwaccel", "cuda", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "hwupload,libplacebo=w=1920:h=1080:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:format=nv12,hwdownload,format=nv12", "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "vaapi-opencl-renderer", "encoder": "VA-API", "renderer": "tonemap_opencl",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-vaapi_device", "<vaapi-device>", "-init_hw_device", "opencl=ocl", "-filter_hw_device", "ocl", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "hwdownload,format=p010le,scale=1920:1080,format=p010,hwupload,tonemap_opencl=tonemap=hable:transfer=bt709:matrix=bt709:primaries=bt709:format=nv12,hwdownload,format=nv12,format=nv12,hwupload", "-c:v", "h264_vaapi", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "nvenc-light-h264", "encoder": "NVIDIA NVENC", "renderer": "cpu",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-hwaccel", "cuda", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(1080,ih)',format=yuv420p", "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "videotoolbox-sdr-h264", "encoder": "Apple VideoToolbox", "renderer": "cpu",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-hwaccel", "videotoolbox", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(1080,ih)',format=yuv420p", "-c:v", "h264_videotoolbox", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "videotoolbox-avi-mpeg4", "encoder": "Apple VideoToolbox", "renderer": "cpu",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-hwaccel", "videotoolbox", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(1080,ih)',format=yuv420p", "-c:v", "h264_videotoolbox", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "qsv-heavy-hevc-hdr-forced-software", "encoder": "Intel QuickSync", "renderer": "cpu",
+    "compatibility_force_software_decode": true,
+    "args": ["-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(1080,ih)',zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p,hwupload=extra_hw_frames=64,format=qsv", "-c:v", "h264_qsv", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "dovi-tonemapx-videotoolbox", "encoder": "Apple VideoToolbox", "renderer": "dovi_tonemapx",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "tonemapx=tonemap=bt2390:transfer=bt709:matrix=bt709:primaries=bt709:range=tv:format=yuv420p:apply_dovi=1,scale=1920:1080,format=yuv420p", "-c:v", "h264_videotoolbox", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "dovi-passthrough-qsv", "encoder": "Intel QuickSync", "renderer": "dovi_passthrough",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "tonemapx=tonemap=none:transfer=smpte2084:matrix=bt2020:primaries=bt2020:range=tv:format=yuv420p10le:apply_dovi=1,scale=1920:1080,format=yuv420p10le,format=p010le,hwupload=extra_hw_frames=64,format=qsv", "-c:v", "hevc_qsv", "-preset", "veryfast", "-profile:v", "main10", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-color_range", "tv", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
+  },
+  {
+    "name": "hdr10-passthrough-qsv", "encoder": "Intel QuickSync", "renderer": "hdr10_passthrough",
+    "compatibility_force_software_decode": false,
+    "args": ["-hide_banner", "-loglevel", "error", "-init_hw_device", "qsv=hw", "-filter_hw_device", "hw", "-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-i", "<source>", "-map", "0:v:0", "-map", "0:a:0?", "-vf", "hwdownload,format=p010le,scale=1920:1080,format=yuv420p10le,format=p010le,hwupload=extra_hw_frames=64,format=qsv", "-c:v", "hevc_qsv", "-preset", "veryfast", "-profile:v", "main10", "-b:v", "8000k", "-maxrate", "12000k", "-bufsize", "16000k", "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-color_range", "tv", "-force_key_frames", "expr:gte(t,n_forced*2)", "-c:a", "aac", "-ac", "2", "-b:a", "160k", "-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file", "-hls_segment_type", "mpegts", "-hls_segment_filename", "<output>/seg%05d.ts", "-start_number", "0", "<output>/index.m3u8"]
   }
 ]
