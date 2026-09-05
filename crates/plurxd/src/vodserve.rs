@@ -327,6 +327,19 @@ pub struct VodSessionInfo {
     pub delivered_bps: Option<i64>,
     /// How long since the rate was last recomputed, which is what tells a
     /// stale rate from a dead link.
+    ///
+    /// **Deliberately not serialized.** This struct is the body of
+    /// `/hls/{session}/status`, and Apple's `DeliveryStarvationDetector`
+    /// refuses to fire unless `delivered_idle_ms` is present and at least
+    /// sixteen seconds. VOD has never carried the key, so that detector has
+    /// never been armed on the primary presentation; publishing it here would
+    /// turn on an automatic session reopen for every VOD viewer as a side
+    /// effect of adding a measurement. That may well be the right thing — the
+    /// detector was written for copy-HLS — but it is a client-behaviour change
+    /// that needs its own evidence on hardware, not a rider on this one. The
+    /// field is read in-process by `DeliveryView::from_status`, which is what
+    /// needs it.
+    #[serde(skip)]
     pub delivered_idle_ms: i64,
     pub suspended: bool,
     #[serde(rename = "final")]
@@ -9660,6 +9673,59 @@ mod tests {
             .expect("playlist bytes")
             .0;
         assert_eq!(first, second, "the playlist is immutable (plan §2.1)");
+    }
+
+    /// The seam the P1-3 correction consists of: the meter a segment answer
+    /// carries is the meter its own session publishes.
+    ///
+    /// Every other proof of this change supplies its own meter, which exercises
+    /// the pump and the control view in isolation and would keep passing if
+    /// `session_rendition` handed out a fresh meter per request — every VOD
+    /// session would silently return to `delivered_bps: None`, preparation
+    /// would go back to refusing `throughput_unreported`, and the whole suite
+    /// would stay green. This drives the production entry point, so nothing
+    /// here chooses the meter, and reads the count back off the session's own
+    /// status rather than off the answer.
+    #[tokio::test]
+    async fn a_segment_answer_carries_the_meter_its_own_session_publishes() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        create(&serve, &file, "sess-b", "play-b", &settings()).await;
+
+        assert_eq!(
+            serve
+                .status("sess-a")
+                .await
+                .expect("status")
+                .delivered_bytes,
+            0,
+            "nothing has been delivered yet"
+        );
+
+        let ready = fetch(&serve, "sess-a", "seg00000.m4s").await;
+        // Exactly what the response pump does, against the meter production
+        // chose rather than one this test made.
+        ready.delivery.note(4_096);
+
+        assert_eq!(
+            serve
+                .status("sess-a")
+                .await
+                .expect("status")
+                .delivered_bytes,
+            4_096,
+            "the session publishes what its own answer counted"
+        );
+        assert_eq!(
+            serve
+                .status("sess-b")
+                .await
+                .expect("status")
+                .delivered_bytes,
+            0,
+            "two viewers of the same immutable rendition are metered apart"
+        );
     }
 
     #[tokio::test]

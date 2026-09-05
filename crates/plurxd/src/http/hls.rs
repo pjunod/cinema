@@ -18166,12 +18166,22 @@ mod tests {
         );
     }
 
-    /// An abandoned body credits only what the client actually took.
+    /// An abandoned body credits exactly what the client actually took.
     ///
-    /// The pump counts after the downstream acknowledgement, so a viewer who
-    /// walks away mid-segment cannot leave behind a rate built from bytes that
-    /// went nowhere — which is the failure that would make a stalled link look
-    /// fast enough to prepare a successor against.
+    /// A viewer who walks away mid-segment must not leave behind a rate built
+    /// from bytes that went nowhere — that is what would make a stalled link
+    /// look fast enough to stage a successor against. The assertion is an
+    /// equality rather than an upper bound: "less than the whole segment"
+    /// holds for a counter that never moved at all, which is how a version of
+    /// this test proved nothing.
+    ///
+    /// What it does **not** pin is the ordering of the `note` against the
+    /// downstream acknowledgement. The local body channel holds one chunk and
+    /// the pump awaits each chunk's acknowledgement before reading the next,
+    /// so it never reads ahead of what it has sent, and counting at read time
+    /// is externally indistinguishable from counting at acknowledgement time.
+    /// That ordering is argued from the code, not proved here; pinning it
+    /// would need a downstream this test can park mid-chunk.
     #[tokio::test]
     async fn an_abandoned_vod_body_counts_nothing_it_did_not_hand_over() {
         let dir = crate::test_tempdir().expect("VOD HTTP directory");
@@ -18195,12 +18205,34 @@ mod tests {
         )
         .await
         .expect("VOD response");
-        drop(response);
+
+        // Take a prefix and abandon the rest. Asserting only "less than the
+        // whole" would hold for a counter that never moved at all, and would
+        // also hold if bytes were counted at read time — the exact defect the
+        // acknowledgement ordering exists to prevent. The prefix has to be
+        // counted *exactly*: everything handed over, nothing that was not.
+        let mut body = response.into_body().into_data_stream();
+        let mut taken = 0_i64;
+        for _ in 0..2 {
+            let chunk = futures_util::StreamExt::next(&mut body)
+                .await
+                .expect("a chunk")
+                .expect("chunk bytes");
+            taken += chunk.len() as i64;
+        }
+        drop(body);
         tokio::task::yield_now().await;
 
+        assert!(taken > 0, "the fixture must actually hand over a prefix");
         assert!(
-            delivery.total_bytes() < bytes.len() as i64,
-            "a dropped body cannot have delivered the whole segment"
+            taken < bytes.len() as i64,
+            "the fixture must abandon the body before it completes"
+        );
+        assert_eq!(
+            delivery.total_bytes(),
+            taken,
+            "exactly the bytes the viewer took — a reader that counted at read \
+             time would be ahead of this, and one that never counted behind it"
         );
     }
 

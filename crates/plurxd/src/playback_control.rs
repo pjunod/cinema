@@ -11834,9 +11834,10 @@ static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// explain why no successor was staged.
 ///
 /// **Labelled by platform because the three clients are not interchangeable
-/// here.** Only the web client fills `observed_download_bps` at all, so an
-/// unlabelled counter would mix the one platform that can reach a throughput
-/// verdict with the two the client release is actually about, and no reader
+/// here.** All three now fill `observed_download_bps`, but only Apple reports
+/// `dual_player_preparation`, so an unlabelled counter would mix the one
+/// platform that can reach a prepared verdict with the two it is not about,
+/// and no reader
 /// could separate them again.
 ///
 /// Indexed `[platform][axis][outcome]`. Platform order is `ClientPlatform`'s
@@ -12858,7 +12859,9 @@ mod tests {
         delivered_bps: Option<i64>,
     ) -> HlsSessionInfo {
         HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
-            delivered_bytes: delivered_bps.map_or(0, |bps| bps / 8),
+            // A plausible total, not a rate divided by eight: a fixture that
+            // encodes the wrong unit is how the wrong unit gets copied.
+            delivered_bytes: delivered_bps.map_or(0, |_| 4_194_304),
             delivered_bps,
             delivered_idle_ms: 0,
             id: "vod-session".to_owned(),
@@ -20624,9 +20627,12 @@ mod tests {
         // too tight" and "nobody measured the link" are opposite findings, and
         // a counter that reported them as one number would read as evidence
         // for the throughput rule while measuring only its own missing inputs.
-        // On today's fleet the unreported cases are effectively all of it: the
-        // native clients send no `observed_download_bps` and VOD sessions
-        // carry no `delivered_bps`.
+        // This was once effectively all of it, for two separate reasons that
+        // have both since been fixed: the native clients now send
+        // `observed_download_bps` (Apple from AVFoundation's access log,
+        // Android off the wire), and VOD sessions now carry a measured
+        // `delivered_bps`. What remains unreported is a session too young for
+        // a window to have closed.
         let refusals = [
             (
                 "no margin at all",
