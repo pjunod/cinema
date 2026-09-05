@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** M2 Astra approved and focused qualification passed; M3 web in review · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** backend merged; web media acceptance and native completion in progress · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-04 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -15,13 +15,13 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 |---|---|---|---|
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
-| Forgejo main synchronization | Astra approved; fresh gate pending | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | pushed `c4b66e1d`, incorporating main `4ce33f95`; pinned fmt/check/clippy passed |
-| M2 live HLS and cluster relay | Astra approved; focused qualification passed; gate pending | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | final `3c911018`: pinned fmt/check/clippy, 41 Live TV, 1 signature, 1 Activity, 2 route and 2 admission tests passed |
-| M3 web client | Astra findings closed; browser acceptance pending | — | Developer enable/recovery card and separate live player implemented; 11 Live TV tests plus the complete web static target passed |
-| M4 Apple and Android | not started | — | — |
+| Forgejo main synchronization | merged | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | Astra approved `c4b66e1d`; fresh gate run 61 passed; merge `e8095916` |
+| M2 live HLS and cluster relay | merged | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | Astra approved `fc164045`; exact pinned fmt/check/clippy and 47 focused tests passed; effort gate run 85 passed; merge `f2773ca8` |
+| M3 web client | Astra findings closed; browser media acceptance pending | — | 72 captures at `59bf4932`, no console/page errors; 17 focused tests pass after persistent ownership fixes; new real-HLS browser fixture awaits execution |
+| M4 Apple and Android | Apple tests pass; Android implementation remains | — | Apple API, lease, player and Developer settings compile on iOS/tvOS; all 14 focused tests pass on both platforms; Astra findings closed pending exact commit review |
 | M5 docs, hardware, promotion | not started | — | — |
 
-## Current work — close the remaining M2 review findings
+## Current work — finish client acceptance and effort gates
 
 M0 and M1 are merged to the effort. M2 now has the always-compiled foreground
 admission path, one-open tuner-to-FFmpeg pump, bounded six-segment live HLS
@@ -73,14 +73,30 @@ execute FFmpeg because Homebrew's x265 dylib is missing; the isolated compiler
 image now includes FFmpeg for the pinned-toolchain verification. The user's
 Homebrew installation was not modified.
 
-Next are the Forgejo effort gates and task merges, then completion of web and
-native clients. Browser PR controls are temporarily unavailable while the Mac
-is locked. Forgejo's [documented AGit workflow](https://forgejo.org/docs/latest/user/git-cli/agit-support/)
-opened M2 PR #13 through the existing SSH login. Source work and compiler checks
-continue. No authentication bypass or credential extraction was attempted.
-Forgejo is the only mutable remote after the repository migration. Repository
-access is confirmed through the host SSH agent; the supplied deploy key
-remains scoped to node access.
+PR #7 merged after actual Astra approval and its fresh effort gate. PR #13's
+policy check identified eight stale task/process ownership counts. Astra
+independently attributed every new site; the ledger now names those owners,
+and all 115 validation tests pass. The ledger does not waive the ownership
+check. Candidate `fc164045` passed its exact pinned compiler loop and fresh
+effort gate run 85, then merged as `f2773ca8`.
+
+Web structural acceptance produced 72 desktop/mobile captures across all three
+layouts with no console/page errors. Actual Astra then found that a typed lost
+owner response and a wall-clock adjustment could bypass uncertain-start
+quarantine. The working fix uses monotonic deadlines and keeps ambiguous starts
+blocked for 90 seconds. Native Apple has the same fixes, an app-wide uncertainty
+barrier across profile switches, explicit live controls, and the runtime-only
+Developer card. Token-free ownership markers now persist before POST and during
+active playback, surviving page/app restart until confirmed release. Immutable
+web marker keys prevent expiry from deleting another tab's fresh recovery wait;
+marker IDs work on LAN HTTP. Hardware playback and Android implementation remain
+outstanding.
+
+Browser access has resumed after the Mac was unlocked. Forgejo is the only
+mutable remote after migration; no authentication bypass or credential
+extraction was attempted. Forgejo's documented AGit workflow opened and updated
+PR #13 through existing SSH access. The supplied deploy key remains scoped to
+node access.
 
 ## Evidence — exact commands and trees
 
