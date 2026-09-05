@@ -421,6 +421,7 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/cluster-panel.js", get(web::cluster_panel_js))
         .route("/assets/playback-policy.js", get(web::playback_policy_js))
         .route("/assets/playback-control.js", get(web::playback_control_js))
+        .route("/assets/live-tv.js", get(web::live_tv_js))
         .route("/assets/reader.js", get(web::reader_js))
         .route("/assets/reader.css", get(web::reader_css))
         .route("/connect.svg", get(web::connect_qr))
@@ -8573,6 +8574,7 @@ mod tests {
             "/assets/cluster-panel.js",
             "/assets/playback-policy.js",
             "/assets/playback-control.js",
+            "/assets/live-tv.js",
             "/assets/reader.js",
             "/assets/reader.css",
             "/healthz",

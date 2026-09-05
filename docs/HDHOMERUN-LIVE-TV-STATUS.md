@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** backend merged; web acceptance and native client PRs in progress · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** backend and Apple merged; web acceptance passed; Android qualification in progress · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-05 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -16,10 +16,10 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | M0 plan and adversarial review | merged | [#904](https://github.com/pjunod/plurx/pull/904) | review approved; effort gate passed; merge `e3f05f2e` |
 | M1 device/settings/lineup | merged | [#906](https://github.com/pjunod/plurx/pull/906) | attack-review findings fixed; re-review approved; effort gate passed; merge `b15d241a` |
 | Forgejo main synchronization | merged | [#7](http://192.168.4.7:3000/noirr/plurx/pulls/7) | Astra approved `c4b66e1d`; fresh gate run 61 passed; merge `e8095916` |
-| M2 live HLS and cluster relay | merged | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | Astra approved `fc164045`; pinned fmt/check/clippy and 47 focused tests passed; fresh effort gate 85 passed; merge `f2773ca8` |
-| M3 web client | browser structure passed; final Astra fixes in progress | — | 72 captures at `59bf4932`, no console/page errors; 12 focused tests after fixing ambiguous-start and wall-clock findings; live media acceptance remains |
+| M2 live HLS and cluster relay | merged | [#13](http://192.168.4.7:3000/noirr/plurx/pulls/13) | Astra approved `fc164045`; exact pinned fmt/check/clippy and 47 focused tests passed; effort gate run 85 passed; merge `f2773ca8` |
+| M3 web client | reviewed; merged with M4 Apple; effort PR pending | — | 18 focused tests; `70607d14` passed pinned static checks, decoded H.264/AAC media acceptance, and 72 structural captures against the committed baseline |
 | M4 Apple | merged | [#17](http://192.168.4.7:3000/noirr/plurx/pulls/17) | Astra approved `8cfe8cc5`; iOS/tvOS compile and 14 focused tests pass on each simulator; effort gate 95 passed; merge `fc9c8f45` |
-| M4 Android | implemented; final review and native UI acceptance | — | dedicated live player and Developer controls compile; 14 focused tests pass; Astra sliding-window finding fixed using rendered-frame progress; isolated JDK 25/SDK 37 verification pending |
+| M4 Android | reviewed; effort PR open and green | [#23](http://192.168.4.7:3000/noirr/plurx/pulls/23) | dedicated live player and Developer controls; 15 focused tests and both instrumentation tests pass on an API 36 phone emulator; exact JDK 25 / SDK 37 build passes; adversarial review closed a shared critical double-allocation path. Television instrumentation is still outstanding |
 | M5 docs, hardware, promotion | not started | — | — |
 
 ## Current work — finish client acceptance and effort gates
@@ -78,7 +78,8 @@ PR #7 merged after actual Astra approval and its fresh effort gate. PR #13's
 policy check identified eight stale task/process ownership counts. Astra
 independently attributed every new site; the ledger now names those owners,
 and all 115 validation tests pass. The ledger does not waive the ownership
-check. Candidate `fc164045` passed fresh effort gate 85 and merged as `f2773ca8`.
+check. Candidate `fc164045` passed its exact pinned compiler loop and fresh
+effort gate run 85, then merged as `f2773ca8`.
 
 Web structural acceptance produced 72 desktop/mobile captures across all three
 layouts with no console/page errors. Actual Astra then found that a typed lost
@@ -86,11 +87,23 @@ owner response and a wall-clock adjustment could bypass uncertain-start
 quarantine. The working fix uses monotonic deadlines and keeps ambiguous starts
 blocked for 90 seconds. Native Apple has the same fixes, an app-wide uncertainty
 barrier across profile switches, explicit live controls, and the runtime-only
-Developer card. Hardware playback and Android implementation remain outstanding.
+Developer card. Token-free ownership markers now persist before POST and during
+active playback, surviving page/app restart until confirmed release. Immutable
+web marker keys prevent expiry from deleting another tab's fresh recovery wait;
+marker IDs work on LAN HTTP. The real-HLS browser fixture now proves advancing
+decoded frames, explicit controls, channel switch, active owner/producer/expiry
+failures, paused release and reload quarantine after deliberately lost unload
+DELETE. It does not claim unload delivery is guaranteed or substitute a fake
+reaper for the backend's orphan cleanup. Apple merged after its exact review
+and effort gate. Android is implemented with rendered-frame progress because
+Media3 live-window position can move backward during healthy playback; 14
+focused tests pass. Native UI and hardware playback acceptance remain.
 
 Browser access has resumed after the Mac was unlocked. Forgejo is the only
 mutable remote after migration; no authentication bypass or credential
-extraction was attempted. The supplied deploy key remains scoped to node access.
+extraction was attempted. Forgejo's documented AGit workflow opened and updated
+PR #13 through existing SSH access. The supplied deploy key remains scoped to
+node access.
 
 ## Evidence — exact commands and trees
 
@@ -119,10 +132,17 @@ extraction was attempted. The supplied deploy key remains scoped to node access.
 | 2026-09-04 | `4baf64bb` | `cargo test -p plurx-core --features hiqlite-store --lib live_tv_drain_response_signature --locked` | 1 passed; a previous filter without the feature ran zero and was not counted |
 | 2026-09-04 | `4baf64bb` | actual Astra exact-candidate review | approved, no actionable findings; real rollover and two-node fault acceptance remain M5 |
 | 2026-09-04 | physical tuner discovery | sanitized `discover.json`, no tuner stream opened | FLEX 4K, HDFX-4K, device `10AF300E`, four tuners, firmware `20260326`; not playback proof |
+| 2026-09-05 | `70607d14`, the web branch merged with effort `fc9c8f45` | Rust 1.97.1 `cargo fmt --check`, `cargo check --workspace --locked --all-targets`, workspace Clippy `-D warnings`, `cargo test -p plurxd app_shell_loads_the_live_tv_controller_before_its_route` | passed; 1 focused test. The merge commit itself passed the effort hook: `history-check`, `validation-lint`, `operations-check` (160 tests) and `effort-rust-check` |
+| 2026-09-05 | `70607d14` | `python3 scripts/live-tv-browser --self-host` | passed; decoded H.264/AAC frames advance, pause/resume, fullscreen stop, channel switch, navigation, typed refusal, late-start cleanup, active owner loss, producer failure, capability expiry, paused budget, visibility event and lost-unload reload quarantine; ten starts, nine confirmed releases, one deliberately orphaned start blocks replacement; no account token on capability routes and zero VOD/account writes |
+| 2026-09-05 | `70607d14` | `scripts/ui-baseline --self-host` compared against the committed golden | passed; 72 captures, 6,600 structural facts, no console or page errors, 408 s. The `--update` golden generated during the `36090562` run was **not** adopted: it recorded one extra `div.row > button.ghost.sm` on the Live TV route that a clean run of the merged tree does not reproduce, so the committed baseline stands |
+| 2026-09-05 | adversarial review of `70607d14` | release/renew symmetry in the client lease | one finding, fixed here: `Lease.status()` lacked the `releasing` guard that `keepalive()` already carries, so a heartbeat status poll issued while its own DELETE was in flight could renew the lease the client was dropping — the suite already treats a status request as lease-renewing. Covered by a regression test proven to fail without the guard |
+| 2026-09-05 | adversarial review of `7fe573aa` (web) and `4192b97f` (Android) | whole-diff review of both client task PRs | three defects fixed, listed below. Both clients shared the critical one, and it sat in code an earlier review had approved |
+| 2026-09-05 | `9c536174` | start-failure classification | **critical**: the ambiguous-outcome test was a denylist of four codes, so any other typed failure — including `tuner_unavailable`, whose own message admits a tuner "may be unavailable", and any code a newer server adds — cleared the durable marker and admitted an immediate retry, letting one viewer hold two physical tuners. Now an allowlist of failures decided before a tuner can open; everything else arms the barrier |
+| 2026-09-05 | `9c536174` | `Lease.status()` / `keepalive()` generation check | the generation was captured *after* `stop()` had already incremented it, so the check compared a value to itself, and `releasing` is only set two microtasks later. A poll entered in that synchronous window still renewed the lease being dropped. Both now compare against the generation that owns `current`. The earlier `656ceb00` guard was real but incomplete, and its test skipped exactly this window |
+| 2026-09-05 | `9c536174` | `channelView` | a denylist of two known-protected shapes rendered an enabled "Watch live" for any unfamiliar `support` value. Now allowlists the one playable state |
 | 2026-09-05 | Android `da19e7fa` with its instrumentation fixture | isolated JDK 25 / Android SDK 37 image: `:app:assembleDebug`, `:app:assembleDebugAndroidTest`, `:app:testDebugUnitTest --tests tv.plurx.app.livetv.LiveTvTest` | passed; 14 unit tests, 0 failures. This is the exact-source Android verification the plan required, run off the Mac |
 | 2026-09-05 | `LiveTvUiTest` on an API 36 x86_64 phone emulator | `:app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=tv.plurx.app.livetv.LiveTvUiTest` | passed; 2 tests, 0 failures. The two earlier 10-second timeouts were **fixture faults, not product faults**: the loopback socket was bound to `InetAddress.getLoopbackAddress()` instead of the literal `127.0.0.1` the client dials, and `/api/v1/live-tv/readiness/refresh` was answered with `{}`, a body that cannot decode into `LiveTvReadiness`. The fixture now reports its bound address, accepted connections, every request, unexpected paths, fixture faults and the semantics tree instead of timing out silently |
 | 2026-09-05 | `LiveTvUiTest` initial-focus expectation | phone-profile semantics dump | the Back control was observed `Focused = 'false'`. Initial focus is the 10-foot navigation contract, not something the product owes a touch screen, so the assertion is now scoped to television `uiMode` and the phone profile asserts reachability instead. **The television half has not been run**: the AOSP Android TV system image enforces adb authorization, which a headless container cannot grant, so it needs one of the arm64 AVDs on the Mac |
-| 2026-09-05 | adversarial review of `4192b97f` | whole-diff review of the Android task PR | three findings fixed, below; the critical one is shared with the web client |
 | 2026-09-05 | Android start-failure classification | `LiveTvLease.start` | **critical**: the ambiguous-outcome test was a denylist of four codes, so any other typed failure — including any code a newer server adds — called `barrier.confirm()` and deleted the durable marker, admitting an immediate retry that could hold a second physical tuner. Now an allowlist of failures decided before a tuner can open. Covered by `unrecognisedStartFailureKeepsTheDurableMarker`, executed against the unfixed code and observed to fail |
 | 2026-09-05 | Android heartbeat | `LiveTvLease.heartbeatMarker` | it called `barrier.arm()` every five seconds, which is an `AtomicFile` rename + write + `fsync` + unlink **on the main thread** during live video — dropped frames and an ANR candidate. The durable marker is already on disk for the whole session, so the write changed nothing an observer could see; the heartbeat now refreshes only the in-process deadline |
 | 2026-09-05 | Android watchdog coverage | `LiveTvTest` | the test cited as evidence for the sliding-window fix destructured its regressing-position list into `_` and never used it, feeding a monotonically increasing count instead. It would have passed against the position-based implementation it claimed to rule out. The list is gone, the comment now says what the test does prove, and it is renamed `renderedFrameCountRenewsOnChangeAndFrozenVideoExpires`. **The position-versus-frames choice at the LiveTvPlayer call site remains unproven** until a fake player drives that heartbeat |

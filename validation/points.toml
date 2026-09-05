@@ -626,9 +626,12 @@ paths = [
   "crates/plurxd/src/live_tv.rs",
   "crates/plurxd/src/http/live_tv.rs",
   "crates/plurxd/src/http/internal_live_tv.rs",
+  "crates/plurxd/src/web/live-tv.js",
+  "tests/web/live-tv.test.js",
+  "scripts/live-tv-browser",
   "docs/HDHOMERUN-LIVE-TV-*.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]
