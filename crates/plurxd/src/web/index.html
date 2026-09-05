@@ -12797,7 +12797,7 @@ const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
     // forget that this document still owns an unconfirmed physical session.
     try{ LIVE_TV.cleanupMarker=LIVE_TV_BARRIER.hold(LIVE_TV.cleanupMarker); }catch(e){}
     for(let attempt=0;attempt<2;attempt++){
-      try{ await liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}`,"DELETE",8000); break; }
+      try{ await liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}`,"DELETE",8000,false,LIVE_TV.unloading===true); break; }
       catch(e){ if(e.status===404||e.status===410||e.code==="capability_expired") break; if(attempt===1) throw e; }
     }
     LIVE_TV_BARRIER.confirm(LIVE_TV.cleanupMarker); LIVE_TV.cleanupMarker=null;
@@ -12808,9 +12808,13 @@ const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
     return liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}/keepalive`,"PUT",15000);
   },
 });
-async function liveTvRequest(path,method,timeout,authenticated=false){
+async function liveTvRequest(path,method,timeout,authenticated=false,keepalive=false){
   const headers=authenticated&&TOKEN?{authorization:"Bearer "+TOKEN}:{};
-  const response=await fetch(API+path,{method,headers,cache:"no-store",signal:AbortSignal.timeout(timeout)});
+  // `keepalive` lets the unload DELETE outlive the document. Without it the
+  // browser aborts the only release that could confirm the durable marker, so
+  // every ordinary reload while watching cost a 90-second safety wait for a
+  // tuner the server had in fact already released.
+  const response=await fetch(API+path,{method,headers,cache:"no-store",keepalive,signal:AbortSignal.timeout(timeout)});
   if(!response.ok){
     let body={}; try{ body=await response.json(); }catch(e){}
     const error=new Error(body.message||body.error||"Live TV request failed");
@@ -12879,7 +12883,7 @@ async function watchLiveTv(index){
     const info=await LIVE_TV_LEASE.start(channel.id);
     if(!info||!current()) return;
     const video=document.getElementById("live-tv-video");
-    LIVE_TV.unplayedSince=liveTvNow(); LIVE_TV.lastPosition=0;
+    LIVE_TV.unplayedSince=liveTvNow(); LIVE_TV.lastPosition=0; LIVE_TV.lastFrames=0;
     document.getElementById("live-tv-player").hidden=false;
     document.getElementById("live-tv-title").textContent=`${channel.guide_number} · ${channel.guide_name}`;
     // Ignore the wire URL: the capability only grants same-origin live resources.
@@ -12907,8 +12911,16 @@ async function watchLiveTv(index){
       if(!current()||LIVE_TV.polling) return;
       LIVE_TV.polling=true;
       try{
+        // Decoded frames, not position. A live-window slide, a gap jump or a
+        // level switch can move currentTime backwards on a healthy stream, and
+        // a high-water mark then refuses to renew until the timeline climbs
+        // back past its old peak — stopping playback that was never stuck.
+        // Position remains the fallback where the quality API is absent.
+        const quality=video.getVideoPlaybackQuality?video.getVideoPlaybackQuality():null;
+        const frames=quality&&Number.isFinite(quality.totalVideoFrames)?quality.totalVideoFrames:null;
         const position=video.currentTime;
-        const advancing=!video.paused&&Number.isFinite(position)&&position>LIVE_TV.lastPosition+0.1;
+        const advancing=!video.paused&&(frames!==null?frames>LIVE_TV.lastFrames
+          :Number.isFinite(position)&&position>LIVE_TV.lastPosition+0.1);
         if(!advancing){
           if(LIVE_TV.unplayedSince===null) LIVE_TV.unplayedSince=liveTvNow();
           if(liveTvNow()-LIVE_TV.unplayedSince>=30000){
@@ -12916,6 +12928,7 @@ async function watchLiveTv(index){
           }
           return;
         }
+        if(frames!==null) LIVE_TV.lastFrames=frames;
         LIVE_TV.lastPosition=position; LIVE_TV.unplayedSince=liveTvNow();
         if(document.visibilityState!=="hidden") await LIVE_TV_LEASE.keepalive();
         const status=await LIVE_TV_LEASE.status();
@@ -12961,7 +12974,11 @@ function exitLiveTvPresentation(){
 window.addEventListener("pagehide",()=>{
   const info=LIVE_TV_LEASE.current;
   if(info){ try{ LIVE_TV.cleanupMarker=LIVE_TV_BARRIER.hold(LIVE_TV.cleanupMarker); }catch(e){} }
-  if(info) fetch(API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}`,{method:"DELETE",keepalive:true}).catch(()=>{});
+  // One DELETE, not two. The release path now carries `keepalive` itself, so
+  // the request that is actually delivered is also the one whose result can
+  // clear the marker; a duplicate raw fetch only spent a second request that
+  // nothing could observe.
+  LIVE_TV.unloading=true;
   stopLiveTv().catch(()=>{});
 });
 window.addEventListener("storage",event=>{
