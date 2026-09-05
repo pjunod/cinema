@@ -416,24 +416,69 @@ const PROTECT_OPERATION_LEASE_FROM_JOIN_STAGING_SQL: &str =
      BEFORE INSERT ON cluster_node_join_staging \
      WHEN EXISTS (SELECT 1 FROM cluster_operation_leases) \
      BEGIN SELECT RAISE(ABORT, 'planned outage lease blocks node join'); END";
+/// Both join guards sit on cluster tables, so they may only read cluster
+/// tables. A joining node replays this schema from the leader's log before its
+/// application store exists, and SQLite resolves a trigger's body when it
+/// PREPARES the guarded statement rather than when the WHEN clause is
+/// evaluated. A guard that named `settings` therefore did not merely stay
+/// quiet on a joining node -- it made `UPDATE cluster_join_tokens SET state`
+/// unpreparable there (`no such table: main.settings`), so the join could
+/// never be redeemed, the node never entered `cluster_nodes`, and
+/// `cluster_capacity_gate` answered 503 to everything including `/readyz` for
+/// as long as it ran. Live TV did not have to be enabled for any of it.
 const REQUIRE_LIVE_TV_JOIN_INTENT_ON_RESERVATION_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_live_tv_join_reservation_guard \
      BEFORE UPDATE OF state ON cluster_join_tokens \
      WHEN NEW.state = 'redeeming' AND OLD.state = 'issued' \
-       AND EXISTS (SELECT 1 FROM settings \
-         WHERE key = 'live_tv.enabled' AND value = '1') \
+       AND EXISTS (SELECT 1 FROM cluster_live_tv_activation \
+         WHERE singleton = 1 AND enabled = 1) \
        AND NOT EXISTS (SELECT 1 FROM cluster_live_tv_join_intents intent \
          WHERE intent.token_hash = NEW.token_hash) \
      BEGIN SELECT RAISE(ABORT, 'enabled live TV requires a compatible joining binary'); END";
 const REQUIRE_LIVE_TV_JOIN_INTENT_ON_STAGING_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_live_tv_join_staging_guard \
      BEFORE INSERT ON cluster_node_join_staging \
-     WHEN EXISTS (SELECT 1 FROM settings \
-         WHERE key = 'live_tv.enabled' AND value = '1') \
+     WHEN EXISTS (SELECT 1 FROM cluster_live_tv_activation \
+         WHERE singleton = 1 AND enabled = 1) \
        AND NOT EXISTS (SELECT 1 FROM cluster_live_tv_join_intents intent \
          JOIN cluster_join_tokens token ON token.token_hash = intent.token_hash \
          WHERE token.node_id = NEW.node_id) \
      BEGIN SELECT RAISE(ABORT, 'enabled live TV requires a compatible joining binary'); END";
+/// The mirror that keeps that marker true.
+///
+/// These target `settings`, so on a node that has not got the application
+/// schema they are simply never created -- which is exactly right, because
+/// such a node cannot apply a `settings` write either. It is the same shape as
+/// `cluster_node_removal_owner_delete_guard`, and the reason the guards above
+/// had to stop naming `settings` themselves.
+const MIRROR_LIVE_TV_ACTIVATION_ON_INSERT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_live_tv_activation_insert_mirror \
+     AFTER INSERT ON settings WHEN NEW.key = 'live_tv.enabled' \
+     BEGIN INSERT INTO cluster_live_tv_activation (singleton, enabled) \
+       VALUES (1, CASE WHEN NEW.value = '1' THEN 1 ELSE 0 END) \
+       ON CONFLICT(singleton) DO UPDATE SET enabled = excluded.enabled; END";
+const MIRROR_LIVE_TV_ACTIVATION_ON_UPDATE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_live_tv_activation_update_mirror \
+     AFTER UPDATE OF value ON settings WHEN NEW.key = 'live_tv.enabled' \
+     BEGIN INSERT INTO cluster_live_tv_activation (singleton, enabled) \
+       VALUES (1, CASE WHEN NEW.value = '1' THEN 1 ELSE 0 END) \
+       ON CONFLICT(singleton) DO UPDATE SET enabled = excluded.enabled; END";
+const MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_live_tv_activation_delete_mirror \
+     AFTER DELETE ON settings WHEN OLD.key = 'live_tv.enabled' \
+     BEGIN INSERT INTO cluster_live_tv_activation (singleton, enabled) \
+       VALUES (1, 0) \
+       ON CONFLICT(singleton) DO UPDATE SET enabled = 0; END";
+/// A cluster that already has Live TV on when this schema lands would
+/// otherwise start with an empty marker and admit a join the guard exists to
+/// refuse. Seeded in the same replicated transaction that installs the mirror,
+/// so no `settings` write can land between reading the old truth and the
+/// mirror becoming responsible for the new one.
+const BACKFILL_LIVE_TV_ACTIVATION_SQL: &str =
+    "INSERT INTO cluster_live_tv_activation (singleton, enabled) \
+     SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM settings \
+         WHERE key = 'live_tv.enabled' AND value = '1') THEN 1 ELSE 0 END \
+     ON CONFLICT(singleton) DO UPDATE SET enabled = excluded.enabled";
 const EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_heartbeat_expiry \
      BEFORE UPDATE OF last_seen_at ON cluster_nodes \
@@ -576,6 +621,13 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     // coordinator while Live TV remains active.
     "CREATE TABLE IF NOT EXISTS cluster_live_tv_join_intents (\
          token_hash TEXT PRIMARY KEY) STRICT",
+    // Whether Live TV is on, said in the cluster schema so the two join guards
+    // can read it without naming an application table they would poison. Kept
+    // true by the mirror triggers on `settings`; seeded by
+    // `BACKFILL_LIVE_TV_ACTIVATION_SQL` for a cluster that was already on.
+    "CREATE TABLE IF NOT EXISTS cluster_live_tv_activation (\
+         singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+         enabled INTEGER NOT NULL) STRICT",
     // Kept separate from `cluster_nodes` so this patch is rolling-compatible
     // with M3 binaries that still write the original six-column row. Public
     // HTTP addressing belongs to the node rather than the logical server: it
@@ -2711,6 +2763,19 @@ impl MembershipManager {
                 (BACKFILL_REMOVAL_ATTEMPT_REFS_SQL.to_owned(), params!()),
                 (REQUIRE_REMOVAL_INTENT_SQL.to_owned(), params!()),
                 (REQUIRE_LEARNER_JOIN_INTENT_SQL.to_owned(), params!()),
+                (BACKFILL_LIVE_TV_ACTIVATION_SQL.to_owned(), params!()),
+                (
+                    MIRROR_LIVE_TV_ACTIVATION_ON_INSERT_SQL.to_owned(),
+                    params!(),
+                ),
+                (
+                    MIRROR_LIVE_TV_ACTIVATION_ON_UPDATE_SQL.to_owned(),
+                    params!(),
+                ),
+                (
+                    MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL.to_owned(),
+                    params!(),
+                ),
             ])
             .await?
             .into_iter()
@@ -9241,6 +9306,10 @@ mod tests {
                  CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_join_tokens (token_hash TEXT PRIMARY KEY, state TEXT NOT NULL, node_id TEXT); \
                  CREATE TABLE cluster_live_tv_join_intents (token_hash TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_live_tv_activation (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), enabled INTEGER NOT NULL); \
+                 {MIRROR_LIVE_TV_ACTIVATION_ON_INSERT_SQL}; \
+                 {MIRROR_LIVE_TV_ACTIVATION_ON_UPDATE_SQL}; \
+                 {MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL}; \
                  {REQUIRE_LIVE_TV_JOIN_INTENT_ON_RESERVATION_SQL}; \
                  {REQUIRE_LIVE_TV_JOIN_INTENT_ON_STAGING_SQL}; \
                  INSERT INTO cluster_nodes VALUES ('owner', 'voter', NULL, 1);"
@@ -9593,6 +9662,139 @@ mod tests {
         assert!(
             !unsafe_state,
             "enabled state must never cross a legacy join"
+        );
+    }
+
+    /// A joining node has the cluster schema and nothing else yet.
+    ///
+    /// It replays the leader's Raft log before its own application store
+    /// exists, so `settings` is simply absent while every cluster table is
+    /// present. Redeeming the join token has to work in exactly that state.
+    /// With a guard that named `settings`, it did not: SQLite resolves a
+    /// trigger's body when it PREPARES the guarded statement, so the UPDATE
+    /// failed with `no such table: main.settings` before the WHEN clause was
+    /// ever considered, the join could never be redeemed, and the node
+    /// answered 503 to `/readyz` forever.
+    #[test]
+    fn a_joining_node_redeems_before_it_has_any_application_schema() {
+        let connection = rusqlite::Connection::open_in_memory().expect("fixture");
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE cluster_join_tokens (token_hash TEXT PRIMARY KEY, state TEXT NOT NULL, node_id TEXT); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_live_tv_join_intents (token_hash TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_live_tv_activation (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), enabled INTEGER NOT NULL); \
+                 {REQUIRE_LIVE_TV_JOIN_INTENT_ON_RESERVATION_SQL}; \
+                 {REQUIRE_LIVE_TV_JOIN_INTENT_ON_STAGING_SQL}; \
+                 INSERT INTO cluster_join_tokens VALUES ('joining-token', 'issued', NULL);"
+            ))
+            .expect("a joining node's cluster schema, with no `settings` anywhere");
+
+        connection
+            .execute(
+                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = 'joining-node' \
+                 WHERE token_hash = 'joining-token'",
+                [],
+            )
+            .expect("the reservation must prepare without the application schema");
+        connection
+            .execute(
+                "INSERT INTO cluster_node_join_staging VALUES ('joining-node')",
+                [],
+            )
+            .expect("staging must prepare without the application schema");
+        connection
+            .execute(
+                "UPDATE cluster_join_tokens SET state = 'redeemed' \
+                 WHERE token_hash = 'joining-token' AND state = 'redeeming'",
+                [],
+            )
+            .expect("redemption must prepare without the application schema");
+    }
+
+    /// The rule the defect broke, stated over the whole schema.
+    ///
+    /// A trigger on a cluster table runs on every node's state machine,
+    /// including one that has replayed only this schema. Naming any other
+    /// table there makes the guarded statement unpreparable on that node --
+    /// not quietly inert, refused. A trigger on an application table is a
+    /// different matter and is not judged here: it is never created on a node
+    /// that lacks its target, which is the failure mode we want.
+    #[test]
+    fn a_cluster_table_guard_may_only_read_cluster_tables() {
+        fn identifier(token: &str) -> String {
+            token
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
+                .to_owned()
+        }
+
+        let installed = MEMBERSHIP_SCHEMA
+            .iter()
+            .copied()
+            .chain([
+                REQUIRE_REMOVAL_INTENT_SQL,
+                REQUIRE_LEARNER_JOIN_INTENT_SQL,
+                MIRROR_LIVE_TV_ACTIVATION_ON_INSERT_SQL,
+                MIRROR_LIVE_TV_ACTIVATION_ON_UPDATE_SQL,
+                MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL,
+            ])
+            .collect::<Vec<_>>();
+        let created = MEMBERSHIP_SCHEMA
+            .iter()
+            .filter_map(|statement| {
+                statement
+                    .strip_prefix("CREATE TABLE IF NOT EXISTS ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .map(identifier)
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(
+            created.contains("cluster_live_tv_activation"),
+            "the schema census found no tables; the scanner is broken, not the tree"
+        );
+
+        let mut offenders = Vec::new();
+        for statement in installed {
+            let Some(rest) = statement.strip_prefix("CREATE TRIGGER IF NOT EXISTS ") else {
+                continue;
+            };
+            let words = rest.split_whitespace().collect::<Vec<_>>();
+            let name = identifier(words.first().copied().unwrap_or_default());
+            // The first `ON` in a trigger is its target: the event clause
+            // precedes both WHEN and BEGIN.
+            let Some(position) = words.iter().position(|word| *word == "ON") else {
+                offenders.push(format!("{name}: no target table"));
+                continue;
+            };
+            let target = identifier(words.get(position + 1).copied().unwrap_or_default());
+            if !target.starts_with("cluster_") {
+                continue;
+            }
+            // Only what follows the target: the event clause before it is
+            // `BEFORE UPDATE OF <column>`, whose `OF` list names columns.
+            for (index, word) in words.iter().enumerate().skip(position + 2) {
+                if !matches!(*word, "FROM" | "JOIN" | "INTO" | "UPDATE") {
+                    continue;
+                }
+                let next = words.get(index + 1).copied().unwrap_or_default();
+                // `DO UPDATE SET` assigns; it does not name a table.
+                if matches!(next, "OF" | "SET") {
+                    continue;
+                }
+                let named = identifier(next);
+                if named.is_empty() || named == target || created.contains(&named) {
+                    continue;
+                }
+                offenders.push(format!("{name} (on {target}) reads {named}"));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "a trigger on a cluster table may only read cluster tables -- a joining node \
+             has replayed nothing else, and SQLite refuses to prepare the guarded statement \
+             rather than skipping the guard:\n{}",
+            offenders.join("\n")
         );
     }
 
