@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7ef28000"]
+points = ["operations.packaging"]
+checks = ["operations-contract", "container-runtime"]
+reason = "Executable operations contracts require the main-only post-merge job to wait for the validation fan-out, authenticate to the Forgejo registry, verify the immutable SHA image before moving the main alias, and keep main and versioned latest semantics explicit in deployment documentation and configuration."

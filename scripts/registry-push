@@ -1,10 +1,86 @@
 #!/usr/bin/env bash
 set -euo pipefail
-REG=192.168.4.7:3000
-REF="$(git describe --tags --always --dirty)"
-SHA="$(git rev-parse --short=12 HEAD)"
-docker build --build-arg PLURX_BUILD_REF="$REF" \
-  -t "$REG/noirr/plurxd:sha-$SHA" -t "$REG/noirr/plurxd:latest" .
-docker push "$REG/noirr/plurxd:sha-$SHA"
-docker push "$REG/noirr/plurxd:latest"
-echo "pushed $REG/noirr/plurxd:{latest,sha-$SHA} = $REF"
+
+REGISTRY="${PLURX_REGISTRY:-192.168.4.7:3000}"
+IMAGE="$REGISTRY/noirr/plurxd"
+SOURCE_URL="${PLURX_SOURCE_URL:-http://192.168.4.7:3000/noirr/plurx}"
+FULL_SHA="${PLURX_BUILD_SHA:-$(git rev-parse HEAD)}"
+REF="${PLURX_BUILD_REF:-$(git describe --tags --always --dirty)}"
+EXPECTED_ARCH="${PLURX_IMAGE_ARCH:-amd64}"
+
+[[ "$FULL_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "PLURX_BUILD_SHA must be the full 40-character commit" >&2
+  exit 1
+}
+test "$(git rev-parse HEAD)" = "$FULL_SHA" || {
+  echo "checkout HEAD does not match PLURX_BUILD_SHA" >&2
+  exit 1
+}
+git diff --quiet && git diff --cached --quiet || {
+  echo "refusing to publish a checkout with tracked changes" >&2
+  exit 1
+}
+
+SHORT_SHA="${FULL_SHA:0:12}"
+IMMUTABLE_REF="$IMAGE:sha-$SHORT_SHA"
+FLEET_REF="$IMAGE:main"
+
+is_missing_ref() {
+  local ref="$1" err="$2"
+  grep -Eqi 'manifest unknown|name unknown' "$err" ||
+    { grep -Fq "$ref" "$err" && grep -Eqi '(^|[[:space:]:])not found([[:space:].:]|$)' "$err"; }
+}
+
+index_digest() {
+  docker buildx imagetools inspect "$1" \
+    | sed -n 's/^Digest:[[:space:]]*//p' | head -1
+}
+
+verify_image() {
+  local ref="$1" reported identity
+  docker pull --platform "linux/$EXPECTED_ARCH" "$ref"
+  test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$ref")" \
+    = "linux/$EXPECTED_ARCH"
+  test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$ref")" \
+    = "$FULL_SHA"
+  test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$ref")" \
+    = "$SOURCE_URL"
+  reported="$(docker run --rm "$ref" --version)"
+  printf '%s\n' "$reported" | grep -Fq "($REF)"
+  identity="$(docker run --rm \
+    --entrypoint /usr/local/bin/plurx-cluster-check \
+    "$ref" build-identity)"
+  test "$identity" = "$FULL_SHA"
+  scripts/container-smoke "$ref"
+}
+
+if docker buildx imagetools inspect "$IMMUTABLE_REF" \
+    > /dev/null 2> inspect.err; then
+  echo "reusing existing immutable image $IMMUTABLE_REF"
+elif is_missing_ref "$IMMUTABLE_REF" inspect.err; then
+  docker build \
+    --build-arg PLURX_BUILD_REF="$REF" \
+    --build-arg PLURX_BUILD_SHA="$FULL_SHA" \
+    --label "org.opencontainers.image.source=$SOURCE_URL" \
+    --label "org.opencontainers.image.revision=$FULL_SHA" \
+    --label "tv.plurx.build-ref=$REF" \
+    -t "$IMMUTABLE_REF" .
+  docker push "$IMMUTABLE_REF"
+else
+  cat inspect.err >&2
+  echo "registry state is indeterminate; refusing to publish" >&2
+  exit 1
+fi
+
+verify_image "$IMMUTABLE_REF"
+immutable_digest="$(index_digest "$IMMUTABLE_REF")"
+test -n "$immutable_digest"
+
+# The moving alias changes only after the immutable registry copy passes its
+# architecture, provenance, binary-identity, and runtime smoke checks.
+docker tag "$IMMUTABLE_REF" "$FLEET_REF"
+docker push "$FLEET_REF"
+fleet_digest="$(index_digest "$FLEET_REF")"
+test "$fleet_digest" = "$immutable_digest"
+
+echo "published $FLEET_REF and $IMMUTABLE_REF = $REF ($immutable_digest)"

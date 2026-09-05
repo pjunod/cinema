@@ -1351,6 +1351,7 @@ for (const startupDelay of [0, 1600, 7000]) {
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
         action = read(".github/actions/playwright/action.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
 
         # The Playwright pip pin and the browser-bundle cache key must move
         # together, or a version bump silently reuses the wrong browsers.
@@ -1371,7 +1372,16 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertEqual(
             workflow.count("sha256sum clients/android/Dockerfile"), 2
         )
-        self.assertEqual(workflow.count("secrets.LOCAL_REGISTRY_TOKEN"), 2)
+        self.assertEqual(
+            sum(
+                jobs[name].count("secrets.LOCAL_REGISTRY_TOKEN")
+                for name in ("android_jvm", "android_device")
+            ),
+            2,
+        )
+        self.assertEqual(
+            jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1
+        )
         self.assertIn("192.168.4.7:3000/noirr/android-build", workflow)
         self.assertEqual(workflow.count("PLURX_ANDROID_IMAGE_READY=1"), 4)
         makefile = read("Makefile")
@@ -1633,16 +1643,52 @@ for (const startupDelay of [0, 1600, 7000]) {
             4,
         )
         self.assertIn(
-            "<Repository>192.168.4.7:3000/noirr/plurxd:latest</Repository>",
+            "<Repository>192.168.4.7:3000/noirr/plurxd:main</Repository>",
             unraid,
         )
         self.assertIn(
-            "<Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/latest</Registry>",
+            "<Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/main</Registry>",
             unraid,
         )
         self.assertIn('cron: "41 16 * * 1"', readiness)
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
+
+    def test_main_push_builds_once_and_publishes_only_after_validation(self):
+        workflow = read(".github/workflows/ci.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        publish = jobs["publish_main"]
+        script = read("scripts/registry-push")
+
+        self.assertIn("name: publish merged image (Forgejo registry)", publish)
+        self.assertIn("github.event_name == 'push'", publish)
+        self.assertIn("github.ref == 'refs/heads/main'", publish)
+        for dependency in (
+            "check",
+            "cluster_store",
+            "cluster_topology",
+            "cluster_wal",
+            "cluster_daemon",
+            "web_layout",
+            "vod_web",
+            "package_smoke",
+        ):
+            self.assertIn(f"      - {dependency}\n", publish)
+        self.assertIn("Require the post-merge validation fan-out", publish)
+        self.assertIn("secrets.LOCAL_REGISTRY_TOKEN", publish)
+        self.assertIn("run: scripts/registry-push", publish)
+        self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", publish)
+
+        self.assertIn('IMMUTABLE_REF="$IMAGE:sha-$SHORT_SHA"', script)
+        self.assertIn('FLEET_REF="$IMAGE:main"', script)
+        self.assertNotIn('plurxd:latest', script)
+        self.assertLess(
+            script.index('verify_image "$IMMUTABLE_REF"'),
+            script.index('docker push "$FLEET_REF"'),
+        )
+        self.assertIn('test "$fleet_digest" = "$immutable_digest"', script)
+        self.assertIn("refusing to publish a checkout with tracked changes", script)
+        self.assertIn("registry state is indeterminate; refusing to publish", script)
 
     def test_every_actions_job_has_an_explicit_timeout(self):
         for path in (
@@ -1736,6 +1782,8 @@ for (const startupDelay of [0, 1600, 7000]) {
                     expected = ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
+                elif path == ".github/workflows/ci.yml" and name == "publish_main":
+                    expected = high_cpu
                 elif (
                     path == ".github/workflows/ci.yml"
                     and name == "cluster_store_legacy"
