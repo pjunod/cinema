@@ -61,6 +61,7 @@ def main(argv: list[str]) -> int:
             errors: list[str] = []
             forbidden: list[str] = []
             pending: list = []
+            deletes: list[str] = []
             mode = {"next": "normal"}
 
             def active() -> list[str]:
@@ -99,12 +100,16 @@ def main(argv: list[str]) -> int:
                 capability, suffix = resource.groups()
                 session = sessions[capability]
                 if method == "DELETE":
+                    deletes.append(capability)
                     if not session["closed"]:
                         session["closed"] = True
                         events.append("release:" + capability)
                     route.fulfill(status=204)
                 elif session["closed"]:
                     route.fulfill(status=410, json={"code": "capability_expired"})
+                elif suffix in {"keepalive", "status"} and session.get("failure"):
+                    code = session["failure"]
+                    route.fulfill(status=410 if code == "capability_expired" else 503, json={"code": code})
                 elif suffix == "keepalive":
                     route.fulfill(status=204)
                 elif suffix == "status":
@@ -128,32 +133,51 @@ def main(argv: list[str]) -> int:
             context.on("request", observe)
             page = context.new_page()
             page.on("pageerror", lambda error: errors.append(str(error)))
+
+            def until(predicate, message: str, timeout: float = 10):
+                deadline = time.monotonic() + timeout
+                while not predicate():
+                    assert time.monotonic() < deadline, message
+                    # Pump Playwright events while the fake tuner services requests.
+                    page.wait_for_timeout(50)
+
+            def frames_advance():
+                sample = page.locator("#live-tv-video").evaluate("""video => ({
+                    time: video.currentTime,
+                    frames: video.getVideoPlaybackQuality?.().totalVideoFrames ?? video.webkitDecodedFrameCount ?? 0
+                })""")
+                page.wait_for_function("""sample => {
+                    const video = document.querySelector('#live-tv-video');
+                    const frames = video.getVideoPlaybackQuality?.().totalVideoFrames ?? video.webkitDecodedFrameCount ?? 0;
+                    return !video.paused && video.videoWidth > 0 && video.videoHeight > 0
+                        && video.currentTime > sample.time + 1 && frames > sample.frames + 12;
+                }""", arg=sample, timeout=30000)
+
+            def watch():
+                page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
+                frames_advance()
+
             page.goto(host.base_url + "/#/live-tv")
             page.get_by_role("button", name="DRM unsupported", exact=True).wait_for()
             assert page.get_by_role("button", name="DRM unsupported", exact=True).is_disabled()
-            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
-            page.wait_for_function("document.querySelector('#live-tv-video').currentTime > 1 && !document.querySelector('#live-tv-video').paused", timeout=30000)
+            watch()
             page.screenshot(path=str(out / "live-tv-playing.png"), full_page=True)
             page.get_by_role("button", name="Pause", exact=True).click()
             assert page.locator("#live-tv-video").evaluate("video => video.paused")
-            position = page.locator("#live-tv-video").evaluate("video => video.currentTime")
             page.get_by_role("button", name="Play live", exact=True).click()
-            page.wait_for_function("position => document.querySelector('#live-tv-video').currentTime > position + 1", arg=position)
+            frames_advance()
             page.get_by_role("button", name="Fullscreen", exact=True).click()
             page.wait_for_function("document.fullscreenElement?.id === 'live-tv-player'")
             page.get_by_role("button", name="Stop", exact=True).click()
             page.wait_for_function("!document.fullscreenElement && document.querySelector('#live-tv-player').hidden")
-            page.wait_for_timeout(100)
-            assert not active()
+            until(lambda: not active(), "fullscreen stop did not release")
 
-            page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
-            page.wait_for_function("document.querySelector('#live-tv-video').currentTime > 1")
+            watch()
             page.get_by_role("button", name="Watch live", exact=True).nth(1).click()
             page.wait_for_function("document.querySelector('#live-tv-title').textContent.includes('10.2')")
             page.evaluate("location.hash = '#/settings'")
-            page.get_by_role("heading", name="Settings", exact=True).wait_for()
-            page.wait_for_timeout(200)
-            assert not active()
+            page.wait_for_function("location.hash.startsWith('#/settings') && !document.querySelector('#live-tv-video')")
+            until(lambda: not active(), "navigation did not release")
 
             page.goto(host.base_url + "/#/live-tv")
             page.get_by_role("button", name="Watch live", exact=True).nth(0).wait_for()
@@ -162,19 +186,48 @@ def main(argv: list[str]) -> int:
             page.get_by_text("All Live TV slots are busy.", exact=False).wait_for()
             mode["next"] = "late"
             page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
-            page.wait_for_timeout(100)
-            assert len(pending) == 1
+            until(lambda: len(pending) == 1, "late start never reached the tuner")
             page.evaluate("location.hash = '#/settings'")
-            page.wait_for_timeout(100)
+            page.wait_for_function("location.hash.startsWith('#/settings') && !document.querySelector('#live-tv-video')")
             late_route, late_result = pending.pop()
             late_route.fulfill(json=late_result)
-            page.wait_for_timeout(300)
-            assert not active(), "late start after navigation was not released"
+            until(lambda: not active(), "late start after navigation was not released")
+
+            page.goto(host.base_url + "/#/live-tv")
+            for failure in ("owner_unavailable", "stream_failed", "capability_expired"):
+                watch()
+                sessions[active()[0]]["failure"] = failure
+                until(lambda: not active(), "active " + failure + " did not release", timeout=25)
+                page.wait_for_function("document.querySelector('#live-tv-player').hidden")
+
+            watch()
+            page.get_by_role("button", name="Pause", exact=True).click()
+            until(lambda: not active(), "paused tuner was renewed instead of released", timeout=42)
+            page.wait_for_function("document.querySelector('#live-tv-player').hidden")
+
+            watch()
+            # Exercise the shipped visibility handler. Headless Chromium does
+            # not model an OS app switch, so this is explicitly an event test.
+            page.evaluate("""() => {
+                Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'});
+                document.dispatchEvent(new Event('visibilitychange'));
+            }""")
+            until(lambda: not active(), "visibility loss did not release")
+            page.evaluate("delete document.visibilityState")
+
+            watch()
+            page.goto("about:blank")
+            until(lambda: not active(), "real document pagehide did not release")
             assert not forbidden, "Live TV wrote VOD/account state: " + repr(forbidden)
             assert not errors, "browser page errors: " + repr(errors)
-            assert events == [entry for i in range(1, 5) for entry in (f"start:fixture-{i}", f"release:fixture-{i}")], events
-            print("PASS real H.264/AAC frame advancement, pause/resume, fullscreen stop, channel switch, navigation, typed refusal and late-start cleanup")
-            print("PASS capability requests carry no account token; zero VOD/account mutations; four starts, four confirmed releases")
+            assert events == [entry for i in range(1, 11) for entry in (f"start:fixture-{i}", f"release:fixture-{i}")], events
+            # pagehide intentionally sends a best-effort keepalive DELETE in
+            # addition to serialized stop; all ordinary flows send exactly one.
+            assert all(deletes.count(f"fixture-{i}") == 1 for i in range(1, 10)), deletes
+            assert 1 <= deletes.count("fixture-10") <= 2, deletes
+            print("PASS decoded H.264/AAC frames advance; pause/resume, fullscreen stop, switch, navigation, typed refusal and late-start cleanup")
+            print("PASS active owner loss, producer failure, capability expiry, paused timeout, visibility event and real pagehide release")
+            print("PASS no account token on capability requests; zero VOD/account writes; ten starts, ten confirmed releases, bounded DELETE counts")
             context.close()
             browser.close()
         return 0
