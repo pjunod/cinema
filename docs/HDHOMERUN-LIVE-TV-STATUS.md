@@ -1,6 +1,6 @@
 # HDHomeRun Live TV status — what is built and what is proved
 
-**Status:** backend, web, Apple and Android merged; M5 acceptance scripts and documentation merged; **the hardware pass has not run** · **Effort:** `effort/hdhomerun-live-tv` ·
+**Status:** backend, web, Apple and Android merged; M5 acceptance and documentation merged; **the hardware pass has run** — ATSC 1.0 plays end to end on a real FLEX 4K, and ATSC 3.0 is refused by the 15 s startup budget rather than by a codec · **Effort:** `effort/hdhomerun-live-tv` ·
 **Updated:** 2026-09-05 · **Historical issue:**
 [#902](https://github.com/pjunod/plurx/issues/902)
 
@@ -23,9 +23,9 @@ contract and ordered work) and [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md
 | M5 endless-source acceptance | merged | [#28](http://192.168.4.7:3000/noirr/plurx/pulls/28) | `scripts/live-tv-endless` drives ten real window rollovers against an endless FFmpeg source: one tuner GET, window never past six, 29.9 MB peak scratch, orphan expiry in 65 s, zero bytes left |
 | M5 carried-forward review closeout | merged | [#30](http://192.168.4.7:3000/noirr/plurx/pulls/30) | 25 web tests, 16 Android unit tests, 4 instrumentation tests (2 `LiveTvUiTest`, 2 `LiveTvFileBarrierStoreTest`) pass |
 | M5 two-node acceptance | merged | [#31](http://192.168.4.7:3000/noirr/plurx/pulls/31) | three cases written and compiled clean behind `cluster-integration-tests`; `make live-tv-two-node-check`. **Never executed** — no reachable host can bind port 80 for the fixture device and run two daemons |
-| M5 hardware acceptance | merged; never pointed at a device | [#32](http://192.168.4.7:3000/noirr/plurx/pulls/32) | `scripts/live-tv-hardware` plus `make live-tv-hardware-check DEVICE=<ipv4>`; argument, address, bound and unreachable-device paths exercised. **The hardware path has never run** |
+| M5 hardware acceptance | **run, and passed for ATSC 1.0** | [#32](http://192.168.4.7:3000/noirr/plurx/pulls/32) | real FLEX 4K over an antenna: 6.4 s to a fetchable segment of a 15 s budget, 4.004 s segments, 1080i MPEG-2/AC-3 in and H.264 720p/AAC out, 2 sessions then `tuner_capacity`, the device itself confirming the tuners held and freed, 0 bytes left. One defect found: ATSC 3.0 always `startup_timeout` |
 | M5 documentation | merged | [#33](http://192.168.4.7:3000/noirr/plurx/pulls/33) | Live TV now appears in FEATURES §4a, ROADMAP, ARCHITECTURE §3a, PLAYBACK, OPERATIONS (runbook + problems + ports), CHEATSHEET §5, SECURITY, both client-parity docs, REQUIREMENTS §3a and the README, whose live-TV non-goal is narrowed to "no DVR" rather than deleted |
-| M5 promotion | blocked on hardware | — | the household numbers the docs are waiting for come from `make live-tv-hardware-check`, and it has not run |
+| M5 promotion | blocked on the ATSC 3.0 startup budget | — | the household numbers are measured and in the documentation; promotion waits on the `startup_timeout` defect below, on the two-node cases actually executing, and on Android television instrumentation |
 
 ## Current work — finish client acceptance and effort gates
 
@@ -155,6 +155,10 @@ node access.
 | 2026-09-05 | `scripts/live-tv-endless` against a real endless FFmpeg source | ten playlist window rollovers, bounded scratch, one tuner GET, idle orphan expiry, resource cleanup | **passed** — 10 rollovers (media sequence 0 → 60, 4.0 s segments), 66 distinct segments actually read, published window never exceeded 6, peak live scratch 29.9 MB, **one** tuner GET for the whole session; an orphaned capability with no DELETE expired 65 s after its last read and left 0 bytes of scratch and no surviving encoder. The fixture is a real HDHomeRun-shaped device on ports 80 and 5004 at this host's own private address; no household tuner was opened |
 
 
+| 2026-09-05 | `scripts/live-tv-hardware` against a real HDHomeRun FLEX 4K (`HDFX-4K`, firmware `20260326`, four tuners) on a real antenna, from a host on the same LAN | `make live-tv-hardware-check DEVICE=<ipv4> TUNERS=2` | **passed for ATSC 1.0.** 55 channels, 52 playable, 3 DRM-flagged (all ATSC 3.0). Channel 6.1: **6.4 s** from asking to a fetchable segment against the 15 s budget — 6.42 s of it inside the start request and 0.006 s waiting after it; **4.004 s** segments; source read straight off the tuner is MPEG-2 Main 1080 interlaced with AC-3 5.1, published output is H.264 720p with AAC stereo in MPEG-TS; signal 96–100% strength, 83–93% quality, 100% symbol; the device's own `/status.json` named the tuner (`tuner3`) and the channel (`6.1`) it was on. Two sessions filled the configured limit, the third answered `tuner_capacity`, and the device confirmed exactly two tuners (`tuner0`, `tuner3`) held and then free. A DRM-flagged channel was refused `drm_unsupported`. 0 bytes of live scratch survived release, and a tuner another household client held throughout (`tuner2`) was never touched. Only one property was not exercisable: a four-tuner device has no configurable `live_tv_max_sessions` above its own count, since the setting is validated to 1..=4 |
+| 2026-09-05 | the same device, channel 157.1 (ATSC 3.0) | `make live-tv-hardware-check DEVICE=<ipv4> --channel 157.1` | **failed: `startup_timeout`.** Diagnosed rather than assumed. The channel is listed `ready` by plurx's own sanitized lineup. Reproducing plurx's exact producer arguments (`spawn_live_ffmpeg`) by hand against the live stream published its **first segment at 18.1 s**, then seven segments without trouble; the ATSC 1.0 control channel on the same device and host published at **7.04 s**. `STARTUP_TIMEOUT` is 15 s, so the budget — not a codec — is what refuses it. Ruled out: the codec (HEVC Main 10 1080 + AC-3, both decoded), transcode cost (that source encodes to 720p at **2.37× realtime** in software on the same machine, against 5.87× for MPEG-2), and the device (first byte in 2.77 s). Separately, ATSC 3.0 channels 108.1 and 135.1 return **zero bytes** from the device within 10 s, which is reception |
+| 2026-09-05 | hardware-script defects the first real run exposed | second and third runs | two, both fixed in the same PR. (1) Startup was measured from after the start request returned, reporting **0.007 s** while the request itself took 6.4 s — the one number nobody wants; it now measures from asking, and reports both halves. (2) Attribution matched the device's `TargetIP` against this host's address, which never matches behind NAT; it now falls back to "idle before this run, busy now", says which signal it used, and accepts `--host-address`. A third addition came from the run: the broadcaster's own codecs are now read straight off the tuner, because the published segment only proves what the graph produced |
+
 ## Decisions made while the owner is away
 
 | Decision | Why | Revisit when |
@@ -172,10 +176,11 @@ node access.
 
 ## What remains
 
-1. **Run the hardware pass.** `make live-tv-hardware-check DEVICE=<tuner ipv4> TUNERS=2` on a machine on the tuner's network. It writes `target/live-tv-hardware/hardware.json` with the device's real tuner count, real time to a playable segment against the 15 s budget, real segment length, signal strength and quality, the codec that survived the graph, and the device's own `/status.json` account of which tuners plurx held and that they came back. Every "pending the hardware pass" in the documentation points here.
+1. **Fix the ATSC 3.0 startup budget.** This is the one product defect the hardware pass found, and it is the reason promotion is blocked. An ATSC 3.0 channel is listed playable and then always refused, which is the worst of the three possible behaviours — worse than hiding it, and worse than playing it. A blanket raise of `STARTUP_TIMEOUT` is the wrong fix: two channels on the test antenna deliver zero bytes, and making an operator wait 40 s to hear that is its own defect. The budget should stay tight while the tuner has delivered **nothing** and extend once bytes are actually flowing.
 2. **Run the two-node cases.** `make live-tv-two-node-check` on a Linux host that can bind ports 80 and 5004. They compile and have never executed; expect to debug the harness as well as the product on the first run.
 3. **Android television instrumentation.** The AOSP Android TV system image enforces adb authorization, which a headless container cannot grant, so the television half of `LiveTvUiTest` needs one of the arm64 AVDs on the Mac.
-4. **Promotion.** Only after 1–3.
+4. **Physical client playback.** The server side is proved against the real device; no physical iPhone, Apple TV, phone or Google TV has played from it, so whether AVPlayer and Media3 hold a 4 s-segment live window on real hardware is still open.
+5. **Promotion.** Only after 1–4.
 
 ## Known limits — honest until evidence changes them
 
@@ -186,11 +191,19 @@ node access.
   serve `/status.json` costs the strongest assertion in it — that the device
   itself agrees which tuners plurx holds — and it reports that as
   `not_exercisable` rather than skipping quietly.
-- The default two concurrent sessions, the real startup latency and the real
-  segment length in the documentation are **defaults and budgets, not
-  measurements**. Nothing in this tree has measured them against a tuner.
-- ATSC 3.0 commonly needs HEVC and AC-4. Device reception does not prove the
-  installed FFmpeg can decode either.
+- The startup latency and segment length in the documentation are now
+  **measurements** from one FLEX 4K on one antenna, not specifications. The two
+  concurrent sessions remain a default: two were exercised on a four-tuner device,
+  and three or four concurrent live sessions have not been.
+- **ATSC 3.0 is listed as playable and always refused.** Measured on a FLEX 4K: an
+  ATSC 3.0 channel publishes its first segment at 18.1 s against a 15 s
+  `STARTUP_TIMEOUT`, so every start answers `startup_timeout` even though the channel
+  plays once started. Not a codec limit — HEVC Main 10 and AC-3 both decode, and that
+  source transcodes at 2.37× realtime in software. The lineup advertised `AudioCodec:
+  AC4` for that mux while the stream carried AC-3, so AC-4 decoding remains untested
+  rather than proved absent.
+- Reception is still not decoding: two ATSC 3.0 channels on the test antenna return
+  zero bytes from the device itself, which no amount of software fixes.
 - Owner failure ends the current live session. Reconfiguration remains possible
   while disabled; re-enable requires confirmed old-owner cleanup or explicit
   physical fencing, followed by readiness. Automatic takeover is out of scope.

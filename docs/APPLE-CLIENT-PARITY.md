@@ -481,8 +481,11 @@ that matter:
   administrator access plus an exact settings generation.
 
 **Proved:** iOS and tvOS compile and 14 focused tests pass on each simulator
-(effort gate 95, merged `fc9c8f45`). **Not proved:** playback against a real
-tuner on a real device — that is the hardware pass, and it has not run.
+(effort gate 95, merged `fc9c8f45`). The server side of Live TV is now proved
+against a real HDHomeRun FLEX 4K over an antenna — see
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md). **Not proved:**
+playback on a physical iPhone or Apple TV against that tuner. The simulators do
+not settle whether AVPlayer keeps a 4 s-segment live window on real hardware.
 
 ## Release gate
 

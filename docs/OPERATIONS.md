@@ -3791,6 +3791,42 @@ Reconfiguration is always possible **while disabled**. Losing the owner ends
 the live session that was in flight; viewers see a named refusal and start
 again, they do not silently get somebody else's tuner.
 
+### What a real device measured
+
+Everything above the previous section was proved against a fixture. This was
+proved against an HDHomeRun FLEX 4K (`HDFX-4K`, firmware `20260326`, four
+tuners) on a real antenna, from a host on the same LAN, with
+`make live-tv-hardware-check`. It is one device on one antenna, not a
+specification -- but it is the only numbers in this document that came from
+hardware, and it says which are which.
+
+| What | Measured |
+|---|---|
+| lineup | 55 channels, 52 playable, 3 DRM-flagged (all on ATSC 3.0 muxes) |
+| ATSC 1.0 channel, asking to fetchable segment | **6.4 s** of a 15 s budget, nearly all of it inside the start request |
+| segment duration | **4.004 s** |
+| source in | MPEG-2 Main, 1080 interlaced, AC-3 5.1 |
+| published out | H.264 720p, AAC stereo, MPEG-TS |
+| signal on the tuned channel | 96-100% strength, 83-93% quality, 100% symbol |
+| capacity | 2 sessions filled the configured limit; the 3rd answered `tuner_capacity`; the device confirmed exactly 2 of its tuners held, then free |
+| DRM channel | refused `drm_unsupported` |
+| after release | 0 bytes of live scratch, 0 tuners held, and a tuner another household client was using untouched throughout |
+
+**ATSC 3.0 does not start, and the codec is not why.** On that device an ATSC
+3.0 channel (HEVC Main 10 1080, AC-3) publishes its first segment at **18.1 s**.
+`STARTUP_TIMEOUT` is 15 s, so plurx lists the channel as playable and then
+always refuses it with `startup_timeout` -- while the same channel plays fine
+once it does start, and while that same HEVC source transcodes to 720p at
+**2.37x realtime** in software on the same machine. The ATSC 1.0 control
+channel on the same device and host took 7.0 s. Separately, two ATSC 3.0
+channels on that antenna return **no bytes at all** from the device within 10 s,
+which is reception and not something plurx can fix.
+
+If you are trying ATSC 3.0 today, expect `startup_timeout` on a channel the
+lineup says is ready. That is the defect, tracked in
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md), not your
+configuration.
+
 ### Accepting it on real hardware
 
 Everything above is proved against a fixture — a real HDHomeRun-shaped device
@@ -3804,13 +3840,18 @@ make live-tv-hardware-check DEVICE=192.168.4.20 TUNERS=2
 It boots a throwaway server (nothing you are running is touched), occupies at
 most `TUNERS` tuners for a few minutes, and writes
 `target/live-tv-hardware/hardware.json` with the device's real tuner count,
-real time to a playable segment against the 15 s budget, real segment length,
-signal strength and quality, the codec that actually survived the graph, and
+real time from asking for a channel to a playable segment against the 15 s
+budget, real segment length, signal strength and quality, what the broadcaster
+actually sends (read straight off the tuner) and what survived the graph, and
 the device's own account — from `/status.json` — of which tuners plurx held and
 that they came back. Anything this device cannot exercise is reported as `NOT
-EXERCISABLE` with a reason rather than counted as a pass. **This has not been
-run against real hardware yet**, so the household-specific numbers in this
-document are still the defaults and not measurements.
+EXERCISABLE` with a reason rather than counted as a pass.
+
+Pass `--channel <guide number>` to accept a specific channel — that is how the
+ATSC 3.0 finding above was produced. Behind NAT, or from a bridged container,
+add `--host-address <the address the device sees>`: the device reports a
+translated address in its `TargetIP` and attribution falls back to "idle before
+this run, busy now", which is weaker and says so in the evidence.
 
 ## Logs
 
@@ -4015,3 +4056,5 @@ the loading overlay a few seconds longer, then playback).
 | A viewer's session will not start again for ~90 s | Their last attempt failed in a way that might mean a tuner *did* open, so the client is holding its place rather than opening a second one | Expected. It clears itself; see [PLAYBACK.md](PLAYBACK.md) |
 | Live TV settings `PUT` returns `409` | Somebody else moved the settings generation | Refetch `/api/v1/settings` and retry with the current generation. Never force it |
 | `plurx_live_tv_sessions` is `0` on a node people are watching on | Sessions are process-local and only the **owner** creates them | Read the metric on the owner; a relaying node reports `plurx_live_tv_relay_bytes_total` instead |
+| An ATSC 3.0 channel is listed as playable and always answers `startup_timeout` | Known defect. On a FLEX 4K an ATSC 3.0 channel publishes its first segment at 18.1 s and `STARTUP_TIMEOUT` is 15 s | No workaround today; the channel is not broken and neither is your configuration. Use an ATSC 1.0 channel. Tracked in [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) |
+| An ATSC 3.0 channel returns no picture and no error from the device itself | The device accepted the connection and sent zero bytes — two channels on one test antenna do this | Reception, not software. Check signal on that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |

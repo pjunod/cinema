@@ -490,11 +490,30 @@ HEVC and AC-4, and a device that receives them does not prove the installed
 FFmpeg handles them. The default is H.264/AAC at 720p, which every first-party
 client plays.
 
-**What it is limited to, honestly.** The concurrent-session default is two, and
-the real ceiling is whatever the device reports — the household number, the
-real time from "Watch live" to a moving picture, and the real segment length are
-pending the hardware pass (`make live-tv-hardware-check DEVICE=<ipv4>`), not
-guessed at here. Losing the owner node ends the live session in flight;
+**What a real tuner does, measured.** On an HDHomeRun FLEX 4K (firmware
+`20260326`, four tuners) over a real antenna: 55 channels, 52 of them playable;
+**6.4 s** from asking for a channel to a segment a player can fetch, against the
+15 s budget the runtime enforces, almost all of it inside the start request;
+**4.0 s** segments; a 1080i MPEG-2 broadcast with AC-3 5.1 arriving as H.264
+720p with AAC stereo. Two concurrent sessions filled the configured limit, the
+third was turned away with `tuner_capacity`, the device itself confirmed exactly
+two of its tuners were held and then free again, and a tuner another household
+client was already using was left alone throughout. A DRM-flagged channel was
+refused with `drm_unsupported`.
+
+**ATSC 3.0 does not play yet, and it is not the codec's fault.** On that same
+device an ATSC 3.0 channel (HEVC Main 10 1080 with AC-3) publishes its first
+segment at **18.1 s** — past the 15 s startup budget — so plurx lists it as
+playable and then always refuses it with `startup_timeout`, even though it plays
+perfectly well once started. The ATSC 1.0 channel on the same device and host
+took 7.0 s. Decoding is not the limit either: that HEVC source transcodes to
+720p at 2.37× realtime in software on the same machine. Two other ATSC 3.0
+channels on that antenna deliver no bytes at all from the device, which is
+reception rather than software. See
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
+
+**What else is limited, honestly.** Losing the owner node ends the live session
+in flight;
 reconfiguration stays possible while Live TV is disabled, and re-enabling wants
 either a confirmed drain of the old owner or an explicit physical-fencing
 attestation, because elapsed time cannot prove somebody else's FFmpeg let go of

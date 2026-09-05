@@ -18,25 +18,32 @@ limits the documentation currently marks as pending this pass:
 
   * the device's real tuner count, and that `live_tv_max_sessions` above it is
     refused by the session_limit readiness check rather than tried;
-  * real startup latency from POST to first playable segment, against the
-    15 s STARTUP_TIMEOUT budget;
+  * real startup latency, measured from asking for the channel to a segment a
+    player could fetch, against the 15 s STARTUP_TIMEOUT budget, and split into
+    the part spent inside the start request and the part spent waiting after it;
   * real segment duration and real signal strength for the tuned channel;
-  * that the device itself reports our host holding exactly the tuners we
-    opened, and reports them free again after release -- proof from the other
-    side of the wire, which is the one thing a fixture can only claim;
+  * that the device itself agrees this run holds exactly the tuners we opened,
+    and reports them free again after release -- proof from the other side of
+    the wire, which is the one thing a fixture can only claim. Attribution
+    prefers a `TargetIP` matching our own address and falls back to "idle
+    before this run, busy now" behind NAT, and says which it used;
   * that every DRM-flagged channel in a real lineup is unplayable and its
     start is turned away with `drm_unsupported`;
-  * that the real broadcast codec survives the graph, read back with ffprobe
-    from a segment the daemon actually published;
+  * what the broadcaster actually sends, read straight off the tuner before
+    plurx touches it -- the fact behind the ATSC 3.0 limit, since reception is
+    not decoding -- and that it survived the graph, read back with ffprobe from
+    a segment the daemon actually published;
   * that filling the configured tuners makes the next start answer
     `tuner_capacity`, and that the device agrees about how many are busy.
 
 WHAT THIS DOES TO YOUR HARDWARE. It occupies up to `--tuners` tuners on the
 named device for a few minutes, so anyone recording or watching on that device
-at the same time may be turned away. It defaults to one tuner. It reads
-`/discover.json`, `/lineup.json` and `/status.json` and opens
-`/auto/vN` streams; it writes nothing to the device and changes no device
-setting.
+at the same time may be turned away. It defaults to one tuner, refuses to
+start if that many are not already free, and leaves whatever other clients are
+watching alone -- their tuners are recorded and excluded from attribution
+rather than counted as ours. It reads `/discover.json`, `/lineup.json` and
+`/status.json` and opens `/auto/vN` streams; it writes nothing to the device
+and changes no device setting.
 
 WHAT THIS DOES NOT TOUCH. Nothing that is already running. `--self-host`
 boots a throwaway plurxd with its own data directory under `--out`, and the
@@ -127,11 +134,14 @@ def device_json(address: str, path: str, timeout: int = 6):
 
 
 def host_lan_address(device: str) -> str:
-    """The address the device will see us from, so /status.json can be read.
+    """The address we expect the device to see us from.
 
     A UDP connect assigns a local address without sending a packet, and routing
-    to the device picks the interface the daemon's stream will actually leave
-    by -- which is the address that shows up in the device's TargetIP.
+    to the device picks the interface the stream will actually leave by. It is
+    only an EXPECTATION: behind NAT -- a Docker bridge, a router between this
+    host and the tuner -- the device sees the translated address instead, and
+    this one will never appear in a TargetIP. Attribution below therefore does
+    not depend on it; it strengthens attribution when it happens to match.
     """
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -157,29 +167,52 @@ def tuner_status(address: str):
     return rows
 
 
-def busy_tuners(rows, host: str):
-    """Tuners this host is holding, per the device."""
+def busy(rows):
+    """Every tuner the device says is in use, keyed by its resource name."""
     if rows is None:
-        return None
-    return [row for row in rows
-            if str(row.get("TargetIP") or "").strip() == host]
+        return {}
+    return {str(row.get("Resource")): row
+            for row in rows
+            if str(row.get("TargetIP") or "").strip()}
 
 
-def await_busy_count(address: str, host: str, expected: int, deadline_seconds: int):
-    """The device's own count of tuners we hold, settled.
+def attribute(rows, baseline: set, expected: str):
+    """Which busy tuners are OURS, and by what evidence.
+
+    Matching `TargetIP` against our own address is the strongest signal and the
+    first choice -- but it is unavailable behind NAT, where the device sees a
+    translated address and never our own. So the fallback is the delta: a tuner
+    that was idle before this run started and is busy now. That is weaker,
+    because somebody else in the household starting a tuner in the same minute
+    would land in the same set, and the run says which signal it used rather
+    than presenting both as equally good.
+    """
+    current = busy(rows)
+    mine_by_ip = [row for row in current.values()
+                  if str(row.get("TargetIP") or "").strip() == expected]
+    if mine_by_ip:
+        return mine_by_ip, "TargetIP matched this host's own address"
+    appeared = [row for resource, row in current.items() if resource not in baseline]
+    return appeared, "newly busy since the run started (this host is behind NAT, " \
+                     "so the device cannot report our own address)"
+
+
+def await_attributed(address: str, baseline: set, expected: str, count: int,
+                     deadline_seconds: int):
+    """Wait for the device to agree we hold exactly `count` tuners.
 
     A tuner is acquired and released asynchronously from the API call that
-    caused it, so a single read races. Returns (count, rows) at the first
-    reading that matches, else the last reading taken.
+    caused it, so a single read races. Returns (rows_we_hold, all_rows, method)
+    at the first reading that matches, else at the last reading taken.
     """
     deadline = time.monotonic() + deadline_seconds
     rows = tuner_status(address)
     if rows is None:
         raise Unexercisable("this firmware does not serve /status.json")
     while True:
-        held = busy_tuners(rows, host)
-        if len(held) == expected or time.monotonic() >= deadline:
-            return len(held), rows
+        mine, method = attribute(rows, baseline, expected)
+        if len(mine) == count or time.monotonic() >= deadline:
+            return mine, rows, method
         time.sleep(1)
         rows = tuner_status(address) or rows
 
@@ -290,6 +323,32 @@ def await_first_segment(client, playlist_url, deadline_seconds):
                          % deadline_seconds)
 
 
+def probe_source(ffmpeg, device, guide_number, seconds, destination):
+    """What the broadcaster actually sends, read straight off the tuner.
+
+    The published segment proves the graph produced H.264/AAC. It cannot prove
+    what went IN, and that is the fact behind the standing limit: ATSC 3.0
+    commonly carries HEVC and AC-4, and a device receiving them does not prove
+    the installed FFmpeg decodes them. The only way to learn the source codec is
+    to read the tuner directly for a moment -- which costs one tuner for
+    `seconds`, inside the budget the operator already allowed.
+
+    ffmpeg rather than a raw socket read, because it stops on a duration and a
+    raw read has no idea when it has enough transport stream to probe.
+    """
+    url = "http://%s:%d/auto/v%s" % (device, TUNER_PORT, guide_number)
+    result = subprocess.run(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+         "-t", str(seconds), "-i", url, "-c", "copy", str(destination)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False, timeout=seconds + 45)
+    if result.returncode != 0 or not destination.exists() or not destination.stat().st_size:
+        raise Unexercisable(
+            "reading the tuner directly failed (%s), so the broadcaster's own codecs are "
+            "unknown; the published-segment codecs below are still the graph's output"
+            % (result.stderr.decode(errors="replace").strip()[:200] or "no output"))
+    return destination
+
+
 def probe_streams(ffprobe, segment_path):
     """What the graph actually produced, read back rather than assumed."""
     result = subprocess.run(
@@ -314,6 +373,9 @@ def split_own_args(argv):
     own.add_argument("--tuners", type=int, default=1,
                      help="how many of the device's tuners this run may occupy (default 1)")
     own.add_argument("--channel", help="pin a guide number instead of taking the first playable one")
+    own.add_argument("--host-address",
+                     help="the address the device will see this host as, when it is not the "
+                          "one routing picks (behind NAT, or in a bridged container)")
     mine, rest = own.parse_known_args(argv)
     # Before the shared parser sees the rest: it would refuse `--base-url`
     # without a `--token` and name ui-baseline in the error, which sends the
@@ -384,7 +446,7 @@ def main(argv):
         raise SystemExit("the device at %s reports TunerCount %r; nothing can be tuned"
                          % (device, discover.get("TunerCount")))
     sessions = min(mine.tuners, tuner_count, MAX_CONFIGURABLE_SESSIONS)
-    host = host_lan_address(device)
+    host = mine.host_address or host_lan_address(device)
 
     serial = str(discover.get("DeviceID") or "")
     evidence = {
@@ -399,27 +461,43 @@ def main(argv):
             "tuner_count": tuner_count,
             "address": device,
         },
-        "host_address_seen_by_device": host,
+        "host_address_expected_by_this_run": host,
+        "host_address_was_given": bool(mine.host_address),
         "tuners_this_run_may_occupy": sessions,
         "not_exercisable": {},
     }
-    print("device %s %s firmware %s, %d tuners; this run may occupy %d, seen from %s"
+    print("device %s %s firmware %s, %d tuners; this run may occupy %d, expecting the "
+          "device to see us as %s"
           % (discover.get("ModelNumber"), discover.get("FriendlyName"),
              discover.get("FirmwareVersion"), tuner_count, sessions, host))
 
-    baseline = tuner_status(device)
-    if baseline is None:
+    baseline_rows = tuner_status(device)
+    baseline = set(busy(baseline_rows))
+    if baseline_rows is None:
         evidence["not_exercisable"]["device_side_tuner_proof"] = (
             "this firmware does not serve /status.json, so the device cannot be asked whether "
             "plurx holds a tuner; every tuner count below is plurx's own account of itself")
     else:
-        already = busy_tuners(baseline, host)
-        assert not already, (
+        mine_already = [row for row in busy(baseline_rows).values()
+                        if str(row.get("TargetIP") or "").strip() == host]
+        assert not mine_already, (
             "this host already holds %d tuner(s) on the device before the run started: %s. "
-            "Something else here is streaming from it; stop that first or the counts below "
-            "mean nothing." % (len(already), json.dumps(already)))
-        evidence["device_busy_tuners_before_run"] = len(
-            [r for r in baseline if str(r.get("TargetIP") or "").strip()])
+            "Something else here is streaming from it; stop that first, or the counts below "
+            "attribute somebody else's tuner to this run."
+            % (len(mine_already), json.dumps(mine_already)))
+        # Other people's tuners are fine and expected -- a household watches TV
+        # while this runs. They are recorded so a reader can see how much of the
+        # device was free, and excluded from attribution by the baseline.
+        others = busy(baseline_rows)
+        evidence["device_tuners_busy_before_run"] = sorted(others)
+        evidence["device_tuners_free_before_run"] = tuner_count - len(others)
+        assert tuner_count - len(others) >= sessions, (
+            "this run wants %d tuner(s) and only %d of the device's %d are free (%s are "
+            "already in use by somebody else). Lower --tuners or wait."
+            % (sessions, tuner_count - len(others), tuner_count, sorted(others)))
+        if others:
+            print("  %d of %d tuners are already in use by other clients (%s); "
+                  "attribution excludes them" % (len(others), tuner_count, ", ".join(sorted(others))))
 
     server = HARNESS["SelfHost"](args)
     server.start()
@@ -532,15 +610,53 @@ def main(argv):
         else:
             channel = playable[0]
 
-        started_at = time.monotonic()
+        # --- what the broadcaster sends, before plurx touches it -------------
+        try:
+            source = probe_source("ffmpeg", device, channel["guide_number"], 4,
+                                  out / "source.ts")
+            streams, container = probe_streams("ffprobe", source)
+            video = [s for s in streams if s.get("codec_type") == "video"]
+            audio = [s for s in streams if s.get("codec_type") == "audio"]
+            evidence["source"] = {
+                "guide_number": channel.get("guide_number"),
+                "container": container.get("format_name"),
+                "video_codec": video[0].get("codec_name") if video else None,
+                "video_profile": video[0].get("profile") if video else None,
+                "video_height": video[0].get("height") if video else None,
+                "video_field_order": video[0].get("field_order") if video else None,
+                "audio_codec": audio[0].get("codec_name") if audio else None,
+                "audio_channels": audio[0].get("channels") if audio else None,
+                "bytes_in_%ds" % 4: source.stat().st_size,
+            }
+            # Our own probe held a tuner; wait for the device to say it is back
+            # before opening plurx sessions, or attribution counts it as ours.
+            try:
+                await_attributed(device, baseline, host, 0, 30)
+            except Unexercisable:
+                pass
+        except Unexercisable as reason:
+            evidence["not_exercisable"]["source_codecs"] = str(reason)
+        except subprocess.TimeoutExpired:
+            evidence["not_exercisable"]["source_codecs"] = (
+                "reading the tuner directly timed out, so the broadcaster's own codecs are "
+                "unknown; the published-segment codecs below are still the graph's output")
+
+        # Startup is measured from the moment the channel is ASKED FOR, not from
+        # the moment the POST answers. The runtime's own budget starts when the
+        # session is created server-side, so most of a real tune happens inside
+        # that request -- the first run of this script measured 6.4 s of accept
+        # and 0.007 s of waiting afterwards, and reported the 0.007 s as
+        # "startup", which is the one number nobody wants.
+        asked_at = time.monotonic()
         started = client.api("/live-tv/channels/%s/sessions" % channel["id"], "POST")
         capability = started["session_id"]
         opened.append(capability)
-        accept_seconds = time.monotonic() - started_at
+        accept_seconds = time.monotonic() - asked_at
 
         playlist_url = "%s/api/v1/live-tv/sessions/%s/index.m3u8" % (server.base_url, capability)
-        startup, sequence, segments, segment_seconds, name, chunk = await_first_segment(
+        waited, sequence, segments, segment_seconds, name, chunk = await_first_segment(
             client, playlist_url, SEGMENT_DEADLINE)
+        startup = time.monotonic() - asked_at
 
         segment_path = out / "first-segment.ts"
         segment_path.write_bytes(chunk)
@@ -555,8 +671,10 @@ def main(argv):
 
         evidence["session"] = {
             "guide_number": channel.get("guide_number"),
-            "accept_seconds": round(accept_seconds, 3),
-            "seconds_to_first_playable_segment": round(startup, 3),
+            # The number a viewer feels, and its two halves.
+            "seconds_from_asking_to_first_playable_segment": round(startup, 3),
+            "of_which_inside_the_start_request": round(accept_seconds, 3),
+            "of_which_waiting_for_a_segment": round(waited, 3),
             "startup_budget_seconds": STARTUP_BUDGET,
             "first_media_sequence": sequence,
             "published_window_segments": len(segments),
@@ -572,9 +690,10 @@ def main(argv):
             "the live window published %d segments; at most %d may be listed"
             % (len(segments), LISTED_SEGMENTS))
         assert startup <= STARTUP_BUDGET, (
-            "the first playable segment took %.1fs; STARTUP_TIMEOUT is %ds, so a real tune on "
-            "this device does not fit the budget the runtime enforces"
-            % (startup, STARTUP_BUDGET))
+            "a playable segment took %.1fs from asking for the channel (%.1fs inside the start "
+            "request, %.1fs waiting after it); STARTUP_TIMEOUT is %ds, so a real tune on this "
+            "device does not fit the budget the runtime enforces"
+            % (startup, accept_seconds, waited, STARTUP_BUDGET))
         # Configured output_height is a ceiling, not a promise to upscale: an SD
         # channel legitimately arrives shorter. Exceeding it is the defect.
         assert int(video[0].get("height") or 0) <= 720, (
@@ -583,21 +702,24 @@ def main(argv):
 
         # --- the device's own account of who holds its tuners ----------------
         try:
-            held, rows = await_busy_count(device, host, 1, 30)
-            assert held == 1, (
-                "the device reports %d tuner(s) held by this host during one session: %s"
-                % (held, json.dumps(busy_tuners(rows, host))))
-            mine_rows = busy_tuners(rows, host)
-            evidence["session"]["device_reported_vct"] = mine_rows[0].get("VctNumber")
-            evidence["session"]["signal_strength_percent"] = mine_rows[0].get(
+            ours, rows, method = await_attributed(device, baseline, host, 1, 30)
+            assert len(ours) == 1, (
+                "the device attributes %d tuner(s) to this run during one session (%s): %s"
+                % (len(ours), method, json.dumps(list(busy(rows)))))
+            evidence["device_attribution_method"] = method
+            evidence["session"]["device_reported_vct"] = ours[0].get("VctNumber")
+            evidence["session"]["signal_strength_percent"] = ours[0].get(
                 "SignalStrengthPercent")
-            evidence["session"]["signal_quality_percent"] = mine_rows[0].get(
+            evidence["session"]["signal_quality_percent"] = ours[0].get(
                 "SignalQualityPercent")
-            evidence["session"]["device_resource"] = mine_rows[0].get("Resource")
+            evidence["session"]["symbol_quality_percent"] = ours[0].get(
+                "SymbolQualityPercent")
+            evidence["session"]["device_network_rate"] = ours[0].get("NetworkRate")
+            evidence["session"]["device_resource"] = ours[0].get("Resource")
             # A device that names the channel it is on lets us prove we tuned
             # what we asked for. Not every source populates VctNumber (a QAM
             # lineup may not), so its absence is recorded, not asserted away.
-            reported = str(mine_rows[0].get("VctNumber") or "").strip()
+            reported = str(ours[0].get("VctNumber") or "").strip()
             if reported:
                 assert reported == str(channel.get("guide_number") or ""), (
                     "the device says it is tuned to %r while plurx says it started %r"
@@ -645,11 +767,14 @@ def main(argv):
                 "refusal_code": "tuner_capacity",
             }
             try:
-                held, rows = await_busy_count(device, host, sessions, 45)
-                assert held == sessions, (
-                    "plurx holds %d sessions and the device reports %d tuner(s) for this host: %s"
-                    % (len(opened), held, json.dumps(busy_tuners(rows, host))))
-                evidence["capacity"]["device_reported_busy"] = held
+                ours, rows, method = await_attributed(device, baseline, host, sessions, 45)
+                assert len(ours) == sessions, (
+                    "plurx holds %d sessions and the device attributes %d tuner(s) to this "
+                    "run (%s): %s"
+                    % (len(opened), len(ours), method, json.dumps(list(busy(rows)))))
+                evidence["capacity"]["device_attributed_busy"] = len(ours)
+                evidence["capacity"]["device_resources"] = sorted(
+                    str(row.get("Resource")) for row in ours)
             except Unexercisable as reason:
                 evidence["not_exercisable"]["capacity_confirmed_by_device"] = str(reason)
 
@@ -658,11 +783,13 @@ def main(argv):
             client.api("/live-tv/sessions/%s" % capability, "DELETE")
         opened.clear()
         try:
-            held, rows = await_busy_count(device, host, 0, RELEASE_DEADLINE)
-            assert held == 0, (
-                "%ds after every session was released the device still reports %d tuner(s) held "
-                "by this host: %s" % (RELEASE_DEADLINE, held, json.dumps(busy_tuners(rows, host))))
-            evidence["device_tuners_after_release"] = 0
+            ours, rows, method = await_attributed(device, baseline, host, 0, RELEASE_DEADLINE)
+            assert not ours, (
+                "%ds after every session was released the device still attributes %d tuner(s) "
+                "to this run (%s): %s"
+                % (RELEASE_DEADLINE, len(ours), method, json.dumps(list(busy(rows)))))
+            evidence["device_tuners_attributed_after_release"] = 0
+            evidence["device_tuners_busy_after_release"] = sorted(busy(rows))
         except Unexercisable as reason:
             evidence["not_exercisable"]["release_confirmed_by_device"] = str(reason)
 
@@ -675,7 +802,7 @@ def main(argv):
 
         (out / "hardware.json").write_text(json.dumps(evidence, indent=2) + "\n")
         capacity = evidence.get("capacity")
-        print("PASS real %s: first playable segment in %.1fs of a %ds budget, %.1fs segments, "
+        print("PASS real %s: playable %.1fs after asking, of a %ds budget; %.1fs segments, "
               "%s/%s at %sp, window never past %d, %s, every tuner handed back"
               % (evidence["device"]["model_number"], startup, STARTUP_BUDGET, segment_seconds,
                  evidence["session"]["video_codec"], evidence["session"]["audio_codec"],
