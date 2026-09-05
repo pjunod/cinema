@@ -2395,21 +2395,10 @@ fn spawn_live_ffmpeg(
     command
         .args(["-hide_banner", "-loglevel", "warning", "-nostdin", "-y"])
         .args(encoder.init_args())
+        .args(["-fflags", "+genpts+discardcorrupt"])
+        .args(live_probe_args())
         .args([
-            "-fflags",
-            "+genpts+discardcorrupt",
-            "-probesize",
-            "8388608",
-            "-analyzeduration",
-            "5000000",
-            "-i",
-            "pipe:0",
-            "-map",
-            "0:v:0",
-            "-map",
-            "0:a:0",
-            "-sn",
-            "-dn",
+            "-i", "pipe:0", "-map", "0:v:0", "-map", "0:a:0", "-sn", "-dn",
         ]);
     let filter = live_video_filter(encoder, height);
     command.args(["-vf", &filter]);
@@ -2453,6 +2442,33 @@ fn spawn_live_ffmpeg(
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
+}
+
+/// How long FFmpeg may look at a tuner before it has to start producing.
+///
+/// `-probesize` is a BYTE budget. A file delivers those bytes at disk speed; a
+/// tuner delivers them at the broadcaster's rate, so on a live stream it is a
+/// time budget in disguise. Measured on a real HDHomeRun FLEX 4K, running this
+/// exact argument list against the strongest channel on the antenna (96-100%
+/// signal, ~6.9 Mbps):
+///
+/// | probesize | first segment |
+/// |-----------|---------------|
+/// | 8192 KiB  | 7.06 s        |
+/// | 2048 KiB  | 5.55 s        |
+/// |  512 KiB  | 5.54 s        |
+///
+/// The curve flattens at 2 MiB, so that is the value: below it there is
+/// nothing left to win, above it every byte is latency a viewer waits through.
+/// On that antenna's ~2.8 Mbps ATSC 3.0 mux the old 8 MiB was about 23 s of
+/// wall time on its own -- longer than the whole startup budget.
+///
+/// `-analyzeduration` stays as it was. It bounds the probe by STREAM time
+/// rather than by bytes, which is the bound that keeps meaning the same thing
+/// at any bitrate, and it is what still protects detection on a mux that
+/// genuinely needs looking at.
+fn live_probe_args() -> [&'static str; 4] {
+    ["-probesize", "2097152", "-analyzeduration", "5000000"]
 }
 
 fn live_video_filter(encoder: Encoder, height: u16) -> String {
@@ -4361,6 +4377,36 @@ exec /bin/cat >/dev/null
     /// format: VAAPI uploads nv12 and QSV uploads a qsv surface, and appending
     /// a system-memory format conversion after a hardware upload would be a
     /// different bug.
+    /// The probe budget is a measurement, so it does not get to drift back.
+    ///
+    /// A byte budget spent on a stream arriving at the broadcaster's rate is a
+    /// time budget, and the old 8 MiB was about 23 s of wall time on a
+    /// 2.8 Mbps mux -- longer than the entire startup budget. 2 MiB is where
+    /// the measured curve flattened on a real FLEX 4K (7.06 s -> 5.55 s, with
+    /// 512 KiB no better at 5.54 s). The stream-time bound is asserted
+    /// alongside it because lowering the byte bound is only safe while the
+    /// bound that does not depend on bitrate is still there.
+    #[test]
+    fn the_live_probe_budget_is_the_measured_one() {
+        let args = live_probe_args();
+        assert_eq!(
+            args,
+            ["-probesize", "2097152", "-analyzeduration", "5000000"],
+            "the live probe budget was measured, not guessed: {args:?}"
+        );
+        let probesize: u64 = args[1].parse().expect("probesize is a byte count");
+        assert!(
+            probesize <= 2 * 1024 * 1024,
+            "every byte above the measured 2 MiB is startup latency on a live \
+             tuner, not spare detection budget"
+        );
+        assert!(
+            probesize >= 512 * 1024,
+            "512 KiB was the smallest value measured; below it nothing was \
+             won and detection has less to work with"
+        );
+    }
+
     #[test]
     fn the_live_chain_delivers_eight_bit_to_an_eight_bit_profile() {
         for encoder in [Encoder::Software, Encoder::Nvenc] {
