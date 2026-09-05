@@ -27,7 +27,7 @@ change.
 
 | Milestone | Task branch | PR | State | Blocking evidence |
 |---|---|---|---|---|
-| M1 · frame completion | `codex/cluster-transport-m1` | not opened | third-review fixes pass; fourth review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
+| M1 · frame completion | `codex/cluster-transport-m1` | not opened | fifth review found one status-only correction; final exact review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same review | foundations implemented; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | implementation in progress | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
