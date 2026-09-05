@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Replay sanitized FFmpeg diagnostics against the decoder-health M0 contract."""
+
+from __future__ import annotations
+
+import argparse
+from collections import deque
+from dataclasses import asdict, dataclass
+import json
+from pathlib import Path
+import re
+
+
+VIDEO_DECODE_ERROR_WINDOW_MS = 2_000
+VIDEO_DECODE_ERROR_LIMIT = 5
+DIAGNOSTIC_DRAIN_BUDGET_MS = 2_000
+MAX_DIAGNOSTIC_LINE_BYTES = 16 * 1024
+
+PRIMARY_VIDEO_ERROR = re.compile(
+    r"^(?:\[error\]\s+)?"
+    r"\[vist#(?P<input>\d+):(?P<stream>\d+)/[^\]]+\]\s+"
+    r"\[dec:[^\]]+\]\s+Error submitting packet to decoder:"
+)
+SUBORDINATE_NO_FRAME = re.compile(
+    r"^(?:\[error\]\s+)?\[[^\]]+\]\s+No frame decoded\?"
+)
+LEGACY_REPEAT = re.compile(r"^\s*Last message repeated (?P<count>\d+) times$")
+
+
+class QualificationError(ValueError):
+    """A fixture cannot be interpreted without inventing evidence."""
+
+
+@dataclass(frozen=True)
+class Qualification:
+    fixture: str
+    selected_input: int
+    selected_stream: int
+    primary_video_error_records: int
+    subordinate_records: int
+    legacy_repeat_summaries: int
+    legacy_repeated_messages: int
+    first_primary_at_ms: int | None
+    fault_at_ms: int | None
+    detection_latency_ms: int | None
+    automatic_action_qualified: bool
+
+
+def parse_selected_stream(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(\d+):(\d+)", value)
+    if match is None:
+        raise QualificationError("selected stream must use INPUT:STREAM")
+    return int(match.group(1)), int(match.group(2))
+
+
+def fixture_records(path: Path) -> list[tuple[int, str]]:
+    records: list[tuple[int, str]] = []
+    prior_ms = -1
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not raw or raw.startswith("#"):
+            continue
+        observed, separator, message = raw.partition("\t")
+        if not separator or not observed.isascii() or not observed.isdecimal():
+            raise QualificationError(
+                f"{path}:{number}: expected OBSERVATION_MS<TAB>FFMPEG_LINE"
+            )
+        observed_ms = int(observed)
+        if observed_ms < prior_ms:
+            raise QualificationError(f"{path}:{number}: observations moved backward")
+        if len(message.encode("utf-8")) > MAX_DIAGNOSTIC_LINE_BYTES:
+            raise QualificationError(f"{path}:{number}: diagnostic line exceeds 16 KiB")
+        records.append((observed_ms, message))
+        prior_ms = observed_ms
+    if not records:
+        raise QualificationError(f"{path}: fixture has no records")
+    return records
+
+
+def qualify(
+    path: Path,
+    selected: tuple[int, int] = (0, 0),
+) -> Qualification:
+    window: deque[int] = deque(maxlen=VIDEO_DECODE_ERROR_LIMIT)
+    primary = 0
+    subordinate = 0
+    repeat_summaries = 0
+    repeated_messages = 0
+    first_primary: int | None = None
+    fault_at: int | None = None
+
+    for observed_ms, message in fixture_records(path):
+        repeat = LEGACY_REPEAT.fullmatch(message)
+        if repeat is not None:
+            repeat_summaries += 1
+            repeated_messages += int(repeat.group("count"))
+            continue
+        if SUBORDINATE_NO_FRAME.match(message):
+            subordinate += 1
+            continue
+        match = PRIMARY_VIDEO_ERROR.match(message)
+        if match is None:
+            continue
+        stream = (int(match.group("input")), int(match.group("stream")))
+        if stream != selected:
+            continue
+
+        primary += 1
+        if first_primary is None:
+            first_primary = observed_ms
+        lower_bound = observed_ms - VIDEO_DECODE_ERROR_WINDOW_MS
+        while window and window[0] <= lower_bound:
+            window.popleft()
+        window.append(observed_ms)
+        if fault_at is None and len(window) >= VIDEO_DECODE_ERROR_LIMIT:
+            fault_at = observed_ms
+
+    latency = None
+    if fault_at is not None and first_primary is not None:
+        latency = fault_at - first_primary
+    return Qualification(
+        fixture=path.name,
+        selected_input=selected[0],
+        selected_stream=selected[1],
+        primary_video_error_records=primary,
+        subordinate_records=subordinate,
+        legacy_repeat_summaries=repeat_summaries,
+        legacy_repeated_messages=repeated_messages,
+        first_primary_at_ms=first_primary,
+        fault_at_ms=fault_at,
+        detection_latency_ms=latency,
+        automatic_action_qualified=fault_at is not None and repeat_summaries == 0,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("fixture", type=Path)
+    parser.add_argument("--selected-stream", default="0:0", metavar="INPUT:STREAM")
+    arguments = parser.parse_args()
+    try:
+        result = qualify(
+            arguments.fixture,
+            parse_selected_stream(arguments.selected_stream),
+        )
+    except (OSError, UnicodeError, QualificationError) as error:
+        parser.error(str(error))
+    print(json.dumps(asdict(result), indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
