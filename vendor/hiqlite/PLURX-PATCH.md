@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries fourteen compatibility patches for clustered
+Apache-2.0. Plurx carries fifteen compatibility patches for clustered
 deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
@@ -130,7 +130,7 @@ deployments:
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
 
-Remove this vendor when an upstream Hiqlite release contains all fourteen patches
+Remove this vendor when an upstream Hiqlite release contains all fifteen patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep

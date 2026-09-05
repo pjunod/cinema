@@ -294,6 +294,7 @@ enum ClientConnectedEvent {
 
 enum ClientEnqueueEvent {
     Shutdown,
+    Reader(Result<ClientStreamReq, flume::RecvError>),
     LeaderChange(Result<ClientLeaderChange, flume::RecvError>),
     ReaderFinished(Result<(), String>),
     WriterFinished(Result<(), String>),
@@ -304,6 +305,7 @@ fn latched_client_enqueue_event(
     stream_shutdown: &tokio::sync::watch::Receiver<bool>,
     reader_finished: &mut oneshot::Receiver<Result<(), String>>,
     writer_finished: &mut oneshot::Receiver<Result<(), String>>,
+    reader: &flume::Receiver<ClientStreamReq>,
     leaders: &flume::Receiver<ClientLeaderChange>,
 ) -> Option<ClientEnqueueEvent> {
     if *stream_shutdown.borrow() {
@@ -326,6 +328,15 @@ fn latched_client_enqueue_event(
             )));
         }
         Err(oneshot::error::TryRecvError::Empty) => {}
+    }
+    match reader.try_recv() {
+        Ok(request) => return Some(ClientEnqueueEvent::Reader(Ok(request))),
+        Err(flume::TryRecvError::Disconnected) => {
+            return Some(ClientEnqueueEvent::Reader(Err(
+                flume::RecvError::Disconnected,
+            )));
+        }
+        Err(flume::TryRecvError::Empty) => {}
     }
     match leaders.try_recv() {
         Ok(change) => Some(ClientEnqueueEvent::LeaderChange(Ok(change))),
@@ -357,8 +368,8 @@ async fn next_client_connected_event(
                 "API writer task exited without reporting an outcome".into()
             ))
         ),
-        change = leaders.recv_async() => ClientConnectedEvent::Leader(change),
         result = reader.recv_async() => ClientConnectedEvent::Incoming(result),
+        change = leaders.recv_async() => ClientConnectedEvent::Leader(change),
         result = requests.recv_async() => ClientConnectedEvent::Incoming(result),
     }
 }
@@ -543,6 +554,7 @@ async fn client_stream(
         let mut rotate_after_disconnect = false;
         let mut terminal_transport_failure = false;
         let mut force_writer_abort = false;
+        let mut leader_handoff = false;
 
         'connected: loop {
             let res = match next_client_connected_event(
@@ -601,11 +613,7 @@ async fn client_stream(
                     }
                     let _ = tx_write.try_send(WritePayload::Close);
                     update_leader(&leader, Some(leader_id), Some(node)).await;
-                    for (_, ack) in in_flight.drain() {
-                        let _ = ack.send(Err(Error::LeaderChange(
-                            "Action not allowed, Raft leader has changed".into(),
-                        )));
-                    }
+                    leader_handoff = true;
                     break;
                 }
                 ClientConnectedEvent::Incoming(result) => Some(result),
@@ -859,13 +867,9 @@ async fn client_stream(
                         let _ = pending_leader_ready.register(target, Some(ready));
                     }
 
-                    // in case of a leader change, we should not use the in flight buffer
-                    // since no modifying write after this error will be Ok(_) anyway.
-                    for (_, ack) in in_flight.drain() {
-                        let _ = ack.send(Err(Error::LeaderChange(
-                            "Action not allowed, Raft leader has changed".into(),
-                        )));
-                    }
+                    // Preserve acknowledgements until teardown drains every
+                    // response the reader decoded before the handoff.
+                    leader_handoff = true;
                     break;
                 }
 
@@ -926,6 +930,7 @@ async fn client_stream(
                         &stream_shutdown,
                         &mut rx_reader_finished,
                         &mut rx_writer_finished,
+                        &rx_read,
                         &rx_leader,
                     ) {
                         event
@@ -962,6 +967,7 @@ async fn client_stream(
                                     "API writer task exited without reporting an outcome".into()
                                 ))
                             ),
+                            result = rx_read.recv_async() => ClientEnqueueEvent::Reader(result),
                             change = rx_leader.recv_async() => ClientEnqueueEvent::LeaderChange(change),
                             () = time::sleep(Duration::from_millis(1)) => ClientEnqueueEvent::Retry,
                         }
@@ -973,6 +979,39 @@ async fn client_stream(
                             let _ = ack
                                 .send(Err(Error::Connect("client stream manager stopped".into())));
                             break 'connected;
+                        }
+                        ClientEnqueueEvent::Reader(result) => {
+                            let Ok(reader_request) = result else {
+                                terminal_transport_failure = true;
+                                rotate_after_disconnect = client.inner.proxy_mode;
+                                let _ = ack.send(Err(Error::Connect(
+                                    "API transport ended before request dispatch".into(),
+                                )));
+                                break 'connected;
+                            };
+                            match reader_request {
+                                ClientStreamReq::StreamResponse(response) => {
+                                    try_forward_response(
+                                        &mut in_flight,
+                                        &mut in_flight_buf,
+                                        awaiting_timeout,
+                                        response,
+                                    )
+                                    .await;
+                                }
+                                ClientStreamReq::CleanupBuffer => {
+                                    for (_, buffered_ack) in in_flight_buf.drain() {
+                                        let _ = buffered_ack.send(Err(Error::Connect(
+                                            "request timed out".to_string(),
+                                        )));
+                                    }
+                                    awaiting_timeout = false;
+                                }
+                                _ => unreachable!(
+                                    "API WebSocket reader emitted a non-response request"
+                                ),
+                            }
+                            continue;
                         }
                         ClientEnqueueEvent::LeaderChange(change) => {
                             let Ok(ClientLeaderChange {
@@ -998,11 +1037,7 @@ async fn client_stream(
                                 continue;
                             }
                             update_leader(&leader, Some(leader_id), Some(node)).await;
-                            for (_, in_flight_ack) in in_flight.drain() {
-                                let _ = in_flight_ack.send(Err(Error::LeaderChange(
-                                    "Action not allowed, Raft leader has changed".into(),
-                                )));
-                            }
+                            leader_handoff = true;
                             let _ = ack.send(Err(Error::Connect(
                                 "API request was not dispatched before stream handoff".into(),
                             )));
@@ -1151,7 +1186,9 @@ async fn client_stream(
             break;
         }
 
-        if terminal_transport_failure {
+        if leader_handoff {
+            fail_client_stream_leader_handoff(&mut in_flight, &mut in_flight_buf);
+        } else if terminal_transport_failure {
             for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
                 let _ = ack.send(Err(Error::Connect(
                     "API connection ended after dispatch; outcome unknown and request was not replayed"
@@ -1189,6 +1226,17 @@ fn fail_client_stream_shutdown(
     }
     while let Ok(request) = rx_req.try_recv() {
         request.fail_on_shutdown();
+    }
+}
+
+fn fail_client_stream_leader_handoff(
+    in_flight: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+    in_flight_buf: &mut HashMap<usize, Sender<Result<ApiStreamResponsePayload, Error>>>,
+) {
+    for (_, ack) in in_flight.drain().chain(in_flight_buf.drain()) {
+        let _ = ack.send(Err(Error::LeaderChange(
+            "Action not allowed, Raft leader has changed".into(),
+        )));
     }
 }
 
@@ -1497,6 +1545,141 @@ mod tests {
         assert!(matches!(
             request_rx.try_recv(),
             Ok(ClientStreamReq::Shutdown)
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn queued_api_response_wins_before_queued_leader_change() {
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reader_finished_tx, mut reader_finished_rx) = oneshot::channel();
+        let (_writer_finished_tx, mut writer_finished_rx) = oneshot::channel();
+        let (leader_tx, leader_rx) = flume::bounded(1);
+        let (socket_reader_tx, socket_reader_rx) = flume::bounded(1);
+        let (_request_tx, request_rx) = flume::bounded(1);
+        socket_reader_tx
+            .send_async(ClientStreamReq::StreamResponse(ApiStreamResponse {
+                request_id: 41,
+                result: ApiStreamResponsePayload::Execute(Ok(1)),
+            }))
+            .await
+            .expect("queue decoded API response");
+        leader_tx
+            .send_async(ClientLeaderChange {
+                leader_id: 8,
+                node: Node {
+                    id: 8,
+                    addr_raft: "node-eight:21000".into(),
+                    addr_api: "node-eight:21001".into(),
+                },
+                ready: None,
+            })
+            .await
+            .expect("queue leader change");
+
+        let event = next_client_connected_event(
+            &mut shutdown_rx,
+            &mut reader_finished_rx,
+            &mut writer_finished_rx,
+            &leader_rx,
+            &socket_reader_rx,
+            &request_rx,
+        )
+        .await;
+
+        assert!(matches!(
+            event,
+            ClientConnectedEvent::Incoming(Ok(ClientStreamReq::StreamResponse(
+                ApiStreamResponse { request_id: 41, .. }
+            )))
+        ));
+        assert!(matches!(
+            leader_rx.try_recv(),
+            Ok(ClientLeaderChange { leader_id: 8, .. })
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn queued_api_response_wins_before_leader_during_writer_backpressure() {
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reader_finished_tx, mut reader_finished_rx) = oneshot::channel();
+        let (_writer_finished_tx, mut writer_finished_rx) = oneshot::channel();
+        let (leader_tx, leader_rx) = flume::bounded(1);
+        let (socket_reader_tx, socket_reader_rx) = flume::bounded(1);
+        socket_reader_tx
+            .send_async(ClientStreamReq::StreamResponse(ApiStreamResponse {
+                request_id: 42,
+                result: ApiStreamResponsePayload::Execute(Ok(1)),
+            }))
+            .await
+            .expect("queue decoded API response");
+        leader_tx
+            .send_async(ClientLeaderChange {
+                leader_id: 9,
+                node: Node {
+                    id: 9,
+                    addr_raft: "node-nine:21000".into(),
+                    addr_api: "node-nine:21001".into(),
+                },
+                ready: None,
+            })
+            .await
+            .expect("queue leader change");
+
+        let event = latched_client_enqueue_event(
+            &shutdown_rx,
+            &mut reader_finished_rx,
+            &mut writer_finished_rx,
+            &socket_reader_rx,
+            &leader_rx,
+        )
+        .expect("a queued response must wake backpressured admission");
+
+        assert!(matches!(
+            event,
+            ClientEnqueueEvent::Reader(Ok(ClientStreamReq::StreamResponse(ApiStreamResponse {
+                request_id: 42,
+                ..
+            })))
+        ));
+        assert!(matches!(
+            leader_rx.try_recv(),
+            Ok(ClientLeaderChange { leader_id: 9, .. })
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn leader_handoff_settles_decoded_response_before_failing_unresolved_requests() {
+        let mut in_flight = HashMap::new();
+        let mut in_flight_buf = HashMap::new();
+        let (settled_tx, settled_rx) = oneshot::channel();
+        let (unresolved_tx, unresolved_rx) = oneshot::channel();
+        in_flight.insert(51, settled_tx);
+        in_flight.insert(52, unresolved_tx);
+
+        try_forward_response(
+            &mut in_flight,
+            &mut in_flight_buf,
+            false,
+            ApiStreamResponse {
+                request_id: 51,
+                result: ApiStreamResponsePayload::Execute(Ok(1)),
+            },
+        )
+        .await;
+        fail_client_stream_leader_handoff(&mut in_flight, &mut in_flight_buf);
+
+        assert!(matches!(
+            settled_rx.await.expect("settled request acknowledgement"),
+            Ok(ApiStreamResponsePayload::Execute(Ok(1)))
+        ));
+        assert!(matches!(
+            unresolved_rx
+                .await
+                .expect("unresolved request acknowledgement"),
+            Err(Error::LeaderChange(_))
         ));
     }
 
