@@ -1164,9 +1164,30 @@ changes while the slot is busy leave one candidate to build rather than three.
 The wake is the next exchange after the slot frees, which is a client heartbeat
 away and only matters to a client that is still sending them.
 
-**Still open** in this thread: the durable half. Desired ownership is not
-persisted, so none of the three admission points can compare it, and nothing
-survives a restart or an owner change.
+**Also corrected: the ask becomes durable before the client is told it was
+taken.** A client told its new selection was accepted, with nothing durable
+saying so, leaves every later admission decision comparing against an ask that
+never landed — and a restart or an owner change in that window loses the
+request entirely, with the session continuing to serve the old selection and
+nothing recording that anything was asked.
+
+`media_playback_desired` now carries it, written before the exchange is
+reported accepted. Only an exchange whose ask the row does not already name
+pays for the write: a heartbeat repeats the same selection, so it writes
+nothing and cannot fail on it, and the cost falls on the exchange that changed
+something. A failed write refuses that exchange rather than answering it, which
+is what "before reported accepted" means — answering anyway would report a
+request taken that nothing has recorded.
+
+The offer to persist is retired by the write landing and by nothing else. A
+state that stopped offering on the *attempt* would leave the store one ask
+behind whenever a write failed, with nothing left to notice, because the
+client's retry would then say nothing needed writing.
+
+**Still open** in this thread: none of the three admission points compares the
+stored ask yet, so a successor can still be admitted, committed or activated
+against an ask the viewer has left. That is the next lane, and it is the one
+the durable row exists for.
 
 **Partly corrected: a failed rendition now gives its producer back.** Reading
 the teardown paths rather than the finding turned up one leak that was

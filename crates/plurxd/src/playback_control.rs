@@ -3029,8 +3029,27 @@ pub(crate) struct SelectionObservation {
     /// ask has been dispatched yet, which stays true across every exchange
     /// until it has been.
     pub dispatch_preparation: bool,
+    /// The ask this exchange carries, and whether it still needs persisting.
+    ///
+    /// `Some` only while the durable row does not yet name this ask. The
+    /// handler must write it *before* reporting the exchange accepted — a
+    /// client told its new selection was taken, with nothing durable saying
+    /// so, is exactly the window §1 exists to close — and must call
+    /// [`ControlState::record_desired_persisted`] once the write has landed,
+    /// or every later exchange pays for a row that is already correct.
+    pub persist_desired: Option<PersistDesired>,
     /// The document the **session** is holding, not this exchange's.
     pub capabilities: Option<DynamicCapabilities>,
+}
+
+/// The ask to write, in the two forms the durable row wants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PersistDesired {
+    pub digest: String,
+    /// Written beside the digest so it is checkable — see the store's own
+    /// note on why a hash whose input is not recoverable is a value nobody
+    /// can verify.
+    pub canonical_form: String,
 }
 
 #[derive(Debug)]
@@ -3066,6 +3085,15 @@ pub(crate) struct ControlState {
     /// sequence space restarts, and a selection from before the advance is not
     /// something this client has since departed from.
     last_selection: Option<ClientSelection>,
+    /// The ask the durable row is known to name.
+    ///
+    /// Separate from `dispatched_digest` because they answer different
+    /// questions about different consumers: one is "has a candidate been built
+    /// for this", the other "does the store know about this". A single flag
+    /// would tie a durable write to a scheduling decision, so a candidate the
+    /// slot refused would suppress the write, and a write that failed would
+    /// suppress the candidate.
+    persisted_digest: Option<String>,
     /// The ask a preparation candidate was last dispatched for.
     ///
     /// Together with `desired_digest` this is the whole of retain-and-coalesce.
@@ -3138,6 +3166,7 @@ impl Default for ControlState {
             last_selection: None,
             desired_digest: None,
             dispatched_digest: None,
+            persisted_digest: None,
             last_capabilities: None,
             preparation: PreparationSlot::Empty,
         }
@@ -3357,6 +3386,12 @@ impl ControlState {
             self.last_selection = None;
             self.desired_digest = None;
             self.dispatched_digest = None;
+            // Not cleared on an epoch rollover, deliberately. A new owner
+            // inherits the same viewer's ask; forgetting it here would make
+            // every takeover rewrite a row that is already correct, and the
+            // row is keyed by playback rather than by owner precisely so it
+            // survives one.
+
             self.last_capabilities = None;
             inherited.map(|staged_incarnation_id| PreparationDirective::Abort {
                 staged_incarnation_id,
@@ -3666,7 +3701,13 @@ impl ControlState {
             .last_selection
             .as_ref()
             .is_some_and(|previous| previous.desired() != desired);
-        let dispatch_preparation = self.take_preparation_dispatch(&desired.digest());
+        let digest = desired.digest();
+        let dispatch_preparation = self.take_preparation_dispatch(&digest);
+        let persist_desired =
+            (self.persisted_digest.as_deref() != Some(digest.as_str())).then(|| PersistDesired {
+                canonical_form: desired.canonical_form(),
+                digest,
+            });
         self.last_selection = Some(selection.clone());
         if let Some(capabilities) = capabilities {
             self.last_capabilities = Some(capabilities.clone());
@@ -3674,7 +3715,27 @@ impl ControlState {
         SelectionObservation {
             changed,
             dispatch_preparation,
+            persist_desired,
             capabilities: self.last_capabilities.clone(),
+        }
+    }
+
+    /// The durable row now names this ask.
+    ///
+    /// Recorded only after the write has landed, so a failed write leaves the
+    /// next exchange still asking for it rather than leaving the store one ask
+    /// behind with nothing to notice. A digest that is no longer the current
+    /// ask is accepted and ignored: by the time a slow write returns the
+    /// viewer may have moved on, and the next exchange will carry the newer
+    /// one.
+    pub(crate) fn record_desired_persisted(&mut self, digest: &str) {
+        if self
+            .last_selection
+            .as_ref()
+            .map(|selection| selection.desired().digest())
+            == Some(digest.to_owned())
+        {
+            self.persisted_digest = Some(digest.to_owned());
         }
     }
 
@@ -6636,6 +6697,12 @@ enum RollingControlCommand {
     },
     /// Take the preparation slot for a successor. `false` when it is already
     /// occupied or the playback is terminal.
+    /// The durable desired row now names this ask.
+    ///
+    /// Fire-and-forget: the write has already landed, and the only thing this
+    /// suppresses is a redundant repeat of it. A dropped command costs one
+    /// extra write on the next exchange, which is why it carries no reply.
+    RecordDesiredPersisted { digest: String },
     StagePreparation {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
@@ -6798,6 +6865,7 @@ impl RollingControlCommand {
             Self::ApplyProducerFlow { .. } => Some(19),
             Self::SettleProducerFlowSignal { .. } => Some(20),
             Self::StagePreparation { .. } => Some(21),
+            Self::RecordDesiredPersisted { .. } => None,
             Self::MayCommitPreparation { .. }
             | Self::BeginAbortPreparation { .. }
             | Self::RejectPreparationCommit { .. } => Some(22),
@@ -10218,6 +10286,9 @@ impl RollingControlActor {
                 } => {
                     let _ = reply.send(self.poll_producer_decision_at(after_sequence));
                 }
+                RollingControlCommand::RecordDesiredPersisted { digest } => {
+                    self.control.record_desired_persisted(&digest);
+                }
                 RollingControlCommand::StagePreparation {
                     staged_incarnation_id,
                     predecessor_incarnation_id,
@@ -11605,6 +11676,15 @@ impl RollingControlHandle {
         .await
         .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)?
+    }
+
+    /// The durable desired row now names this ask.
+    pub(crate) async fn record_desired_persisted(&self, digest: &str) {
+        let _ = self
+            .enqueue_command(RollingControlCommand::RecordDesiredPersisted {
+                digest: digest.to_owned(),
+            })
+            .await;
     }
 
     /// Take the preparation slot for a successor whose durable row already
@@ -14576,6 +14656,74 @@ mod tests {
             "a successor built for an ask the viewer has left is not published by their own \
              acknowledgement"
         );
+    }
+
+    /// The ask is offered for persistence until it has been, and then not
+    /// again.
+    ///
+    /// Two failures this guards against, pulling in opposite directions. A
+    /// state that offered the ask on every exchange would put a durable write
+    /// on a path that runs about once a second per client, for a row that is
+    /// already correct — and a control exchange that can fail on a store
+    /// hiccup is a control exchange that fails on heartbeats. A state that
+    /// stopped offering it after the first *attempt* would leave the store one
+    /// ask behind whenever a write failed, with nothing left to notice: the
+    /// client has been refused, retries, and the retry says nothing needs
+    /// writing.
+    ///
+    /// So the offer is retired by [`ControlState::record_desired_persisted`]
+    /// and by nothing else, which is what makes a failed write cost exactly
+    /// one refused exchange rather than a silently stale row.
+    #[test]
+    fn an_ask_is_offered_for_persistence_until_the_write_has_landed() {
+        let mut state = ControlState::default();
+        let first = selection_at(QualitySelection::Auto);
+        let second = selection_at(QualitySelection::Manual { height: 720 });
+
+        // A session's opening ask has to be written too: without it the store
+        // holds nothing for a viewer who never changes their mind, and an
+        // admission point comparing against "no row" cannot tell that from a
+        // viewer who has asked for something new.
+        let offer = state
+            .observe(&first, None)
+            .persist_desired
+            .expect("the opening ask is offered");
+        assert_eq!(offer.digest, first.desired().digest());
+        assert_eq!(offer.canonical_form, first.desired().canonical_form());
+
+        // Still offered while the write has not landed — a refused exchange
+        // must leave the next one asking for the same thing.
+        assert_eq!(
+            state.observe(&first, None).persist_desired,
+            Some(offer.clone()),
+            "an unacknowledged write is still outstanding"
+        );
+
+        state.record_desired_persisted(&offer.digest);
+        assert_eq!(
+            state.observe(&first, None).persist_desired,
+            None,
+            "and once it has landed, a heartbeat repeating the same ask writes nothing"
+        );
+
+        // A new ask is offered again.
+        let next = state
+            .observe(&second, None)
+            .persist_desired
+            .expect("a changed ask is offered");
+        assert_ne!(next.digest, offer.digest);
+
+        // A stale acknowledgement — the viewer moved on while the write was in
+        // flight — does not retire the current offer. Accepting it would mark
+        // the row as naming an ask it does not name.
+        state.record_desired_persisted(&offer.digest);
+        assert_eq!(
+            state.observe(&second, None).persist_desired,
+            Some(next.clone()),
+            "a write that landed for an ask the viewer has already left retires nothing"
+        );
+        state.record_desired_persisted(&next.digest);
+        assert_eq!(state.observe(&second, None).persist_desired, None);
     }
 
     /// An ask that arrives while the slot is busy is not lost.

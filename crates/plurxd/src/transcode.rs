@@ -17313,6 +17313,28 @@ impl TranscodeManager {
         Some(Arc::new(control) as Arc<dyn crate::playback_control::PreparationGate>)
     }
 
+    /// Record that the durable row now names this ask.
+    ///
+    /// Both engines, because either may own the session and neither knows
+    /// which. A session that has gone by the time this lands is not an error:
+    /// the row is written and keyed by playback, so it outlives the session
+    /// that recorded it and the only thing lost is one exchange's worth of
+    /// suppression.
+    pub(crate) async fn record_desired_persisted(&self, session_id: &str, digest: &str) {
+        if self.vod.record_desired_persisted(session_id, digest).await {
+            return;
+        }
+        let control = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|session| session.control.clone());
+        if let Some(control) = control {
+            control.record_desired_persisted(digest).await;
+        }
+    }
+
     pub(crate) fn session_adoption_token(&self, session_id: &str) -> Option<SessionAdoptionToken> {
         Some(SessionAdoptionToken {
             gate: self.session_adoption_gate(session_id)?,

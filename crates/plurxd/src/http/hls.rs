@@ -5949,6 +5949,62 @@ async fn control_local_with_settlement_capacity(
             ),
         )
     };
+    // The ask becomes durable before this exchange is reported accepted.
+    //
+    // §1's rule, and the window it closes is narrow but real: a client told
+    // its new selection was taken, with nothing durable saying so, leaves
+    // every later admission decision comparing against an ask that never
+    // landed — and a restart or an owner change in that window loses the
+    // request entirely, with the session continuing to serve the old
+    // selection and nothing anywhere recording that anything was asked.
+    //
+    // Only an exchange whose ask the row does not already name pays for this.
+    // A heartbeat repeats the same selection, so it writes nothing and cannot
+    // fail here; the cost falls on the exchange that actually changed
+    // something, which is the one that has something to lose.
+    //
+    // A failed write refuses the exchange rather than answering it. That is
+    // the whole point of "before reported accepted": answering anyway would
+    // be reporting a request taken that nothing has recorded, which is worse
+    // than a client retrying one exchange.
+    if let Some(desired) = result.selection.persist_desired.clone() {
+        match state
+            .store
+            .record_desired_selection(
+                route.user_id,
+                &route.playback_id,
+                &desired.digest,
+                &desired.canonical_form,
+                unix_ms(),
+            )
+            .await
+        {
+            Ok(_) => {
+                state
+                    .transcode
+                    .record_desired_persisted(&route.session_id, &desired.digest)
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session = %crate::transcode::session_log_id(&route.session_id),
+                    "recording the viewer's selection failed: {error}"
+                );
+                crate::playback_control::record(
+                    crate::playback_control::MetricOutcome::Unavailable,
+                );
+                return control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "this selection could not be recorded; retry shortly",
+                    Some(route.incarnation_id.clone()),
+                    Some(owner_epoch),
+                    Some(500),
+                    None,
+                );
+            }
+        }
+    }
     let outcome = match result.disposition {
         crate::playback_control::ControlDisposition::Accepted => {
             crate::playback_control::MetricOutcome::Accepted
