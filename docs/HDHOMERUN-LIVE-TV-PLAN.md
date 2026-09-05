@@ -1,6 +1,6 @@
 # HDHomeRun Live TV — one tuner, every plurx client
 
-**Status:** adversarially approved; ready to build · **Effort:**
+**Status:** M0/M1 merged; M2 review fixes under verification · **Effort:**
 `effort/hdhomerun-live-tv` · **Written:** 2026-09-04
 
 Companion to [PLAYBACK.md](PLAYBACK.md) (how finite files become streams),
@@ -116,13 +116,14 @@ deterministic tests.
 Session creation opens the lineup-derived HDHomeRun HTTP stream exactly once
 with the same pinned, proxy-free Reqwest client used for device documents.
 FFmpeg never receives a device URL. The manager validates the HTTP status and
-pumps the one response body through a bounded channel into FFmpeg's stdin; a
+pumps the one response body through a single backpressured task into FFmpeg's stdin; a
 cancel, stall, or child exit drops the response and therefore closes the tuner
 TCP connection. FFmpeg probes and consumes `pipe:0` with bounded probe time.
 There is no separate `ffprobe` request, because a second HTTP GET can consume a
 second tuner.
 
-The start request waits up to 15 seconds for a complete HLS playlist and first
+The start request has a common 15-second budget, including the fresh lineup,
+for a complete HLS playlist and first
 segment. Success returns a short-lived capability URL. Failure kills and waits
 for FFmpeg, removes scratch files, releases both tuner and transcode admission,
 and returns one of:
@@ -159,6 +160,15 @@ default. Video bitrate is 4 Mb/s at 720p and 8 Mb/s at 1080p. The encoder must
 force an IDR at every 4-second boundary so each segment is independently
 decodable.
 
+Both video and audio are required inputs. A demuxer that sees no usable audio
+must not silently publish video-only HLS while advertising AAC. Missing
+decoder and required-stream diagnostics map to `codec_unsupported`; unrelated
+FFmpeg failures remain `stream_failed`. Recognition uses bounded stderr and
+the upstream [decoder diagnostic](https://ffmpeg.org/doxygen/trunk/ffmpeg__demux_8c_source.html)
+and [required-map diagnostic](https://ffmpeg.org/doxygen/trunk/ffmpeg__opt_8c_source.html),
+without returning raw process logs or claiming that every missing audio stream
+is AC-4.
+
 One session owns:
 
 ```text
@@ -190,8 +200,17 @@ owns tuner permits. Every ingress obtains lineup/readiness snapshots from that
 owner through signed peer requests; an ingress-local LAN path is never treated
 as proof that the selected owner can reach the tuner. An ingress that receives
 a start, playlist, segment, status, keepalive, or delete request for another
-owner uses the existing exact-request peer HMAC and redirect-free peer
+owner uses exact-request Ed25519 authentication and redirect-free peer
 transport.
+
+Readiness, start, activation, playlist, status, keepalive, and stop control
+responses additionally sign the HTTP status and exact bounded body, bound to
+both node identities, the request nonce, and the route. Activation URLs are
+constructed locally from the validated capability. Drain acknowledgements
+carry a separately signed exact owner/target/nonce/generation/count tuple.
+MPEG-TS response bytes remain streaming and require a trusted cluster network
+(or TLS) for transport confidentiality/integrity; a request signature alone
+does not authenticate a streamed response body.
 
 Live TV also has an always-compiled `live_tv_v1` node capability in the current
 heartbeat declaration. Enabling and starting require the owner and every
@@ -223,12 +242,23 @@ tuples with the same generation; a loser receives `settings_conflict`, reloads,
 and may explicitly retry. Every manager read obtains the tuple from one
 transactional snapshot, never five independent setting reads.
 
-The new owner refuses admissions until the old owner returns a signed drain
-acknowledgement or its quorum serving lease has expired plus a conservative
-grace interval. The old owner cannot retain serving authority through a
-partition; its local `ServingAuthority` loss generation fences and drains its
-sessions without a Store round trip. These rules prevent an old and new owner
-from each admitting the configured limit.
+Disable atomically records the original owner and a fixed drain-before
+generation. Disabled edits preserve that barrier, including A→B→C owner
+changes. The new owner refuses admissions until an authenticated drain proof
+clears it, or an administrator makes a separate, exact-generation physical
+fencing attestation while disabled: **I have stopped or powered off the
+previous owner and prevented it from restarting until it can synchronize the
+current configuration.** Recovery remains disabled; readiness and enable are
+separate actions. Unreachability alone is not proof of physical cleanup.
+
+A wall-clock timeout cannot prove the old socket/process has stopped and is
+not an automatic recovery mechanism. Serving-authority loss still cancels the
+old owner's sessions without a Store round trip. The owner installs its
+monotonic drain floor under the same registry lock as insertion, and shutdown
+permanently closes insertion before collecting sessions. Neither delayed
+starts nor stale drains can cross those fences. Failed child reaping retains
+the child and encoder reservation; failed scratch cleanup retains the registry
+entry and can be retried. Neither failure produces a successful drain proof.
 
 This release does not take over a live session when the tuner owner dies.
 TCP closure frees the physical tuner and the player receives
@@ -238,7 +268,7 @@ availability trade-off, not silent per-voter over-allocation.
 
 **Acceptance:** with four test nodes and a device count of four, concurrent
 starts admit at most the configured global limit; every ingress can serve one
-owner's capability; a forged owner, stale peer, invalid HMAC, redirect, and
+owner's capability; a forged owner, stale peer, invalid signature, redirect, and
 relay stall fail closed. Partition, disable through a remote voter, in-flight
 start, and concurrent owner/device changes fence the old generation, drain it,
 and never overlap admission generations.
@@ -375,7 +405,7 @@ temporary names, and symlinks are rejected.
 
 `LiveTvStart` carries an ingress-generated UUID request id, source user/node,
 and expected configuration/serving generations. The owner registry keys a
-provisional start by `(source_node, user_id, request_id)` and stores an
+provisional start by `(source_node, source_serving_generation, user_id, request_id)` and stores an
 immutable fingerprint of channel, profile, user/node, and both generations. A
 repeated signed request with that fingerprint returns the same `created` or
 `recovered` result instead of opening a second tuner; a mismatched replay is a
@@ -386,6 +416,13 @@ rejected. Unactivated starts are reaped. The public client sees success only
 after confirmed activation. This handles lost start or activation responses
 without blind retry or leaked capacity.
 
+The provisional deadline is 40 seconds from first publication, longer than
+the controller's common 24-second start exchange plus two 5-second activation
+attempts. A retired request retains its immutable fingerprint and typed
+terminal error for 60 seconds. Admission reserves room in the bounded
+256-entry active-plus-terminal history instead of evicting an unexpired
+request and permitting a delayed replay to open a second tuner.
+
 ### 4.2 Settings keys (`crates/plurx-core/src/store/mod.rs`)
 
 | Key | Default | Bound |
@@ -395,7 +432,9 @@ without blind retry or leaked capacity.
 | `live_tv.owner_node_id` | empty | Existing reachable committed voter |
 | `live_tv.max_sessions` | `2` | `1..=min(TunerCount, 4)` |
 | `live_tv.output_height` | `720` | `720` or `1080` |
-| `live_tv.config_generation` | `0` | Monotonic `u64`; server-managed |
+| `live_tv.config_generation` | `0` | Monotonic nonnegative `i64`; server-managed |
+| `live_tv.transition_from_owner_node_id` | empty | Original owner awaiting drain/fencing; server-managed |
+| `live_tv.transition_drain_before` | `0` | Fixed cutoff preserved through disabled edits; server-managed |
 
 The Settings PUT remains PATCH-shaped but reads and validates the complete
 effective live-TV tuple from one snapshot before its first write. Any changed
@@ -449,9 +488,12 @@ POST /_internal/v1/live-tv/stop
 
 Every body is at most 16 KiB, uses `deny_unknown_fields`, names the expected
 owner, and is bound to method, path, body, timestamp, nonce, source node, and
-target node by the existing exact-request peer HMAC. Media responses stream
-with backpressure through the existing bounded relay body pattern; they are
-never accumulated into memory.
+target node by exact-request Ed25519 signatures. MPEG-TS responses stream
+with bounded backpressure; small control responses and playlists are buffered
+under explicit limits to authenticate their complete bytes. Local segment
+responses admit four concurrent readers per session, retain at most two
+64 KiB queued chunks each, and expire after five seconds without downstream
+progress or 30 seconds total, including unpolled response bodies.
 
 `start` is idempotent by request UUID plus immutable request fingerprint and
 answers `created` or `recovered`. `activate` idempotently confirms the same
@@ -673,7 +715,7 @@ so an accepted risk cannot disappear into a resolved conversation.
 | Protocol pre-review | A second probe connection can consume another tuner | Accepted: one FFmpeg ingest in §2.3 |
 | Protocol pre-review | Slow consumers and endless input can create unbounded state | Accepted: fixed window, backpressure, idle reap, and lifecycle tests in §2.4 |
 | Plan adversary | FFmpeg opening a URL bypasses pinned redirect/proxy policy | Accepted: proxy-free Reqwest owns the only GET and pumps bounded bytes to `pipe:0` in §2.3/§3.1 |
-| Plan adversary | Disable, owner/device change, or quorum loss can leave an old owner consuming tuners | Accepted: configuration and serving generations plus drain acknowledgement/lease expiry in §2.1/§2.5 |
+| Plan adversary and subsequent Astra review | Disable, owner/device change, or quorum loss can leave an old owner consuming tuners | Configuration/serving generations plus authenticated drain; automatic lease-expiry recovery rejected in favor of exact admin physical fencing in §2.5 |
 | Plan adversary | A lost peer-start response makes retries duplicate or leak a tuner | Accepted: stable request UUID, provisional lease, recovered response, and signed activation in §4.1/§4.4 |
 | Plan adversary | Ingress-local lineup/readiness does not prove owner access | Accepted: authoritative owner snapshot relay in §2.5/§4.4 |
 | Plan adversary | Mixed-version ingress/owner nodes can disagree on the protocol | Accepted: all active serving nodes and owner must advertise `live_tv_v1` in §2.5 |

@@ -5257,6 +5257,102 @@ impl MembershipManager {
             .await
     }
 
+    /// Authenticate an exact internal mutation whose caller and receiver must
+    /// both be committed voters. Live-TV tuner admission is intentionally
+    /// narrower than the general media-worker surface: learners may relay an
+    /// existing capability, but they may not mint one.
+    pub async fn authorize_internal_peer_voter_request(
+        &self,
+        auth: &InternalPeerAuth,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<bool, MembershipError> {
+        if !self
+            .authorize_internal_peer_request(auth, method, path, body)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.verify_live_peer_authority(
+            &auth.node_id,
+            unix_ms()?,
+            PeerAuthorityRole::CommittedVoter,
+        )
+        .await
+    }
+
+    /// Sign a response to one exact internal request with this node's durable
+    /// activity key.  The request nonce makes the proof single-exchange, while
+    /// the route, response bytes, and both node identities prevent a stale or
+    /// substituted HTTP response from satisfying a lifecycle barrier.
+    pub fn sign_internal_peer_response(
+        &self,
+        target_node_id: &str,
+        request_nonce: &str,
+        path: &str,
+        response: &[u8],
+    ) -> Result<String, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let message = internal_peer_response_message(
+            &inner.identity.node_id,
+            target_node_id,
+            request_nonce,
+            path,
+            response,
+        )
+        .ok_or_else(|| MembershipError::Internal("invalid internal peer response".to_owned()))?;
+        Ok(inner.activity_signing_key.sign_hex(&message))
+    }
+
+    /// Verify a response proof and confirm the signer is still a committed
+    /// voter.  Callers separately compare the decoded response fields with
+    /// their exact request before treating the proof as an acknowledgement.
+    pub async fn authorize_internal_peer_response(
+        &self,
+        source_node_id: &str,
+        target_node_id: &str,
+        request_nonce: &str,
+        path: &str,
+        response: &[u8],
+        signature: &str,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        if target_node_id != inner.identity.node_id
+            || source_node_id == target_node_id
+            || source_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || target_node_id.len() > MAX_PEER_NODE_ID_BYTES
+            || signature.len() != ED25519_SIGNATURE_HEX_BYTES
+        {
+            return Ok(false);
+        }
+        let Some(message) = internal_peer_response_message(
+            source_node_id,
+            target_node_id,
+            request_nonce,
+            path,
+            response,
+        ) else {
+            return Ok(false);
+        };
+        let signature = match hex::decode(signature) {
+            Ok(signature) => signature,
+            Err(_) => return Ok(false),
+        };
+        if !self
+            .activity_signature_is_valid(source_node_id, &message, &signature)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.verify_live_peer_authority(
+            source_node_id,
+            unix_ms()?,
+            PeerAuthorityRole::CommittedVoter,
+        )
+        .await
+    }
+
     /// Authenticate an idempotent read-only relay. Signature verification is
     /// mandatory, globally rate-bounded, and each signed nonce is single-use
     /// for the complete five-second read window. A separate, right-sized
@@ -8725,6 +8821,32 @@ fn internal_peer_auth_message(
     Some(message)
 }
 
+fn internal_peer_response_message(
+    node_id: &str,
+    target_node_id: &str,
+    request_nonce: &str,
+    path: &str,
+    response: &[u8],
+) -> Option<Vec<u8>> {
+    if !canonical_internal_auth_nonce(request_nonce)
+        || !path.starts_with('/')
+        || path.len() > 512
+        || path.contains('?')
+        || path.contains('#')
+        || path.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let response_digest = Sha256::digest(response);
+    let mut message = b"plurx-internal-peer-response-v1\0".to_vec();
+    for value in [node_id, target_node_id, request_nonce, path] {
+        message.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        message.extend_from_slice(value.as_bytes());
+    }
+    message.extend_from_slice(&response_digest);
+    Some(message)
+}
+
 fn canonical_internal_auth_nonce(nonce: &str) -> bool {
     nonce.len() == INTERNAL_AUTH_NONCE_BYTES
         && uuid::Uuid::parse_str(nonce).is_ok_and(|parsed| parsed.hyphenated().to_string() == nonce)
@@ -9072,6 +9194,42 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn live_tv_drain_response_signature_binds_each_exchange_field_and_domain() {
+        let key = ActivitySigningKey::from_seed_hex(&"42".repeat(32)).expect("fixture signing key");
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let other_nonce = uuid::Uuid::new_v4().to_string();
+        let path = "/_internal/v1/live-tv/drain";
+        let payload = br#"["owner","controller","nonce",7,2]"#;
+        let message = internal_peer_response_message("owner", "controller", &nonce, path, payload)
+            .expect("message");
+        let signature = hex::decode(key.sign_hex(&message)).expect("signature");
+        let public_key = hex::decode(key.public_key_hex()).expect("public key");
+        let verifier = UnparsedPublicKey::new(&ED25519, &public_key);
+        assert!(verifier.verify(&message, &signature).is_ok());
+        for changed in [
+            internal_peer_response_message("other-owner", "controller", &nonce, path, payload),
+            internal_peer_response_message("owner", "other-controller", &nonce, path, payload),
+            internal_peer_response_message("owner", "controller", &other_nonce, path, payload),
+            internal_peer_response_message("owner", "controller", &nonce, "/other", payload),
+            internal_peer_response_message(
+                "owner",
+                "controller",
+                &nonce,
+                path,
+                b"changed cutoff or count",
+            ),
+            internal_peer_auth_message("owner", "controller", 1, &nonce, "POST", path, payload),
+        ] {
+            assert!(verifier
+                .verify(&changed.expect("valid alternate message"), &signature)
+                .is_err());
+        }
+        let mut tampered = signature;
+        tampered[0] ^= 1;
+        assert!(verifier.verify(&message, &tampered).is_err());
+    }
+
     fn install_live_tv_membership_fixture(connection: &rusqlite::Connection) {
         connection
             .execute_batch(&format!(
@@ -9224,6 +9382,14 @@ mod tests {
                 "{authorizer} must not reinstate the voter predicate",
             );
         }
+        let voter = source
+            .split_once("pub async fn authorize_internal_peer_voter_request(")
+            .expect("voter authorizer was renamed")
+            .1
+            .split_once("\n    }\n")
+            .expect("voter authorizer never closes at fn indent")
+            .0;
+        assert!(voter.contains("PeerAuthorityRole::CommittedVoter"));
     }
 
     // The route gate answers 503 for `Fenced`, so the cost of an interim

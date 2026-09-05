@@ -30,7 +30,6 @@ use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 
-#[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::admission::Admission;
 use crate::admission::{
     Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
@@ -43,6 +42,10 @@ use crate::ffmpeg::pacing_caps;
 use crate::media_sessions::SessionSettlementGuard;
 use crate::meter::Meter;
 
+/// Namespace below the transcode work root which is owned by the Live TV
+/// lifecycle rather than `TranscodeManager.sessions`.
+pub(crate) const LIVE_TV_WORK_DIR_NAME: &str = "live-tv";
+
 /// Idle timeout after which a session's ffmpeg is killed and its dir removed.
 const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS as u64 / 1_000;
 /// Stable classification for a start that lost a bounded admission wait.
@@ -51,7 +54,6 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
-#[cfg(any(test, feature = "live-hls-recovery"))]
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
@@ -257,7 +259,6 @@ const ACTOR_HARDWARE_STARTUP_BUDGET: Duration = Duration::from_secs(12);
 const ACTOR_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
 /// How long ffmpeg's output timestamp may sit still. It is the actor's
 /// progress budget for every actor-managed rolling producer.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 /// How long a flow evaluation waits for the actor to order its desire.
 ///
 /// This bounds a mailbox round trip, not a producer: it selects no recipe,
@@ -276,12 +277,10 @@ const COPY_READER_INGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// process reap could not yet be confirmed. This owner never makes playback
 /// policy or replacement decisions; it only retains resources until physical
 /// cleanup converges.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 const PREPUBLICATION_REAP_RETRY: Duration = Duration::from_secs(5);
 /// One supervisor terminate/reap request may not monopolize lifecycle
 /// serialization. Timeout retains the child and permits for the next repair
 /// attempt; it never treats an unconfirmed reap as success.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 const PREPUBLICATION_REAP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Slack on top of both exact actor startup budgets for scheduler latency,
 /// predecessor reap, successor spawn/install, and the request's 100 ms file
@@ -1680,7 +1679,6 @@ fn is_progress_line(line: &str) -> bool {
 }
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn clear_session_dir(dir: &std::path::Path) -> std::io::Result<()> {
     let mut entries = tokio::fs::read_dir(dir).await.map_err(|error| {
         std::io::Error::new(
@@ -8188,11 +8186,18 @@ enum PartEnd {
 
 /// The owner-aware permits a foreground encoder keeps for its whole lifetime.
 /// Constructed only after every background permit has been released.
-#[cfg(any(test, feature = "live-hls-recovery"))]
-struct LiveAdmission {
-    encoder: Encoder,
+pub(crate) struct LiveAdmission {
+    pub(crate) encoder: Encoder,
     hw_slot: Option<HwSlot>,
     sw_permit: Option<crate::admission::SwPermit>,
+}
+
+impl LiveAdmission {
+    pub(crate) fn software_threads(&self) -> Option<u32> {
+        self.sw_permit
+            .as_ref()
+            .map(|permit| permit.threads() as u32)
+    }
 }
 
 /// Which tracks a session carries. Part of its recipe, which is why it is a
@@ -15038,7 +15043,6 @@ impl TranscodeManager {
     /// capacity back. The permit then carries live ownership for the session's
     /// whole lifetime, keeping every background pool parked after this method
     /// drops the short-lived waiter.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn admit_live(
         &self,
         preferred: Encoder,
@@ -15139,6 +15143,26 @@ impl TranscodeManager {
             tracing::warn!(class = %work.software_class(), "{why}");
             return Err(capacity_error(why));
         }
+    }
+
+    /// Reserve the same foreground encoder pool used by ordinary playback for
+    /// one always-compiled HDHomeRun session. The pessimistic 4K HEVC/HDR
+    /// shape prevents an unmeasured software fallback from promising a live
+    /// stream that cannot run in real time; the returned opaque guard owns the
+    /// permit until the live session ends.
+    pub(crate) async fn admit_live_tv(
+        &self,
+        target_height: u16,
+        max_wait: Duration,
+    ) -> Result<LiveAdmission, String> {
+        let preferred = self.encoder().await;
+        let work = Workload {
+            source_height: 2160,
+            codec: "hevc",
+            hdr: Some("hdr"),
+            target_height: i64::from(target_height),
+        };
+        self.admit_live(preferred, work, max_wait).await
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
@@ -19726,7 +19750,9 @@ impl TranscodeManager {
         let mut removed = 0usize;
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if live.contains(&path) || !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
+            if entry.file_name() == LIVE_TV_WORK_DIR_NAME
+                || live.contains(&path)
+                || !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
             {
                 continue;
             }
@@ -21484,6 +21510,38 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn orphan_sweep_never_enters_the_live_tv_owned_namespace() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work root");
+        let live_session = work
+            .path()
+            .join(LIVE_TV_WORK_DIR_NAME)
+            .join("live-tv-active");
+        tokio::fs::create_dir_all(&live_session)
+            .await
+            .expect("active Live TV scratch");
+        tokio::fs::write(live_session.join("index.m3u8"), b"active")
+            .await
+            .expect("active playlist");
+        let ordinary_orphan = work.path().join("orphan-vod");
+        tokio::fs::create_dir(&ordinary_orphan)
+            .await
+            .expect("ordinary orphan");
+        let manager = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+
+        assert!(manager.sweep_orphan_dirs().await >= 1);
+        assert!(live_session.join("index.m3u8").is_file());
+        assert!(!ordinary_orphan.exists());
+    }
 
     #[test]
     fn retired_rolling_marker_prewarm_ambiguity_survives_plan_method_drift() {
