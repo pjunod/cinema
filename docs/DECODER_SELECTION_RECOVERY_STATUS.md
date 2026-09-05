@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 full PR qualification · **Updated:** 2026-09-05 ·
+**Status:** M0 final review and PR qualification · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -15,18 +15,18 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M0 — capture baseline and freeze diagnostic qualification |
 | Task branch | `codex/decoder-selection-m0` |
-| Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft; remote state being reconciled |
+| Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft; reviewed local head is ahead of the remote branch |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Both final adversarial reviews approve `7649ccdd`; repaired fast lane and exact media verification pass |
-| Full PR validation | Unit suite passes; one `validate-full` run is starting on the corrected head |
-| Blocker | None |
+| Focused validation | History, 11-case playback, 60-capture UI, reader-browser, warmed cluster, and final unit suites pass |
+| Full PR validation | First pass completed with environment/setup failures fully diagnosed; corrected-head rerun follows final adversarial review |
+| Blocker | Publishing the reviewed head requires renewed external-transfer approval from the execution sandbox; local qualification continues |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Full PR qualification | [PR #915](https://github.com/pjunod/plurx/pull/915); unit suite and both final adversarial reviews pass |
+| M0 · baseline and diagnostic qualification | Final review and PR qualification | [PR #915](https://github.com/pjunod/plurx/pull/915); focused gates and corrected-head unit suite pass |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -227,7 +227,7 @@ complete decoder-list output are retained per node in
 | `m6` | Not on host `PATH` | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
 | `nuc4` | 8.0.1 Ubuntu | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
 | `nuc3` | 8.0.1 Ubuntu | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
-| Local Apple build host | Homebrew FFmpeg cannot start: missing `libx265.216.dylib` | No deployed daemon inspected | Unknown | Unavailable |
+| Local Apple build host | Full Homebrew FFmpeg 8.1.2 with `zscale`, run through a task-scoped x265 ABI 216 wrapper | No deployed daemon inspected | VideoToolbox | Qualified only as the local validation toolchain; not fleet evidence |
 
 All four containers advertise software MPEG-4 plus QSV/CUVID families. None of
 those names proves a usable device, correct surface transfer, metadata
@@ -320,6 +320,8 @@ and task refs were restored, and #915 is the active review record.
 | 2026-09-05 | Bind automatic diagnostic action to one exact build/codec grammar | Structural matching remains useful for observation, but cannot safely authorize recovery across unqualified FFmpeg builds |
 | 2026-09-05 | Use MP4 and explicit single-thread encoder controls for generated media evidence | The exact remote verifier proved Matroska/x265 and unconstrained encoder scheduling were not byte reproducible |
 | 2026-09-05 | Collapse only identical repeated probe rows | FFprobe may emit the same selected-stream fact more than once; conflicting rows remain an evidence failure |
+| 2026-09-05 | Map review-only documentation commits to `catalog-contract` instead of ignoring them | Retains positive current evidence and avoids weakening the historical regression ledger |
+| 2026-09-05 | Use full Homebrew FFmpeg 8.1.2 plus its retained x265 ABI 216 library for local qualification | The default FFmpeg 8.1.2 lacks `zscale`; FFmpeg 9.0.1 has `zscale` but changes muxer output identities expected by the repository's FFmpeg 8 contracts |
 
 ## Validation ledger
 
@@ -376,7 +378,16 @@ lane and focused tests provide earlier feedback.
 | `4ec13f3b` | `git diff --check` | Pass |
 | `3fe6a6ca` | `CARGO='rustup run 1.97.1 cargo' make unit` | Invalid environment run · 143 FFmpeg-backed tests failed because Homebrew FFmpeg could not load retained `libx265.216.dylib`; no non-loader failure observed |
 | `3fe6a6ca` | `PLURX_FFMPEG=/private/tmp/codex-ffmpeg-abi216 PLURX_FFPROBE=/private/tmp/codex-ffprobe-abi216 CARGO='rustup run 1.97.1 cargo' make unit` | Pass · 2,785 tests; 3 declared ignores; task-scoped wrappers use the retained installed x265 ABI 216 library without modifying the host |
-| Pending | Full PR suite after review fixes | Not run |
+| `ac456b44` | `make validate-full` with the initial task-scoped FFmpeg wrapper | Diagnostic pass · 18 passed, 3 failed, 3 skipped; history lacked five review-doc mappings, playback selected an FFmpeg without `zscale`, cold cluster work exceeded 1,800 s, Playwright was not on `PATH`, and `adb` was unavailable |
+| Working tree | `make history-check` | Pass · 1,322 corrective commits have current evidence; review-only M0 documentation maps to `catalog-contract` and is not ignored |
+| Working tree | `make ui-check` through the existing `plurx-ui` Playwright 1.62.0 environment | Pass · 60 captures and 5,464 structural facts match the golden; no console or page errors |
+| Working tree | `scripts/reader-browser` through the existing `plurx-ui` environment | Pass · online/native/offline handoff, profile isolation, force-relaunch restore, style, TOC, search, finish, stale revision, and hostile-content checks |
+| Working tree | `make cluster-check` with the warmed Rust 1.97.1 targets | Pass · 133 three-voter store contracts, topology/growth/failure drills, 7 activation tests, and 2 activity tests |
+| Working tree | `make unit` with full FFmpeg 9.0.1 | Invalid tool-version run · 2 FFmpeg 8 muxer-identity tests failed; all other tests passed |
+| Working tree | the two failed FFmpeg-sensitive tests with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · copy-segment decode equivalence and mid-film generation identity |
+| Working tree | `make unit` with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · 2,785 tests; 3 declared ignores |
+| Working tree | `make playback-smoke` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Pass · 11/11 Chrome cases, including HDR tone-map, copy-HLS, no-MSE, seek, audio switch, and subtitle toggle |
+| Pending reviewed head | `make validate-full` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Not run; begins after the final adversarial re-review |
 
 ## Remaining evidence before release
 

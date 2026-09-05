@@ -1,0 +1,13 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "cae1aa43",
+  "c58e4480",
+  "c5b0970f",
+  "6009367b",
+  "7649ccdd",
+]
+points = []
+checks = ["catalog-contract"]
+reason = "These commits record M0 adversarial-review findings, evidence, and validation results in project documentation; the catalog contract verifies their governed documentation and validation metadata."
