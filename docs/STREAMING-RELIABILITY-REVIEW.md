@@ -1260,6 +1260,45 @@ documentation debt:
    conversion need not re-encode video; burn and incompatible HDR requirements
    must be reported honestly. Test Original→720p→Original, including
    source-height Manual as a distinct case.
+
+   **Confirmed, attempted, and withdrawn — the obvious fix is a worse bug.**
+   The defect is real: with a transcode predecessor the old code produced
+   `Prepare { ResolutionOrBitrate }` and would have staged a source-height
+   *re-encode* for a viewer asking to stop transcoding. But turning the
+   candidate into a copy inside `candidate_request` cannot work, and an
+   attempt at it was reverted after adversarial review rather than shipped.
+   The reasons are worth keeping so the next attempt does not repeat them:
+
+   - **`candidate_request` cannot reconstruct a copy recipe.** It sees only
+     the transcode predecessor, which carries no memory of the copy plan the
+     session was created with, so `aac`, `preserve_dolby_vision` and
+     `convert_dolby_vision` can only be invented. For a Profile 7 title
+     direct-played as a *converting* copy — the module's own
+     `converting_copy()` fixture — Original→720p→Original then yields
+     `preserve_dolby_vision: true, convert_dolby_vision: false`: raw dual-layer
+     P7, which `http/hls.rs` already names as "the one delivery nothing plays
+     … observed in production as Safari answering `stream_rejected`". The same
+     shape loses `aac: true` for a client that cannot decode the source audio.
+     `review_client_plan` is the documented sole owner of those three fields.
+   - **"The decision refuses an incapable client" is false.**
+     `decide_preparation` reads exactly one capability bit,
+     `dual_player_preparation`; `codecs`, `dynamic_ranges` and `max_height` are
+     validated and then consulted by nothing. What actually refuses such a
+     candidate today is that `preserve_dolby_vision: true` always crosses
+     `DynamicRange`, which no `PREPARED_AXIS_SETS` row contains — an accident,
+     and one this document elsewhere invites someone to remove by adding a
+     grade row with a receipt.
+   - **It would corrupt the metric M6 exists to gather.** A copy candidate
+     keeps the delivered height, so the only axis that moves is the invented
+     grade: every viewer pressing Original on an SDR title would book a
+     `dynamic_range` fallback on a title with no grade to cross.
+
+   **What the real fix needs:** plumb the caps re-review (`review_client_plan`
+   / `apply_plan_review`) into `process_preparation_candidate` so a copy
+   candidate carries the flags that review decides, and make the capability
+   refusal real rather than incidental. That is a larger change than the
+   resolver line it looks like, and it belongs with §4 of the handoff's
+   client-adapter work rather than ahead of it.
 5. **Truthful capacity and delivery.** `DeliveryView::from_status` drops VOD
    producer decisions and delivered throughput, while
    `PreparationConditions::headroom_refusal` requires measured headroom.
