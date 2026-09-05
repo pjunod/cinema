@@ -492,17 +492,36 @@ container-smoke: docker ## Build, start, probe, restart, and re-probe the contai
 # files are evaluated with the same precedence as the mutation below. The
 # checker refuses a health grace shorter than snapshot recovery plus the named
 # startup phases before `compose up` can replace a container.
+#
+# `--emit-start-period` runs first because the readiness grace is half of a
+# pair whose other half usually lives somewhere this repository cannot edit —
+# a bind-mounted production `plurx.toml`. Requiring an operator to mirror that
+# file's snapshot deadline into `deploy/.env` by hand meant the first report of
+# a mismatch was a refused deploy on the box, which is exactly what happened.
+# So an unset grace is derived from the same deadline the refusal is computed
+# from. A grace the operator did write is passed through untouched and still
+# refused by name if it is too short: deriving is for the value nobody chose,
+# not a way to overrule somebody who chose to fail fast.
 .PHONY: docker-startup-budget-check
 docker-startup-budget-check: ## Prove the resolved Compose startup budget before deployment
-	cd deploy && python3 ../scripts/validate-docker-startup-budget
+	cd deploy && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget
 
 # The mutation below is character-for-character what somebody runs by hand in
-# `deploy/`, with only the build arg added. That is the point: a convenience
-# target that is not equivalent to the command it replaces is a trap, and this
-# one sprang on the first real deploy.
+# `deploy/`, with only the build arg and the two values a checkout can work out
+# for itself added. That is the point: a convenience target that is not
+# equivalent to the command it replaces is a trap, and this one sprang on the
+# first real deploy.
+#
+# The derived period is computed once and reused for both the proof and the
+# mutation, rather than depending on `docker-startup-budget-check` and letting
+# each recipe derive its own. A preflight that proves one number while
+# `compose up` applies another is not a preflight.
 .PHONY: docker-up
-docker-up: docker-startup-budget-check ## Build + (re)start Compose after its startup budget passes
-	cd deploy && PLURX_BUILD_REF="$(BUILD_REF)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+docker-up: ## Build + (re)start Compose after its startup budget passes
+	cd deploy && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
+	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 .PHONY: release-check

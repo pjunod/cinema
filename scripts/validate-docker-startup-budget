@@ -22,6 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 SNAPSHOT_ENV = "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"
 CONFIG_ENV = "PLURX_CONFIG"
+HEALTH_ENV = "PLURX_HEALTH_START_PERIOD"
+COMPOSE_FILE = DEPLOY / "docker-compose.yml"
+TRACKED_DEFAULT = re.compile(
+    r'(?m)^[ \t]*start_period:[ \t]*"\$\{' + HEALTH_ENV + r':-([^}]+)\}"[ \t]*$'
+)
 PHASE_NAMES = (
     "HIQLITE_HEALTH_TIMEOUT",
     "MEMBERSHIP_ADMISSION_TIMEOUT",
@@ -305,20 +310,91 @@ def effective_snapshot_timeout(
     return limits.default_snapshot_seconds, "built-in default"
 
 
-def validate_document(
-    document: dict[str, Any], limits: SourceLimits | None = None
-) -> Budget:
-    limits = limits or load_source_limits()
+def plurxd_service(document: dict[str, Any]) -> dict[str, Any]:
     services = document.get("services", {})
     service = services.get("plurxd") if isinstance(services, dict) else None
     if not isinstance(service, dict):
         raise BudgetError("resolved Compose config has no plurxd service")
+    return service
+
+
+def resolved_health_seconds(service: dict[str, Any]) -> Decimal:
     healthcheck = service.get("healthcheck")
     if not isinstance(healthcheck, dict) or healthcheck.get("disable") is True:
         raise BudgetError("resolved plurxd service has no enabled healthcheck")
-    health_seconds = parse_duration(
+    return parse_duration(
         healthcheck.get("start_period"), "plurxd health start period"
     )
+
+
+def tracked_default_health_seconds(path: Path = COMPOSE_FILE) -> Decimal:
+    """Return the health grace this repository ships when nobody sets one."""
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise BudgetError(f"cannot read {path}: {error}") from error
+    match = TRACKED_DEFAULT.search(text)
+    if match is None:
+        raise BudgetError(
+            f"{path} no longer interpolates {HEALTH_ENV} with a tracked default"
+        )
+    return parse_duration(match.group(1), f"tracked {path.name} start period")
+
+
+def start_period_for_deployment(
+    document: dict[str, Any],
+    limits: SourceLimits | None = None,
+    compose_file: Path = COMPOSE_FILE,
+) -> tuple[str, str]:
+    """Return the health grace a rollout should use, and how it was chosen.
+
+    The grace and the snapshot deadline are one budget set in two places, and
+    the deadline commonly lives in a bind-mounted production TOML this
+    repository never sees. Asking an operator to mirror it into `deploy/.env`
+    by hand meant the first report of a mismatch was a refused deploy. So a
+    grace nobody chose is derived here from the same deadline and phases the
+    refusal is computed from, and cannot drift.
+
+    Whether anybody chose is answered by Compose, not by reading `.env` and
+    hoping to agree with it: a resolved grace that is anything other than this
+    repository's own interpolation default came from a shell variable, an env
+    file, or a literal pinned in an override, at Compose's own precedence. Such
+    a value is returned untouched even when it is too short — `validate_document`
+    then refuses it by name, because a short grace is how a build that can never
+    become ready gets reported instead of waited out.
+    """
+
+    limits = limits or load_source_limits()
+    service = plurxd_service(document)
+    resolved = resolved_health_seconds(service)
+    snapshot_seconds, snapshot_source = effective_snapshot_timeout(
+        document, service, limits
+    )
+    required = snapshot_seconds + limits.startup_allowance_seconds
+    rendered = f"{display_seconds(resolved)}s"
+    if resolved >= required:
+        return rendered, f"{rendered} resolved by Compose, which covers the budget"
+    if resolved != tracked_default_health_seconds(compose_file):
+        return (
+            rendered,
+            f"{rendered} chosen by this deployment and shorter than the "
+            f"{required}s it needs; left as written for the preflight to refuse",
+        )
+    return (
+        f"{required}s",
+        f"{required}s derived from snapshot timeout {snapshot_seconds}s "
+        f"({snapshot_source}) plus the named startup phases "
+        f"{limits.startup_allowance_seconds}s",
+    )
+
+
+def validate_document(
+    document: dict[str, Any], limits: SourceLimits | None = None
+) -> Budget:
+    limits = limits or load_source_limits()
+    service = plurxd_service(document)
+    health_seconds = resolved_health_seconds(service)
     snapshot_seconds, snapshot_source = effective_snapshot_timeout(
         document, service, limits
     )
@@ -379,6 +455,14 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="validate an already-resolved Compose JSON document (test/debug only)",
     )
+    parser.add_argument(
+        "--emit-start-period",
+        action="store_true",
+        help=(
+            "print the health start period a rollout should run with, deriving "
+            "one when the operator has not chosen a value"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
         if args.compose_json is None:
@@ -387,6 +471,11 @@ def main(argv: list[str] | None = None) -> int:
             document = json.loads(args.compose_json.read_text(encoding="utf-8"))
             if not isinstance(document, dict):
                 raise BudgetError("resolved Compose JSON must be an object")
+        if args.emit_start_period:
+            value, explanation = start_period_for_deployment(document)
+            print(f"docker startup budget start period: {explanation}", file=sys.stderr)
+            print(value)
+            return 0
         budget = validate_document(document)
     except (BudgetError, OSError, json.JSONDecodeError) as error:
         print(

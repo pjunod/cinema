@@ -1704,27 +1704,58 @@ deadline as effective cluster-wide until every possible leader is current.
 Compose forwards `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` explicitly and
 pairs it with `PLURX_HEALTH_START_PERIOD`. The default five-minute health grace
 covers the 120-second snapshot deadline plus the three sequential 45-second
-startup phases. If you raise the snapshot deadline, set the health start period
-to at least that deadline plus 135 seconds; the supported maximum pair is
-3,600 seconds and 65 minutes. Do not use the 65-minute maximum as the ordinary
-default: it delays reporting a build that can never become ready.
+startup phases. Raising the snapshot deadline raises what the grace must be,
+but does not make that your bookkeeping: leave `PLURX_HEALTH_START_PERIOD`
+unset and `make docker-up` derives the grace as the resolved deadline plus 135
+seconds, from the same reading its preflight refuses on. That matters most for
+the case that used to bite — a deadline set in a bind-mounted production TOML,
+where `.env` has no reason to mention readiness at all, and the first report of
+the mismatch was a refused deploy on the box.
 
-Use `make docker-up`, not bare `docker compose up`, for a Compose rollout. Its
-first recipe is a read-only, fail-closed preflight that runs `docker compose
-config` in `deploy/`, so shell variables, `deploy/.env`, interpolation defaults,
-and override files have the same precedence they will have during the rollout.
+Set the variable only to choose a grace deliberately. Whether anybody chose is
+answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
+that is anything other than the interpolation default in
+`deploy/docker-compose.yml` came from a shell variable, an env file, or a
+literal pinned in an override, at Compose's own precedence, and is used exactly
+as resolved. It is never silently raised, because a short grace is a legitimate
+choice: it surfaces a build that can never become ready instead of waiting out
+the deadline. If it cannot cover the resolved deadline the preflight refuses it
+by name. Writing the tracked default itself — five minutes — is indistinguishable
+from writing nothing, and is derived from like anything else. The supported
+maximum pair is
+3,600 seconds and 65 minutes; do not adopt the 65-minute maximum as an ordinary
+default.
+
+Use `make docker-up`, not bare `docker compose up`, for a Compose rollout. It
+derives the period, proves it, and applies that same period — a preflight that
+proves one number while `compose up` applies another proves nothing. The proof
+is a read-only, fail-closed preflight that runs `docker compose config` in
+`deploy/`, so shell variables, `deploy/.env`, interpolation defaults, and
+override files have the same precedence they will have during the rollout.
 It then reads the effective snapshot timeout from the resolved container
 environment or, when the environment is empty, a readable bind-mounted
 production TOML. A resolved command-line `--config` path takes precedence over
 `PLURX_CONFIG`, as it does in the server. The command exits before any Compose
-mutation unless the resolved health start period covers that timeout plus all
-three named startup phases.
+mutation unless the health start period it is about to apply covers that
+timeout plus all three named startup phases.
 
 If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
 `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` in the resolved environment. With
 no explicit value, the preflight assumes the source maximum rather than
-guessing that the hidden TOML uses the default. Run the check independently
-when diagnosing configuration without changing a container:
+guessing that the hidden TOML uses the default.
+
+Two diagnostics, and they answer different questions. `make
+docker-startup-budget-check` answers "would `make docker-up` succeed here" — it
+derives the same period the rollout would and proves that. To ask instead what
+a bare `docker compose up` would apply, which derives nothing, run the script
+without the deriving step:
+
+```bash
+cd deploy && python3 ../scripts/validate-docker-startup-budget
+```
+
+Run either independently when diagnosing configuration without changing a
+container:
 
 ```bash
 make docker-startup-budget-check
@@ -2484,7 +2515,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
 | `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Snapshot transfer/install deadline in seconds, bounded 10–3,600; keep identical on every voter |
-| `PLURX_HEALTH_START_PERIOD` | — | `5m` | Compose-only Docker readiness grace; when extending the snapshot deadline, set this to at least that value plus 135 seconds |
+| `PLURX_HEALTH_START_PERIOD` | — | derived | Compose-only Docker readiness grace. Unset, `make docker-up` derives the resolved snapshot deadline plus 135 seconds (`5m` when nothing longer resolves). Set it only to choose a grace deliberately: the value is used as written, and refused rather than raised if it cannot cover the deadline |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |
