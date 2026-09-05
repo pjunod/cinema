@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 locally approved; external transfer approval required · **Updated:** 2026-09-05 ·
+**Status:** M0 final adversarial review · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -15,18 +15,18 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M0 — capture baseline and freeze diagnostic qualification |
 | Task branch | `codex/decoder-selection-m0` |
-| Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft; remote head awaits approved push |
+| Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft; remote state being reconciled |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Fast lane passes at `195b7574`; both fourth adversarial reviews approve `6009367b` |
-| Full PR validation | Pending exact media-verifier run, then unit and one full suite |
-| Blocker | Environment requires explicit approval to copy the verifier/evidence payload to `nynuc` and push committed source to GitHub |
+| Focused validation | Fast lane passes for the code committed at `4ec13f3b`; exact media verification passes on `nynuc` |
+| Full PR validation | Pending final adversarial approval, then unit and one full suite |
+| Blocker | None |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Locally approved; external evidence/push pending | [PR #915](https://github.com/pjunod/plurx/pull/915); both fourth reviews approve `6009367b` |
+| M0 · baseline and diagnostic qualification | Final adversarial review | [PR #915](https://github.com/pjunod/plurx/pull/915); exact media verifier passes at `4ec13f3b` |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -143,6 +143,16 @@ unavailable incident media or hardware qualification. The generator's
 and compares build identity, generator hash, source/playlist/segment/frame
 hashes, and probe facts with the TOML.
 
+The exact verifier was copied with only its evidence TOML to a task-scoped
+directory on `nynuc`. Its first run rejected the evidence: repeated identical
+probe rows exposed ambiguous extraction, Matroska/x265 output was not byte
+reproducible, and encoder scheduling changed the MPEG-4-derived HLS segment.
+The repaired generator collapses only identical repeated probe rows, rejects
+conflicting rows, writes HEVC to MP4, and fixes x264/x265 to deterministic
+single-threaded settings. Two independent fresh generations then matched
+byte-for-byte. The final exact run returned `"verified": true` for every
+retained build, source, output, frame, and probe fact.
+
 | Control | Available evidence | M0 result / prerequisite |
 |---|---|---|
 | #913 MPEG-4 Part 2 ASP/XVID AVI, MP3 audio, 624×352 at 25 fps | Sanitized FFmpeg 7.1.4-Jellyfin diagnostic capture | Five explicit selected-video primaries in 361 ms; original media is not present, so VideoToolbox/software output comparison remains required |
@@ -252,7 +262,8 @@ Their initial verdict was request changes; those repairs were committed before
 both agents performed a second pass. Both second passes also requested changes;
 their repairs were committed at `f9d68467`. Both third passes requested the
 additional repairs committed at `195b7574`; both fourth passes approved
-`6009367b` with no actionable findings.
+`6009367b` with no actionable findings. The reproducibility repairs at
+`4ec13f3b` are now undergoing the final fifth pass.
 GitHub had deleted the temporary effort base and closed #914; the same effort
 and task refs were restored, and #915 is the active review record.
 
@@ -285,7 +296,7 @@ and task refs were restored, and #915 is the active review record.
 | Fixture hash and parse used different opens | One descriptor now supplies both the streaming digest and classified records before action is decided |
 | Light VA-API and legacy override spellings were not frozen | A sixteenth argv case proves light VA-API stays on software decode; a pure table covers `off`, `0`, `false`, and `no` |
 | `dv_disk` subprocess inventory was incomplete and ambiguous | Capability, bound probe, unbound conversion, and Unix bound conversion have distinct rows; all 67 anchors must occur exactly once |
-| Media evidence was not rerunnable from the ledger | The generator now verifies every retained build/source/output fact; the exact `nynuc` run remains pending external payload approval |
+| Media evidence was not rerunnable from the ledger | The exact `nynuc` verifier rejected three nondeterminism defects; after repair, two fresh generations matched byte-for-byte and the exact verifier returned `"verified": true` |
 | Image IDs and hardware acceleration lacked exact per-node capture | Exact prefixed image IDs and per-node `-hwaccels` output/hash evidence are retained for all four nodes |
 
 ## Decisions and deviations
@@ -301,6 +312,8 @@ and task refs were restored, and #915 is the active review record.
 | 2026-09-05 | Do not expand legacy repeat summaries into timestamps | Their timing is unknowable, so expansion would manufacture recovery evidence |
 | 2026-09-05 | Use generated encoded controls for M0 while preserving the original-media gap | This creates reproducible source-to-HLS evidence without pretending the controls are the #913 ASP/XVID asset |
 | 2026-09-05 | Bind automatic diagnostic action to one exact build/codec grammar | Structural matching remains useful for observation, but cannot safely authorize recovery across unqualified FFmpeg builds |
+| 2026-09-05 | Use MP4 and explicit single-thread encoder controls for generated media evidence | The exact remote verifier proved Matroska/x265 and unconstrained encoder scheduling were not byte reproducible |
+| 2026-09-05 | Collapse only identical repeated probe rows | FFprobe may emit the same selected-stream fact more than once; conflicting rows remain an evidence failure |
 
 ## Validation ledger
 
@@ -341,6 +354,14 @@ lane and focused tests provide earlier feedback.
 | `195b7574` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
 | `195b7574` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
 | `195b7574` | `git diff --check` | Pass |
+| `4ec13f3b` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 22 tests, including deterministic media verification and conflicting-probe rejection |
+| `4ec13f3b` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
+| `4ec13f3b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
+| `4ec13f3b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `4ec13f3b` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
+| `4ec13f3b` | two fresh `scripts/decoder-media-baseline` generations on `nynuc` | Pass · every retained artifact digest matches byte-for-byte |
+| `4ec13f3b` | `/tmp/codex-decoder-m0-review4/decoder-media-baseline --verify /tmp/codex-decoder-m0-review4/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review7` on `nynuc` | Pass · `"verified": true` |
+| `4ec13f3b` | `git diff --check` | Pass |
 | Pending | Full PR suite after review fixes | Not run |
 
 ## Remaining evidence before release
