@@ -39,7 +39,11 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val backFocus = remember { FocusRequester() }
     RequestInitialFocus(backFocus)
-    val api = remember(origin) { LiveTvApi(origin, Session.token.orEmpty()) }
+    // `LiveTvApi` rejects an unusable origin by throwing, which out of
+    // `remember` is an uncaught crash on entering Settings -> Developer rather
+    // than the typed message every other Live TV surface shows.
+    val token = Session.token.orEmpty()
+    val api = remember(origin, token) { runCatching { LiveTvApi(origin, token) }.getOrNull() }
     var saved by remember { mutableStateOf<LiveTvSettings?>(null) }
     var readiness by remember { mutableStateOf<LiveTvReadiness?>(null) }
     var ipv4 by remember { mutableStateOf("") }
@@ -63,21 +67,23 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
     }
     fun failure(error: Exception): String = (error as? LiveTvFailure)?.message ?: liveTvMessage("stream_failed")
     fun load() {
+        val client = api ?: run { message = liveTvMessage("invalid_settings"); return }
         if (busy) return
         busy = true
         scope.launch {
-            try { apply(api.settings()); message = "Settings loaded. Save, check readiness, then enable." }
+            try { apply(client.settings()); message = "Settings loaded. Save, check readiness, then enable." }
             catch (error: Exception) { saved = null; message = failure(error) }
             finally { busy = false }
         }
     }
     fun write(change: LiveTvSettingsChange) {
         val previous = saved ?: return
+        val client = api ?: run { message = liveTvMessage("invalid_settings"); return }
         if (busy) return
         busy = true
         scope.launch {
             try {
-                val result = api.save(previous, change)
+                val result = client.save(previous, change)
                 apply(result)
                 message = "Saved. Live TV is ${if (result.live_tv_enabled) "enabled" else "disabled"}."
             } catch (error: Exception) {
@@ -114,7 +120,7 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
                 busy = true
                 scope.launch {
                     try {
-                        val result = api.readiness()
+                        val result = (api ?: throw LiveTvFailure("invalid_settings")).readiness()
                         if (result.generation != settings.live_tv_config_generation) throw LiveTvFailure("settings_conflict")
                         readiness = result
                         message = if (result.ready) "Ready. Enable is a separate action." else "Resolve the failed checks before enabling."

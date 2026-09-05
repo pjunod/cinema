@@ -141,6 +141,26 @@ class LiveTvTest {
         assertEquals(listOf("start:one"), requests.events)
     }
 
+    @Test fun anUnconfirmedReleaseRecoversWithoutAUserGesture() = runTest {
+        // The heartbeat is cancelled and, on sign-out, the screen offering
+        // "Stop / retry cleanup" no longer exists. The lease must come back
+        // for its own capability rather than hold a tuner until idle expiry.
+        val store = Store()
+        val requests = Requests()
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        val lease = LiveTvLease(requests, LiveTvStartBarrier(store) { 0 }, scope)
+        assertNotNull(lease.start("one").await())
+        requests.releaseFails = true
+        try { lease.stop().await(); fail("expected the DELETE to fail") } catch (_: Exception) { }
+        assertNotNull("a failed release must retain its capability", lease.current)
+        requests.releaseFails = false
+        testScheduler.advanceTimeBy(2_001)
+        testScheduler.runCurrent()
+        assertNull("the retry must release it without a user gesture", lease.current)
+        assertFalse("and clear the durable marker", store.value)
+        assertEquals(listOf("start:one", "release:cap-one", "release:cap-one"), requests.events)
+    }
+
     @Test fun definitiveCapacityRejectionClearsMarker() = runTest {
         val store = Store()
         val requests = Requests().apply { error = "tuner_capacity" }
