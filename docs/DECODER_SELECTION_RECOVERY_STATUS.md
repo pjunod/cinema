@@ -18,7 +18,7 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | 14 diagnostic/inventory tests and 1 normalized argument-baseline test pass at `2d4900e1` |
+| Focused validation | 15 diagnostic/inventory tests pass at `6c23d17a`; 1 normalized argument-baseline test passes at `2d4900e1` |
 | Full PR validation | Pending adversarial review and fixes |
 | Blocker | None; physical Apple/Android client and original-media runs remain later milestone evidence |
 
@@ -256,6 +256,8 @@ lane and focused tests provide earlier feedback.
 | `2d4900e1` | `make validation-lint` | Pass · 23 points, 28 checks, 1,381 files |
 | `2d4900e1` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
 | `2d4900e1` | `git diff --check` | Pass |
+| `6c23d17a` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 15 tests, including exact 16 KiB and bounded repeat-count edges |
+| `6c23d17a` | `git diff --check` | Pass |
 | Pending | Full PR suite after review fixes | Not run |
 
 ## Remaining evidence before release
