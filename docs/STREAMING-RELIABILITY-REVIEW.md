@@ -1101,6 +1101,49 @@ Session-detach cleanup, total serving admission, typed scoped timeout/NoRoom
 actions, disjoint-viewer capacity, and transition transactions remain separate
 open architecture work.
 
+**Partly corrected: a failed rendition now gives its producer back.** Reading
+the teardown paths rather than the finding turned up one leak that was
+physical rather than architectural. A recorded rendition failure is permanent
+and answers every waiter the moment it lands, and the driver returned on
+sight of one — but `Action::Idle` is the only thing that reclaims a producer
+and it is reached only through the pass that return skipped. What was left
+were the dormant purge, which refuses an admitted rendition outright, and the
+last `Arc<Rendition>` drop, which an in-flight generation task or a parked
+materialize watchdog defers for as long as it lives. On an admitted rendition
+neither fires, so a live ffmpeg — or a SIGSTOP'd one, still holding the codec
+session a running one held — stayed on the node until the process exited,
+with nothing in the product naming it. The driver now retires the producer on
+that pass instead of returning, `record_failure` wakes it so the reclaim does
+not wait for the next maintenance tick, and the attach that races a failure
+being recorded is refused where the child is still ours to kill. The
+regression asserts the pid is gone and reaped, not that a belief was
+rewritten.
+
+The stale `capacity_hold` is cleared on the same path, and it is worth being
+exact that this is hygiene rather than a wire fix: `status` answers `failed`
+ahead of every belief arm, so the latched hold was already shielded from
+clients. The first version of the test asserted a `no_room` a viewer would
+see, and no viewer ever would.
+
+**Also corrected: one unfinished terminal cleanup could wedge the whole node.**
+`maintain` waits on every unfinished cleanup belonging to a tombstoned session
+before doing anything else, and that wait had no bound — so a single cleanup
+that never completed stopped the idle reap, the dormant-rendition purge, the
+tombstone eviction and every driver kick, permanently and silently. Two arms
+could install one: `begin_end` and the supersession sweep both wrote the
+tombstone and the cleanup before reading a rendition that may be `None`, then
+returned leaving it ownerless. Both now complete it, and the wait is bounded
+so the next change to that ordering costs a logged line rather than a node.
+
+**Still open** in this area: total serving admission across sessions, fair
+service at the global limit (see §5), the reattachment path's open-coded
+detach — which duplicates `detach_reader`'s reader removal and wait retirement
+but not its subtitle-window release, contradicting that function's own comment
+— eviction windows synthesized from wait-pool pins that outlive a departed
+session's reader, and the absence of any decrement path for `completed_cache`,
+which makes an admitted rendition's footprint unreclaimable by any session
+close. None of those is addressed here.
+
 ### Astra continuation review — keep transport, media, and title ownership distinct
 
 Apple correction `856d9a0a` closes the six continuation classes from the
