@@ -54,11 +54,13 @@ and must not be broken:
 
 ### 2.1 The distinction M5 depends on
 
-`producer_state` says `failed`. That single word covered **fourteen** distinct
-producer decisions until 2026-08-31, which is exactly why no client could
-decide anything: twelve of them are timing, process or executor facts where the
-next attempt may work, and two are verdicts about the source that no retry
-changes. `DeliveryView.producer_decision` now carries which one it was, and
+`producer_state` says `failed`. That single word covered every distinct
+producer decision until 2026-08-31, which is exactly why no client could decide
+anything. There are **nineteen** of them now that VOD failures are classified
+too: sixteen are timing, process, plan or executor facts where the next attempt
+may work, and three cannot be retried into working — two verdicts about the
+source, and `EngineChanged`, which is a verdict about this daemon process.
+`DeliveryView.producer_decision` now carries which one it was, and
 `ProducerDecisionReason::is_permanent()` is the split.
 
 **This is the fact every §7.4 owner was guessing at.** Each of them, on every

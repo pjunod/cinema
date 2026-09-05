@@ -286,7 +286,7 @@ class ControlRequestWireCase(unittest.TestCase):
             )
 
     def test_the_producer_decision_is_bounded_by_one_list(self) -> None:
-        """The relay check and the enum must agree on the fourteen names.
+        """The relay check and the enum must agree on every name.
 
         A variant added to `ProducerDecisionReason` but forgotten in `ALL`
         would be accepted on the wire under no name the relay could bound, and

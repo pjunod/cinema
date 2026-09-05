@@ -268,6 +268,65 @@ the server's authoritative retryable or terminal reason.
 decision vocabulary as rolling delivery, with tests from rendition failure
 through serialized control action.
 
+**Corrected.** A recorded rendition failure now carries a class alongside its
+prose. `record_failure` takes a `ProducerDecisionReason` and every one of its
+nine production call sites supplies one; `VodSessionInfo` publishes it, and
+`DeliveryView::from_status` fills `producer_decision` from it, so
+`resolve_action` produces the `retry_resource` or `terminal` the clients
+already handle. Nothing ships on the client side for this to take effect — no
+client reads `producer_decision`; they act on the action it produces.
+
+The vocabulary is extended rather than borrowed where borrowing would lie.
+`vodgen::Failure::Stream` maps onto the existing `ReaderFailed`, because it is
+the same fact — reading the producer's output failed — and a producer that
+exits early maps onto `PartialSuccessExit`. The five additions name things
+rolling has no equivalent for: `source_changed`, `engine_changed`,
+`producer_launch_failed` (a producer that never started, as against
+`ProcessExit`, which is one that ran and stopped), `media_landing_failed` and
+`producer_write_failed`.
+
+**Four of the five are retryable; `engine_changed` is not.** A VOD rendition is
+planned once against an exact source and an exact fragment-index engine, so a
+landing, write, launch or source-moved fault is a statement about *that plan*
+rather than about the film — a fresh create re-plans and can succeed.
+`engine_changed` is different, and the adversarial review of this change is what
+established it: the engine baseline is a per-process `OnceCell` set at start-up,
+so once it has moved every planned rendition fails identically until the node
+restarts, and a reopen re-plans straight back into the same verdict. Telling
+that client to retry is telling it to poll until an operator intervenes, so it
+is permanent and carries its own terminal message.
+
+`producer_launch_failed` is the awkward one and is deliberately retryable: a
+spawn that fails under resource pressure succeeds on the next attempt, and a
+spawn that fails because the binary is missing is an install fault an operator
+reads in the same log line — not something a viewer's client should be told is
+final.
+
+**What permanence does today: nothing a viewer sees.** All three reporters stop
+*reporting* on `terminal` and deliberately leave the player alone, because
+making `terminal` end playback is M5's work. So classifying VOD failures does
+not change client behaviour yet — for a transient verdict it sets the same
+5 000 ms cadence the exchange already ran at. It is the fact M5 needs in order
+to act, and until then its value is that operators and metrics can finally see
+which failure a session actually hit.
+
+**Widening the vocabulary is only safe because the relay stopped checking
+membership.** `ControlResponseV1::is_valid_for` runs on the *relaying* node
+against that node's own compiled vocabulary, so during a rolling deploy an
+ingress on the older build would have rejected an owner's newer reason outright
+— turning a good exchange into a 503 `control_unavailable` with a 500 ms retry
+and making that session poll ten times faster than its own cadence for the whole
+deploy window. It now bounds the *shape* of the name and relays it, exactly as
+clients already ignore hold reasons they do not know. `action_is_believable`
+keeps the exact-name comparison, because an action must match the decision it
+claims to rest on.
+
+**Still open.** The per-entry materialize watchdog uses `pool.fail_entry`, which
+answers one GET without marking the rendition failed, so a producer that simply
+stops making progress still yields `action: none`. That is the remaining hole in
+"a VOD failure reaches the client as an action" and it belongs with §3's bounded
+`NoRoom` and admission work.
+
 ### P1-3 — preparation is unreachable on the production VOD observation
 
 Preparation requires a throughput headroom proof. The VOD delivery view always
@@ -541,6 +600,58 @@ seventeenth fail immediately. Existing tests prove a forward target and pool
 limits separately; they do not prove latest-target service after a reversal or
 fair service at the global limit.
 
+**Mostly already corrected — by `abb872ba`, not by this review's own work.**
+Re-reading the code rather than the finding: the reader frontier is *not* a
+monotonic high-water mark. `Reader::accept_control` assigns it, so an accepted
+backward seek moves it back, and once control owns it a segment GET can no
+longer move it at all. The driver reads that current frontier, and the eviction
+window is anchored on it — `[frontier − 2, frontier + 1 + ahead]`, never the
+interval between every position the session has visited. `last_served` survives
+only as telemetry. The narrative above describes the pre-`abb872ba` shape and
+the evidence row's line anchors are dead; both are left in place as the record
+of what was found, with this note as the correction.
+
+**Corrected here.** Two things the re-read did turn up, both real:
+
+- **A departed viewer kept stealing the producer.** `detach_reader` removed the
+  reader but left that session's registered GETs in the wait pool, and
+  `playback_demands` ranks a blocked request against the reader that asked for
+  it — with no reader it falls back to marking that session's oldest wait
+  *foreground*. So an abandoned request outranked a present viewer's and aimed
+  production at media nobody was watching, until its HTTP deadline expired.
+  Detach now retires that session's waits, waking them `Gone` — the same answer
+  their own disconnect would have produced. Reattachment removes the reader
+  inline rather than through `detach_reader`, so it retires them too; the
+  adversarial review found that path still live after the first fix.
+- **A window-locked working set asked for a sweep that could not free
+  anything.** `Manifest::has_evictable` answered without looking at what reader
+  windows protect, so `decide` returned `MakeRoom`, the sweep skipped every
+  protected index and freed nothing, and only then did the driver terminate the
+  producer. `has_evictable` now applies the same guard the sweep does, so the
+  decision is the stall up front. On its own this changes no published state —
+  which the adversarial review of this change caught, after the first version
+  of this note claimed it did.
+- **A capacity stall genuinely did not say why, and now does.** A hold with no
+  scheduled end terminates its producer — a stopped one goes on holding
+  everything a running one held — so the belief becomes `Absent` and takes the
+  reason with it. `Producer::Stopped { reason: NoRoom }` is unreachable:
+  `next_step` routes it to `Terminate`, and `after` hard-codes `Ahead` for the
+  only `Stop` that survives. The status therefore read `waiting` with no hold
+  at all, and `DeliveryView::hold_reason` — whose only feed this is — could
+  never carry `no_room`. The rendition now records the hold from each pass's
+  own decision and the status projects it across the terminated producer, so a
+  viewer's control plane can finally distinguish "nothing is arriving because
+  there is no room" from "nothing is arriving". It is cleared by the first pass
+  that decides anything else, so it cannot outlive the condition.
+- **The eviction window's ahead reach truncated** where the production horizon
+  rounds up, leaving the protected range shorter than the range the producer
+  may run into — so a sweep under pressure could evict the segment the
+  ahead-fill was about to write again.
+
+**Still open.** The hard-coded global cap against §2.3's promised setting
+(tracked as P2-10), and fair service at the global limit — no test distributes
+`PoolFull` across sessions.
+
 **Required correction:** split historical delivery telemetry from current
 demand. A large accepted discontinuity creates a new demand generation and
 window; exact in-flight requests retain their own pins, while superseded waits
@@ -774,7 +885,7 @@ are retained in
 | P0-3 | Default feature in [`crates/plurxd/Cargo.toml`](../crates/plurxd/Cargo.toml#L9); production/test default split in [`TranscodeManager::live_hls_recovery_enabled`](../crates/plurxd/src/transcode.rs#L13570); VOD refusal in [`VodServe::try_create_with_release_fence`](../crates/plurxd/src/vodserve.rs#L2307) |
 | P0-4 | Response-before-stage in [`control_session_local`](../crates/plurxd/src/http/hls.rs#L5116); placeholder stage in [`stage_prepared_successor`](../crates/plurxd/src/http/hls.rs#L5549); client vocabularies in [`playback-control.js`](../crates/plurxd/src/web/playback-control.js#L14), [`PlaybackControlReporter.swift`](../clients/apple/Sources/PlaybackControlReporter.swift#L316), and [`PlaybackControlReporter.kt`](../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt#L335); [M6 caller handoff](M6-CALLER-HANDOFF.md) §3.4–3.5 |
 | P1-1 | Watchdog/frontier before admission in [`VodServe::segment`](../crates/plurxd/src/vodserve.rs#L4112); pool cancellation in [`waitpool.rs`](../crates/plurxd/src/waitpool.rs#L126); sticky failure in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L4299); isolated `WaitPool` storm test at `waitpool.rs:405` |
-| P1-2 | VOD mapping in [`DeliveryView::from_status`](../crates/plurxd/src/playback_control.rs#L836); action resolution at `playback_control.rs:1882`; VOD failure status at [`vodserve.rs`](../crates/plurxd/src/vodserve.rs#L3315); HTTP 502 mapping at `http/hls.rs:8851` |
+| P1-2 | **Corrected.** `RenditionFailure` and `classify_failure` in [`vodserve.rs`](../crates/plurxd/src/vodserve.rs); five additions to `ProducerDecisionReason` in [`playback_control.rs`](../crates/plurxd/src/playback_control.rs); VOD arm of `DeliveryView::from_status` fills `producer_decision`. Proved by `a_classified_vod_failure_becomes_a_serialized_client_action` (every class, through action selection, to JSON), `an_unclassified_vod_failure_still_says_nothing`, `a_recorded_failure_publishes_its_class_not_only_its_sentence` and `every_generation_failure_names_what_actually_happened` |
 | P1-3 | **Corrected.** Per-session meter on [`vodserve::Session`](../crates/plurxd/src/vodserve.rs); bytes noted after downstream acknowledgement in the VOD body pump in [`http/hls.rs`](../crates/plurxd/src/http/hls.rs); carried by `VodSessionInfo` into `DeliveryView::from_status`. Proved by `a_vod_body_counts_its_delivered_bytes_where_they_leave`, `an_abandoned_vod_body_counts_nothing_it_did_not_hand_over`, `a_measured_vod_delivery_reaches_the_control_view_and_an_unmeasured_one_stays_unknown` and `a_measured_vod_rate_lets_the_headroom_decision_actually_run`. `PreparationConditions::headroom_refusal` is the real function name; the review's `has_throughput_headroom` never existed |
 | P1-4 | Detached spawn at [`http/hls.rs`](../crates/plurxd/src/http/hls.rs#L5181); asynchronous candidate reads at `http/hls.rs:5409`; preparation slot identity at [`playback_control.rs`](../crates/plurxd/src/playback_control.rs#L2418) |
 | P1-5 | SQLite commit at [`sessions.rs`](../crates/plurx-core/src/store/sqlite/sessions.rs#L1623), Hiqlite commit at [`hiqlite_sessions.rs`](../crates/plurx-core/src/store/hiqlite_sessions.rs#L1750), and best-effort timer at `http/hls.rs:5707` |
@@ -1149,6 +1260,45 @@ documentation debt:
    conversion need not re-encode video; burn and incompatible HDR requirements
    must be reported honestly. Test Original→720p→Original, including
    source-height Manual as a distinct case.
+
+   **Confirmed, attempted, and withdrawn — the obvious fix is a worse bug.**
+   The defect is real: with a transcode predecessor the old code produced
+   `Prepare { ResolutionOrBitrate }` and would have staged a source-height
+   *re-encode* for a viewer asking to stop transcoding. But turning the
+   candidate into a copy inside `candidate_request` cannot work, and an
+   attempt at it was reverted after adversarial review rather than shipped.
+   The reasons are worth keeping so the next attempt does not repeat them:
+
+   - **`candidate_request` cannot reconstruct a copy recipe.** It sees only
+     the transcode predecessor, which carries no memory of the copy plan the
+     session was created with, so `aac`, `preserve_dolby_vision` and
+     `convert_dolby_vision` can only be invented. For a Profile 7 title
+     direct-played as a *converting* copy — the module's own
+     `converting_copy()` fixture — Original→720p→Original then yields
+     `preserve_dolby_vision: true, convert_dolby_vision: false`: raw dual-layer
+     P7, which `http/hls.rs` already names as "the one delivery nothing plays
+     … observed in production as Safari answering `stream_rejected`". The same
+     shape loses `aac: true` for a client that cannot decode the source audio.
+     `review_client_plan` is the documented sole owner of those three fields.
+   - **"The decision refuses an incapable client" is false.**
+     `decide_preparation` reads exactly one capability bit,
+     `dual_player_preparation`; `codecs`, `dynamic_ranges` and `max_height` are
+     validated and then consulted by nothing. What actually refuses such a
+     candidate today is that `preserve_dolby_vision: true` always crosses
+     `DynamicRange`, which no `PREPARED_AXIS_SETS` row contains — an accident,
+     and one this document elsewhere invites someone to remove by adding a
+     grade row with a receipt.
+   - **It would corrupt the metric M6 exists to gather.** A copy candidate
+     keeps the delivered height, so the only axis that moves is the invented
+     grade: every viewer pressing Original on an SDR title would book a
+     `dynamic_range` fallback on a title with no grade to cross.
+
+   **What the real fix needs:** plumb the caps re-review (`review_client_plan`
+   / `apply_plan_review`) into `process_preparation_candidate` so a copy
+   candidate carries the flags that review decides, and make the capability
+   refusal real rather than incidental. That is a larger change than the
+   resolver line it looks like, and it belongs with §4 of the handoff's
+   client-adapter work rather than ahead of it.
 5. **Truthful capacity and delivery.** `DeliveryView::from_status` drops VOD
    producer decisions and delivered throughput, while
    `PreparationConditions::headroom_refusal` requires measured headroom.

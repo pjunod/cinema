@@ -570,7 +570,11 @@ expected_occurrences = 15
 [[module_symbols]]
 id = "m4-owner-bound-vod-outcome"
 pattern = "VodPublication"
-expected_occurrences = 24
+# 24 -> 25 with P1-2's classification proof: one more `VodPublication` in
+# `a_source_that_moves_is_published_as_a_source_change`, which matches the
+# refusal a moved source produces on a real segment GET. It reads an owner-bound
+# answer; it does not create or forward one.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-vod-status-owner-admission"
@@ -1471,7 +1475,28 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # publishes after its own answer counted bytes, and what a second viewer of the
 # same immutable rendition publishes instead. No process, producer or timer is
 # created or owned.
-expected_occurrences = 226
+# 226 -> 235 with P1-2's VOD failure classification. None of the nine launches
+# anything; the sentinel's pattern catches `.status(` alongside `.spawn(` and
+# `.output(`. Two are production: `record_failure` logs `decision.status()`, and
+# `status_publication` projects the recorded class onto `VodSessionInfo`. The
+# other seven are in the regressions -- `VodServe::status` registry reads that
+# assert what a session publishes before and after a failure is recorded, and
+# `ProducerDecisionReason::status()` projections that pin each class to its wire
+# name through action selection. No process, producer or timer is created.
+# 235 -> 237 after the P1-2 review: two more `VodServe::status` reads, in the
+# regressions that pin a moved source to `source_changed` end to end and that
+# require a recorded cause to survive its own consequence. Registry reads; they
+# launch nothing.
+# 237 -> 239 with the review's permanence proofs: two more
+# `ProducerDecisionReason::status()` projections, in the assertion that every
+# permanent reason carries its own terminal sentence and in the per-arm
+# permanence check. Projections of an enum onto its wire name; nothing is
+# launched.
+# 239 -> 242 with the capacity-hold and reattach regressions: three more
+# `VodServe::status` reads, in the proof that a stall still says `no_room` after
+# the producer it terminated is gone (healthy, held, and cleared again). Registry
+# reads; they launch nothing.
+expected_occurrences = 242
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1505,7 +1530,13 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # old pool.wait becomes registered.wait, for no net change. All thirteen are
 # in-process waits, not OS-child lifecycle calls; the existing timeout remains
 # owned by each admitted request rather than by a detached task.
-expected_occurrences = 319
+# 319 -> 322 with the departing-session wait retirement: three
+# `RegisteredWait::wait` calls in `a_departing_session_takes_its_own_waits_and
+# _nobody_elses`. The sentinel's pattern catches `.wait(` alongside `.kill(` and
+# `.try_wait(`; these await a oneshot from the pool under a bounded deadline and
+# own no child process. The test requires the departing session's waiter to be
+# answered `Gone` and both surviving waiters to be served normally.
+expected_occurrences = 322
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

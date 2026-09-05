@@ -291,6 +291,11 @@ pub struct VodSessionInfo {
     pub producer_state: &'static str,
     pub producer_hold: Option<&'static str>,
     pub producer_failed: Option<String>,
+    /// The bounded class of that failure, in the same vocabulary rolling
+    /// delivery publishes. `producer_failed` is the sentence an operator
+    /// reads; this is the only part a client can act on, because
+    /// `producer_state` flattens every failure to the word `failed`.
+    pub producer_decision: Option<&'static str>,
     pub published_end_ms: Option<i64>,
     /// The end of the contiguous materialized run measured from the segment
     /// this client was last served, rather than from segment 0.
@@ -515,7 +520,12 @@ struct Reader {
     /// Before control arrives, successful media commits are the fallback.
     frontier: u32,
     control_sequence: Option<u64>,
-    /// The last segment actually served — the eviction window's playhead.
+    /// The last segment actually served. Telemetry only: the observed runway
+    /// the status publishes is measured from here, while both the eviction
+    /// window and the production target are anchored on `frontier`, which
+    /// accepted control owns. Reading this as the playhead would put a
+    /// viewer's protected range back where their bytes came from rather than
+    /// where they are now.
     last_served: Option<u32>,
     /// Per-playback provenance for speculative marker production. This is
     /// deliberately separate from the ordinary reader frontier: moving the
@@ -1209,7 +1219,26 @@ struct Rendition {
     marker_prewarm_generation: AtomicU64,
     /// A recorded producer failure: subsequent planned-segment GETs answer
     /// `ProducerFailed` until a new create replaces the rendition.
-    failed: StdMutex<Option<String>>,
+    ///
+    /// The class travels with the prose. The prose is a sentence for an
+    /// operator reading a log; the class is the only part a client can act on,
+    /// because `producer_state` flattens every failure to the word `failed`
+    /// and a client that cannot tell "try again" from "this will never work"
+    /// guesses toward retry — reopening, getting the same verdict, reopening
+    /// again.
+    failed: StdMutex<Option<RenditionFailure>>,
+    /// The capacity hold this rendition is under, if any, retained across the
+    /// producer that was terminated for it.
+    ///
+    /// A hold that cannot clear on its own terminates the producer — a stopped
+    /// one goes on holding everything a running one held — which leaves the
+    /// belief `Absent` and takes the reason with it. So the status said
+    /// `waiting` with no hold: the viewer's control plane saw a producer that
+    /// had stopped and never saw *why*, which for a capacity stall is the only
+    /// fact that explains why nothing is arriving. Recorded from each pass's
+    /// own decision and cleared by the first pass that decides anything else,
+    /// so it cannot outlive the condition.
+    capacity_hold: StdMutex<Option<crate::prodsched::Hold>>,
     /// Woken when `init.mp4` lands, for GETs waiting on the identity.
     init_notify: Notify,
     /// The driver's kick: wait registration, segment GETs, attach/detach,
@@ -1235,8 +1264,14 @@ impl Rendition {
         self.wake.notify_one();
     }
 
-    fn failure(&self) -> Option<String> {
+    fn failure(&self) -> Option<RenditionFailure> {
         self.failed.lock().expect("failed lock").clone()
+    }
+
+    /// Just the operator-facing sentence, for the paths that answer a typed
+    /// HTTP refusal whose body is prose.
+    fn failure_cause(&self) -> Option<String> {
+        self.failure().map(|failure| failure.cause)
     }
 
     fn identity_path(&self) -> PathBuf {
@@ -1259,7 +1294,7 @@ impl Rendition {
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
-    async fn detach_reader(&self, session_id: &str) {
+    async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
         {
             let mut readers = self.readers.lock().await;
             readers.remove(session_id);
@@ -1267,6 +1302,13 @@ impl Rendition {
                 *self.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
             }
         }
+        // Retire this session's parked GETs with its reader, not after them.
+        // `playback_demands` ranks a blocked request against the reader that
+        // asked for it, and with no reader to rank against it falls back to
+        // marking the session's oldest wait foreground — so a departed
+        // viewer's abandoned request outranks a present viewer's and aims the
+        // producer at media nobody is watching until its deadline expires.
+        pool.retire_session(&self.key, session_id);
         // Every VOD session end converges here — terminal, idle reap and
         // reattachment alike — so this is the one place a departing viewer's
         // subtitle window is released. The readers guard is deliberately
@@ -2041,6 +2083,7 @@ impl VodServe {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -2061,7 +2104,7 @@ impl VodServe {
             .get(session_id)
             .and_then(|session| session.rendition.as_ref().map(Arc::clone));
         if let Some(previous) = previous {
-            previous.detach_reader(session_id).await;
+            previous.detach_reader(&self.shared.pool, session_id).await;
         }
         rendition.attach_reader(session_id, 0).await;
         self.shared.sessions.lock().await.insert(
@@ -2726,6 +2769,16 @@ impl VodServe {
                     *previous.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
                 }
             }
+            // Reattachment removes the reader here rather than through
+            // `detach_reader`, so it needs the same wait retirement: this
+            // viewer has moved to another rendition, and any request still
+            // parked on the one they left has no reader to be ranked against.
+            // `playback_demands` would mark it foreground on exactly that
+            // absence and keep the old rendition producing for somebody who
+            // is no longer watching it.
+            if let Some(previous) = previous_rendition.as_ref() {
+                self.shared.pool.retire_session(&previous.key, &session_id);
+            }
         }
         replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
         *rendition.dormant_since.lock().expect("dormant lock") = None;
@@ -3134,7 +3187,7 @@ impl VodServe {
                 pause.wait().await;
                 pause.wait().await;
             }
-            rendition.detach_reader(&session_id).await;
+            rendition.detach_reader(&shared.pool, &session_id).await;
             rendition.kick();
             let serve = VodServe { shared };
             serve.emit_lifecycle(
@@ -3538,7 +3591,19 @@ impl VodServe {
                     }),
                     true,
                 ),
-                Producer::Absent { .. } => ("waiting", None, false),
+                // A capacity hold outlives the producer it terminated, so a
+                // rendition that wants to produce and cannot still says why.
+                Producer::Absent { .. } => {
+                    match *rendition.capacity_hold.lock().expect("capacity hold") {
+                        Some(crate::prodsched::Hold::NoRoom { .. }) => {
+                            ("waiting", Some("no_room"), false)
+                        }
+                        Some(crate::prodsched::Hold::WorkingSetFull { .. }) => {
+                            ("waiting", Some("working_set"), false)
+                        }
+                        _ => ("waiting", None, false),
+                    }
+                }
             }
         };
         let fetched_end_ms = last_served
@@ -3554,7 +3619,8 @@ impl VodServe {
                 playlist_shape: "vod",
                 producer_state,
                 producer_hold,
-                producer_failed: failed,
+                producer_failed: failed.as_ref().map(|f| f.cause.clone()),
+                producer_decision: failed.as_ref().map(|f| f.decision.status()),
                 published_end_ms,
                 ready_ahead_end_ms,
                 fetched_end_ms,
@@ -4305,7 +4371,7 @@ impl VodServe {
                 // Keep the per-id gate through detach. A resurrection for the
                 // same durable id must attach only after this old reader is
                 // gone, never between registry removal and detach.
-                rendition.detach_reader(&id).await;
+                rendition.detach_reader(&self.shared.pool, &id).await;
                 tracing::info!(
                     session = %session_log_id(&id),
                     rendition = %rendition.key,
@@ -4386,7 +4452,12 @@ impl VodServe {
     ) -> Result<SegmentReady, VodError> {
         if self.source_changed(rendition) {
             let cause = "source changed after the fragment index was selected".to_owned();
-            record_failure(&self.shared, rendition, cause.clone());
+            record_failure(
+                &self.shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
             return Err(VodError::ProducerFailed(cause));
         }
         let demand = self
@@ -4413,12 +4484,17 @@ impl VodServe {
                 if self.source_changed(rendition) {
                     let cause =
                         "source changed while the rendition init was being opened".to_owned();
-                    record_failure(&self.shared, rendition, cause.clone());
+                    record_failure(
+                        &self.shared,
+                        rendition,
+                        crate::playback_control::ProducerDecisionReason::SourceChanged,
+                        cause.clone(),
+                    );
                     return Err(VodError::ProducerFailed(cause));
                 }
                 return Ok(ready);
             }
-            if let Some(cause) = rendition.failure() {
+            if let Some(cause) = rendition.failure_cause() {
                 return Err(VodError::ProducerFailed(cause));
             }
             if demand.expired() {
@@ -4452,7 +4528,7 @@ impl VodServe {
         if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
             return Ok(ready);
         }
-        if let Some(cause) = rendition.failure() {
+        if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
         self.blocked_wait(rendition, session_id, index, budget, delivery)
@@ -4501,7 +4577,7 @@ impl VodServe {
         if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
             return Ok(ready);
         }
-        if let Some(cause) = rendition.failure() {
+        if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
         if demand.expired() {
@@ -4579,7 +4655,12 @@ impl VodServe {
     ) -> Result<Option<SegmentReady>, VodError> {
         if self.source_changed(rendition) {
             let cause = "source changed after the fragment index was selected".to_owned();
-            record_failure(&self.shared, rendition, cause.clone());
+            record_failure(
+                &self.shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
             return Err(VodError::ProducerFailed(cause));
         }
         let manifest = rendition.manifest.lock().await;
@@ -5196,6 +5277,7 @@ impl Shared {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -5451,7 +5533,26 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             held: matches!(belief, Producer::Stopped { .. }),
         },
     };
-    let decision = decide_with_marker_prewarm(&manifest, &demands, position, &prewarm_ledgers);
+    // The eviction windows are read before the decision, not inside the sweep
+    // it may ask for: whether anything can be given up is not answerable
+    // without knowing what is protected, and answering it wrongly turns a
+    // capacity stall into a producer that looks like it stopped making
+    // progress.
+    let windows = eviction_windows(shared, rendition).await;
+    let decision =
+        decide_with_marker_prewarm(&manifest, &demands, position, &windows, &prewarm_ledgers);
+    // Recorded from this pass's own decision, before the step that acts on it.
+    // A hold with no scheduled end terminates its producer, so the belief that
+    // would otherwise carry the reason is gone by the time anyone reads the
+    // status; a hold that clears on its own is still carried by the stopped
+    // producer and needs nothing here. Any other decision clears it, so the
+    // record cannot outlive the condition that produced it.
+    *rendition.capacity_hold.lock().expect("capacity hold") = match decision.action {
+        Action::Suspend { reason, .. } if !crate::prodexec::clears_on_its_own(reason) => {
+            Some(reason)
+        }
+        _ => None,
+    };
     let step = retire_completed_marker_prewarm(
         rendition,
         belief,
@@ -5500,7 +5601,6 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             }
         }
         Step::MakeRoom { wanted } => {
-            let windows = eviction_windows(shared, rendition).await;
             match rendition
                 .dir
                 .make_room(&mut manifest, &windows, wanted)
@@ -5683,9 +5783,10 @@ fn decide_with_marker_prewarm(
     manifest: &Manifest,
     demands: &[Demand],
     position: Position,
+    readers: &[ReaderWindow],
     prewarm_ledgers: &[Arc<StdMutex<MarkerPrewarmLedger>>],
 ) -> MarkerPrewarmDecision {
-    let foreground_action = decide(manifest, demands, position);
+    let foreground_action = decide(manifest, demands, position, readers);
     // Real reader demand is always decided first. Only an idle producer or
     // one that would otherwise stop at the ordinary ahead horizon may spend
     // work on a marker destination. Capacity holds never evict or make room
@@ -5720,7 +5821,7 @@ fn decide_with_marker_prewarm(
                 // above proved the playhead has no work left.
                 Demand::waiting_on(candidate.target_entry)
             };
-            (candidate, decide(manifest, &[demand], position))
+            (candidate, decide(manifest, &[demand], position, readers))
         })
         .filter(|(_, action)| {
             matches!(
@@ -5838,6 +5939,7 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
         record_failure(
             shared,
             rendition,
+            crate::playback_control::ProducerDecisionReason::EngineChanged,
             "the v2 fragment-index engine changed; restart is required".to_owned(),
         );
         return;
@@ -5882,7 +5984,12 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
             Ok(child) => child,
             Err(error) => {
                 let cause = format!("spawning the producer: {error}");
-                record_failure(shared, rendition, cause);
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    cause,
+                );
                 return;
             }
         };
@@ -5890,6 +5997,7 @@ async fn spawn_generation(shared: &Arc<Shared>, rendition: &Arc<Rendition>, at: 
             record_failure(
                 shared,
                 rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
                 "the producer started without a stdout".to_string(),
             );
             return;
@@ -6089,7 +6197,7 @@ async fn establish_or_verify(
         on_generation_end(
             shared,
             rendition,
-            Outcome::Failed(Failure::Stream(
+            Outcome::Failed(Failure::EngineChanged(
                 "the v2 fragment-index engine changed before init publication".to_owned(),
             )),
             epoch,
@@ -6206,7 +6314,12 @@ async fn on_generation_end(
             on_init_drift(shared, rendition, cause).await;
         }
         Outcome::Failed(failure) => {
-            record_failure(shared, rendition, describe_failure(&failure));
+            record_failure(
+                shared,
+                rendition,
+                classify_failure(&failure),
+                describe_failure(&failure),
+            );
         }
         Outcome::Ran { produced_through } => {
             let last = rendition.plan.len().saturating_sub(1) as u32;
@@ -6220,6 +6333,7 @@ async fn on_generation_end(
                 record_failure(
                     shared,
                     rendition,
+                    crate::playback_control::ProducerDecisionReason::PartialSuccessExit,
                     format!("producer exited early (produced through {produced_through:?})"),
                 );
             } else {
@@ -6260,12 +6374,42 @@ async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Rendition>, cause: 
         );
         return;
     }
-    record_failure(shared, rendition, cause);
+    // Init drift is a *pipeline* change under a rendition a client already
+    // holds a playlist for — vodgen says so in as many words — so it is filed
+    // as the engine moving, not as the file on disk moving.
+    record_failure(
+        shared,
+        rendition,
+        crate::playback_control::ProducerDecisionReason::EngineChanged,
+        cause,
+    );
 }
 
-fn record_failure(shared: &Arc<Shared>, rendition: &Arc<Rendition>, cause: String) {
-    tracing::warn!(rendition = %rendition.key, "producer failed: {cause}");
-    *rendition.failed.lock().expect("failed lock") = Some(cause.clone());
+fn record_failure(
+    shared: &Arc<Shared>,
+    rendition: &Arc<Rendition>,
+    decision: crate::playback_control::ProducerDecisionReason,
+    cause: String,
+) {
+    tracing::warn!(
+        rendition = %rendition.key,
+        decision = decision.status(),
+        "producer failed: {cause}"
+    );
+    {
+        // First failure wins. A publication fence records the cause — the
+        // source moved, the engine moved — and the generation it stops then
+        // ends with a *consequence*: the sink refused the bytes, the pipe
+        // closed. Overwriting would file the consequence as the diagnosis and
+        // publish a class that names the wrong subsystem.
+        let mut failed = rendition.failed.lock().expect("failed lock");
+        if failed.is_none() {
+            *failed = Some(RenditionFailure {
+                decision,
+                cause: cause.clone(),
+            });
+        }
+    }
     shared.pool.fail(&rendition.key, &cause);
     // Init waiters block on their own Notify, not the wait pool — without
     // this, a GET waiting for `init.mp4` sleeps its whole budget to learn
@@ -6273,9 +6417,42 @@ fn record_failure(shared: &Arc<Shared>, rendition: &Arc<Rendition>, cause: Strin
     rendition.init_notify.notify_waiters();
 }
 
+/// One recorded rendition failure: what a client can act on, and what an
+/// operator reads.
+#[derive(Debug, Clone)]
+struct RenditionFailure {
+    /// The bounded class, in the same vocabulary rolling delivery publishes.
+    /// This is what becomes `DeliveryView::producer_decision`, and through it
+    /// a `terminal` or `retry_resource` action the clients already handle.
+    decision: crate::playback_control::ProducerDecisionReason,
+    /// The sentence. Never parsed, only shown.
+    cause: String,
+}
+
+/// Classify one generation outcome.
+///
+/// `Stream` is genuinely the reader failing on the producer's output, which is
+/// what `ReaderFailed` already names on the rolling side; the other two have
+/// no rolling equivalent, because nothing rolling lands fragments at planned
+/// film times or writes through an immutable sink.
+fn classify_failure(failure: &Failure) -> crate::playback_control::ProducerDecisionReason {
+    use crate::playback_control::ProducerDecisionReason as Reason;
+    match failure {
+        // Handled before this point by `on_init_drift`; classified here so the
+        // match stays exhaustive rather than defaulting a new variant, and
+        // with the same class that path records.
+        Failure::InitDrift(_) => Reason::EngineChanged,
+        Failure::EngineChanged(_) => Reason::EngineChanged,
+        Failure::Landing(_) => Reason::MediaLandingFailed,
+        Failure::Stream(_) => Reason::ReaderFailed,
+        Failure::Sink(_) => Reason::ProducerWriteFailed,
+    }
+}
+
 fn describe_failure(failure: &Failure) -> String {
     match failure {
         Failure::InitDrift(why) => format!("init drift: {why}"),
+        Failure::EngineChanged(why) => format!("engine changed: {why}"),
         Failure::Landing(why) => format!("landing failed: {why}"),
         Failure::Stream(why) => format!("stream failed: {why}"),
         Failure::Sink(error) => format!("sink refused: {error}"),
@@ -6369,24 +6546,37 @@ impl vodgen::Sink for RenditionSink {
             // ended normally rather than faulted.
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
+        // Both fences record their own class before returning. vodgen sees
+        // only an `io::Error` and wraps it as `Failure::Sink`, which would
+        // otherwise be classified `producer_write_failed` — a sink fault,
+        // which is not what happened. `record_failure` is first-wins, so the
+        // class recorded here survives the generation ending underneath it.
         if self
             .rendition
             .source
             .as_ref()
             .is_some_and(|source| !source.unchanged())
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "source changed before fragment publication",
-            ));
+            let cause = "source changed before fragment publication".to_owned();
+            record_failure(
+                &self.shared,
+                &self.rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
         if self.rendition.recipe.cluster_cache_key.is_some()
             && !crate::ffmpeg::fragment_index_engine_is_current().await
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "v2 fragment-index engine changed before fragment publication",
-            ));
+            let cause = "v2 fragment-index engine changed before fragment publication".to_owned();
+            record_failure(
+                &self.shared,
+                &self.rendition,
+                crate::playback_control::ProducerDecisionReason::EngineChanged,
+                cause.clone(),
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
         let len = bytes.len() as u64;
         {
@@ -6692,7 +6882,11 @@ fn reader_window(reader: &Reader, seconds_per_segment: f64) -> ReaderWindow {
     } else {
         1.0
     };
-    let ahead = ((f64::from(AHEAD_HORIZON_SECONDS) / per) as u32).max(1);
+    // `ceil`, matching `Position::horizon_segments`, which is what bounds how
+    // far the producer may run. Truncating made the protected range shorter
+    // than the range the ahead-fill is allowed to reach, so a sweep under
+    // pressure could evict the segment the producer was about to write again.
+    let ahead = ((f64::from(AHEAD_HORIZON_SECONDS) / per).ceil() as u32).max(1);
     ReaderWindow {
         back: 2,
         playhead,
@@ -7436,6 +7630,7 @@ mod tests {
             active_marker_prewarms: AtomicU32::new(0),
             marker_prewarm_generation: AtomicU64::new(0),
             failed: StdMutex::new(None),
+            capacity_hold: StdMutex::new(None),
             init_notify: Notify::new(),
             wake: Notify::new(),
             gen_epoch: AtomicU64::new(0),
@@ -7570,7 +7765,7 @@ mod tests {
             working_set: WorkingSet::default(),
         };
         assert_eq!(
-            decide(&manifest, &[Demand::idle_at(frontier)], empty_position),
+            decide(&manifest, &[Demand::idle_at(frontier)], empty_position, &[]),
             Action::Reposition { to: frontier },
             "the foreground fixture itself starts at the playhead window"
         );
@@ -7578,6 +7773,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             empty_position,
+            &[],
             &ledgers,
         );
         assert_eq!(
@@ -7616,6 +7812,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             filled_position,
+            &[],
             &ledgers,
         );
         assert!(matches!(
@@ -7643,6 +7840,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &ledgers,
         );
         assert_eq!(
@@ -7681,6 +7879,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &ledgers,
         );
         assert!(
@@ -7907,6 +8106,7 @@ mod tests {
             &manifest,
             &[Demand::idle_at(frontier)],
             unpressured,
+            &[],
             &[Arc::clone(&ledger), Arc::clone(&enabled_ledger)],
         );
         assert_eq!(enabled.owners.len(), 1);
@@ -9675,6 +9875,381 @@ mod tests {
         assert_eq!(first, second, "the playlist is immutable (plan §2.1)");
     }
 
+    /// A capacity stall says why, after the producer it terminated is gone.
+    ///
+    /// A hold with no scheduled end terminates its producer — a stopped one
+    /// goes on holding everything a running one held — which leaves the belief
+    /// `Absent` and takes the reason with it. The status then said `waiting`
+    /// with no hold at all, so a viewer's control plane saw a producer stop
+    /// and never saw that the working set was full. `hold_reason` is the only
+    /// fact that distinguishes "nothing is arriving because there is no room"
+    /// from "nothing is arriving".
+    #[tokio::test]
+    async fn a_capacity_stall_still_says_no_room_after_its_producer_is_gone() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        assert_eq!(
+            serve.status("sess-a").await.expect("status").producer_hold,
+            None,
+            "a healthy rendition is not holding"
+        );
+
+        *rendition.capacity_hold.lock().expect("capacity hold") =
+            Some(crate::prodsched::Hold::NoRoom { wanted: 4_096 });
+        let held = serve.status("sess-a").await.expect("status");
+        assert_eq!(
+            held.producer_hold,
+            Some("no_room"),
+            "the reason outlives the producer it terminated"
+        );
+
+        // And it is cleared by the first pass that decides anything else,
+        // rather than being latched for the life of the rendition.
+        *rendition.capacity_hold.lock().expect("capacity hold") = None;
+        assert_eq!(
+            serve.status("sess-a").await.expect("status").producer_hold,
+            None
+        );
+    }
+
+    /// Reattachment removes a reader without going through `detach_reader`,
+    /// so it needs the same wait retirement.
+    ///
+    /// A viewer who creates again lands on a different rendition; anything
+    /// still parked on the one they left has no reader to be ranked against,
+    /// and `playback_demands` marks a session's oldest wait foreground on
+    /// exactly that absence — keeping the abandoned rendition producing for
+    /// somebody who is no longer watching it.
+    #[tokio::test]
+    async fn reattaching_elsewhere_retires_the_waits_left_behind() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let first = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("the first rendition");
+
+        let _parked = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: first.key.clone(),
+                    index: 40,
+                },
+                "sess-a",
+            )
+            .expect("a parked request on the rendition being left");
+        assert_eq!(serve.shared.pool.demands(&first.key).len(), 1);
+
+        // Same session, a different recipe: a different rendition key, and the
+        // reader moves to it.
+        let mut moved = request("play-a", 0.0);
+        moved.kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        serve
+            .try_create(
+                &moved,
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "sess-a".to_string(),
+            )
+            .await
+            .expect("the replacement is VOD-presentable");
+        let second = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("the replacement rendition");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "the fixture must actually move the viewer to another rendition"
+        );
+
+        assert!(
+            serve.shared.pool.demands(&first.key).is_empty(),
+            "the request left behind goes with the reader that made it"
+        );
+    }
+
+    /// A detached viewer stops being demand at the moment their reader goes,
+    /// not when their abandoned request finally times out.
+    ///
+    /// `playback_demands` ranks a blocked request against the reader that
+    /// asked for it. With the reader gone it falls back to marking that
+    /// session's oldest wait foreground — so until the request's HTTP deadline
+    /// expired, a viewer who had already left outranked one who was still
+    /// watching and pointed the producer at media nobody wanted.
+    #[tokio::test]
+    async fn a_detached_viewer_stops_being_demand_with_its_reader() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        create(&serve, &file, "sess-b", "play-b", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        let _leaving = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 40,
+                },
+                "sess-a",
+            )
+            .expect("a parked request for the leaving viewer");
+        let _staying = serve
+            .shared
+            .pool
+            .register(
+                WaitKey {
+                    rendition: rendition.key.clone(),
+                    index: 2,
+                },
+                "sess-b",
+            )
+            .expect("a parked request for the viewer who stays");
+        assert_eq!(serve.shared.pool.demands(&rendition.key).len(), 2);
+
+        rendition.detach_reader(&serve.shared.pool, "sess-a").await;
+
+        let remaining = serve.shared.pool.demands(&rendition.key);
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the departing viewer's parked request left with its reader"
+        );
+        assert_eq!(
+            remaining[0].session, "sess-b",
+            "and the viewer still watching keeps theirs"
+        );
+    }
+
+    /// P1-2. A recorded failure carries its class to the session status.
+    ///
+    /// The prose was always there; the class is what a client can act on.
+    /// Without it `DeliveryView::from_status` had nothing to publish, so a
+    /// rendition that had genuinely failed still produced `action: none`.
+    #[tokio::test]
+    async fn a_recorded_failure_publishes_its_class_not_only_its_sentence() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+
+        let healthy = serve.status("sess-a").await.expect("status");
+        assert_eq!(healthy.producer_decision, None, "nothing has failed");
+        assert_eq!(healthy.producer_failed, None);
+
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+        record_failure(
+            &serve.shared,
+            &rendition,
+            Reason::SourceChanged,
+            "source changed after the fragment index was selected".to_owned(),
+        );
+
+        let failed = serve.status("sess-a").await.expect("status");
+        assert_eq!(failed.producer_state, "failed");
+        assert_eq!(
+            failed.producer_decision,
+            Some(Reason::SourceChanged.status()),
+            "the class travels with the failure"
+        );
+        assert_eq!(
+            failed.producer_failed.as_deref(),
+            Some("source changed after the fragment index was selected"),
+            "the operator's sentence is not replaced by the class"
+        );
+    }
+
+    /// The first failure is the cause; a later one is its consequence.
+    ///
+    /// A publication fence records `source_changed` and then stops the
+    /// generation, which ends by reporting that its sink refused the bytes.
+    /// Overwriting would file the consequence as the diagnosis and publish a
+    /// class naming the wrong subsystem — `producer_write_failed` for a source
+    /// that moved. The sentence must not drift from the class either.
+    #[tokio::test]
+    async fn a_recorded_cause_is_not_overwritten_by_its_own_consequence() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = serve
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get("sess-a")
+            .and_then(|session| session.live_rendition().map(Arc::clone))
+            .expect("a live rendition");
+
+        record_failure(
+            &serve.shared,
+            &rendition,
+            Reason::SourceChanged,
+            "source changed before fragment publication".to_owned(),
+        );
+        record_failure(
+            &serve.shared,
+            &rendition,
+            Reason::ProducerWriteFailed,
+            "sink refused: source changed before fragment publication".to_owned(),
+        );
+
+        let failure = rendition.failure().expect("a recorded failure");
+        assert_eq!(
+            failure.decision,
+            Reason::SourceChanged,
+            "the fence that stopped the generation is the diagnosis"
+        );
+        assert_eq!(
+            failure.cause, "source changed before fragment publication",
+            "the sentence stays with the class it was recorded beside"
+        );
+    }
+
+    /// A source that moves under a rendition is published as a source change,
+    /// end to end, not as whatever the generation happened to say on its way
+    /// down.
+    ///
+    /// This is one of the classification choices that had no coverage: the
+    /// class chosen at a `record_failure` site is invisible to a test that
+    /// supplies its own.
+    #[tokio::test]
+    async fn a_source_that_moves_is_published_as_a_source_change() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+
+        // Move the source under the fence the rendition took at create.
+        let mut bytes = tokio::fs::read(&file.path).await.expect("source bytes");
+        bytes.extend_from_slice(b"moved");
+        tokio::fs::write(&file.path, &bytes)
+            .await
+            .expect("rewrite the source");
+
+        let answer = serve.segment("sess-a", "seg00000.m4s").await;
+        assert!(
+            matches!(
+                answer,
+                Some(VodPublication {
+                    result: Err(VodError::ProducerFailed(_)),
+                    ..
+                })
+            ),
+            "a moved source must refuse the GET, not serve stale media"
+        );
+
+        let status = serve.status("sess-a").await.expect("status");
+        assert_eq!(status.producer_state, "failed");
+        assert_eq!(
+            status.producer_decision,
+            Some(Reason::SourceChanged.status()),
+            "the class names what actually changed"
+        );
+        assert!(
+            !Reason::SourceChanged.is_permanent(),
+            "a moved source is a statement about this plan: a fresh create \
+             re-plans against the file that is there now"
+        );
+    }
+
+    /// Every generation outcome has a class, and each names what happened.
+    ///
+    /// A `match` that fell through to one bucket would compile and would make
+    /// the whole vocabulary decorative, so this pins each arm. `Stream` maps
+    /// onto rolling's existing `ReaderFailed` because it is the same fact —
+    /// reading the producer's output failed — while landing and sink faults
+    /// have no rolling equivalent and get their own names rather than borrow
+    /// one that would misdescribe them.
+    #[test]
+    fn every_generation_failure_names_what_actually_happened() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let cases = [
+            (Failure::InitDrift("init".to_owned()), Reason::EngineChanged),
+            (
+                Failure::EngineChanged("engine".to_owned()),
+                Reason::EngineChanged,
+            ),
+            (
+                Failure::Landing("landing".to_owned()),
+                Reason::MediaLandingFailed,
+            ),
+            (Failure::Stream("stream".to_owned()), Reason::ReaderFailed),
+            (
+                Failure::Sink(io::Error::other("sink")),
+                Reason::ProducerWriteFailed,
+            ),
+        ];
+        for (failure, expected) in cases {
+            assert_eq!(
+                classify_failure(&failure),
+                expected,
+                "{} must not be filed as something else",
+                describe_failure(&failure)
+            );
+            // Permanence follows what a retry can change, not which subsystem
+            // failed. A landing, stream or sink fault is a statement about
+            // this attempt, and a fresh create can succeed. An engine change
+            // is not: the engine baseline is established once per process, so
+            // every reopen re-plans straight back into the same verdict.
+            assert_eq!(
+                classify_failure(&failure).is_permanent(),
+                expected == Reason::EngineChanged,
+                "{} is classified with the wrong permanence",
+                describe_failure(&failure)
+            );
+        }
+    }
+
     /// The seam the P1-3 correction consists of: the meter a segment answer
     /// carries is the meter its own session publishes.
     ///
@@ -11294,7 +11869,7 @@ mod tests {
             &*rendition.manifest.lock().await,
         );
         assert_eq!(
-            decide(&*rendition.manifest.lock().await, &demands, position),
+            decide(&*rendition.manifest.lock().await, &demands, position, &[]),
             Action::Reposition { to: 45 }
         );
         assert!(
@@ -11344,7 +11919,8 @@ mod tests {
                 Position {
                     positioned_at: Some(10),
                     ..position
-                }
+                },
+                &[]
             ),
             Action::Reposition { to: 3 }
         );
@@ -11553,7 +12129,7 @@ mod tests {
             working_set: WorkingSet::default(),
         };
         assert_eq!(
-            decide(&*rendition.manifest.lock().await, &demands, position),
+            decide(&*rendition.manifest.lock().await, &demands, position, &[]),
             Action::Reposition { to: 3 }
         );
         drop(readers);
@@ -11639,7 +12215,7 @@ mod tests {
             working_set: WorkingSet::default(),
         };
         assert_eq!(
-            decide(&manifest, &demands, position),
+            decide(&manifest, &demands, position, &[]),
             Action::Produce { next: 46 },
             "old request3 must not win the publication-to-satisfy interval"
         );
@@ -12395,7 +12971,12 @@ mod tests {
         }
         serve.shared.working_set.fetch_add(10, Relaxed);
         assert_eq!(serve.shared.working_set.load(Relaxed), 10);
-        record_failure(&serve.shared, &rendition, "boom".to_string());
+        record_failure(
+            &serve.shared,
+            &rendition,
+            crate::playback_control::ProducerDecisionReason::ReaderFailed,
+            "boom".to_string(),
+        );
         assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
 
         create(&serve, &file, "sess-b", "play-b", &settings()).await;
@@ -12486,7 +13067,12 @@ mod tests {
 
         // Same window, failure flavor: a failure recorded in the gap answers
         // typed instead of sleeping.
-        record_failure(&serve.shared, &rendition, "boom".to_string());
+        record_failure(
+            &serve.shared,
+            &rendition,
+            crate::playback_control::ProducerDecisionReason::ReaderFailed,
+            "boom".to_string(),
+        );
         match tokio::time::timeout(
             Duration::from_secs(5),
             serve.blocked_wait(
@@ -12557,7 +13143,12 @@ mod tests {
             })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
-        record_failure(&serve.shared, &rendition, "boom".to_string());
+        record_failure(
+            &serve.shared,
+            &rendition,
+            crate::playback_control::ProducerDecisionReason::ReaderFailed,
+            "boom".to_string(),
+        );
         match tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
             .expect("the failure must wake the waiter")
