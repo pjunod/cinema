@@ -158,7 +158,9 @@
     const candidates=[];
     (ops.nodes||[]).forEach(row=>{
       const status=row&&row.observation==="answered"&&row.status;
-      const transport=status&&status.transport;
+      // The private cluster listener remains available while a learner's
+      // public daemon listener is intentionally closed during catch-up.
+      const transport=(row&&row.transport)||(status&&status.transport);
       (transport&&transport.observations||[]).forEach(observation=>{
         if(observation.raft_group!=="sqlite") return;
         if(Number(observation.sample_age_ms)>300000) return;
@@ -182,14 +184,16 @@
         : {code:"unavailable",text:"progress unavailable",observation:null};
     const labels={
       connecting:"connecting snapshot transport",
-      transferring:Number(observation.observing_node_id)===Number(raftId)
+      transferring:observation.direction==="inbound"
         ?"receiving snapshot":"transferring snapshot",
       awaiting_acknowledgement:"waiting for snapshot acknowledgement",
       installing:"installing snapshot",
       retrying:"retrying snapshot",
       stalled:"snapshot stalled",
       failed:"snapshot failed",
-      complete:boundedReadReady?"snapshot recovered":"waiting for startup watermark",
+      complete:observation.direction==="inbound"&&observation.acknowledged_offset==null
+        ?(boundedReadReady?"snapshot recovered":"snapshot received; sender acknowledgement unconfirmed")
+        :(boundedReadReady?"snapshot recovered":"waiting for startup watermark"),
     };
     const code=observation.phase==="complete"&&!boundedReadReady?"startup_watermark":observation.phase;
     return {code,text:labels[observation.phase]||"progress unavailable",observation};

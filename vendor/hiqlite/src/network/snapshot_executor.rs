@@ -185,6 +185,34 @@ pub(crate) struct SnapshotExecutorRequest<C: RaftTypeConfig> {
 pub(crate) type SnapshotExecutor<C> =
     NodeOwnedExecutor<SnapshotExecutorRequest<C>, SnapshotResult<C>>;
 
+fn record_inbound_snapshot_result<C>(
+    snapshot_transport: &crate::LocalSnapshotTransportStatus,
+    raft_group: &'static str,
+    peer_node_id: u64,
+    locally_received_offset: u64,
+    done: bool,
+    request_vote: openraft::Vote<u64>,
+    result: &SnapshotResult<C>,
+) where
+    C: RaftTypeConfig<NodeId = u64>,
+{
+    let error_category = match result {
+        Ok(response) if response.vote <= request_vote => None,
+        Ok(_) => Some("higher_vote"),
+        Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => {
+            Some("snapshot_mismatch")
+        }
+        Err(_) => Some("snapshot_install_error"),
+    };
+    snapshot_transport.inbound_finished(
+        raft_group,
+        peer_node_id,
+        locally_received_offset,
+        done,
+        error_category,
+    );
+}
+
 pub(crate) fn start_snapshot_executor<C>(
     raft: Raft<C>,
     admission_timeout: Duration,
@@ -200,6 +228,7 @@ where
         let raft = raft.clone();
         let snapshot_transport = snapshot_transport.clone();
         async move {
+            let request_vote = job.request.vote;
             let done = job.request.done;
             let acknowledged_offset = job
                 .request
@@ -217,19 +246,14 @@ where
                     },
             );
             let result = raft.install_snapshot(job.request).await;
-            let error_category = match &result {
-                Ok(_) => None,
-                Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => {
-                    Some("snapshot_mismatch")
-                }
-                Err(_) => Some("snapshot_install_error"),
-            };
-            snapshot_transport.inbound_finished(
+            record_inbound_snapshot_result::<C>(
+                &snapshot_transport,
                 raft_group,
                 job.peer_node_id,
                 acknowledged_offset,
                 done,
-                error_category,
+                request_vote,
+                &result,
             );
             result
         }
@@ -244,6 +268,61 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use tokio::sync::{Notify, Semaphore};
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_executor_completion_records_local_bytes_before_returning_response() {
+        use crate::store::state_machine::sqlite::TypeConfigSqlite;
+        use openraft::Vote;
+
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        status.inbound_received(crate::transport_status::InboundSnapshotChunk {
+            raft_group: "sqlite",
+            peer_node_id: 1,
+            snapshot_id: "executor-ordering",
+            offset: 0,
+            len: 64,
+            done: true,
+            deadline: time::Instant::now() + Duration::from_secs(30),
+        });
+        let worker_status = status.clone();
+        let executor = NodeOwnedExecutor::start(Duration::from_secs(1), move |()| {
+            let worker_status = worker_status.clone();
+            async move {
+                let request_vote = Vote::new_committed(1, 1);
+                worker_status.inbound_admitted(
+                    "sqlite",
+                    1,
+                    true,
+                    time::Instant::now() + Duration::from_secs(30),
+                );
+                let result: SnapshotResult<TypeConfigSqlite> =
+                    Ok(InstallSnapshotResponse { vote: request_vote });
+                record_inbound_snapshot_result::<TypeConfigSqlite>(
+                    &worker_status,
+                    "sqlite",
+                    1,
+                    64,
+                    true,
+                    request_vote,
+                    &result,
+                );
+                result
+            }
+        });
+        let (_connection, mut connection_closed) = watch::channel(false);
+        let response = executor
+            .submit((), &mut connection_closed)
+            .await
+            .expect("executor response");
+        assert!(response.is_ok());
+        let observation = &status.snapshot().observations[0];
+        assert_eq!(observation.locally_received_bytes, Some(64));
+        assert_eq!(observation.acknowledged_offset, None);
+        assert_eq!(observation.phase, crate::SnapshotTransportPhase::Complete);
+        assert!(!observation.operation_owns_work);
+    }
 
     #[derive(Clone)]
     struct FileWrite {

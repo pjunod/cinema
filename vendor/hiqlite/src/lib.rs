@@ -72,8 +72,8 @@ pub use crate::store::state_machine::sqlite::state_machine::{
 };
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use crate::transport_status::{
-    LocalSnapshotTransportStatus, SnapshotTransportObservation, SnapshotTransportPhase,
-    SnapshotTransportStatus,
+    LocalSnapshotTransportStatus, SnapshotTransportDirection, SnapshotTransportObservation,
+    SnapshotTransportPhase, SnapshotTransportStatus,
 };
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use crate::{client::Client, error::Error};

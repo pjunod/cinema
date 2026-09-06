@@ -1164,6 +1164,14 @@ impl NetworkConnectionStreaming {
         })
     }
 
+    fn snapshot_transfer_deadline(&self) -> Option<time::Instant> {
+        self.snapshot_attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|attempt| attempt.transfer_deadline)
+    }
+
     fn restore_transfer_after_snapshot_mismatch(
         &self,
         response: &Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
@@ -1410,6 +1418,7 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
+        let request_vote = req.vote;
         let done = req.done;
         let acknowledged_offset = req.offset.saturating_add(req.data.len() as u64);
         let rpc_ttl = self
@@ -1434,6 +1443,7 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
                     self.raft_group,
                     self.node.id,
                     "transport_unavailable",
+                    self.snapshot_transfer_deadline(),
                 );
                 return Err(error);
             }
@@ -1442,15 +1452,28 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
             RaftStreamResponsePayload::SnapshotDB(resp) => {
                 self.restore_transfer_after_snapshot_mismatch(&resp);
                 match &resp {
-                    Ok(_) => self.snapshot_transport.outbound_acknowledged(
+                    Ok(response) if response.vote <= request_vote => {
+                        self.snapshot_transport.outbound_acknowledged(
+                            self.raft_group,
+                            self.node.id,
+                            acknowledged_offset,
+                            done,
+                            self.snapshot_transfer_deadline(),
+                        )
+                    }
+                    Ok(_) => self.snapshot_transport.outbound_failed(
                         self.raft_group,
                         self.node.id,
-                        acknowledged_offset,
-                        done,
+                        "higher_vote",
                     ),
-                    Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => self
-                        .snapshot_transport
-                        .outbound_retry(self.raft_group, self.node.id, "snapshot_mismatch"),
+                    Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => {
+                        self.snapshot_transport.outbound_retry(
+                            self.raft_group,
+                            self.node.id,
+                            "snapshot_mismatch",
+                            self.snapshot_transfer_deadline(),
+                        )
+                    }
                     Err(_) => self.snapshot_transport.outbound_failed(
                         self.raft_group,
                         self.node.id,
@@ -1525,6 +1548,7 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
+        let request_vote = req.vote;
         let done = req.done;
         let acknowledged_offset = req.offset.saturating_add(req.data.len() as u64);
         let rpc_ttl = self
@@ -1549,6 +1573,7 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
                     self.raft_group,
                     self.node.id,
                     "transport_unavailable",
+                    self.snapshot_transfer_deadline(),
                 );
                 return Err(error);
             }
@@ -1557,15 +1582,28 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
             RaftStreamResponsePayload::SnapshotCache(resp) => {
                 self.restore_transfer_after_snapshot_mismatch(&resp);
                 match &resp {
-                    Ok(_) => self.snapshot_transport.outbound_acknowledged(
+                    Ok(response) if response.vote <= request_vote => {
+                        self.snapshot_transport.outbound_acknowledged(
+                            self.raft_group,
+                            self.node.id,
+                            acknowledged_offset,
+                            done,
+                            self.snapshot_transfer_deadline(),
+                        )
+                    }
+                    Ok(_) => self.snapshot_transport.outbound_failed(
                         self.raft_group,
                         self.node.id,
-                        acknowledged_offset,
-                        done,
+                        "higher_vote",
                     ),
-                    Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => self
-                        .snapshot_transport
-                        .outbound_retry(self.raft_group, self.node.id, "snapshot_mismatch"),
+                    Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => {
+                        self.snapshot_transport.outbound_retry(
+                            self.raft_group,
+                            self.node.id,
+                            "snapshot_mismatch",
+                            self.snapshot_transfer_deadline(),
+                        )
+                    }
                     Err(_) => self.snapshot_transport.outbound_failed(
                         self.raft_group,
                         self.node.id,
@@ -1833,6 +1871,42 @@ mod tests {
         }
 
         assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_connection_supervisor_does_not_invent_snapshot_work() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("reserve a connection-refused endpoint");
+        let address = listener.local_addr().expect("read endpoint");
+        drop(listener);
+        let transport =
+            crate::LocalSnapshotTransportStatus::new(1, std::collections::BTreeSet::from([2]));
+        let mut factory = NetworkStreaming {
+            node_id: 1,
+            tls_config: None,
+            secret_raft: b"test-secret".to_vec(),
+            raft_type: RaftType::Sqlite,
+            heartbeat_interval: 1,
+            is_raft_stopped: Arc::new(AtomicBool::new(false)),
+            is_startup_finished: Arc::new(AtomicBool::new(true)),
+            snapshot_budgets: test_snapshot_budgets(),
+            snapshot_transport: transport.clone(),
+        };
+        let node = Node {
+            id: 2,
+            addr_raft: address.to_string(),
+            addr_api: "127.0.0.1:1".to_owned(),
+        };
+        let connection = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+            &mut factory,
+            node.id,
+            &node,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(transport.snapshot().observations.is_empty());
+        drop(connection);
     }
 
     #[tokio::test]
@@ -2480,6 +2554,15 @@ mod tests {
         let attempt = SnapshotAttempt::new(13, "snapshot".into(), budgets);
         let start = attempt.start;
         let (mut network, receiver) = test_network(budgets);
+        let transport = network.snapshot_transport.clone();
+        transport.begin_outbound_attempt(
+            "sqlite",
+            network.node.id,
+            13,
+            "snapshot",
+            network.reset.epoch(),
+            attempt.transfer_deadline,
+        );
         network.snapshot_attempt = Arc::new(StdMutex::new(Some(Arc::clone(&attempt))));
         time::advance(Duration::from_secs(100)).await;
 
@@ -2527,6 +2610,13 @@ mod tests {
                 deadline: start + Duration::from_secs(120),
             }
         );
+        let observation = transport.snapshot().observations.remove(0);
+        assert_eq!(observation.phase, crate::SnapshotTransportPhase::Retrying);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(20_000));
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("snapshot_mismatch")
+        );
 
         let reread = tokio::spawn(supervise_snapshot_driver::<TypeConfigSqlite, _, _>(
             Arc::clone(&attempt),
@@ -2546,6 +2636,57 @@ mod tests {
             Err(StreamingError::Timeout(Timeout { timeout, .. }))
                 if timeout == Duration::from_secs(120)
         ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_higher_vote_response_never_advances_snapshot_acknowledgement() {
+        let (mut network, receiver) = test_network(test_snapshot_budgets());
+        let transport = network.snapshot_transport.clone();
+        transport.begin_outbound_attempt(
+            "sqlite",
+            network.node.id,
+            21,
+            "snapshot-higher-vote",
+            network.reset.epoch(),
+            time::Instant::now() + Duration::from_secs(120),
+        );
+        let responder = tokio::spawn(async move {
+            let (ack, request) = match receiver.recv_async().await.expect("receive request") {
+                RaftRequest::SnapshotDB(request) => request,
+                request => panic!("unexpected SQLite Raft request: {request:?}"),
+            };
+            ack.send(Ok(RaftStreamResponsePayload::SnapshotDB(Ok(
+                InstallSnapshotResponse {
+                    vote: Vote::new_committed(request.vote.leader_id.term + 1, 7),
+                },
+            ))))
+            .expect("return higher vote");
+        });
+        let response =
+            <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
+                &mut network,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: test_snapshot_meta(),
+                    offset: 0,
+                    data: b"final".to_vec(),
+                    done: true,
+                },
+                RPCOption::new(Duration::from_secs(30)),
+            )
+            .await
+            .expect("higher vote remains a typed Raft response");
+        responder.await.expect("join responder");
+        assert_eq!(response.vote.leader_id.term, 2);
+        let observation = transport.snapshot().observations.remove(0);
+        assert_eq!(observation.phase, crate::SnapshotTransportPhase::Failed);
+        assert_eq!(observation.acknowledged_offset, None);
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("higher_vote")
+        );
+        assert!(!observation.operation_owns_work);
     }
 
     #[cfg(feature = "sqlite")]

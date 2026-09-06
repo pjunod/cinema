@@ -14,7 +14,7 @@ const RETIRED_PEER_ALLOWANCE: usize = 4;
 const STALLED_AFTER: Duration = Duration::from_secs(30);
 const EXPIRE_AFTER: Duration = Duration::from_secs(300);
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotTransportPhase {
     Connecting,
@@ -25,6 +25,13 @@ pub enum SnapshotTransportPhase {
     Stalled,
     Failed,
     Complete,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotTransportDirection {
+    Inbound,
+    Outbound,
 }
 
 impl SnapshotTransportPhase {
@@ -50,6 +57,7 @@ pub struct SnapshotTransportObservation {
     pub attempt_id: u64,
     pub snapshot_id: Option<String>,
     pub socket_epoch: u64,
+    pub direction: SnapshotTransportDirection,
     pub attempted_offset: Option<u64>,
     pub acknowledged_offset: Option<u64>,
     pub locally_received_bytes: Option<u64>,
@@ -88,6 +96,7 @@ pub(crate) struct InboundSnapshotChunk<'a> {
 struct ObservationKey {
     raft_group: &'static str,
     peer_node_id: u64,
+    direction: SnapshotTransportDirection,
 }
 
 #[derive(Clone, Debug)]
@@ -176,11 +185,10 @@ impl LocalSnapshotTransportStatus {
                 if sample_age > EXPIRE_AFTER {
                     return None;
                 }
-                let stalled = if observation.phase == SnapshotTransportPhase::Installing {
-                    observation.deadline.is_some_and(|deadline| now >= deadline)
-                } else {
-                    observation.phase.can_stall() && sample_age >= STALLED_AFTER
-                };
+                let stalled = observation.phase.can_stall()
+                    && observation
+                        .deadline
+                        .map_or(sample_age >= STALLED_AFTER, |deadline| now >= deadline);
                 if stalled && observation.phase != SnapshotTransportPhase::Stalled {
                     let previous = observation.phase;
                     observation.phase = SnapshotTransportPhase::Stalled;
@@ -195,6 +203,7 @@ impl LocalSnapshotTransportStatus {
                     attempt_id: observation.attempt_id,
                     snapshot_id: observation.snapshot_id.clone(),
                     socket_epoch: observation.socket_epoch,
+                    direction: key.direction,
                     attempted_offset: observation.attempted_offset,
                     acknowledged_offset: observation.acknowledged_offset,
                     locally_received_bytes: observation.locally_received_bytes,
@@ -234,15 +243,23 @@ impl LocalSnapshotTransportStatus {
         peer_node_id: u64,
         socket_epoch: u64,
     ) {
-        self.update(raft_group, peer_node_id, |observation, now| {
-            observation.socket_epoch = socket_epoch;
-            observation.connection_attempt_count =
-                observation.connection_attempt_count.saturating_add(1);
-            observation.phase = SnapshotTransportPhase::Connecting;
-            observation.last_update = now;
-            observation.last_error_category = None;
-            observation.operation_owns_work = false;
-        });
+        self.update_existing(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Outbound,
+            |observation, now| {
+                if !observation.operation_owns_work {
+                    return;
+                }
+                observation.socket_epoch = socket_epoch;
+                observation.connection_attempt_count =
+                    observation.connection_attempt_count.saturating_add(1);
+                observation.phase = SnapshotTransportPhase::Connecting;
+                observation.last_update = now;
+                observation.last_error_category = None;
+                observation.operation_owns_work = true;
+            },
+        );
     }
 
     pub(crate) fn begin_outbound_attempt(
@@ -254,24 +271,30 @@ impl LocalSnapshotTransportStatus {
         socket_epoch: u64,
         deadline: Instant,
     ) {
-        self.update(raft_group, peer_node_id, |observation, now| {
-            observation.attempt_id = attempt_id;
-            observation.snapshot_id = Some(snapshot_id.to_owned());
-            observation.socket_epoch = socket_epoch;
-            observation.attempted_offset = None;
-            observation.acknowledged_offset = None;
-            observation.locally_received_bytes = None;
-            observation.total_bytes = None;
-            observation.attempt_started = Some(now);
-            observation.last_acknowledgement = None;
-            observation.last_local_receive = None;
-            observation.deadline = Some(deadline);
-            observation.phase = SnapshotTransportPhase::Transferring;
-            observation.retry_count = 0;
-            observation.last_error_category = None;
-            observation.operation_owns_work = true;
-            observation.last_update = now;
-        });
+        self.update(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Outbound,
+            |observation, now| {
+                observation.attempt_id = attempt_id;
+                observation.snapshot_id = Some(snapshot_id.to_owned());
+                observation.socket_epoch = socket_epoch;
+                observation.attempted_offset = None;
+                observation.acknowledged_offset = None;
+                observation.locally_received_bytes = None;
+                observation.total_bytes = None;
+                observation.attempt_started = Some(now);
+                observation.last_acknowledgement = None;
+                observation.last_local_receive = None;
+                observation.deadline = Some(deadline);
+                observation.phase = SnapshotTransportPhase::Transferring;
+                observation.connection_attempt_count = 0;
+                observation.retry_count = 0;
+                observation.last_error_category = None;
+                observation.operation_owns_work = true;
+                observation.last_update = now;
+            },
+        );
     }
 
     pub(crate) fn outbound_chunk(
@@ -283,21 +306,26 @@ impl LocalSnapshotTransportStatus {
         done: bool,
         deadline: Instant,
     ) {
-        self.update(raft_group, peer_node_id, |observation, now| {
-            let end_offset = offset.saturating_add(len as u64);
-            observation.attempted_offset = Some(end_offset);
-            if done {
-                observation.total_bytes = Some(end_offset);
-            }
-            observation.deadline = Some(deadline);
-            observation.phase = if done {
-                SnapshotTransportPhase::Installing
-            } else {
-                SnapshotTransportPhase::AwaitingAcknowledgement
-            };
-            observation.operation_owns_work = true;
-            observation.last_update = now;
-        });
+        self.update(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Outbound,
+            |observation, now| {
+                let end_offset = offset.saturating_add(len as u64);
+                observation.attempted_offset = Some(end_offset);
+                if done {
+                    observation.total_bytes = Some(end_offset);
+                }
+                observation.deadline = Some(deadline);
+                observation.phase = if done {
+                    SnapshotTransportPhase::Installing
+                } else {
+                    SnapshotTransportPhase::AwaitingAcknowledgement
+                };
+                observation.operation_owns_work = true;
+                observation.last_update = now;
+            },
+        );
     }
 
     pub(crate) fn outbound_acknowledged(
@@ -306,19 +334,26 @@ impl LocalSnapshotTransportStatus {
         peer_node_id: u64,
         acknowledged_offset: u64,
         done: bool,
+        transfer_deadline: Option<Instant>,
     ) {
-        self.update(raft_group, peer_node_id, |observation, now| {
-            observation.acknowledged_offset = Some(acknowledged_offset);
-            observation.last_acknowledgement = Some(now);
-            observation.phase = if done {
-                SnapshotTransportPhase::Complete
-            } else {
-                SnapshotTransportPhase::Transferring
-            };
-            observation.operation_owns_work = !done;
-            observation.last_error_category = None;
-            observation.last_update = now;
-        });
+        self.update(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Outbound,
+            |observation, now| {
+                observation.acknowledged_offset = Some(acknowledged_offset);
+                observation.last_acknowledgement = Some(now);
+                observation.deadline = (!done).then_some(transfer_deadline).flatten();
+                observation.phase = if done {
+                    SnapshotTransportPhase::Complete
+                } else {
+                    SnapshotTransportPhase::Transferring
+                };
+                observation.operation_owns_work = !done;
+                observation.last_error_category = None;
+                observation.last_update = now;
+            },
+        );
     }
 
     pub(crate) fn outbound_retry(
@@ -326,14 +361,21 @@ impl LocalSnapshotTransportStatus {
         raft_group: &'static str,
         peer_node_id: u64,
         category: &'static str,
+        deadline: Option<Instant>,
     ) {
-        self.update(raft_group, peer_node_id, |observation, now| {
-            observation.retry_count = observation.retry_count.saturating_add(1);
-            observation.phase = SnapshotTransportPhase::Retrying;
-            observation.last_error_category = Some(category);
-            observation.operation_owns_work = true;
-            observation.last_update = now;
-        });
+        self.update(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Outbound,
+            |observation, now| {
+                observation.retry_count = observation.retry_count.saturating_add(1);
+                observation.phase = SnapshotTransportPhase::Retrying;
+                observation.deadline = deadline;
+                observation.last_error_category = Some(category);
+                observation.operation_owns_work = true;
+                observation.last_update = now;
+            },
+        );
     }
 
     pub(crate) fn outbound_failed(
@@ -342,12 +384,20 @@ impl LocalSnapshotTransportStatus {
         peer_node_id: u64,
         category: &'static str,
     ) {
-        self.update(raft_group, peer_node_id, |observation, now| {
-            observation.phase = SnapshotTransportPhase::Failed;
-            observation.last_error_category = Some(category);
-            observation.operation_owns_work = false;
-            observation.last_update = now;
-        });
+        self.update(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Outbound,
+            |observation, now| {
+                observation.phase = SnapshotTransportPhase::Failed;
+                observation.deadline = None;
+                if observation.last_error_category.is_none() {
+                    observation.last_error_category = Some(category);
+                }
+                observation.operation_owns_work = false;
+                observation.last_update = now;
+            },
+        );
     }
 
     pub(crate) fn inbound_received(&self, chunk: InboundSnapshotChunk<'_>) {
@@ -364,6 +414,7 @@ impl LocalSnapshotTransportStatus {
         let key = ObservationKey {
             raft_group,
             peer_node_id,
+            direction: SnapshotTransportDirection::Inbound,
         };
         let mut state = self
             .inner
@@ -388,23 +439,20 @@ impl LocalSnapshotTransportStatus {
             .or_insert_with(|| empty_observation(now));
         let previous = observation.phase;
         if changed_snapshot {
+            *observation = empty_observation(now);
             observation.attempt_id = attempt_id;
             observation.snapshot_id = Some(snapshot_id.to_owned());
             observation.attempt_started = Some(now);
-            observation.retry_count = 0;
-        } else if observation
-            .attempted_offset
-            .is_some_and(|seen| seen >= offset)
-        {
-            observation.retry_count = observation.retry_count.saturating_add(1);
         }
         let end_offset = offset.saturating_add(len as u64);
-        observation.attempted_offset = Some(end_offset);
-        observation.locally_received_bytes = Some(end_offset);
-        if done {
-            observation.total_bytes = Some(end_offset);
+        let previous_end = observation.attempted_offset.unwrap_or_default();
+        if !changed_snapshot && end_offset <= previous_end {
+            observation.retry_count = observation.retry_count.saturating_add(1);
         }
-        observation.last_local_receive = Some(now);
+        observation.attempted_offset = Some(previous_end.max(end_offset));
+        if done {
+            observation.total_bytes = Some(previous_end.max(end_offset));
+        }
         observation.deadline = Some(deadline);
         observation.phase = if done {
             SnapshotTransportPhase::Installing
@@ -424,56 +472,84 @@ impl LocalSnapshotTransportStatus {
         done: bool,
         deadline: Instant,
     ) {
-        self.update(raft_group, peer_node_id, |observation, now| {
-            observation.deadline = Some(deadline);
-            observation.phase = if done {
-                SnapshotTransportPhase::Installing
-            } else {
-                SnapshotTransportPhase::Transferring
-            };
-            observation.operation_owns_work = true;
-            observation.last_update = now;
-        });
+        self.update(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Inbound,
+            |observation, now| {
+                observation.deadline = Some(deadline);
+                observation.phase = if done {
+                    SnapshotTransportPhase::Installing
+                } else {
+                    SnapshotTransportPhase::Transferring
+                };
+                observation.operation_owns_work = true;
+                observation.last_update = now;
+            },
+        );
     }
 
     pub(crate) fn inbound_finished(
         &self,
         raft_group: &'static str,
         peer_node_id: u64,
-        acknowledged_offset: u64,
+        locally_received_offset: u64,
         done: bool,
         error_category: Option<&'static str>,
     ) {
-        self.update(raft_group, peer_node_id, |observation, now| {
-            observation.operation_owns_work = false;
-            observation.last_update = now;
-            if let Some(category) = error_category {
-                observation.phase = SnapshotTransportPhase::Retrying;
-                observation.last_error_category = Some(category);
-                observation.retry_count = observation.retry_count.saturating_add(1);
-            } else {
-                observation.acknowledged_offset = Some(acknowledged_offset);
-                observation.last_acknowledgement = Some(now);
-                observation.phase = if done {
-                    SnapshotTransportPhase::Complete
+        self.update(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Inbound,
+            |observation, now| {
+                observation.operation_owns_work = false;
+                observation.last_update = now;
+                if let Some(category) = error_category {
+                    observation.phase = SnapshotTransportPhase::Retrying;
+                    observation.deadline = None;
+                    observation.last_error_category = Some(category);
+                    observation.retry_count = observation.retry_count.saturating_add(1);
                 } else {
-                    SnapshotTransportPhase::Transferring
-                };
-                observation.last_error_category = None;
-            }
-        });
+                    // Finishing the node-owned install only means bytes are
+                    // durable locally. The response still has to cross and flush
+                    // the WebSocket before the sender can call it acknowledged.
+                    observation.deadline = None;
+                    let previous = observation.locally_received_bytes.unwrap_or_default();
+                    if locally_received_offset > previous {
+                        observation.locally_received_bytes = Some(locally_received_offset);
+                        observation.last_local_receive = Some(now);
+                    }
+                    if done {
+                        observation.total_bytes = Some(
+                            observation
+                                .total_bytes
+                                .unwrap_or_default()
+                                .max(locally_received_offset),
+                        );
+                    }
+                    observation.phase = if done {
+                        SnapshotTransportPhase::Complete
+                    } else {
+                        SnapshotTransportPhase::Transferring
+                    };
+                    observation.last_error_category = None;
+                }
+            },
+        );
     }
 
     fn update(
         &self,
         raft_group: &'static str,
         peer_node_id: u64,
+        direction: SnapshotTransportDirection,
         mutate: impl FnOnce(&mut Observation, Instant),
     ) {
         let now = Instant::now();
         let key = ObservationKey {
             raft_group,
             peer_node_id,
+            direction,
         };
         let mut state = self
             .inner
@@ -487,6 +563,32 @@ impl LocalSnapshotTransportStatus {
             .observations
             .entry(key.clone())
             .or_insert_with(|| empty_observation(now));
+        let previous = observation.phase;
+        mutate(observation, now);
+        log_transition(self.inner.observing_node_id, &key, previous, observation);
+    }
+
+    fn update_existing(
+        &self,
+        raft_group: &'static str,
+        peer_node_id: u64,
+        direction: SnapshotTransportDirection,
+        mutate: impl FnOnce(&mut Observation, Instant),
+    ) {
+        let now = Instant::now();
+        let key = ObservationKey {
+            raft_group,
+            peer_node_id,
+            direction,
+        };
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(observation) = state.observations.get_mut(&key) else {
+            return;
+        };
         let previous = observation.phase;
         mutate(observation, now);
         log_transition(self.inner.observing_node_id, &key, previous, observation);
@@ -555,6 +657,7 @@ fn log_transition(
         observing_node_id,
         peer_node_id = key.peer_node_id,
         raft_group = key.raft_group,
+        direction = ?key.direction,
         attempt_id = observation.attempt_id,
         snapshot_id = observation.snapshot_id.as_deref().unwrap_or("unknown"),
         socket_epoch = observation.socket_epoch,
@@ -563,6 +666,34 @@ fn log_transition(
         phase = ?observation.phase,
         "snapshot transport phase transition"
     );
+    match observation.phase {
+        SnapshotTransportPhase::Complete => tracing::info!(
+            observing_node_id,
+            peer_node_id = key.peer_node_id,
+            raft_group = key.raft_group,
+            direction = ?key.direction,
+            attempt_id = observation.attempt_id,
+            snapshot_id = observation.snapshot_id.as_deref().unwrap_or("unknown"),
+            attempted_offset = observation.attempted_offset,
+            acknowledged_offset = observation.acknowledged_offset,
+            locally_received_bytes = observation.locally_received_bytes,
+            "snapshot transport completed"
+        ),
+        SnapshotTransportPhase::Failed => tracing::warn!(
+            observing_node_id,
+            peer_node_id = key.peer_node_id,
+            raft_group = key.raft_group,
+            direction = ?key.direction,
+            attempt_id = observation.attempt_id,
+            snapshot_id = observation.snapshot_id.as_deref().unwrap_or("unknown"),
+            attempted_offset = observation.attempted_offset,
+            acknowledged_offset = observation.acknowledged_offset,
+            locally_received_bytes = observation.locally_received_bytes,
+            error_category = observation.last_error_category.unwrap_or("unknown"),
+            "snapshot transport failed"
+        ),
+        _ => {}
+    }
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -585,11 +716,15 @@ mod tests {
     async fn local_status_distinguishes_receive_ack_install_retry_and_completion() {
         let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
         let deadline = Instant::now() + Duration::from_secs(30);
+        // Ordinary connection churn is not snapshot work and must not create
+        // a status record that later projects as a stalled snapshot.
         status.connecting("sqlite", 2, 0);
-        assert_eq!(status.snapshot().observations[0].reconnect_count, 0);
+        assert!(status.snapshot().observations.is_empty());
+        status.begin_outbound_attempt("sqlite", 2, 7, "snap-a", 0, deadline);
         status.connecting("sqlite", 2, 1);
+        assert_eq!(status.snapshot().observations[0].reconnect_count, 0);
+        status.connecting("sqlite", 2, 2);
         assert_eq!(status.snapshot().observations[0].reconnect_count, 1);
-        status.begin_outbound_attempt("sqlite", 2, 7, "snap-a", 3, deadline);
         status.outbound_chunk("sqlite", 2, 0, 100, false, deadline);
         let waiting = status.snapshot().observations.remove(0);
         assert_eq!(
@@ -599,12 +734,12 @@ mod tests {
         assert_eq!(waiting.attempted_offset, Some(100));
         assert_eq!(waiting.acknowledged_offset, None);
 
-        status.outbound_acknowledged("sqlite", 2, 100, false);
+        status.outbound_acknowledged("sqlite", 2, 100, false, Some(deadline));
         assert_eq!(
             status.snapshot().observations[0].phase,
             SnapshotTransportPhase::Transferring
         );
-        status.outbound_retry("sqlite", 2, "snapshot_mismatch");
+        status.outbound_retry("sqlite", 2, "snapshot_mismatch", Some(deadline));
         assert_eq!(
             status.snapshot().observations[0].phase,
             SnapshotTransportPhase::Retrying
@@ -613,7 +748,7 @@ mod tests {
         let installing = &status.snapshot().observations[0];
         assert_eq!(installing.phase, SnapshotTransportPhase::Installing);
         assert_eq!(installing.total_bytes, Some(150));
-        status.outbound_acknowledged("sqlite", 2, 150, true);
+        status.outbound_acknowledged("sqlite", 2, 150, true, Some(deadline));
         assert_eq!(
             status.snapshot().observations[0].phase,
             SnapshotTransportPhase::Complete
@@ -633,7 +768,7 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(30),
         });
         let received = &status.snapshot().observations[0];
-        assert_eq!(received.locally_received_bytes, Some(64));
+        assert_eq!(received.locally_received_bytes, None);
         assert_eq!(received.acknowledged_offset, None);
         assert!(!received.operation_owns_work);
 
@@ -652,10 +787,102 @@ mod tests {
         assert!(status.snapshot().observations[0].operation_owns_work);
 
         status.inbound_finished("sqlite", 1, 96, true, None);
-        let acknowledged = &status.snapshot().observations[0];
-        assert_eq!(acknowledged.locally_received_bytes, Some(96));
-        assert_eq!(acknowledged.acknowledged_offset, Some(96));
-        assert!(!acknowledged.operation_owns_work);
+        let installed = &status.snapshot().observations[0];
+        assert_eq!(installed.locally_received_bytes, Some(96));
+        assert_eq!(installed.acknowledged_offset, None);
+        assert_eq!(installed.phase, SnapshotTransportPhase::Complete);
+        assert!(!installed.operation_owns_work);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_progress_is_monotonic_and_new_identity_clears_attempt_state() {
+        let status = LocalSnapshotTransportStatus::new(2, BTreeSet::from([1]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        for (offset, len) in [(0, 64), (64, 32), (32, 16)] {
+            status.inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: "snap-a",
+                offset,
+                len,
+                done: false,
+                deadline,
+            });
+        }
+        let first = &status.snapshot().observations[0];
+        assert_eq!(first.attempted_offset, Some(96));
+        assert_eq!(first.retry_count, 1);
+
+        status.inbound_finished("sqlite", 1, 96, false, None);
+        assert_eq!(
+            status.snapshot().observations[0].phase,
+            SnapshotTransportPhase::Transferring
+        );
+        status.inbound_received(InboundSnapshotChunk {
+            raft_group: "sqlite",
+            peer_node_id: 1,
+            snapshot_id: "snap-b",
+            offset: 0,
+            len: 8,
+            done: false,
+            deadline,
+        });
+        let next = &status.snapshot().observations[0];
+        assert_eq!(next.snapshot_id.as_deref(), Some("snap-b"));
+        assert_eq!(next.attempted_offset, Some(8));
+        assert_eq!(next.locally_received_bytes, None);
+        assert_eq!(next.total_bytes, None);
+        assert_eq!(next.retry_count, 0);
+        assert_eq!(next.last_local_receive_age_ms, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_peer_inbound_install_and_outbound_transfer_do_not_collide() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        status.begin_outbound_attempt("sqlite", 2, 7, "outbound", 1, deadline);
+        status.inbound_received(InboundSnapshotChunk {
+            raft_group: "sqlite",
+            peer_node_id: 2,
+            snapshot_id: "inbound",
+            offset: 0,
+            len: 64,
+            done: true,
+            deadline,
+        });
+        status.inbound_admitted("sqlite", 2, true, deadline);
+
+        let snapshot = status.snapshot();
+        assert_eq!(snapshot.observations.len(), 2);
+        let inbound = snapshot
+            .observations
+            .iter()
+            .find(|observation| observation.direction == SnapshotTransportDirection::Inbound)
+            .expect("inbound status");
+        let outbound = snapshot
+            .observations
+            .iter()
+            .find(|observation| observation.direction == SnapshotTransportDirection::Outbound)
+            .expect("outbound status");
+        assert_eq!(inbound.phase, SnapshotTransportPhase::Installing);
+        assert_eq!(outbound.phase, SnapshotTransportPhase::Transferring);
+        assert!(inbound.operation_owns_work);
+        assert!(outbound.operation_owns_work);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_wrapper_preserves_the_actionable_failure_category() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        status.begin_outbound_attempt("sqlite", 2, 7, "snapshot", 1, deadline);
+        status.outbound_retry("sqlite", 2, "snapshot_mismatch", Some(deadline));
+        status.outbound_failed("sqlite", 2, "snapshot_attempt_ended");
+        let observation = &status.snapshot().observations[0];
+        assert_eq!(observation.phase, SnapshotTransportPhase::Failed);
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("snapshot_mismatch")
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -664,22 +891,50 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(120);
         status.begin_outbound_attempt("sqlite", 2, 7, "snap-a", 3, deadline);
 
-        tokio::time::advance(STALLED_AFTER - Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_secs(119)).await;
         assert_eq!(
             status.snapshot().observations[0].phase,
             SnapshotTransportPhase::Transferring
         );
-        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
         let stalled = status.snapshot().observations.remove(0);
         assert_eq!(stalled.phase, SnapshotTransportPhase::Stalled);
         assert_eq!(
             stalled.last_error_category.as_deref(),
             Some("snapshot_stalled")
         );
-        assert_eq!(stalled.sample_age_ms, duration_ms(STALLED_AFTER));
+        assert_eq!(stalled.sample_age_ms, duration_ms(Duration::from_secs(120)));
 
-        tokio::time::advance(EXPIRE_AFTER - STALLED_AFTER + Duration::from_millis(1)).await;
+        tokio::time::advance(EXPIRE_AFTER - Duration::from_secs(120) + Duration::from_millis(1))
+            .await;
         assert!(status.snapshot().observations.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_chunk_deadline_controls_awaiting_ack_stall_projection() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let minimum = Instant::now() + Duration::from_secs(5);
+        status.begin_outbound_attempt("sqlite", 2, 1, "minimum", 1, minimum);
+        status.outbound_chunk("sqlite", 2, 0, 64, false, minimum);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            status.snapshot().observations[0].phase,
+            SnapshotTransportPhase::Stalled
+        );
+
+        let maximum = Instant::now() + Duration::from_secs(300);
+        status.begin_outbound_attempt("sqlite", 2, 2, "maximum", 2, maximum);
+        status.outbound_chunk("sqlite", 2, 0, 64, false, maximum);
+        tokio::time::advance(STALLED_AFTER).await;
+        assert_eq!(
+            status.snapshot().observations[0].phase,
+            SnapshotTransportPhase::AwaitingAcknowledgement
+        );
+        tokio::time::advance(Duration::from_secs(270)).await;
+        assert_eq!(
+            status.snapshot().observations[0].phase,
+            SnapshotTransportPhase::Stalled
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -687,7 +942,7 @@ mod tests {
         let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
         let deadline = Instant::now() + Duration::from_secs(120);
         status.begin_outbound_attempt("sqlite", 2, 1, "snap-a", 1, deadline);
-        status.outbound_acknowledged("sqlite", 2, 64, true);
+        status.outbound_acknowledged("sqlite", 2, 64, true, Some(deadline));
 
         tokio::time::advance(STALLED_AFTER + Duration::from_secs(1)).await;
         assert_eq!(

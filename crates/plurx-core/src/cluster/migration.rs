@@ -6842,6 +6842,23 @@ pub mod status {
                 .map(LocalSnapshotTransportStatus::snapshot)
         }
 
+        /// Read a peer's node-owned transport status through the authenticated
+        /// private Hiqlite listener. This remains available when the peer's
+        /// public daemon listener is intentionally closed during recovery.
+        pub async fn peer_transport_status(
+            &self,
+            peer_node_id: u64,
+        ) -> Result<Option<SnapshotTransportStatus>, String> {
+            let client = self
+                .client
+                .as_ref()
+                .ok_or_else(|| "peer transport status requires replicated storage".to_owned())?;
+            client
+                .snapshot_transport_status_sqlite(peer_node_id)
+                .await
+                .map_err(|error| error.to_string())
+        }
+
         /// Keep the atomics-only metrics projection fresh from the local Raft
         /// watch. Changes publish immediately; the periodic refresh keeps an
         /// idle healthy cluster from looking stale.

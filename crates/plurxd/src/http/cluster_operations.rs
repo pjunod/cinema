@@ -183,6 +183,10 @@ pub(crate) struct ClusterNodeObservation {
     pub error_class: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<ClusterNodeOperationsStatus>,
+    /// Node-owned evidence fetched over the private cluster listener. Kept
+    /// outside `status` so a closed public listener cannot hide recovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<SnapshotTransportStatus>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -617,6 +621,7 @@ struct PeerStatusOutcome {
     node_id: String,
     state: ObservationState,
     status: Option<ClusterNodeOperationsStatus>,
+    transport: Option<SnapshotTransportStatus>,
 }
 
 /// Five-second, node-owned cache for bounded peer status fan-out.
@@ -659,12 +664,14 @@ pub(crate) async fn peer_status_cache_loop(
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     loop {
+        let refresh_started = tokio::time::Instant::now();
         match state.membership.operations_peers().await {
             Ok(peers) => {
                 let deadline = deadline_after(AGGREGATE_TIMEOUT);
                 let statuses = collect_peer_statuses(
                     peers,
                     PeerTransport::new(state.membership.clone()),
+                    state.replication.clone(),
                     deadline,
                 )
                 .await;
@@ -676,7 +683,7 @@ pub(crate) async fn peer_status_cache_loop(
         }
         tokio::select! {
             () = shutdown.cancelled() => break,
-            () = tokio::time::sleep(Duration::from_secs(4)) => {}
+            () = tokio::time::sleep_until(refresh_started + Duration::from_secs(4)) => {}
         }
     }
 }
@@ -684,27 +691,44 @@ pub(crate) async fn peer_status_cache_loop(
 async fn collect_peer_statuses(
     peers: Vec<ActivityPeer>,
     transport: PeerTransport,
+    replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     deadline: tokio::time::Instant,
 ) -> BTreeMap<String, PeerStatusOutcome> {
     collect_peer_statuses_with(peers, deadline, move |peer, peer_deadline| {
         let transport = transport.clone();
+        let replication = replication.clone();
         async move {
             let node_id = peer.node_id.clone();
-            if !peer.reachable {
-                PeerStatusOutcome {
-                    node_id,
-                    state: ObservationState::Unreachable,
-                    status: None,
+            let public = async {
+                if !peer.reachable {
+                    PeerStatusOutcome {
+                        node_id: node_id.clone(),
+                        state: ObservationState::Unreachable,
+                        status: None,
+                        transport: None,
+                    }
+                } else if let Some(base) = peer.http_base {
+                    fetch_peer_status(&transport, &node_id, &base, peer_deadline).await
+                } else {
+                    PeerStatusOutcome {
+                        node_id: node_id.clone(),
+                        state: ObservationState::Unreachable,
+                        status: None,
+                        transport: None,
+                    }
                 }
-            } else if let Some(base) = peer.http_base {
-                fetch_peer_status(&transport, &node_id, &base, peer_deadline).await
-            } else {
-                PeerStatusOutcome {
-                    node_id,
-                    state: ObservationState::Unreachable,
-                    status: None,
-                }
-            }
+            };
+            let private = tokio::time::timeout(
+                Duration::from_millis(900),
+                replication.peer_transport_status(peer.raft_id),
+            );
+            let (mut outcome, private_transport) = tokio::join!(public, private);
+            outcome.transport = private_transport
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .filter(|status| status.observing_node_id == peer.raft_id);
+            outcome
         }
     })
     .await
@@ -730,6 +754,7 @@ where
                     node_id: node_id.clone(),
                     state: ObservationState::TimedOut,
                     status: None,
+                    transport: None,
                 });
             (node_id, outcome)
         }
@@ -787,6 +812,7 @@ async fn fetch_peer_status(
         node_id: expected_node_id.to_owned(),
         state,
         status,
+        transport: None,
     }
 }
 
@@ -799,17 +825,33 @@ fn join_observations(
 ) -> Vec<ClusterNodeObservation> {
     let mut rows = Vec::with_capacity(membership.nodes.len());
     for member in &membership.nodes {
-        let (mut state, mut status, mut error_class) = if member.node_id == local_node_id {
+        let (mut state, mut status, transport, mut error_class) = if member.node_id == local_node_id
+        {
             local.hostname = member.hostname.clone();
-            (ObservationState::Answered, Some(local.clone()), None)
+            (
+                ObservationState::Answered,
+                Some(local.clone()),
+                local.transport.clone(),
+                None,
+            )
         } else if let Some(outcome) = remote.remove(&member.node_id) {
             let error = (outcome.state != ObservationState::Answered)
                 .then(|| observation_error_class(outcome.state).to_owned());
             debug_assert_eq!(outcome.node_id, member.node_id);
-            (outcome.state, outcome.status, error)
+            let fallback_transport = outcome
+                .status
+                .as_ref()
+                .and_then(|status| status.transport.clone());
+            (
+                outcome.state,
+                outcome.status,
+                outcome.transport.or(fallback_transport),
+                error,
+            )
         } else {
             (
                 ObservationState::PeerLimit,
+                None,
                 None,
                 Some("peer_limit".to_owned()),
             )
@@ -835,6 +877,7 @@ fn join_observations(
             sample_age_ms,
             error_class,
             status,
+            transport,
         });
     }
     rows
@@ -1383,6 +1426,7 @@ mod tests {
         let peers = (0..MAX_OPERATIONS_PEERS)
             .map(|index| ActivityPeer {
                 node_id: format!("node-{index}"),
+                raft_id: index as u64,
                 http_base: Some(format!("http://node-{index}:8080")),
                 reachable: true,
             })
@@ -1396,6 +1440,7 @@ mod tests {
                     node_id: peer.node_id,
                     state: ObservationState::Answered,
                     status: None,
+                    transport: None,
                 }
             })
             .await;
@@ -1415,6 +1460,7 @@ mod tests {
         let peers = (0..(MAX_OPERATIONS_PEERS + 4))
             .map(|index| ActivityPeer {
                 node_id: format!("node-{index}"),
+                raft_id: index as u64,
                 http_base: Some(format!("http://node-{index}:8080")),
                 reachable: true,
             })
@@ -1427,6 +1473,7 @@ mod tests {
                     node_id: peer.node_id,
                     state: ObservationState::Answered,
                     status: None,
+                    transport: None,
                 }
             },
         )
@@ -1445,6 +1492,7 @@ mod tests {
                 node_id: "node-2".to_owned(),
                 state: ObservationState::Answered,
                 status: None,
+                transport: None,
             },
         )]);
         cache.store(&statuses).await;
@@ -1609,6 +1657,7 @@ mod tests {
                 node_id: "node-a".to_owned(),
                 state: ObservationState::Answered,
                 status: Some(status),
+                transport: None,
             },
         );
         let rows = join_observations(
@@ -1634,6 +1683,7 @@ mod tests {
                 node_id: "node-2".to_owned(),
                 state: ObservationState::Answered,
                 status: Some(peer),
+                transport: None,
             },
         );
 
@@ -1648,6 +1698,41 @@ mod tests {
         assert_eq!(rows[1].observation, ObservationState::InvalidResponse);
         assert_eq!(rows[1].error_class.as_deref(), Some("stale_peer_sample"));
         assert!(!rollout_verdict(&membership, &rows).safe_to_restart_one);
+    }
+
+    #[test]
+    fn private_transport_evidence_survives_a_closed_public_listener() {
+        let membership = test_membership("node-1", 2);
+        let transport = SnapshotTransportStatus {
+            schema_version: 1,
+            observing_node_id: 2,
+            observed_at_unix_ms: unix_ms(),
+            observations: Vec::new(),
+        };
+        let remote = BTreeMap::from([(
+            "node-2".to_owned(),
+            PeerStatusOutcome {
+                node_id: "node-2".to_owned(),
+                state: ObservationState::Unreachable,
+                status: None,
+                transport: Some(transport),
+            },
+        )]);
+        let rows = join_observations(
+            &membership,
+            "node-1",
+            test_local_status("node-1", Some(1)),
+            remote,
+            unix_ms(),
+        );
+        assert_eq!(rows[1].observation, ObservationState::Unreachable);
+        assert_eq!(
+            rows[1]
+                .transport
+                .as_ref()
+                .map(|status| status.observing_node_id),
+            Some(2)
+        );
     }
 
     #[test]
@@ -2000,6 +2085,7 @@ mod tests {
                     sample_age_ms: Some(0),
                     error_class: None,
                     status: Some(status),
+                    transport: None,
                 }
             })
             .collect()

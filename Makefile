@@ -283,6 +283,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::production_executor_completion_records_local_bytes_before_returning_response \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::handler_coordinator_consumes_retained_reset_when_request_queue_is_full \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -339,6 +343,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_connection_supervisor_does_not_invent_snapshot_work \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::sqlite_install_snapshot_preserves_mismatch_for_offset_reset \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -376,6 +384,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::production_final_mismatch_restores_transfer_deadline_before_reread \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_higher_vote_response_never_advances_snapshot_acknowledgement \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -419,7 +431,23 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::inbound_progress_is_monotonic_and_new_identity_clears_attempt_state \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::same_peer_inbound_install_and_outbound_transfer_do_not_collide \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::terminal_wrapper_preserves_the_actionable_failure_category \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  transport_status::tests::active_observation_stalls_then_expires_without_renewing_sample_age \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::configured_chunk_deadline_controls_awaiting_ack_stall_projection \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -437,6 +465,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  transport_status::tests::transport_route_contract_is_authenticated_memory_only_and_404_compatible \
 	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::mgmt::tests::production_transport_client_uses_exact_authenticated_route_and_accepts_404 \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::peer_fanout_applies_the_one_second_per_peer_deadline \
 	  -- --exact
@@ -445,6 +477,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::aggregate_request_path_reads_cache_without_peer_network_fanout \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::private_transport_evidence_survives_a_closed_public_listener \
 	  -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \

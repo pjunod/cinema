@@ -346,11 +346,24 @@ function transportOps(observations) {
   };
 }
 
+function privateTransportOps(observations) {
+  return {
+    nodes: [
+      {
+        observation: "unreachable",
+        status: null,
+        transport: { observations },
+      },
+    ],
+  };
+}
+
 function transportObservation(phase, extra = {}) {
   return {
     observing_node_id: 2,
     peer_node_id: 1,
     raft_group: "sqlite",
+    direction: "inbound",
     sample_age_ms: 40,
     phase,
     ...extra,
@@ -399,6 +412,46 @@ test("transport recovery phases stay distinct from bounded-read authority", () =
   assert.equal(unavailable.code, "unavailable");
 });
 
+test("transport direction keeps sender and receiver explanations honest", () => {
+  const ui = sandbox();
+  const outbound = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("transferring", {
+        observing_node_id: 1,
+        peer_node_id: 2,
+        direction: "outbound",
+      }),
+    ]),
+    2,
+    false,
+  );
+  const inboundComplete = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("complete", {
+        direction: "inbound",
+        locally_received_bytes: 3145728,
+        acknowledged_offset: null,
+      }),
+    ]),
+    2,
+    false,
+  );
+
+  assert.equal(outbound.text, "transferring snapshot");
+  assert.equal(inboundComplete.text, "snapshot received; sender acknowledgement unconfirmed");
+});
+
+test("private cluster-listener evidence survives a closed public listener", () => {
+  const ui = sandbox();
+  const recovery = ui.clusterTransportExplanation(
+    privateTransportOps([transportObservation("installing")]),
+    2,
+    false,
+  );
+  assert.equal(recovery.code, "installing");
+  assert.equal(recovery.text, "installing snapshot");
+});
+
 test("transport status shows outbound evidence and expires stale samples", () => {
   const ui = sandbox();
   const outbound = ui.clusterTransportExplanation(
@@ -406,6 +459,7 @@ test("transport status shows outbound evidence and expires stale samples", () =>
       transportObservation("awaiting_acknowledgement", {
         observing_node_id: 1,
         peer_node_id: 2,
+        direction: "outbound",
       }),
     ]),
     2,
@@ -423,7 +477,12 @@ test("transport status shows outbound evidence and expires stale samples", () =>
   assert.equal(expired.observation, null);
 
   const watermark = ui.clusterTransportExplanation(
-    transportOps([transportObservation("complete")]),
+    transportOps([
+      transportObservation("complete", {
+        direction: "outbound",
+        acknowledged_offset: 3145728,
+      }),
+    ]),
     2,
     false,
   );

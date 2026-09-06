@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const CHKSUM: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_CKSUM);
 
 macro_rules! crc {
-    ($input:expr) => {{
-        crate::utils::CHKSUM.checksum($input).to_le_bytes()
-    }};
+    ($input:expr) => {{ crate::utils::CHKSUM.checksum($input).to_le_bytes() }};
 }
 pub(crate) use crc;
 

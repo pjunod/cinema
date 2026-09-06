@@ -1270,6 +1270,7 @@ pub struct ProtocolChange {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActivityPeer {
     pub node_id: String,
+    pub raft_id: u64,
     pub http_base: Option<String>,
     pub reachable: bool,
 }
@@ -4811,6 +4812,7 @@ impl MembershipManager {
             .map(|row| ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,
+                raft_id: row.raft_id,
                 reachable: node_is_reachable(now, row.last_seen_at),
             })
             .collect())
@@ -4902,6 +4904,7 @@ impl MembershipManager {
             .map(|row| ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,
+                raft_id: row.raft_id,
                 reachable: node_is_reachable(now, row.last_seen_at),
             })
             .collect())
@@ -4956,6 +4959,7 @@ impl MembershipManager {
             .map(|row| ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,
+                raft_id: row.raft_id,
                 reachable: node_is_reachable(now, row.last_seen_at),
             })
             .collect())

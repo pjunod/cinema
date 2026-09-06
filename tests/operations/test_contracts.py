@@ -1572,6 +1572,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "shutdown_before_submission_is_latched_and_admits_no_work",
             "admission_deadline_never_executes_the_timed_out_job",
             "accepted_partial_write_finishes_before_same_offset_retry",
+            "production_executor_completion_records_local_bytes_before_returning_response",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
             "replacement_socket_drops_cancelled_request_after_consuming_reset",
             "live_request_on_stale_socket_requires_reconnect",
@@ -1586,6 +1587,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "forced_reset_cleanup_does_not_wait_for_full_writer_queue",
             "dropping_connection_off_runtime_keeps_cleanup_owned",
             "repeated_connection_failures_return_supervised_tasks_to_baseline",
+            "production_connection_supervisor_does_not_invent_snapshot_work",
             "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
             "cache_install_snapshot_preserves_mismatch_for_offset_reset",
             "snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window",
@@ -1596,6 +1598,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "watchable_snapshot_deadline_switches_to_the_active_phase",
             "simultaneous_final_phase_update_wins_over_stale_transfer_timer",
             "production_final_mismatch_restores_transfer_deadline_before_reread",
+            "production_higher_vote_response_never_advances_snapshot_acknowledgement",
             "sqlite_full_snapshot_enters_bounded_wrapper",
             "cache_full_snapshot_enters_bounded_wrapper",
             "advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry",
@@ -1607,11 +1610,16 @@ for (const startupDelay of [0, 1600, 7000]) {
             "snapshot_deadline_durations_are_bounded_before_instant_arithmetic",
             "local_status_distinguishes_receive_ack_install_retry_and_completion",
             "receiver_bytes_are_not_reported_as_sender_acknowledgements",
+            "inbound_progress_is_monotonic_and_new_identity_clears_attempt_state",
+            "same_peer_inbound_install_and_outbound_transfer_do_not_collide",
+            "terminal_wrapper_preserves_the_actionable_failure_category",
             "active_observation_stalls_then_expires_without_renewing_sample_age",
+            "configured_chunk_deadline_controls_awaiting_ack_stall_projection",
             "completed_observation_never_projects_as_stalled_and_eventually_expires",
             "valid_install_does_not_stall_at_the_chunk_window",
             "retired_peers_are_bounded",
             "transport_route_contract_is_authenticated_memory_only_and_404_compatible",
+            "production_transport_client_uses_exact_authenticated_route_and_accepts_404",
         )
         for test_name in hiqlite_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1631,6 +1639,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "peer_fanout_applies_the_one_second_per_peer_deadline",
             "peer_status_cache_is_fresh_for_five_seconds_then_expires",
             "aggregate_request_path_reads_cache_without_peer_network_fanout",
+            "private_transport_evidence_survives_a_closed_public_listener",
         )
         for test_name in daemon_transport_tests:
             matching = [command for command in wal_commands if test_name in command]

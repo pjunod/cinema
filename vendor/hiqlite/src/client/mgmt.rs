@@ -197,36 +197,17 @@ impl Client {
             .ok_or_else(|| {
                 Error::Config("transport status peer is absent from the node roster".into())
             })?;
-        let scheme = if self.inner.tls_config.is_some() {
-            "https"
-        } else {
-            "http"
-        };
-        let response = self
-            .inner
-            .client
-            .as_ref()
-            .ok_or_else(|| Error::Connect("snapshot transport HTTP client is unavailable".into()))?
-            .get(format!(
-                "{scheme}://{}/cluster/transport/sqlite",
-                peer.addr_api
-            ))
-            .header(
-                HEADER_NAME_SECRET,
-                self.inner.api_secret.as_ref().ok_or_else(|| {
-                    Error::Connect("snapshot transport API secret is unavailable".into())
-                })?,
-            )
-            .timeout(Duration::from_secs(1))
-            .send()
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if response.status().is_success() {
-            return Ok(Some(response.json().await?));
-        }
-        Err(response.json::<Error>().await?)
+        request_snapshot_transport_status_sqlite(
+            self.inner.client.as_ref().ok_or_else(|| {
+                Error::Connect("snapshot transport HTTP client is unavailable".into())
+            })?,
+            self.inner.api_secret.as_deref().ok_or_else(|| {
+                Error::Connect("snapshot transport API secret is unavailable".into())
+            })?,
+            self.inner.tls_config.is_some(),
+            peer,
+        )
+        .await
     }
 
     /// Obtain the process-local database WAL status handle.
@@ -692,10 +673,110 @@ impl Client {
     }
 }
 
+#[cfg(feature = "sqlite")]
+async fn request_snapshot_transport_status_sqlite(
+    client: &reqwest::Client,
+    api_secret: &str,
+    tls: bool,
+    peer: &Node,
+) -> Result<Option<crate::SnapshotTransportStatus>, Error> {
+    let scheme = if tls { "https" } else { "http" };
+    let response = client
+        .get(format!(
+            "{scheme}://{}/cluster/transport/sqlite",
+            peer.addr_api
+        ))
+        .header(HEADER_NAME_SECRET, api_secret)
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if response.status().is_success() {
+        return Ok(Some(response.json().await?));
+    }
+    Err(response.json::<Error>().await?)
+}
+
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
-    use super::RAFT_SHUTDOWN_TIMEOUT;
+    use super::{RAFT_SHUTDOWN_TIMEOUT, request_snapshot_transport_status_sqlite};
+    use crate::Node;
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve_transport_response(
+        status: &'static str,
+        body: String,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind private transport test listener");
+        let address = listener.local_addr().expect("read test listener address");
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let read = socket.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+            assert!(request.starts_with("get /cluster/transport/sqlite http/1.1\r\n"));
+            assert!(request.contains("x-api-secret: exact-test-secret\r\n"));
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            socket.flush().await.expect("flush response");
+        });
+        (address.to_string(), task)
+    }
+
+    #[tokio::test]
+    async fn production_transport_client_uses_exact_authenticated_route_and_accepts_404() {
+        let expected = crate::SnapshotTransportStatus {
+            schema_version: 1,
+            observing_node_id: 2,
+            observed_at_unix_ms: 17,
+            observations: Vec::new(),
+        };
+        let (address, server) = serve_transport_response(
+            "200 OK",
+            serde_json::to_string(&expected).expect("serialize status"),
+        )
+        .await;
+        let peer = Node {
+            id: 2,
+            addr_raft: "127.0.0.1:1".to_owned(),
+            addr_api: address,
+        };
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build test client");
+        let actual =
+            request_snapshot_transport_status_sqlite(&client, "exact-test-secret", false, &peer)
+                .await
+                .expect("read status")
+                .expect("status exists");
+        server.await.expect("join status server");
+        assert_eq!(actual, expected);
+
+        let (address, server) = serve_transport_response("404 Not Found", String::new()).await;
+        let peer = Node {
+            addr_api: address,
+            ..peer
+        };
+        assert!(
+            request_snapshot_transport_status_sqlite(&client, "exact-test-secret", false, &peer,)
+                .await
+                .expect("404 is compatible")
+                .is_none()
+        );
+        server.await.expect("join 404 server");
+    }
 
     #[test]
     fn shutdown_timeout_leaves_room_after_deliberate_cluster_waits() {
