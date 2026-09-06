@@ -1124,23 +1124,150 @@ fn receive_linux_seccomp_notification_before(
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct LinuxProbeReceiver {
+    descriptor: std::sync::Mutex<Option<std::os::fd::OwnedFd>>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProbeReceiver {
+    fn raw_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+
+        self.descriptor
+            .lock()
+            .map_err(|_| std::io::Error::other("probe receiver owner was poisoned"))?
+            .as_ref()
+            .map(std::os::fd::AsRawFd::as_raw_fd)
+            .ok_or_else(|| std::io::Error::other("probe receiver was already closed"))
+    }
+
+    fn shutdown(&self) {
+        if let Ok(descriptor) = self.descriptor.lock() {
+            if let Some(descriptor) = descriptor.as_ref() {
+                use std::os::fd::AsRawFd;
+                unsafe {
+                    libc::shutdown(descriptor.as_raw_fd(), libc::SHUT_RDWR);
+                }
+            }
+        }
+    }
+
+    fn close(&self) {
+        self.shutdown();
+        if let Ok(mut descriptor) = self.descriptor.lock() {
+            descriptor.take();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn receive_linux_probe_fork_ready(
+    socket: std::os::fd::RawFd,
+    deadline: std::time::Instant,
+) -> std::io::Result<()> {
+    wait_for_linux_fd(socket, libc::POLLIN, deadline)?;
+    let mut byte = 0_u8;
+    loop {
+        let received = unsafe { libc::recv(socket, (&raw mut byte).cast(), 1, 0) };
+        if received == 1 && byte == b'F' {
+            return Ok(());
+        }
+        if received == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                wait_for_linux_fd(socket, libc::POLLIN, deadline)?;
+                continue;
+            }
+            return Err(error);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "probe child did not confirm its post-fork descriptor table",
+        ));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn acknowledge_linux_probe_fork(socket: std::os::fd::RawFd) -> std::io::Result<()> {
+    let byte = b'A';
+    loop {
+        if unsafe { libc::send(socket, (&raw const byte).cast(), 1, libc::MSG_NOSIGNAL) } == 1 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn confirm_linux_probe_fork(
+    socket: std::os::fd::RawFd,
+    deadline: std::time::Instant,
+) -> std::io::Result<()> {
+    let byte = b'F';
+    loop {
+        if unsafe { libc::send(socket, (&raw const byte).cast(), 1, libc::MSG_NOSIGNAL) } == 1 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    wait_for_linux_fd(socket, libc::POLLIN, deadline)?;
+    let mut acknowledgement = 0_u8;
+    loop {
+        let received = unsafe { libc::recv(socket, (&raw mut acknowledgement).cast(), 1, 0) };
+        if received == 1 && acknowledgement == b'A' {
+            return Ok(());
+        }
+        if received == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                wait_for_linux_fd(socket, libc::POLLIN, deadline)?;
+                continue;
+            }
+            return Err(error);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "probe supervisor closed before acknowledging the child fork",
+        ));
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn supervise_linux_probe_execs(
-    receiver: Arc<std::os::fd::OwnedFd>,
+    receiver: Arc<LinuxProbeReceiver>,
     stop: Arc<AtomicBool>,
     launch_mode: ProbeLaunchMode,
     launch_deadline: std::time::Instant,
 ) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
-
-    struct ShutdownReceiver(std::os::fd::RawFd);
-    impl Drop for ShutdownReceiver {
+    struct ReceiverCleanup {
+        receiver: Arc<LinuxProbeReceiver>,
+        fork_confirmed: bool,
+    }
+    impl Drop for ReceiverCleanup {
         fn drop(&mut self) {
-            unsafe {
-                libc::shutdown(self.0, libc::SHUT_RDWR);
+            if self.fork_confirmed {
+                self.receiver.close();
+            } else {
+                // Until the child confirms fork, keep the descriptor number
+                // occupied while shutdown unblocks any eventual handshake.
+                self.receiver.shutdown();
             }
         }
     }
-    let _shutdown_receiver = ShutdownReceiver(receiver.as_raw_fd());
+    let socket = receiver.raw_fd()?;
+    let mut receiver_cleanup = ReceiverCleanup {
+        receiver: Arc::clone(&receiver),
+        fork_confirmed: false,
+    };
+    receive_linux_probe_fork_ready(socket, launch_deadline)?;
+    receiver_cleanup.fork_confirmed = true;
     #[cfg(test)]
     if launch_mode.inject_supervisor_delay() {
         std::thread::sleep(Duration::from_millis(250));
@@ -1151,10 +1278,16 @@ fn supervise_linux_probe_execs(
             "injected seccomp listener receive failure",
         ));
     }
-    let listener = receive_linux_seccomp_listener(receiver.as_raw_fd(), launch_deadline)?;
-    unsafe {
-        libc::shutdown(receiver.as_raw_fd(), libc::SHUT_RDWR);
+    if std::time::Instant::now() >= launch_deadline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "probe supervisor launch handshake timed out",
+        ));
     }
+    acknowledge_linux_probe_fork(socket)?;
+    let listener = receive_linux_seccomp_listener(socket, launch_deadline)?;
+    receiver.close();
+    use std::os::fd::AsRawFd;
     let first = receive_linux_seccomp_notification_before(listener.as_raw_fd(), launch_deadline)?;
     if first.flags != 0
         || first.data.arch != LINUX_AUDIT_ARCH
@@ -1229,7 +1362,7 @@ fn supervise_linux_probe_execs(
 #[cfg(target_os = "linux")]
 struct LinuxProbeExecSupervisor {
     child_sender: Option<std::os::fd::OwnedFd>,
-    receiver: Option<Arc<std::os::fd::OwnedFd>>,
+    receiver: Option<Arc<LinuxProbeReceiver>>,
     child_sender_fd: std::os::fd::RawFd,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<std::io::Result<()>>>,
@@ -1272,7 +1405,11 @@ impl LinuxProbeExecSupervisor {
             }
             return Err(std::io::Error::last_os_error());
         }
-        let receiver = Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(receiver_fd) });
+        let receiver = Arc::new(LinuxProbeReceiver {
+            descriptor: std::sync::Mutex::new(Some(unsafe {
+                std::os::fd::OwnedFd::from_raw_fd(receiver_fd)
+            })),
+        });
         let child_sender = unsafe { std::os::fd::OwnedFd::from_raw_fd(sender_fd) };
         let child_sender_fd = child_sender.as_raw_fd();
         let stop = Arc::new(AtomicBool::new(false));
@@ -1310,11 +1447,11 @@ impl LinuxProbeExecSupervisor {
     }
 
     fn child_receiver_fd(&self) -> std::os::fd::RawFd {
-        use std::os::fd::AsRawFd;
         self.receiver
             .as_ref()
             .expect("receiver exists through spawn")
-            .as_raw_fd()
+            .raw_fd()
+            .expect("receiver descriptor exists through fork")
     }
 
     fn parent_after_spawn(&mut self) {
@@ -1572,6 +1709,10 @@ fn configure_probe_execution(
                 let Some(receiver_fd) = supervisor_receiver_fd else {
                     return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
                 };
+                let Some(sender_fd) = supervisor_sender_fd else {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                };
+                confirm_linux_probe_fork(sender_fd, launch_deadline)?;
                 libc::close(receiver_fd);
                 mark_unrelated_fds_close_on_exec()?;
                 #[cfg(test)]
@@ -1583,9 +1724,6 @@ fn configure_probe_execution(
                     return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
                 };
                 let Some(arguments) = production_arguments.as_ref() else {
-                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
-                };
-                let Some(sender_fd) = supervisor_sender_fd else {
                     return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
                 };
                 let listener = seccomp.install_listener()?;
