@@ -895,6 +895,42 @@ pub(crate) fn subtitle_readiness_value(
     )
 }
 
+/// How much of the client's buffer is actually ahead of where it is playing.
+///
+/// `buffered_through_ms` on its own does not say that. A client reports the
+/// end of a buffered region; whether that region *contains* the playhead is a
+/// separate fact, and `buffered_from_ms` is the one that carries it. Reading
+/// only the end credits a client with runway measured across a hole it cannot
+/// play through.
+///
+/// The case this exists for is an ordinary seek. The anchor becomes the seek
+/// target, and the region the client is describing is the one around where it
+/// *was* — so the difference between the two is not buffer, it is the gap the
+/// client is seeking across. Crediting it as runway tells the server the
+/// viewer is comfortable at exactly the moment they have nothing, and the
+/// server holds production on the strength of it.
+///
+/// A region that starts at or before the anchor is contiguous from the
+/// playhead and its end is the honest runway — which is every steady-state
+/// exchange, so nothing changes for the common case.
+///
+/// An absent `buffered_from_ms` means no contiguity evidence, not a hole. That
+/// is the shape a client sends when it could not identify a region containing
+/// the playhead, and it is also the shape every client that predates the field
+/// sends. Both keep the old reading rather than being told they have nothing:
+/// inventing a starvation signal from a missing field would stall production
+/// for clients that are fine.
+fn contiguous_runway_ms(request: &ControlRequestV1, buffer_anchor_ms: i64) -> i64 {
+    let start = request.buffered_from_ms.unwrap_or(buffer_anchor_ms);
+    if start > buffer_anchor_ms {
+        return 0;
+    }
+    request
+        .buffered_through_ms
+        .saturating_sub(buffer_anchor_ms)
+        .max(0)
+}
+
 impl DeliveryView {
     pub(crate) fn from_status(
         status: &HlsSessionInfo,
@@ -905,10 +941,7 @@ impl DeliveryView {
         subtitle_readiness: Option<String>,
     ) -> Self {
         let buffer_anchor_ms = request.seek_target_ms.unwrap_or(request.position_ms);
-        let client_runway_ms = request
-            .buffered_through_ms
-            .saturating_sub(buffer_anchor_ms)
-            .max(0);
+        let client_runway_ms = contiguous_runway_ms(request, buffer_anchor_ms);
         match status {
             HlsSessionInfo::Live(info) => Self {
                 presentation: info.presentation.to_owned(),
@@ -14315,6 +14348,80 @@ mod tests {
     /// interval passes. That distinction is why this is not a terminal, which
     /// would tell a client to tear down a player over a server working
     /// exactly as designed.
+    /// A buffer that does not reach the playhead is not runway.
+    ///
+    /// `buffered_through_ms` alone cannot tell a comfortable client from one
+    /// about to starve: it is the end of *a* buffered region, and whether that
+    /// region contains the playhead is a different fact. The case that matters
+    /// is an ordinary seek — the anchor moves to the target while the region
+    /// the client is describing is the one around where it was, so the
+    /// difference between them is the gap being seeked across, not buffer.
+    /// Counting it tells the server the viewer is fine at precisely the moment
+    /// they have nothing, and the server holds production on that.
+    ///
+    /// The two shapes below report an identical `buffered_through_ms` and must
+    /// not report identical runway. That is the whole property; everything
+    /// else here is making sure the honest cases are left alone.
+    #[test]
+    fn runway_counts_only_a_buffer_that_reaches_the_playhead() {
+        let contiguous = ControlRequestV1 {
+            position_ms: 10_000,
+            buffered_from_ms: Some(9_000),
+            buffered_through_ms: 40_000,
+            ..request()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&contiguous, 10_000),
+            30_000,
+            "a region containing the playhead is runway to its end",
+        );
+
+        let scattered = ControlRequestV1 {
+            buffered_from_ms: Some(25_000),
+            ..contiguous.clone()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&scattered, 10_000),
+            0,
+            "the same end, with a hole at the playhead, is not 30 seconds of \
+             comfort — it is nothing to play",
+        );
+
+        // A seek whose buffer is entirely behind the target is *not* tested
+        // here, and the reason is worth writing down: it cannot reach this
+        // function. `validate` refuses a request whose `buffered_through_ms`
+        // is below the anchor, and during a seek the anchor is the target — so
+        // a client holding 9s-20s while seeking to 600s is rejected at the
+        // door rather than arriving with a misleading runway. Asserting it
+        // anyway would be asserting a shape the wire forbids, which proves
+        // nothing about the system and quietly rots when the validator moves.
+        //
+        // What does reach here is the case above: a request that passes
+        // validation because its region ends past the anchor, while starting
+        // after it.
+
+        // No contiguity evidence is not a hole. Every client that predates the
+        // field sends this, and so does one that could not identify a region
+        // containing its playhead; telling either that it has nothing would
+        // stall production for clients that are fine.
+        let silent = ControlRequestV1 {
+            buffered_from_ms: None,
+            ..contiguous.clone()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&silent, 10_000),
+            30_000,
+            "a client that says nothing about contiguity keeps the old reading",
+        );
+
+        // And a region starting exactly at the playhead is contiguous.
+        let exact = ControlRequestV1 {
+            buffered_from_ms: Some(10_000),
+            ..contiguous
+        };
+        assert_eq!(contiguous_runway_ms(&exact, 10_000), 30_000);
+    }
+
     #[test]
     fn a_hold_says_when_to_ask_again_and_no_room_says_later() {
         for reason in [
