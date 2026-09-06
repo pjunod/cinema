@@ -1041,6 +1041,15 @@ struct LinuxBootstrapInterrupts {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, Default)]
+struct LinuxNotificationInterruptionHooks {
+    interrupt_observer: Option<&'static std::sync::atomic::AtomicUsize>,
+    deadline_exit_observer: Option<&'static std::sync::atomic::AtomicUsize>,
+    stop_exit_observer: Option<&'static std::sync::atomic::AtomicUsize>,
+    stop_after_interrupt: bool,
+}
+
+#[cfg(target_os = "linux")]
 fn consume_linux_bootstrap_interrupt(remaining: &mut u8) -> bool {
     if *remaining == 0 {
         false
@@ -1113,30 +1122,27 @@ fn answer_linux_seccomp_notification_until(
     deadline: Option<std::time::Instant>,
     stop: Option<&AtomicBool>,
     injected_interrupts: &mut u8,
-    injected_interrupt_observer: Option<&std::sync::atomic::AtomicUsize>,
-    deadline_exit_observer: Option<&std::sync::atomic::AtomicUsize>,
-    stop_exit_observer: Option<&std::sync::atomic::AtomicUsize>,
-    stop_after_injected_interrupt: bool,
+    test_hooks: LinuxNotificationInterruptionHooks,
 ) -> std::io::Result<()> {
     loop {
         if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
-            if let Some(observer) = stop_exit_observer {
+            if let Some(observer) = test_hooks.stop_exit_observer {
                 observer.fetch_add(1, Ordering::Release);
             }
             return Ok(());
         }
         if let Err(error) = ensure_linux_probe_deadline(deadline) {
-            if let Some(observer) = deadline_exit_observer {
+            if let Some(observer) = test_hooks.deadline_exit_observer {
                 observer.fetch_add(1, Ordering::Release);
             }
             return Err(error);
         }
         let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
         if injected {
-            if let Some(observer) = injected_interrupt_observer {
+            if let Some(observer) = test_hooks.interrupt_observer {
                 observer.fetch_add(1, Ordering::Release);
             }
-            if stop_after_injected_interrupt {
+            if test_hooks.stop_after_interrupt {
                 if let Some(stop) = stop {
                     stop.store(true, Ordering::Release);
                 }
@@ -1577,9 +1583,7 @@ fn supervise_linux_probe_execs(
             None,
             &mut interrupts.first_notification_response,
             None,
-            None,
-            None,
-            false,
+            LinuxNotificationInterruptionHooks::default(),
         );
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -1602,9 +1606,7 @@ fn supervise_linux_probe_execs(
         None,
         &mut interrupts.first_notification_response,
         None,
-        None,
-        None,
-        false,
+        LinuxNotificationInterruptionHooks::default(),
     )?;
 
     while !stop.load(Ordering::Acquire) {
@@ -1656,10 +1658,12 @@ fn supervise_linux_probe_execs(
             Some(launch_deadline),
             Some(stop.as_ref()),
             &mut interrupts.steady_notification_response,
-            interrupts.steady_notification_response_interrupts,
-            interrupts.steady_notification_response_deadline_exits,
-            interrupts.steady_notification_response_stop_exits,
-            interrupts.stop_after_steady_notification_response_interrupt,
+            LinuxNotificationInterruptionHooks {
+                interrupt_observer: interrupts.steady_notification_response_interrupts,
+                deadline_exit_observer: interrupts.steady_notification_response_deadline_exits,
+                stop_exit_observer: interrupts.steady_notification_response_stop_exits,
+                stop_after_interrupt: interrupts.stop_after_steady_notification_response_interrupt,
+            },
         ) {
             Ok(()) => {}
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
