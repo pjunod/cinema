@@ -810,6 +810,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::three_voter_rolling_upgrade_activates_credential_guard_only_after_full_roster \
 	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::activated_guard_with_live_mutation_lease_is_not_an_activation_candidate \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
 	  -- --exact
@@ -835,10 +838,13 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::capability_refresh_error_and_rollback_clear_cache_only_admin_authority \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
-	  http::cluster_operations::tests::membership_loop_automatically_activates_full_roster_revocation_protocol \
+	  http::cluster_operations::tests::automatic_activation_runs_outside_the_membership_projection \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::full_roster_projection_activates_without_a_credential_mutation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  startup_tests::console_password_reset_fails_closed_before_any_store_mutation \
@@ -878,6 +884,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::internal_auth_revocation::tests::origin_waits_for_exact_claim_apply_before_observing_added_member \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::automatic_activation_checks_the_permanent_marker_before_taking_the_gate \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::password_and_session_revocation_roll_back_together_on_delete_failure \

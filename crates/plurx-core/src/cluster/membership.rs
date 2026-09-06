@@ -2085,6 +2085,7 @@ fn committed_capability_unready_nodes_sql(capability: &str) -> String {
 /// Whether every exact committed Raft member has a current capability proof.
 /// Starting from `json_each` is intentional: a configuration member whose SQL
 /// identity row has not applied yet is unready, not silently absent.
+#[cfg(test)]
 fn committed_capability_ready_sql(capability: &str) -> String {
     format!(
         "SELECT COUNT(*) AS count FROM json_each($1) AS committed \
@@ -2095,6 +2096,25 @@ fn committed_capability_ready_sql(capability: &str) -> String {
             AND active.removed_at IS NULL \
             AND capability.capability = '{capability}' \
             AND capability.last_seen_at = active.last_seen_at)"
+    )
+}
+
+/// Whether the one-time credential-guard transition is still needed and the
+/// exact committed roster is ready to perform it. An active mutation lease
+/// after activation must not make every node submit a redundant claim.
+fn committed_cache_admin_revocation_activation_needed_sql() -> String {
+    format!(
+        "SELECT (\
+           NOT EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+           AND NOT EXISTS (SELECT 1 FROM json_each($1) AS committed \
+             WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+               JOIN cluster_node_capabilities AS capability \
+                 ON capability.node_id = active.node_id \
+              WHERE active.raft_id = CAST(committed.value AS INTEGER) \
+                AND active.removed_at IS NULL \
+                AND capability.capability = '{CACHE_ADMIN_REVOCATION_CAPABILITY}' \
+                AND capability.last_seen_at = active.last_seen_at))\
+         ) AS count"
     )
 }
 
@@ -6755,11 +6775,11 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
-                committed_capability_ready_sql(CACHE_ADMIN_REVOCATION_CAPABILITY),
+                committed_cache_admin_revocation_activation_needed_sql(),
                 params!(members_json),
             )
             .await?;
-        Ok(rows.first().is_some_and(|row| row.count == 0))
+        Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
     /// Whether this exact cache-admin exclusion has reached this process's
@@ -13680,6 +13700,46 @@ mod tests {
             );
         }
         assert_eq!(activation_count(), 1);
+    }
+
+    #[test]
+    fn activated_guard_with_live_mutation_lease_is_not_an_activation_candidate() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL UNIQUE, \
+                   last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT NOT NULL, capability TEXT NOT NULL, \
+                   last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_cache_admin_revocation_leases (\
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1), \
+                   claim_id TEXT NOT NULL UNIQUE); \
+                 CREATE TABLE cluster_credential_guard_activation (\
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1)); \
+                 INSERT INTO cluster_nodes VALUES \
+                   ('node-a', 1, 100, NULL), ('node-b', 2, 100, NULL), \
+                   ('node-c', 3, 100, NULL); \
+                 INSERT INTO cluster_node_capabilities \
+                   SELECT node_id, 'cache_admin_revocation_v3', last_seen_at \
+                   FROM cluster_nodes; \
+                 INSERT INTO cluster_credential_guard_activation VALUES (1); \
+                 INSERT INTO cluster_cache_admin_revocation_leases \
+                   VALUES (1, 'ordinary-credential-mutation');",
+            )
+            .expect("construct activated mutation state");
+        let needed = connection
+            .query_row(
+                &committed_cache_admin_revocation_activation_needed_sql(),
+                rusqlite::params!["[1,2,3]"],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read activation preflight");
+        assert_eq!(
+            needed, 0,
+            "an ordinary active credential lease after activation must not cause reactivation"
+        );
     }
 
     /// A binary old enough to predate heartbeat intents is caught one step

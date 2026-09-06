@@ -1732,8 +1732,10 @@ for (const startupDelay of [0, 1600, 7000]) {
             "begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply",
             "cancelled_local_apply_wait_leaves_peer_memory_fence_closed",
             "origin_waits_for_exact_claim_apply_before_observing_added_member",
-            "membership_loop_automatically_activates_full_roster_revocation_protocol",
+            "automatic_activation_runs_outside_the_membership_projection",
             "full_roster_projection_activates_without_a_credential_mutation",
+            "stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown",
+            "automatic_activation_checks_the_permanent_marker_before_taking_the_gate",
         )
         for test_name in daemon_transport_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1762,6 +1764,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "rollback_heartbeat_cannot_republish_retired_cache_revocation_capabilities",
             "rollback_credential_mutation_is_rejected_before_readiness_refresh",
             "three_voter_rolling_upgrade_activates_credential_guard_only_after_full_roster",
+            "activated_guard_with_live_mutation_lease_is_not_an_activation_candidate",
             "status_protocol_query_materializes_only_the_committed_roster",
             "committed_roster_bound_fails_closed_instead_of_truncating",
             "released_planned_outage_claim_cannot_be_resurrected_by_a_delayed_write",

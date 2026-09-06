@@ -2038,6 +2038,12 @@ fn spawn_background_loops(
             background_shutdown.clone(),
         ),
     );
+    tokio::spawn(
+        crate::http::internal_auth_revocation::cache_admin_revocation_activation_loop(
+            state.clone(),
+            background_shutdown.clone(),
+        ),
+    );
     tokio::spawn(crate::http::cluster_operations::peer_status_cache_loop(
         state.clone(),
         background_shutdown.clone(),

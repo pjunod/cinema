@@ -30,6 +30,7 @@ const EXCLUSION_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(50);
 const EXCLUSION_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(2);
 const LOCAL_CLAIM_APPLY_TIMEOUT: Duration = Duration::from_millis(1_500);
 const LOCAL_CLAIM_APPLY_POLL: Duration = Duration::from_millis(10);
+const ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
 type PeerIdentity = (String, u64, Option<String>);
 
@@ -419,6 +420,52 @@ impl ClusterCacheRevocation {
     }
 }
 
+/// Own automatic one-time protocol activation independently of membership
+/// status publication. A stuck definitive exclusion cleanup must keep its
+/// fail-closed authority without making the five-second diagnostics cache go
+/// stale during the same quorum-loss incident.
+pub(crate) async fn cache_admin_revocation_activation_loop(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    if !state.membership.is_replicated() {
+        return;
+    }
+    cache_admin_revocation_activation_loop_with(shutdown, move || {
+        let state = state.clone();
+        async move {
+            ClusterCacheRevocation::activate_if_ready(&state)
+                .await
+                .map_err(|error| format!("{error:?}"))
+        }
+    })
+    .await;
+}
+
+pub(crate) async fn cache_admin_revocation_activation_loop_with<Activate, ActivateFuture>(
+    shutdown: tokio_util::sync::CancellationToken,
+    mut activate: Activate,
+) where
+    Activate: FnMut() -> ActivateFuture,
+    ActivateFuture: std::future::Future<Output = Result<(), String>>,
+{
+    loop {
+        let result = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            result = activate() => result,
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "cache admin revocation activation attempt failed");
+        }
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            () = tokio::time::sleep(ACTIVATION_RETRY_INTERVAL) => {}
+        }
+    }
+}
+
 async fn cleanup_begin(transport: &PeerTransport, peers: &[ActivityPeer], request: &Request) {
     let cleanup = Request {
         phase: Phase::End,
@@ -646,6 +693,25 @@ mod tests {
             .0;
         assert!(source.contains("cache_admin_revocation_peers(claim_id)"));
         assert!(!source.contains("operations_peers()"));
+    }
+
+    #[test]
+    fn automatic_activation_checks_the_permanent_marker_before_taking_the_gate() {
+        let source = include_str!("internal_auth_revocation.rs")
+            .split_once("pub(crate) async fn activate_if_ready")
+            .expect("automatic activation entry")
+            .1
+            .split_once("pub(crate) async fn begin_digest")
+            .expect("automatic activation entry end")
+            .0;
+        assert!(
+            source
+                .find("cache_admin_revocation_activation_ready()")
+                .expect("marker-aware quorum preflight")
+                < source
+                    .find("try_acquire_revocation_operation()")
+                    .expect("local operation gate")
+        );
     }
 
     #[test]
