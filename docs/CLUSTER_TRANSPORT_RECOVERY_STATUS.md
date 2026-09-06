@@ -27,9 +27,9 @@ change.
 
 | Milestone | Task branch | PR | State | Blocking evidence |
 |---|---|---|---|---|
-| M1 · frame completion | `codex/cluster-transport-m1` | not opened | all ninth-review findings fixed and validated; tenth exact review pending | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
+| M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | implementation and exact-candidate adversarial reviews clean; effort gate rerunning after a CI-routing correction | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same review | foundations implemented; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
-| M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | implementation in progress | Virtual-time exact bounds · config/env/Compose precedence |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | implementation candidate passing focused Rust, virtual-time, and Compose tests; integration/review in progress | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
 | M5 · recovery campaign | planned | not opened | not started | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
@@ -78,32 +78,20 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    snapshot work has a longer-lived owner. Keeping these coupled changes in
    one review prevents the flush fix from shipping with known teardown races.
 5. **Open and merge only reviewed exact candidates.** Git hosting access and
-   the pushed task branch are available. PR creation follows after the current
-   exact candidate passes its focused lane and an adversarial review round.
+   the pushed task branch are available. M1 pull request !56 is open against
+   the effort branch. Its first preflight exposed an unmapped validation helper;
+   the correction now routes changes to that helper through the cluster/WAL
+   lane it protects and has its own scope regression.
 
-## Next checkpoint — exact-SHA tenth review, then the milestone PR
+## Next checkpoint — clear the effort gate and merge M1/M2
 
-The seventh adversarial round found that a caller-issued proxy rotation could
-outlive the socket whose refusal created it, or duplicate an EOF-triggered
-rotation. Proxy recovery now has one authority: the stream manager recognizes
-the refusal on the exact response it receives, settles that response, drains
-and coalesces any additional refusals from the same socket, then advances the
-configured proxy pool once. Callers only retry the definitively refused
-request; they cannot enqueue a stale endpoint mutation. The eighth evidence
-review correctly rejected helper-only proxy tests: the replacements now drive
-the production reader-drain and disconnect-finalization seams, make the biased
-reader-finished event win over queued responses, settle both concurrent
-refusals, and distinguish one endpoint advance from zero or two. The lifecycle
-evidence review then found three teardown gaps. Teardown promotion now uses the
-same proxy-mode guard as live handling, a recognized refusal still owns socket
-recovery after its caller drops the acknowledgement receiver, and the reader
-retains a decoded response while the one-slot outcome queue is full so task
-abort cannot discard it. Regressions exercise all three paths through the
-production seams, including non-proxy EOF ambiguity and two refusals separated
-by queue backpressure. Evidence remains explicitly bounded to 100 in-memory
-WebSocket task cycles; real socket/install acceptance is open for M5. The next
-checkpoint pushes the exact revision, obtains a clean tenth adversarial review,
-and opens the task PR into the effort branch.
+Three adversarial tracks are clean on the reviewed M1/M2 production candidate,
+and the follow-up CI-routing review is clean after requiring changes to
+`scripts/require-test-count` to select the cluster/WAL lane. The current task is
+to let !56's replacement effort gate finish, merge it only when that required
+verdict is green, and rebase the already-running M3 candidate onto the merged
+effort head. Evidence remains explicitly bounded to 100 in-memory WebSocket
+task cycles; real socket/install acceptance is open for M5.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only
