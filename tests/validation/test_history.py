@@ -9,6 +9,7 @@ import unittest
 from validation.history import (
     ISSUE_RE,
     HistoryError,
+    _audit_tips,
     audit_history,
     load_coverage,
     verify_migration_fidelity,
@@ -117,6 +118,75 @@ class HistoryAuditCase(unittest.TestCase):
         )
         covered = audit_history(root, catalog, coverage)
         self.assertEqual(covered.errors, ())
+
+    def test_a_merge_in_progress_audits_both_parents(self):
+        """The hook runs before the merge commit exists, so it must see both sides.
+
+        `git log` from HEAD sees only the first parent, but the merged tree
+        already carries the second parent's coverage fragments. Auditing from
+        HEAD alone therefore reports every one of those mappings as describing a
+        commit that does not exist -- refusing a merge in which nothing is
+        wrong, and leaving no way to merge into an effort branch at all short of
+        skipping the hook. The audited population is the history the resulting
+        commit will actually have.
+        """
+
+        root, catalog, coverage = self.repository()
+        (root / "src/app.rs").write_text("pub fn answer() -> u8 { 1 }\n", encoding="utf-8")
+        self.commit(root, "feat: seed")
+        base = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=root, check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        def corrective(branch: str, value: str, module: str) -> str:
+            subprocess.run(["git", "checkout", "-q", "-b", branch, base], cwd=root, check=True)
+            # The other branch's fragment was the only file in `regressions.d`,
+            # and git does not track an empty directory, so checking out the
+            # base takes the directory with it.
+            coverage.mkdir(parents=True, exist_ok=True)
+            (root / "src" / module).write_text(
+                "pub fn answer() -> u8 { %s }\n" % value, encoding="utf-8"
+            )
+            sha = self.commit(root, "fix: return the corrected answer from %s" % module)
+            self.write_coverage(
+                coverage,
+                f"{sha[:8]}-app.toml",
+                f"""
+                commits = ["{sha[:8]}"]
+                points = ["app"]
+                checks = ["baseline"]
+                reason = "The current baseline exercises this generated behavior."
+                """,
+            )
+            # Two commits, the way a mapping is really made: the fix, then the
+            # fragment naming it. So the tip the merge records is the mapping
+            # commit, not the fix.
+            return sha, self.commit(root, "validation: map %s" % sha[:8])
+
+        corrective("ours", "2", "app.rs")
+        theirs, theirs_tip = corrective("theirs", "3", "other.rs")
+
+        subprocess.run(["git", "checkout", "-q", "ours"], cwd=root, check=True)
+        merge = subprocess.run(
+            ["git", "merge", "--no-commit", "--no-ff", "-q", "theirs"],
+            cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        self.assertEqual(merge.returncode, 0, merge.stdout)
+        self.assertTrue((root / ".git/MERGE_HEAD").is_file(), "expected a merge in progress")
+
+        self.assertEqual(_audit_tips(root), ("HEAD", theirs_tip))
+        self.assertEqual(audit_history(root, catalog, coverage).errors, ())
+
+        # The same tree, audited from HEAD alone, is what the hook was doing:
+        # the other parent's mapping describes a commit it cannot see.
+        (root / ".git/MERGE_HEAD").unlink()
+        self.assertEqual(_audit_tips(root), ("HEAD",))
+        one_sided = audit_history(root, catalog, coverage).errors
+        self.assertTrue(
+            any(f"{theirs[:8]} matches 0 audited commits" in error for error in one_sided),
+            one_sided,
+        )
 
     def test_explicit_ledger_survives_a_non_corrective_squash_title(self):
         root, catalog, coverage = self.repository()

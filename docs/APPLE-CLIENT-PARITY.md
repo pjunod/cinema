@@ -9,7 +9,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-09-06): source is v0.3.0, Apple build 116. Native text
+> Status (2026-09-06): source is v0.3.0, Apple build 117. Native text
 > subtitles, the cinematic detail surface, stable seek/recovery, truthful
 > delivered-range badges, and app-managed offline viewing on iPhone/iPad have
 > landed.
@@ -455,6 +455,37 @@ file id it was made against, so it is discarded rather than spent when the file
 changes; autoplay's next episode builds its own context and inherits nothing.
 Nothing here writes the server's Playback defaults, and in-player audio and
 subtitle switching behaves exactly as it did before.
+
+## Live TV
+
+iOS and tvOS play Live TV through the same bounded six-segment window every
+other client uses ([PLAYBACK.md](PLAYBACK.md)), with the platform differences
+that matter:
+
+- **AVPlayer against the capability URL.** The playlist and segments carry the
+  opaque capability and no account bearer, so the live item is constructed with
+  the capability URL directly rather than through the authenticated asset path
+  used for library titles.
+- **Explicit live controls.** Channel selection, pause/resume, mute, fullscreen
+  and stop are the whole surface. The finite-media controller is never invoked:
+  no scrubber, no resume point, no progress write.
+- **An app-wide uncertainty barrier.** The same allowlist rule the web and
+  Android clients use — only a failure decided before a tuner can open clears
+  the durable ownership marker — and it is app-wide, so switching profiles does
+  not step around it. The marker persists before the POST and during playback
+  and survives an app restart until a release is confirmed.
+- **A runtime-only Developer card.** Device address, saved configuration,
+  readiness checks and the separate runtime enable live in a Developer card
+  that is present in every build. There is no compile-time switch that hides
+  Live TV from a shipped app, and every mutation requires server-enforced
+  administrator access plus an exact settings generation.
+
+**Proved:** iOS and tvOS compile and 14 focused tests pass on each simulator
+(effort gate 95, merged `fc9c8f45`). The server side of Live TV is now proved
+against a real HDHomeRun FLEX 4K over an antenna — see
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md). **Not proved:**
+playback on a physical iPhone or Apple TV against that tuner. The simulators do
+not settle whether AVPlayer keeps a 4 s-segment live window on real hardware.
 
 ## Release gate
 

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b01b0d5c"]
+points = ["live-tv.integration"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The real video-only MPEG-TS fixture exercises the production FFmpeg spawn arguments, requires rejection before playlist publication, and checks typed codec_unsupported classification. Bounded diagnostic tests also distinguish missing required audio/video maps from unrelated FFmpeg failures. The real-media fixture requires a working FFmpeg installation; the isolated pinned-toolchain image supplies one without modifying the user's host installation."

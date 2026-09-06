@@ -33,17 +33,27 @@ jobs:
       - name: Restore patched crates to registry provenance for advisory matching
         run: scripts/vendor-audit-lock --output target/vendor-audit/Cargo.lock
       # v2.0.0, pinned so the security gate cannot move without review.
+      #
+      # It installs the pinned cargo-audit binary and annotates the commit when
+      # it can. It is NOT the verdict: it reports through GitHub's check-run
+      # API, which Forgejo does not implement, and it only reaches that call
+      # when it has an advisory to annotate. That made the job pass for as long
+      # as the lockfile carried no informational advisory and fail with
+      # `::error::404 page not found` the day one appeared -- on a commit that
+      # introduced neither the advisory nor the dependency.
       - uses: https://github.com/rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
+        continue-on-error: true
         with:
           token: ${{ secrets.FORGEJO_TOKEN }}
+      # The verdict. `cargo audit` exits non-zero for an actual vulnerability
+      # and reports informational notices -- unmaintained, unsound, yanked --
+      # in the log without failing. A crate going unmaintained upstream is
+      # news, not a broken build, and it must not be able to close `main`.
+      - name: Audit the workspace lockfile
+        run: cargo audit
       # cargo-audit intentionally skips path-sourced packages. Re-scan a
       # synthesized lockfile so future advisories against either vendored
       # upstream release remain visible.
-      # The action above installs the pinned cargo-audit binary. Invoke it
-      # directly for the synthesized lockfile: a second copy of the action in
-      # one job cannot update its check annotation when an informational
-      # advisory is present. cargo-audit still exits non-zero for actual
-      # vulnerabilities while reporting informational notices in the log.
       - name: Audit synthesized vendor lockfile
         run: cargo audit --file target/vendor-audit/Cargo.lock
 

@@ -19,11 +19,13 @@ mod extract;
 mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
+pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
 mod keys;
 mod libraries;
+mod live_tv;
 mod network;
 mod offline;
 pub(crate) mod peer_transport;
@@ -82,6 +84,36 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/settings",
             get(system::get_settings).put(system::update_settings),
+        )
+        .route("/live-tv/readiness", get(live_tv::readiness))
+        .route(
+            "/live-tv/readiness/refresh",
+            post(live_tv::refresh_readiness),
+        )
+        .route("/live-tv/channels", get(live_tv::channels))
+        .route(
+            "/live-tv/channels/{channel}/sessions",
+            post(live_tv::start_session),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/index.m3u8",
+            get(live_tv::playlist),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/status",
+            get(live_tv::session_status),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/keepalive",
+            put(live_tv::keepalive),
+        )
+        .route(
+            "/live-tv/sessions/{capability}/{segment}",
+            get(live_tv::segment),
+        )
+        .route(
+            "/live-tv/sessions/{capability}",
+            delete(live_tv::stop_session),
         )
         .route("/scan/status", get(system::scan_status))
         .route("/activity", get(system::activity))
@@ -389,6 +421,7 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/cluster-panel.js", get(web::cluster_panel_js))
         .route("/assets/playback-policy.js", get(web::playback_policy_js))
         .route("/assets/playback-control.js", get(web::playback_control_js))
+        .route("/assets/live-tv.js", get(web::live_tv_js))
         .route("/assets/reader.js", get(web::reader_js))
         .route("/assets/reader.css", get(web::reader_css))
         .route("/connect.svg", get(web::connect_qr))
@@ -417,6 +450,42 @@ pub fn router(state: AppState) -> Router {
             crate::shared_cache::CANARY_PATH,
             post(internal_media::shared_cache_canary).layer(DefaultBodyLimit::max(
                 crate::shared_cache::MAX_CANARY_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::SNAPSHOT_PATH,
+            post(internal_live_tv::snapshot).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::START_PATH,
+            post(internal_live_tv::start).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::ACTIVATE_PATH,
+            post(internal_live_tv::activate).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::RESOURCE_PATH,
+            post(internal_live_tv::resource).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::STOP_PATH,
+            post(internal_live_tv::stop).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
+            )),
+        )
+        .route(
+            crate::live_tv::DRAIN_PATH,
+            post(internal_live_tv::drain).layer(DefaultBodyLimit::max(
+                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
             )),
         )
         .route(
@@ -540,6 +609,8 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
+                | crate::live_tv::RESOURCE_PATH
+                | crate::live_tv::STOP_PATH
         )
     {
         return true;
@@ -556,15 +627,23 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "offline", "media", _, _]
                 | ["api", "v1", "offline", "media", _, _, _]
                 | ["api", "v1", "offline", "media", _, "subs", _, _]
+                | ["api", "v1", "live-tv", "sessions", _, _]
         ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let existing_media_control = (method == Method::POST
         && matches!(segments.as_slice(), ["api", "v1", "hls", _, "control"]))
         || (method == Method::DELETE
             && matches!(
                 segments.as_slice(),
-                ["api", "v1", "hls", _] | ["api", "v1", "publication", _]
+                ["api", "v1", "hls", _]
+                    | ["api", "v1", "publication", _]
+                    | ["api", "v1", "live-tv", "sessions", _]
             ));
-    existing_media_read || existing_media_control
+    let live_keepalive = method == Method::PUT
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "live-tv", "sessions", _, "keepalive"]
+        );
+    existing_media_read || existing_media_control || live_keepalive
 }
 
 /// One published route matrix for the non-voting capacity role.
@@ -624,6 +703,8 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
+                    | crate::live_tv::RESOURCE_PATH
+                    | crate::live_tv::STOP_PATH
             ))
     {
         return true;
@@ -687,6 +768,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "offline", "media", _, _, _]
                 | ["api", "v1", "offline", "media", _, "subs", _, _]
                 | ["api", "v1", "publication", _, _]
+                | ["api", "v1", "live-tv", "sessions", _, _]
         ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let node_local_create = method == Method::POST
         && matches!(
@@ -704,9 +786,16 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     let node_local_close = method == Method::DELETE
         && matches!(
             segments.as_slice(),
-            ["api", "v1", "hls", _] | ["api", "v1", "publication", _]
+            ["api", "v1", "hls", _]
+                | ["api", "v1", "publication", _]
+                | ["api", "v1", "live-tv", "sessions", _]
         );
-    node_local_get || node_local_create || node_local_close
+    let live_keepalive = method == Method::PUT
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "live-tv", "sessions", _, "keepalive"]
+        );
+    node_local_get || node_local_create || node_local_close || live_keepalive
 }
 
 async fn cluster_capacity_gate(
@@ -755,12 +844,13 @@ async fn cluster_capacity_gate(
 
 fn safe_trace_target(uri: &Uri) -> String {
     let mut segments = uri.path().split('/').collect::<Vec<_>>();
-    for marker in ["media", "hls", "publication"] {
+    for marker in ["media", "hls", "publication", "sessions"] {
         if let Some(index) = segments.iter().position(|segment| *segment == marker) {
             let is_capability_route = match marker {
                 "media" => index >= 2 && segments.get(index.wrapping_sub(1)) == Some(&"offline"),
                 "hls" => true,
                 "publication" => true,
+                "sessions" => index > 0 && segments.get(index - 1) == Some(&"live-tv"),
                 _ => false,
             };
             if is_capability_route && index + 1 < segments.len() {
@@ -959,6 +1049,10 @@ mod tests {
         for (method, path) in [
             (Method::GET, "/api/v1/search"),
             (Method::GET, "/api/v1/settings"),
+            (Method::GET, "/api/v1/live-tv/readiness"),
+            (Method::GET, "/api/v1/live-tv/channels"),
+            (Method::POST, "/api/v1/live-tv/readiness/refresh"),
+            (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             (Method::POST, "/api/v1/libraries"),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::POST, "/api/v1/cluster/learner-join-tokens"),
@@ -982,6 +1076,16 @@ mod tests {
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::POST, "/api/v1/hls/session-8/control"),
             (Method::DELETE, "/api/v1/hls/session-8"),
+            (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
+            (
+                Method::GET,
+                "/api/v1/live-tv/sessions/cap/segment-000001.ts",
+            ),
+            (Method::GET, "/api/v1/live-tv/sessions/cap/status"),
+            (Method::PUT, "/api/v1/live-tv/sessions/cap/keepalive"),
+            (Method::DELETE, "/api/v1/live-tv/sessions/cap"),
+            (Method::POST, crate::live_tv::RESOURCE_PATH),
+            (Method::POST, crate::live_tv::STOP_PATH),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
@@ -1037,6 +1141,16 @@ mod tests {
             (Method::DELETE, "/api/v1/hls/session"),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
+            (
+                Method::GET,
+                "/api/v1/live-tv/sessions/cap/segment-000001.ts",
+            ),
+            (Method::GET, "/api/v1/live-tv/sessions/cap/status"),
+            (Method::PUT, "/api/v1/live-tv/sessions/cap/keepalive"),
+            (Method::DELETE, "/api/v1/live-tv/sessions/cap"),
+            (Method::POST, crate::live_tv::RESOURCE_PATH),
+            (Method::POST, crate::live_tv::STOP_PATH),
         ] {
             assert!(maintenance_route_eligible(&method, path), "{method} {path}");
         }
@@ -1052,6 +1166,13 @@ mod tests {
             (Method::POST, "/api/v1/files/8/hls/sessions"),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
+            (Method::GET, "/api/v1/live-tv/readiness"),
+            (Method::GET, "/api/v1/live-tv/channels"),
+            (Method::POST, "/api/v1/live-tv/readiness/refresh"),
+            (Method::POST, crate::live_tv::SNAPSHOT_PATH),
+            (Method::POST, crate::live_tv::START_PATH),
+            (Method::POST, crate::live_tv::ACTIVATE_PATH),
+            (Method::POST, crate::live_tv::DRAIN_PATH),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
             (Method::POST, "/api/v1/libraries"),
@@ -1467,6 +1588,14 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body, "quorum unavailable\n");
 
+        // Every route here is a client-facing GET behind
+        // `mutable_media_serving_gate`, which is what produces the envelope and
+        // the `Retry-After` asserted below. The internal Live TV snapshot is
+        // NOT one of these -- it is on the outer router, which carries no such
+        // gate -- and it had been sitting in this list as a GET, answering 405
+        // from the router's method table before any fence was consulted. That
+        // looked like coverage and was not; its real fence is asserted on its
+        // own below.
         for path in [
             "/api/v1/hls/probe/status",
             "/api/v1/files/7/decision",
@@ -1482,6 +1611,7 @@ mod tests {
             "/library/parts/7/0/movie.mkv",
             "/library/metadata/7/thumb",
             "/photo/:/transcode",
+            "/api/v1/live-tv/channels",
         ] {
             let response = app
                 .clone()
@@ -1504,6 +1634,29 @@ mod tests {
             assert_eq!(body["code"], "serving_fenced", "{path}");
             assert!(body.get("retry_nodes").is_none(), "{path}");
         }
+
+        // The owner's internal snapshot, asked with the verb it accepts and
+        // with no credential at all. A fenced owner must not reach
+        // configuration, its own network, or FFmpeg under any authentication
+        // shape, so the fence is ahead of the signature check -- which is
+        // exactly what a 503 rather than a 401 proves here. It carries no
+        // envelope and no `Retry-After`: peers read the status, and the
+        // deliberate cost of fencing this early is that there is nothing yet
+        // to sign a body with.
+        let response = app
+            .clone()
+            .oneshot(post(crate::live_tv::SNAPSHOT_PATH, None, json!({})))
+            .await
+            .expect("fenced internal snapshot response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER), None);
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes()
+            .is_empty());
     }
 
     fn post(uri: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -3271,6 +3424,272 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn live_tv_settings_are_runtime_only_generation_cas_and_enable_fenced() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["live_tv_enabled"], json!(false));
+        assert_eq!(initial["live_tv_device_ipv4"], json!(""));
+        assert_eq!(initial["live_tv_config_generation"], json!(0));
+
+        let (status, refused_enable) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_enabled": true,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused_enable}");
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::LIVE_TV_CONFIG_GENERATION)
+                .await
+                .expect("generation"),
+            None,
+            "a failed enable must not publish any part of the tuple"
+        );
+
+        let owner = initial["live_tv_owner_node_id"]
+            .as_str()
+            .expect("owner node");
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_owner_node_id": owner,
+                    "live_tv_max_sessions": 2,
+                    "live_tv_output_height": 1080,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["live_tv_enabled"], json!(false));
+        assert_eq!(saved["live_tv_device_ipv4"], json!("192.168.4.20"));
+        assert_eq!(saved["live_tv_owner_node_id"], json!(owner));
+        assert_eq!(saved["live_tv_max_sessions"], json!(2));
+        assert_eq!(saved["live_tv_output_height"], json!(1080));
+        assert_eq!(saved["live_tv_config_generation"], json!(1));
+
+        let (status, stale) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_max_sessions": 1,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+        let (status, unchanged) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{unchanged}");
+        assert_eq!(unchanged["live_tv_max_sessions"], json!(2));
+        assert_eq!(unchanged["live_tv_output_height"], json!(1080));
+        assert_eq!(unchanged["live_tv_config_generation"], json!(1));
+
+        let original_name = unchanged["server_name"].clone();
+        let (status, mixed_aggregate) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "server_name": "must-not-commit",
+                    "live_tv_enabled": false,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{mixed_aggregate}");
+        let (status, after_mixed) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{after_mixed}");
+        assert_eq!(after_mixed["server_name"], original_name);
+        assert_eq!(after_mixed["live_tv_config_generation"], json!(1));
+
+        let (status, mixed_enable) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_enabled": true,
+                    "live_tv_max_sessions": 1,
+                    "live_tv_config_generation": 1
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{mixed_enable}");
+    }
+
+    #[tokio::test]
+    async fn live_tv_dead_owner_disable_preserves_barrier_across_edits_and_exact_recovery() {
+        use plurx_core::store::keys;
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        state
+            .store
+            .put_settings(&[
+                (keys::LIVE_TV_ENABLED, "1"),
+                (keys::LIVE_TV_DEVICE_IPV4, "192.168.4.20"),
+                (keys::LIVE_TV_OWNER_NODE_ID, "lost-owner-a"),
+                (keys::LIVE_TV_CONFIG_GENERATION, "7"),
+            ])
+            .await
+            .expect("seed lost owner");
+        let (status, disabled) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_enabled": false, "live_tv_config_generation": 7
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{disabled}");
+        assert_eq!(disabled["live_tv_enabled"], false);
+        assert_eq!(
+            disabled["live_tv_transition_from_owner_node_id"],
+            "lost-owner-a"
+        );
+        assert_eq!(disabled["live_tv_transition_drain_before"], 8);
+        for (generation, owner) in [(8, "replacement-b"), (9, "replacement-c")] {
+            let (status, saved) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({
+                        "live_tv_owner_node_id": owner, "live_tv_config_generation": generation
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{saved}");
+            assert_eq!(
+                saved["live_tv_transition_from_owner_node_id"],
+                "lost-owner-a"
+            );
+            assert_eq!(saved["live_tv_transition_drain_before"], 8);
+            assert_eq!(saved["live_tv_owner_node_id"], owner);
+        }
+        let proof = json!({"owner_node_id":"lost-owner-a", "drain_before_generation":8, "stopped_and_restart_prevented":true});
+        for invalid in [
+            json!({"live_tv_config_generation":9, "live_tv_fenced_owner":proof}),
+            json!({"live_tv_config_generation":10, "live_tv_fenced_owner":{"owner_node_id":"replacement-b", "drain_before_generation":8, "stopped_and_restart_prevented":true}}),
+            json!({"live_tv_config_generation":10, "live_tv_fenced_owner":{"owner_node_id":"lost-owner-a", "drain_before_generation":10, "stopped_and_restart_prevented":true}}),
+            json!({"live_tv_config_generation":10, "live_tv_fenced_owner":{"owner_node_id":"lost-owner-a", "drain_before_generation":8, "stopped_and_restart_prevented":false}}),
+            json!({"live_tv_config_generation":10, "live_tv_enabled":true, "live_tv_fenced_owner":proof}),
+            json!({"live_tv_config_generation":10, "live_tv_owner_node_id":"replacement-d", "live_tv_fenced_owner":proof}),
+        ] {
+            let (status, body) = call(&app, put("/api/v1/settings", Some(&admin), invalid)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        }
+        let recovery = json!({"live_tv_config_generation":10, "live_tv_fenced_owner":proof});
+        let (status, _) = call(&app, put("/api/v1/settings", None, recovery.clone())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // Competing exact-generation recoveries cannot both publish a tuple.
+        let (first, second) = tokio::join!(
+            call(
+                &app,
+                put("/api/v1/settings", Some(&admin), recovery.clone())
+            ),
+            call(&app, put("/api/v1/settings", Some(&admin), recovery)),
+        );
+        let statuses = [first.0, second.0];
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::OK)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::CONFLICT)
+                .count(),
+            1
+        );
+        let (_, saved) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(saved["live_tv_enabled"], false);
+        assert_eq!(saved["live_tv_owner_node_id"], "replacement-c");
+        assert_eq!(saved["live_tv_config_generation"], 11);
+        assert_eq!(saved["live_tv_transition_from_owner_node_id"], "");
+        assert_eq!(saved["live_tv_transition_drain_before"], 0);
+    }
+
+    #[tokio::test]
+    async fn live_tv_quorum_loss_fences_channels_and_stops_readiness_before_device_work() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        let owner = settings["live_tv_owner_node_id"]
+            .as_str()
+            .expect("owner node");
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_owner_node_id": owner,
+                    "live_tv_config_generation": 0
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+
+        state.serving.validation_set_ready(false).await;
+        let (status, readiness) = call(&app, get("/api/v1/live-tv/readiness", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{readiness}");
+        assert_eq!(readiness["ready"], false);
+        assert!(readiness["snapshot"].is_null(), "{readiness}");
+        let authority = readiness["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .find(|check| check["id"] == "serving_authority")
+            .expect("serving-authority check");
+        assert_eq!(authority["ready"], false);
+
+        let (status, channels) = call(&app, get("/api/v1/live-tv/channels", Some(&admin))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{channels}");
+        assert_eq!(channels["code"], "serving_fenced");
+
+        let response = app
+            .clone()
+            .oneshot(post(
+                crate::live_tv::SNAPSHOT_PATH,
+                None,
+                json!({"generation": 1, "force": false, "probe_graph": false}),
+            ))
+            .await
+            .expect("internal fenced response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     /// N1's two settings move as one complete replicated pair. JSON null
     /// clears the optional quality override. The response shows the requested
     /// values; the manager carries the separately validated effective answer
@@ -4226,6 +4645,9 @@ mod tests {
             [
                 "analysis",
                 "deliveries",
+                // Live TV runs on one unreplicated node, so its key is in the
+                // base payload rather than behind the clustered branch.
+                "live_tv",
                 "offline",
                 "producing",
                 "scans",
@@ -8185,6 +8607,7 @@ mod tests {
             "/assets/cluster-panel.js",
             "/assets/playback-policy.js",
             "/assets/playback-control.js",
+            "/assets/live-tv.js",
             "/assets/reader.js",
             "/assets/reader.css",
             "/healthz",

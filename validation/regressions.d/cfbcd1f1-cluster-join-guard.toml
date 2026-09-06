@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cfbcd1f1"]
+points = ["cluster.membership"]
+checks = ["rust-gate"]
+reason = "The Rust gate runs both retained tests. `a_joining_node_redeems_before_it_has_any_application_schema` builds the state a joining node is actually in — every cluster table, no `settings` anywhere — and requires the reservation, the staging insert and the redemption to prepare there; restoring a guard that names an application table fails it with the production error, `no such table: main.settings`. `a_cluster_table_guard_may_only_read_cluster_tables` is the same rule stated over the whole membership schema, so the next trigger on a cluster table that reaches outside it is refused by a unit test rather than by a two-node join that never completes."
