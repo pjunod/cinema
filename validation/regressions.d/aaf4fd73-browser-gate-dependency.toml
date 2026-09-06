@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["aaf4fd73"]
+points = ["operations.packaging", "validation.framework"]
+checks = ["operations-contract"]
+reason = "Forgejo 16 accepted identical job-level concurrency groups on the web-layout and VOD browser jobs but still assigned both siblings and ran their steps concurrently. The VOD job now depends on web_layout in the required workflow graph, which makes completion of the first browser gate a scheduler prerequisite for the second. The operations contract checks that exact dependency and rejects restoration of the ineffective advisory group."
