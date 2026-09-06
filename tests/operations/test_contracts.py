@@ -1507,6 +1507,10 @@ for (const startupDelay of [0, 1600, 7000]) {
             'test("transport observer age advances the repaint projection"',
             membership_web_tests,
         )
+        self.assertIn(
+            'test("rejected public and wrong-observer transport evidence cannot reappear"',
+            membership_web_tests,
+        )
         self.assertNotIn("make ci-rust-gate", effort)
         self.assertNotIn("make cluster-", effort)
         self.assertNotIn("make apple-test", effort)
@@ -1676,6 +1680,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "peer_status_refresh_keeps_one_second_of_cache_margin",
             "aggregate_request_path_reads_cache_without_peer_network_fanout",
             "production_collector_preserves_private_transport_when_public_listener_is_closed",
+            "slow_public_probe_cannot_discard_completed_private_transport",
             "identity_mismatch_discards_peer_local_state",
             "public_transport_fallback_requires_matching_observer_identity",
         )
@@ -1691,6 +1696,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "snapshot_chunk_and_transfer_timeouts_validate_bounds_and_relationship",
             "snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override",
             "production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts",
+            "immediate_watermark_errors_cannot_starve_due_startup_log",
         )
         for test_name in core_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]

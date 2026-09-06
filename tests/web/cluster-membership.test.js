@@ -338,8 +338,10 @@ function transportOps(observations) {
     nodes: [
       {
         observation: "answered",
-        status: {
-          transport: { observations },
+        status: {},
+        transport: {
+          observing_node_id: observations[0]?.observing_node_id ?? 2,
+          observations,
         },
       },
     ],
@@ -352,7 +354,10 @@ function privateTransportOps(observations) {
       {
         observation: "unreachable",
         status: null,
-        transport: { observations },
+        transport: {
+          observing_node_id: observations[0]?.observing_node_id ?? 2,
+          observations,
+        },
       },
     ],
   };
@@ -483,6 +488,38 @@ test("private cluster-listener evidence survives a closed public listener", () =
   assert.equal(recovery.text, "installing snapshot");
 });
 
+test("rejected public and wrong-observer transport evidence cannot reappear", () => {
+  const ui = sandbox();
+  const rejectedPublic = {
+    nodes: [{
+      observation: "answered",
+      transport: null,
+      status: {
+        transport: {
+          observing_node_id: 7,
+          observations: [transportObservation("installing", { observing_node_id: 7 })],
+        },
+      },
+    }],
+  };
+  assert.equal(ui.clusterTransportExplanation(rejectedPublic, 2, false).code, "unavailable");
+
+  const wrongNestedObserver = {
+    nodes: [{
+      observation: "answered",
+      status: {},
+      transport: {
+        observing_node_id: 2,
+        observations: [transportObservation("installing", { observing_node_id: 7 })],
+      },
+    }],
+  };
+  assert.equal(
+    ui.clusterTransportExplanation(wrongNestedObserver, 2, false).code,
+    "unavailable",
+  );
+});
+
 test("transport status shows outbound evidence and expires stale samples", () => {
   const ui = sandbox();
   const outbound = ui.clusterTransportExplanation(
@@ -530,7 +567,8 @@ test("stalled transport renders its observer and sample age", () => {
     node("node-b", 2, "learner", { bounded_read_ready: false }),
   ]);
   const operations = operationStatus(membership);
-  operations.nodes[0].status.transport = {
+  operations.nodes[0].transport = {
+    observing_node_id: 1,
     observations: [
       transportObservation("stalled", {
         observing_node_id: 1,
@@ -2853,11 +2891,12 @@ test("transport observer age advances the repaint projection", () => {
     node("node-c", 3, "voter"),
   ]);
   const first = operationStatus(cluster);
-  first.nodes[0].status.transport = {
+  first.nodes[0].transport = {
+    observing_node_id: 1,
     observations: [transportObservation("transferring", { sample_age_ms: 1_000 })],
   };
   const later = JSON.parse(JSON.stringify(first));
-  later.nodes[0].status.transport.observations[0].sample_age_ms = 61_000;
+  later.nodes[0].transport.observations[0].sample_age_ms = 61_000;
 
   assert.notEqual(
     ui.clusterOpsProjection(later),

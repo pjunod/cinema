@@ -561,6 +561,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::production_collector_preserves_private_transport_when_public_listener_is_closed \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::slow_public_probe_cannot_discard_completed_private_transport \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::identity_mismatch_discards_peer_local_state \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
@@ -581,6 +584,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::migration::tests::production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::migration::startup_wait_logging_tests::immediate_watermark_errors_cannot_starve_due_startup_log \
 	  --lib -- --exact
 	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
 	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \

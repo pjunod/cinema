@@ -30,17 +30,17 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | all known review findings are fixed on the candidate branch; moved-base qualification and exact re-review are pending | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · race-safe reconnect accounting · conservative cache deadline aging |
-| M5 · recovery campaign | `codex/cluster-transport-m5` | not opened | review fixes are integrated on the pre-merge M4 tree and must be rebased after M4 closes | Actual TLS transport matrix · 20 learner and 20 voter cycles |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | rejected public evidence, slow-public/private-success loss, and due-log starvation are fixed; moved-base focused qualification and exact re-review are pending | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · independent public/private deadlines · conservative cache deadline aging |
+| M5 · recovery campaign | `codex/cluster-transport-m5` | not opened | stable resource slack, late source-archive identity validation, and reset full-attempt counts are corrected on the pre-M4 base; post-M4 rebase and qualification remain | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
 
-The current M4 candidate includes the observation-identity correction after
-`0d868c32`; exact re-review is pending. The third-review corrections were
-integrated on `b1821b0b` in an independent clone. The local Homebrew default
-is Rust 1.95.0, so every recorded Rust command uses `rustup run 1.97.1`;
-unpinned results do not count.
+The current M4 integration candidate is based on final M3 PR tip `2c018809`
+and includes the observation-identity and response-retention corrections.
+Exact combined-tree validation is green and re-review is pending. The local Homebrew
+default is Rust 1.95.0, so every recorded Rust command uses
+`rustup run 1.97.1`; unpinned results do not count.
 
 | Check | Result | Detail |
 |---|---|---|
@@ -57,24 +57,25 @@ unpinned results do not count.
 | Dependency resolution | pass | Standalone vendor lock now matches the daemon transport stack: Tokio 1.53.1 and rustls 0.23.42 |
 | Persistent regression map | pass | The transport tests are in `cluster-wal-check`; a command wrapper fails exact filters unless one test executes, the broad snapshot filter requires ten passing tests, and operations contracts preserve both guards |
 | Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the M3 review fixes, including both production `full_snapshot` wrappers, final-mismatch reread ownership, simultaneous timer/phase transition, hard-TTL shorter than C, configured receiver admission, and bounded standalone durations; every exact filter executed and loopback tests used the normal unsandboxed allowance |
-| Operations contracts | pass · 192 tests | Persistent command/count guards include every new M3 regression; the existing deployment, CI, and UI-baseline contracts pass with the port-reservation fixture using the normal unsandboxed loopback allowance |
+| Operations contracts | pass · 197 tests | Persistent command/count guards include every new M3 regression, including immutable prebuilt-image identity; the deployment, CI, and UI-baseline contracts pass with the port-reservation fixture using the normal unsandboxed loopback allowance |
 | M3 snapshot RPC suite | pass · 37 tests | The standalone `raft_client` suite covers one absolute transfer deadline, a latched final-install deadline, caller cancellation, exact-socket reset ownership, typed mismatch restoration before reread, simultaneous phase/timer readiness, both production snapshot wrappers, and stale-attempt isolation |
 | M3 configuration suite | pass · 11 root tests + 1 standalone bound test | Chunk, transfer, and install budgets accept documented bounds, reject invalid ordering and oversized values, preserve defaults for empty environment variables, and cannot reach unchecked `Instant` arithmetic |
 | M3 production timing seam | pass | The `hiqlite-store` migration test proves the production startup catch-up deadline is exactly transfer + install + 45 seconds |
-| M3 deployment and operations contracts | pass · 192 tests | Compose health timing derives from the three startup phases; preflight validates explicit values, opaque mounts, bounds, and chunk ≤ transfer precedence |
+| M3 deployment and operations contracts | pass · 197 tests | Compose health timing derives from the three startup phases; preflight validates explicit values, opaque mounts, bounds, chunk ≤ transfer precedence, immutable image identity, and both-service pinning |
 | M3 compile and lint | pass | Root all-target check and denied-warning Clippy pass; standalone vendored SQLite, SQLite+cache, and full library matrices pass; root and standalone formatting pass |
 | M3 corrective-history audit | pass · local replacement | Explicit current-check mappings cover both runtime corrective commits and the lint-only refactor; six status-only corrections are recorded as non-runtime. The lint refactor now owns a persistent vendored-Hiqlite denied-warning Clippy check in the effort and promotion workflows; static contracts pin its exact recipe, catalog record, and workflow order, and edits to either fail open into the cluster lane. The 1,339-commit history audit, 116 validation tests, 197 operations contracts, and 23-point/29-check catalog pass locally. |
 | M3 adversarial review | pass · 3 tracks | After the earlier code review passed, three final operations-focused reviewers independently certified exact PR SHA `2c018809` clean, including immutable pulled-image identity and rollback behavior |
 | M4 transport status | pass · 19 exact cases | Attempt-scoped sender state, receiver socket/deadline/byte ownership, terminal outcomes, reconnect counts, live-membership capacity, and bounded retired-peer churn pass on the current branch; combined-tree review remains pending |
 | M4 private recovery observation | pass · production seams | The authenticated private route, roster-bound live-membership client, bounded body, and public-port-closed collector seam pass; full real multi-node acceptance remains M5 work |
-| M4 daemon and UI contracts | pass · 11 exact daemon cases | Persistent exact tests cover per-peer timeout, peer bound, cache lifetime, active cached deadline aging beyond five minutes, fresh cached deadline-to-stalled projection, inactive five-minute expiry, refresh margin, request-path isolation, public-failure/private-success collection, and both envelope- and observer-identity rejection; the cluster UI renders stalled state, observer, and age, and all 48 focused operations contracts retain the nonzero guards |
+| M4 daemon and UI contracts | pass · 12 exact daemon cases | Persistent exact tests cover per-peer timeout, peer bound, cache lifetime, active cached deadline aging beyond five minutes, fresh cached deadline-to-stalled projection, inactive five-minute expiry, refresh margin, request-path isolation, slow-public/private-success collection, and both envelope- and nested-observer identity rejection; the cluster UI consumes only the sanitized row projection and all focused operations contracts retain the guards |
 | M4 concurrency and identity remediation | pass · isolated branch | Pinned check and denied-warning Clippy, 19 status tests, 8 executor tests, all 39 Raft-client tests, the daemon 8-peer bound, membership UI suite, operations mapping, formatting, and diff checks pass; the commit still requires combined-tree qualification and three exact-candidate reviews |
 | M4 second-review correction | pass · isolated branch | Rust 1.97.1 passes the 18-case status suite, 9-case executor suite, the production A-running/B-queued/C-cancelled FIFO regression, both active and inactive cache-aging tests, root and prescribed vendored check plus denied-warning Clippy, 48 operations contracts, and the Settings and membership web contracts; combined-tree integration and exact re-review remain required |
 | M4 focused cluster/WAL fast lane | pass · combined tree | `make cluster-wal-check CARGO_RAW='rustup run 1.97.1 cargo'` passes after all four remediation commits were combined; every exact filter executed |
 | M4 compile and lint | pass · combined tree | Root all-target check and denied-warning `plurxd` Clippy pass; standalone vendored SQLite, SQLite+cache, and default-library denied-warning Clippy matrices pass; root formatting and diff checks pass |
 | M4 third-review correction | pass · integrated `0d868c32` | Rust 1.97.1 passes the 19-case status and 10-case executor modules, all 41 Raft-client tests, the three cache-aging regressions, root all-target check, root and vendored denied-warning Clippy, membership web suite, exact operations mapping, formatting, and diff checks; exact replacement review is in progress |
 | M4 observation-identity and retention corrections | pass · candidate branch | Public fallback transport requires both a matching status envelope and matching transport observer; valid private evidence remains independent of public-listener identity; the authenticated private route returns `Cache-Control: private, no-store`; exact re-review is pending |
-| M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`, and the existing `rust:1.97.1-bookworm` Linux/amd64 image; the campaign must still verify `rustc --version` inside that image before compiling |
+| M4 final review correction | pass · focused candidate | Public and private probes settle under independent deadlines, server and UI reject inconsistent nested observers without a fallback resurrection, and immediate watermark errors cannot starve the ten-second pre-listener progress record |
+| M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
 ## Decisions to review — autonomous choices
@@ -172,11 +173,18 @@ both the public envelope and nested observer to match committed membership.
 The following exact review found that the authenticated, time-sensitive private
 route did not prohibit intermediary caching; the candidate now returns
 `Cache-Control: private, no-store` and pins it in the production-route test.
-The focused Rust, web, and operations lanes are green, and exact re-review is
-pending. M5 replacement candidate `ee45db8d` includes the earlier requested CI
-receipt and exact-test-count corrections, is based on the pre-merge M4 tree,
-and must be rebased after M4 review closes. No work is being done in the user's
-existing checkout.
+Two independent reviews of that candidate then found that the UI could revive
+rejected public evidence, one slow public probe could discard already-complete
+private evidence, and repeated immediate watermark errors could starve the
+ten-second pre-listener progress log. The final-M3 integration now exposes only
+one server-sanitized row projection, validates every nested observer, settles
+public and private probes under independent deadlines, and checks the due log
+outside the biased result race. The 22-case daemon module, paused-time startup
+log, web suite, and exact operations mapping pass; exact combined-tree re-review
+remains. M5 replacement work includes the earlier CI receipt and exact-test
+count corrections plus the later zero-resource-growth, early archive-identity,
+and cumulative-attempt corrections; it must be rebased after M4 review closes.
+No work is being done in the user's existing checkout.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only

@@ -2021,6 +2021,15 @@ async fn start_voter(
     let local_transport = client.local_snapshot_transport_status().ok();
     let mut next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
     let catchup_target = loop {
+        if startup_wait_log_is_due(&mut next_wait_log) {
+            log_startup_transport_wait(
+                &identity.node_id,
+                identity.raft_id,
+                None,
+                local_metrics.snapshot().last_applied_index,
+                local_transport.as_ref(),
+            );
+        }
         let watermark = tokio::time::timeout_at(catchup_deadline, client.db_quorum_watermark());
         tokio::pin!(watermark);
         let watermark = loop {
@@ -2028,14 +2037,15 @@ async fn start_voter(
                 biased;
                 result = &mut watermark => break result,
                 () = tokio::time::sleep_until(next_wait_log) => {
-                    log_startup_transport_wait(
-                        &identity.node_id,
-                        identity.raft_id,
-                        None,
-                        local_metrics.snapshot().last_applied_index,
-                        local_transport.as_ref(),
-                    );
-                    next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
+                    if startup_wait_log_is_due(&mut next_wait_log) {
+                        log_startup_transport_wait(
+                            &identity.node_id,
+                            identity.raft_id,
+                            None,
+                            local_metrics.snapshot().last_applied_index,
+                            local_transport.as_ref(),
+                        );
+                    }
                 }
             }
         };
@@ -2079,7 +2089,7 @@ async fn start_voter(
                 identity.node_id
             )));
         }
-        if tokio::time::Instant::now() >= next_wait_log {
+        if startup_wait_log_is_due(&mut next_wait_log) {
             log_startup_transport_wait(
                 &identity.node_id,
                 identity.raft_id,
@@ -2087,7 +2097,6 @@ async fn start_voter(
                 Some(applied),
                 local_transport.as_ref(),
             );
-            next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -2100,6 +2109,16 @@ async fn start_voter(
         );
     }
     Ok((client, local))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn startup_wait_log_is_due(next_wait_log: &mut tokio::time::Instant) -> bool {
+    let now = tokio::time::Instant::now();
+    if now < *next_wait_log {
+        return false;
+    }
+    *next_wait_log = now + Duration::from_secs(10);
+    true
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2148,6 +2167,28 @@ fn log_startup_transport_wait(
             .map(|observation| observation.sample_age_ms),
         "waiting for cluster startup catch-up"
     );
+}
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod startup_wait_logging_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn immediate_watermark_errors_cannot_starve_due_startup_log() {
+        let mut next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut due_logs = 0;
+        for _ in 0..100 {
+            due_logs += usize::from(startup_wait_log_is_due(&mut next_wait_log));
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        due_logs += usize::from(startup_wait_log_is_due(&mut next_wait_log));
+
+        assert_eq!(
+            due_logs, 1,
+            "the due ten-second log must survive fast errors"
+        );
+        assert!(!startup_wait_log_is_due(&mut next_wait_log));
+    }
 }
 
 /// The Raft, WAL, and read-pool settings every plurx voter runs with.

@@ -157,11 +157,13 @@
     if(!ops||ops.unavailable||raftId===null||raftId===undefined) return null;
     const candidates=[];
     (ops.nodes||[]).forEach(row=>{
-      const status=row&&row.observation==="answered"&&row.status;
       // The private cluster listener remains available while a learner's
-      // public daemon listener is intentionally closed during catch-up.
-      const transport=(row&&row.transport)||(status&&status.transport);
+      // public daemon listener is intentionally closed during catch-up. The
+      // server exposes one sanitized transport projection on the row; never
+      // fall back to the unsanitized public-status payload.
+      const transport=row&&row.transport;
       (transport&&transport.observations||[]).forEach(observation=>{
+        if(Number(observation.observing_node_id)!==Number(transport.observing_node_id)) return;
         if(observation.raft_group!=="sqlite") return;
         const hasActiveDeadline=observation.active_deadline_remaining_ms!==null&&
           observation.active_deadline_remaining_ms!==undefined;
