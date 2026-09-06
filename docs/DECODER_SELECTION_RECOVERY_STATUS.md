@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 qualified; Forgejo PR #62 pending effort-gate merge · **Updated:** 2026-09-06 ·
+**Status:** M1 explicit-plan extraction under adversarial review · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -18,21 +18,21 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M0 — capture baseline and freeze diagnostic qualification |
-| Task branch | `codex/decoder-selection-m0` |
-| Task PR | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) into `effort/decoder-selection-recovery` |
+| Milestone | M1 — explicit plans and bound facts |
+| Task branch | `codex/decoder-selection-m1` |
+| Task PR | Not opened; the exact corrected branch will be published to Forgejo after adversarial review |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Exact code head `59d0a4d1` passed the M0 inventory, diagnostic, Live TV boundary, complete unit, format, compile, lint, history, and catalog checks |
-| Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips; Historical pre-rebase head `01368ce1` remains history only |
-| Blocker | None; merge waits for the exact receipt review and Forgejo `Effort development gate` |
+| Focused validation | M1 code head `3f0f75e6`: selector matrix 30/30 and bound FFprobe collector 7/7 pass on Rust 1.97.1; exact task head includes only its corrective-history mapping after that code |
+| Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0; Historical pre-rebase head `01368ce1` remains history only; the M1 full suite waits until all fresh review findings are closed |
+| Blocker | None; fresh selector and bound-probe adversarial reviews are in progress |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Qualified; pending merge | Exact code head `59d0a4d1`: two independent adversarial approvals, all focused gates, and full suite 23 passed / 0 failed / 2 declared skips |
-| M1 · explicit plan and facts | Not started | — |
+| M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
+| M1 · explicit plan and facts | Adversarial review in progress | Code head `3f0f75e6`: pure selector 30/30 and bound fact collector 7/7; compile/lint and fresh exact-head approvals remain required |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -40,6 +40,37 @@ An unchecked item is not implied by a nearby passing check.
 | M6 · postpublication replacement and client intent | Not started | — |
 | M7 · offline, shared cache, and handoff enforcement | Not started | — |
 | M8 · fleet qualification and promotion | Not started | — |
+
+## M1 explicit plan and bound-fact extraction
+
+M1 adds pure `DecodeFacts`, `DecodeCapabilities`, `DecodePolicySnapshot`,
+`AttemptRestrictions`, `ResolvedDecode`, and `ResolvedTranscode` contracts. A
+single selector validates complete decoder, renderer, encoder, surface, source,
+and presentation semantics before returning a plan. It retains the current
+legacy preference order without making advertised decoder names qualified
+evidence, and keeps the MPEG-4/VideoToolbox compatibility exclusion independent
+of container and profile.
+
+The daemon collector discovers and fingerprints the configured FFprobe binary,
+duplicates the already-held source descriptor without sharing its file offset,
+selects the legacy video ordinal while retaining its absolute input index, and
+returns a source/build-bound facts digest. A bounded global cache and
+singleflight prevent unbounded or duplicate probes. Deadlines, cancellation,
+oversize output, changed source identity, and replaced probe binaries fail
+closed. M1 installs these services in daemon state but does not migrate command
+construction or broaden production routing; that remains M2.
+
+Current focused evidence on M1 code head `3f0f75e6`:
+
+- `cargo test -p plurx-core --test decoder_selection`: 30 passed.
+- `cargo test -p plurxd decode_facts::tests:: -- --nocapture`: 7 passed.
+- `cargo fmt --all -- --check` and the effort-base whitespace diff pass.
+- Corrective-history mapping is committed at task head `e74a5282` and awaits
+  the history gate with the remaining compile/lint evidence.
+
+Fresh independent reviews cover the pure planner and the bound probe/cache
+owner separately. Their findings and exact approved head will be recorded
+before the single corrected-head full suite and Forgejo PR.
 
 ## M0 frozen source inventory
 
