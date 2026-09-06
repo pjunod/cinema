@@ -2441,6 +2441,10 @@ for (const startupDelay of [0, 1600, 7000]) {
             "cluster-transport-recovery",
             receipt_contract["LANES"],
         )
+        self.assertEqual(
+            receipt_contract["FIRST_WORKFLOW_RUN_ATTEMPT"],
+            "1",
+        )
 
         for aggregate_name in ("publish_main", "pr_gate"):
             aggregate = jobs[aggregate_name]
@@ -2451,6 +2455,13 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn(
             '"cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}"',
             jobs["pr_gate"],
+        )
+        qualification_contract = runpy.run_path(
+            str(ROOT / "validation/qualification.py")
+        )
+        self.assertEqual(
+            qualification_contract["FIRST_WORKFLOW_RUN_ATTEMPT"],
+            "1",
         )
 
         with (ROOT / "validation/points.toml").open("rb") as handle:

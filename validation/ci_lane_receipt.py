@@ -26,6 +26,7 @@ LANES = frozenset(
     }
 )
 RESULTS = frozenset({"success", "failure", "cancelled"})
+FIRST_WORKFLOW_RUN_ATTEMPT = "1"
 
 
 def build_receipt(
@@ -89,6 +90,16 @@ def build_receipt(
     has_evidence = any(value is not None for value in evidence_values)
     if has_evidence and not all(value is not None for value in evidence_values):
         raise LaneReceiptError("evidence metadata must be supplied together")
+    if (
+        lane == "cluster-transport-recovery"
+        and result == "success"
+        and environment["GITHUB_RUN_ATTEMPT"] != FIRST_WORKFLOW_RUN_ATTEMPT
+    ):
+        raise LaneReceiptError(
+            "successful cluster transport recovery must come from workflow "
+            f"run attempt {FIRST_WORKFLOW_RUN_ATTEMPT}; found "
+            f"{environment['GITHUB_RUN_ATTEMPT']!r}"
+        )
     if (
         lane == "cluster-transport-recovery"
         and result == "success"

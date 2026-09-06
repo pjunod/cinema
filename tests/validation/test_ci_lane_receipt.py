@@ -20,7 +20,7 @@ class CiLaneReceiptCase(unittest.TestCase):
                 "pjunod/plurx/.github/workflows/ci.yml@refs/pull/1/merge"
             ),
             "GITHUB_RUN_ID": "123",
-            "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_RUN_ATTEMPT": "1",
             "GITHUB_JOB": "cluster_store",
         }
 
@@ -62,6 +62,15 @@ class CiLaneReceiptCase(unittest.TestCase):
 
         self.assertEqual(receipt["result"], "failure")
 
+    def test_non_recovery_success_still_accepts_a_workflow_rerun(self):
+        environment = self.environment()
+        environment["GITHUB_RUN_ATTEMPT"] = "2"
+
+        receipt = self.receipt(environment=environment)
+
+        self.assertEqual(receipt["result"], "success")
+        self.assertEqual(receipt["run_attempt"], "2")
+
     def test_receipt_accepts_every_store_rollout_lane(self):
         for lane in (
             "cluster-store",
@@ -100,6 +109,25 @@ class CiLaneReceiptCase(unittest.TestCase):
             },
         )
 
+    def test_successful_transport_recovery_refuses_a_workflow_rerun(self):
+        environment = self.environment()
+        environment["GITHUB_JOB"] = "cluster_transport_recovery"
+        environment["GITHUB_RUN_ATTEMPT"] = "2"
+
+        with self.assertRaisesRegex(
+            LaneReceiptError, "must come from workflow run attempt 1"
+        ):
+            self.receipt(
+                environment=environment,
+                lane="cluster-transport-recovery",
+                commands=["make cluster-transport-recovery-check"],
+                log_name="cluster-transport-recovery.log",
+                evidence_name="cluster-transport-recovery.json",
+                evidence_digest="d" * 64,
+                evidence_bytes=5678,
+                evidence_build_sha="a" * 40,
+            )
+
     def test_successful_transport_recovery_requires_exact_tree_evidence(self):
         environment = self.environment()
         environment["GITHUB_JOB"] = "cluster_transport_recovery"
@@ -124,6 +152,7 @@ class CiLaneReceiptCase(unittest.TestCase):
     def test_failed_transport_recovery_accepts_an_absent_evidence_artifact(self):
         environment = self.environment()
         environment["GITHUB_JOB"] = "cluster_transport_recovery"
+        environment["GITHUB_RUN_ATTEMPT"] = "2"
 
         receipt = self.receipt(
             environment=environment,
@@ -134,6 +163,7 @@ class CiLaneReceiptCase(unittest.TestCase):
         )
 
         self.assertNotIn("evidence", receipt)
+        self.assertEqual(receipt["run_attempt"], "2")
 
     def test_cli_binds_successful_evidence_and_accepts_absent_failure_evidence(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1997,13 +1997,20 @@ Main-bound cluster changes run this command in the dedicated
 `cluster_transport_recovery` CI job and retain the evidence, log, and exact
 lane receipt. A successful receipt verifies that the artifact's `build_sha`
 equals the tested commit and binds the artifact's SHA-256 and byte count, so a
-different or replaced JSON file is not qualification evidence. The campaign
-removes any prior output before starting, then syncs a temporary complete JSON
-file and atomically publishes it. A failed lane always records a log-only
-receipt and does not parse a stale or interrupted evidence file. An effort is
-not qualified when that selected job is skipped or fails. Ordinary effort task
-PRs retain their compile-only development gate; the 40-cycle campaign belongs
-to the final effort-to-main qualification.
+different or replaced JSON file is not qualification evidence. Both that
+successful lane receipt and the final qualification receipt require workflow
+run attempt `1`. A failed cycle therefore remains disqualifying for that exact
+candidate: do not use **Re-run jobs** to make the unchanged campaign produce a
+green artifact. Preserve its failure receipt, fix the cause, and qualify a new
+commit instead.
+Other CI lanes may still retain successful rerun receipts because they do not
+replace this campaign's failure evidence. The campaign removes any prior output
+before starting, then syncs a temporary complete JSON file and atomically
+publishes it. A failed lane always records a log-only receipt, including on a
+later workflow attempt, and does not parse a stale or interrupted evidence
+file. An effort is not qualified when that selected job is skipped or fails.
+Ordinary effort task PRs retain their compile-only development gate; the
+40-cycle campaign belongs to the final effort-to-main qualification.
 
 Set the variable only to choose a grace deliberately. Whether anybody chose is
 answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
