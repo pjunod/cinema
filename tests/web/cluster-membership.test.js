@@ -916,6 +916,7 @@ test("sub-five-second successor attempt outranks same-fingerprint stalled predec
     attempt_id: 4,
     socket_epoch: 2,
     sample_age_ms: 4_000,
+    attempt_age_ms: 60_000,
   });
   const successor = transportObservation("installing", {
     observing_node_id: 2,
@@ -927,6 +928,7 @@ test("sub-five-second successor attempt outranks same-fingerprint stalled predec
     attempt_id: 9,
     socket_epoch: 7,
     sample_age_ms: 0,
+    attempt_age_ms: 1_000,
     active_deadline_remaining_ms: 60_000,
   });
 
@@ -942,6 +944,51 @@ test("sub-five-second successor attempt outranks same-fingerprint stalled predec
     const current = ui.clusterTransportExplanation(operations, 2, false);
     assert.equal(current.code, "installing");
     assert.equal(current.observation.boot_id, "current-boot");
+    assert.equal(current.observation.attempt_id, 9);
+  }
+});
+
+test("late predecessor failure cannot hide an already-started successor attempt", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "f".repeat(64);
+  const predecessor = transportObservation("failed", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "late-cancelled-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 0,
+    attempt_age_ms: 60_000,
+  });
+  const successor = transportObservation("installing", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+    snapshot_id: "late-cancelled-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-receiver",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 500,
+    attempt_age_ms: 1_000,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [[predecessor, successor], [successor, predecessor]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "current-receiver");
     assert.equal(current.observation.attempt_id, 9);
   }
 });
