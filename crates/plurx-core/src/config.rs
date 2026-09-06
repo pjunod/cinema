@@ -718,6 +718,16 @@ mod tests {
 
         std::fs::write(
             &path,
+            format!("[cluster]\nsnapshot_transfer_timeout_secs = {}\n", u64::MAX),
+        )
+        .expect("write overflowing millisecond conversion candidate");
+        assert!(matches!(
+            Config::load(Some(&path)),
+            Err(ConfigError::Parse { .. })
+        ));
+
+        std::fs::write(
+            &path,
             "[cluster]\nsnapshot_chunk_timeout_secs = 300\n\
              snapshot_transfer_timeout_secs = 60\n",
         )

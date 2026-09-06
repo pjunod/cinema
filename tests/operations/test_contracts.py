@@ -1310,16 +1310,22 @@ for (const startupDelay of [0, 1600, 7000]) {
             "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
             "cache_install_snapshot_preserves_mismatch_for_offset_reset",
             "snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window",
+            "non_final_snapshot_rpc_uses_hard_ttl_when_it_is_shorter_than_chunk_budget",
             "final_install_deadline_latches_once_and_mismatch_restores_transfer_deadline",
             "final_install_respects_the_first_rpc_hard_cap_and_transfer_expiry",
             "mismatch_cannot_reenter_final_install_after_transfer_expiry",
             "watchable_snapshot_deadline_switches_to_the_active_phase",
+            "simultaneous_final_phase_update_wins_over_stale_transfer_timer",
+            "production_final_mismatch_restores_transfer_deadline_before_reread",
+            "sqlite_full_snapshot_enters_bounded_wrapper",
+            "cache_full_snapshot_enters_bounded_wrapper",
             "advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry",
             "unanswered_non_final_rpc_expires_at_chunk_budget_and_resets_socket",
             "repeated_mismatch_style_resets_expire_at_the_original_transfer_deadline",
             "final_install_may_exceed_chunk_window_but_cannot_renew_install_window",
             "stale_snapshot_guard_cannot_clear_a_newer_attempt",
             "caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately",
+            "snapshot_deadline_durations_are_bounded_before_instant_arithmetic",
         )
         for test_name in hiqlite_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]

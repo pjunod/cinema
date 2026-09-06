@@ -432,11 +432,7 @@ async fn execute_raft_request(
             let result = state
                 .raft_db
                 .snapshot_executor
-                .submit(
-                    request,
-                    crate::network::frame_io::FRAME_WRITE_TIMEOUT,
-                    connection_closed,
-                )
+                .submit(request, connection_closed)
                 .await?;
             (request_id, RaftStreamResponsePayload::SnapshotDB(result))
         }
@@ -463,11 +459,7 @@ async fn execute_raft_request(
             let result = state
                 .raft_cache
                 .snapshot_executor
-                .submit(
-                    request,
-                    crate::network::frame_io::FRAME_WRITE_TIMEOUT,
-                    connection_closed,
-                )
+                .submit(request, connection_closed)
                 .await?;
             (request_id, RaftStreamResponsePayload::SnapshotCache(result))
         }

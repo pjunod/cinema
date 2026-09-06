@@ -98,8 +98,10 @@ pub(crate) async fn start_raft_db(
     )
     .await
     .expect("Raft create failed");
-    let snapshot_executor =
-        crate::network::snapshot_executor::start_snapshot_executor(raft.clone());
+    let snapshot_executor = crate::network::snapshot_executor::start_snapshot_executor(
+        raft.clone(),
+        node_config.snapshot_chunk_timeout,
+    );
 
     init::init_pristine_node_1_db(
         &raft,
@@ -202,8 +204,10 @@ where
 
         (raft, None)
     };
-    let snapshot_executor =
-        crate::network::snapshot_executor::start_snapshot_executor(raft.clone());
+    let snapshot_executor = crate::network::snapshot_executor::start_snapshot_executor(
+        raft.clone(),
+        node_config.snapshot_chunk_timeout,
+    );
 
     init::init_pristine_node_1_cache(
         &raft,

@@ -16,6 +16,12 @@ pub use openraft::Config as RaftConfig;
 
 pub const DEFAULT_SNAPSHOT_CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(1_200);
+const MIN_SNAPSHOT_CHUNK_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_SNAPSHOT_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
+const MIN_SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(14_400);
+const MIN_SNAPSHOT_INSTALL_TIMEOUT_MILLIS: u64 = 10_000;
+const MAX_SNAPSHOT_INSTALL_TIMEOUT_MILLIS: u64 = 3_600_000;
 
 #[derive(Debug)]
 pub struct RateLimitConfig {
@@ -438,14 +444,31 @@ impl NodeConfig {
             ));
         }
 
-        if self.snapshot_chunk_timeout.is_zero() {
+        if !(MIN_SNAPSHOT_CHUNK_TIMEOUT..=MAX_SNAPSHOT_CHUNK_TIMEOUT)
+            .contains(&self.snapshot_chunk_timeout)
+        {
             return Err(Error::Config(
-                "'snapshot_chunk_timeout' must be greater than zero".into(),
+                "'snapshot_chunk_timeout' must be between 5 and 300 seconds".into(),
+            ));
+        }
+        if !(MIN_SNAPSHOT_TRANSFER_TIMEOUT..=MAX_SNAPSHOT_TRANSFER_TIMEOUT)
+            .contains(&self.snapshot_transfer_timeout)
+        {
+            return Err(Error::Config(
+                "'snapshot_transfer_timeout' must be between 60 and 14400 seconds".into(),
             ));
         }
         if self.snapshot_transfer_timeout < self.snapshot_chunk_timeout {
             return Err(Error::Config(
                 "'snapshot_transfer_timeout' must be at least 'snapshot_chunk_timeout'".into(),
+            ));
+        }
+        if !(MIN_SNAPSHOT_INSTALL_TIMEOUT_MILLIS..=MAX_SNAPSHOT_INSTALL_TIMEOUT_MILLIS)
+            .contains(&self.raft_config.install_snapshot_timeout)
+        {
+            return Err(Error::Config(
+                "'raft_config.install_snapshot_timeout' must be between 10000 and 3600000 milliseconds"
+                    .into(),
             ));
         }
 
@@ -545,6 +568,51 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use crate::{Node, NodeConfig};
+    use std::time::Duration;
+
+    fn valid_config() -> NodeConfig {
+        NodeConfig {
+            node_id: 1,
+            nodes: vec![Node {
+                id: 1,
+                addr_raft: "localhost:8100".to_owned(),
+                addr_api: "localhost:8200".to_owned(),
+            }],
+            secret_raft: "snapshot-test-raft-secret".to_owned(),
+            secret_api: "snapshot-test-api-secret".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn snapshot_deadline_durations_are_bounded_before_instant_arithmetic() {
+        let mut config = valid_config();
+        config.snapshot_chunk_timeout = Duration::MAX;
+        assert!(config.is_valid().is_err());
+
+        let mut config = valid_config();
+        config.snapshot_transfer_timeout = Duration::MAX;
+        assert!(config.is_valid().is_err());
+
+        let mut config = valid_config();
+        config.raft_config.install_snapshot_timeout = u64::MAX;
+        assert!(config.is_valid().is_err());
+
+        let mut config = valid_config();
+        config.snapshot_chunk_timeout = Duration::from_secs(5);
+        config.snapshot_transfer_timeout = Duration::from_secs(60);
+        config.raft_config.install_snapshot_timeout = 10_000;
+        config
+            .is_valid()
+            .expect("minimum snapshot budgets are valid");
+
+        config.snapshot_chunk_timeout = Duration::from_secs(300);
+        config.snapshot_transfer_timeout = Duration::from_secs(14_400);
+        config.raft_config.install_snapshot_timeout = 3_600_000;
+        config
+            .is_valid()
+            .expect("maximum snapshot budgets are valid");
+    }
 
     #[test]
     fn test_config_from_env() {

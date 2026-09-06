@@ -141,11 +141,12 @@ VOLUME ["/var/lib/plurx"]
 USER plurx
 
 # The default replicated startup may spend 45s reaching Hiqlite health, 45s
-# awaiting admission, then the 120s snapshot timeout plus another 45s reaching
-# its quorum watermark. Five minutes covers that 255s budget with margin while
-# still exposing a broken build promptly. Compose can lengthen the grace when
-# an operator lengthens either snapshot stage; a successful probe ends startup
-# grace immediately and later failures use the normal retry cadence.
+# awaiting admission, then a 1,200s snapshot transfer plus a 120s final install
+# and 45s reaching its quorum watermark. Twenty-five minutes covers that 1,455s
+# budget with margin while still exposing a broken build promptly. Compose can
+# lengthen the grace when an operator lengthens either snapshot stage; a
+# successful probe ends startup grace immediately and later failures use the
+# normal retry cadence.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25m \
     CMD ["plurxd", "healthcheck"]
 
