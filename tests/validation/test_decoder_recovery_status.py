@@ -18,7 +18,7 @@ HARNESS = ROOT / "scripts/decoder-diagnostic-qualification"
 FORGEJO_TASK_BASE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
-M1_RECEIPT_HEAD = "b0b206df"
+M1_RECEIPT_HEAD = "adce1125"
 M1_REPAIR_HEAD = "29dd8e88"
 
 
@@ -170,15 +170,17 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_m1_review_repair_distinguishes_exact_and_working_tree_evidence(self) -> None:
         self.assertIn(
-            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact post-map history audit 1,359, "
-            "catalog 24/30/1,436",
+            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact post-map history audit 1,361, "
+            "catalog 24/30/1,437",
             self.status,
         )
         self.assertIn("sealed, self-contained Linux FFprobe artifact", self.status)
         self.assertIn("path and second-memfd exec", self.status)
         self.assertIn("pidfd-before-reap", self.status)
         self.assertIn("Linux 24/24", self.status)
-        self.assertIn(f"Exact code head `{M1_REPAIR_HEAD}`", self.status)
+        self.assertIn("Linux 1.97.1 collector 27/27", self.status)
+        self.assertIn("one-shot exec supervision", self.status)
+        self.assertIn(f"`{M1_REPAIR_HEAD}` source tree", self.status)
         self.assertIn("daemon 1,777/1,777", self.status)
         self.assertIn("no exact postcommit history claim", self.status)
         self.assertNotIn("`608dd04d`: history 1,357", self.status)

@@ -12,6 +12,8 @@ use std::ffi::OsString;
 use std::ffi::{CString, OsStr};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -67,6 +69,41 @@ enum ProbeLaunchMode {
     Production,
     #[cfg(test)]
     Fixture,
+    #[cfg(all(test, target_os = "linux"))]
+    FixturePidfdOpenFailure,
+    #[cfg(all(test, target_os = "linux"))]
+    FixturePidfdReadFailure,
+}
+
+impl ProbeLaunchMode {
+    fn is_production(self) -> bool {
+        self == Self::Production
+    }
+
+    #[cfg(target_os = "linux")]
+    fn inject_pidfd_open_failure(self) -> bool {
+        #[cfg(test)]
+        if self == Self::FixturePidfdOpenFailure {
+            return true;
+        }
+        false
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn inject_pidfd_read_failure(self) -> bool {
+        if self == Self::FixturePidfdReadFailure {
+            return true;
+        }
+        false
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn inject_slow_reap(self) -> bool {
+        matches!(
+            self,
+            Self::FixturePidfdOpenFailure | Self::FixturePidfdReadFailure
+        )
+    }
 }
 
 /// A held source descriptor and the exclusive ownership lane for every child
@@ -206,7 +243,7 @@ impl DecodeProbeIdentity {
         if snapshot_file.content_digest != before.content_digest {
             return Err(DecodeFactError::ProbeChanged);
         }
-        if launch_mode == ProbeLaunchMode::Production {
+        if launch_mode.is_production() {
             require_direct_probe_executable(executable_snapshot.as_file())?;
         }
         let version = probe_version(&executable_snapshot, &executable, launch_mode).await?;
@@ -524,6 +561,12 @@ const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 #[cfg(target_os = "linux")]
 const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+#[cfg(target_os = "linux")]
+const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
+#[cfg(target_os = "linux")]
+const SECCOMP_FILTER_FLAG_NEW_LISTENER: u32 = 1 << 3;
+#[cfg(target_os = "linux")]
+const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const LINUX_AUDIT_ARCH: u32 = 0xc000_003e;
@@ -559,28 +602,37 @@ struct LinuxProbeSeccomp {
 
 #[cfg(target_os = "linux")]
 impl LinuxProbeSeccomp {
-    fn install(&self) -> std::io::Result<()> {
+    fn install_listener(&self) -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::FromRawFd;
+
         let program = libc::sock_fprog {
             len: self.filter_len,
             filter: self.filter.as_ptr().cast_mut(),
         };
-        if unsafe {
-            libc::prctl(
-                libc::PR_SET_SECCOMP,
-                libc::SECCOMP_MODE_FILTER,
+        let listener = unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER,
+                SECCOMP_FILTER_FLAG_NEW_LISTENER,
                 &raw const program,
             )
-        } == -1
-        {
+        };
+        if listener == -1 {
             Err(std::io::Error::last_os_error())
         } else {
-            Ok(())
+            let listener = libc::c_int::try_from(listener).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "FFprobe seccomp listener exceeded the descriptor range",
+                )
+            })?;
+            Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(listener) })
         }
     }
 }
 
-/// Keep FD 4 permanently bound to the sealed parser and make it the only
-/// executable object reachable after the first descriptor-based exec.
+/// Keep FD 4 permanently bound to the sealed parser, deny process-group escape,
+/// and route all descriptor execution to a one-shot supervisor.
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
@@ -614,12 +666,15 @@ fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
         libc::SYS_io_uring_setup,
         libc::SYS_io_uring_enter,
         libc::SYS_io_uring_register,
+        libc::SYS_setsid,
+        libc::SYS_setpgid,
     ] {
         filter.push(seccomp_jump(JUMP_EQUAL, syscall as u32, 0, 1));
         filter.push(seccomp_statement(RETURN_CONSTANT, DENIED));
     }
     let descriptor_mutations = [
         (libc::SYS_close, 0_u32),
+        (libc::SYS_fcntl, 0_u32),
         (libc::SYS_dup3, 1_u32),
         #[cfg(target_arch = "x86_64")]
         (libc::SYS_dup2, 1_u32),
@@ -642,13 +697,13 @@ fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
         seccomp_jump(JUMP_GREATER_OR_EQUAL, HELD_PROBE_FD as u32, 0, 1),
         seccomp_statement(RETURN_CONSTANT, DENIED),
         seccomp_statement(LOAD_WORD_ABSOLUTE, 0),
-        seccomp_jump(JUMP_EQUAL, libc::SYS_execveat as u32, 0, 6),
-        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGS_OFFSET),
-        seccomp_jump(JUMP_EQUAL, HELD_PROBE_FD as u32, 1, 0),
-        seccomp_statement(RETURN_CONSTANT, DENIED),
-        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGS_OFFSET + 32),
-        seccomp_jump(JUMP_EQUAL, libc::AT_EMPTY_PATH as u32, 1, 0),
-        seccomp_statement(RETURN_CONSTANT, DENIED),
+        // A classic BPF filter cannot inspect the pathname or remember that
+        // the first exec already happened. Every execveat therefore goes to a
+        // one-shot supervisor: it continues only the trusted pre-exec call and
+        // returns EPERM for every request made by the installed image or a
+        // descendant.
+        seccomp_jump(JUMP_EQUAL, libc::SYS_execveat as u32, 0, 1),
+        seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_USER_NOTIF),
         seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_ALLOW),
     ]);
     let filter_len = u16::try_from(filter.len()).map_err(|_| {
@@ -669,6 +724,396 @@ fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
         std::io::ErrorKind::Unsupported,
         "qualified FFprobe seccomp is unsupported on this architecture",
     ))
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Debug, Default)]
+struct LinuxSeccompData {
+    nr: libc::c_int,
+    arch: u32,
+    instruction_pointer: u64,
+    args: [u64; 6],
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Debug, Default)]
+struct LinuxSeccompNotification {
+    id: u64,
+    pid: u32,
+    flags: u32,
+    data: LinuxSeccompData,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Debug, Default)]
+struct LinuxSeccompResponse {
+    id: u64,
+    val: i64,
+    error: i32,
+    flags: u32,
+}
+
+#[cfg(target_os = "linux")]
+const fn linux_ioctl_read_write<T>(number: u8) -> libc::c_ulong {
+    const IOC_WRITE: libc::c_ulong = 1;
+    const IOC_READ: libc::c_ulong = 2;
+    const IOC_DIRECTION_SHIFT: libc::c_ulong = 30;
+    const IOC_SIZE_SHIFT: libc::c_ulong = 16;
+    const IOC_TYPE_SHIFT: libc::c_ulong = 8;
+    ((IOC_READ | IOC_WRITE) << IOC_DIRECTION_SHIFT)
+        | ((std::mem::size_of::<T>() as libc::c_ulong) << IOC_SIZE_SHIFT)
+        | ((b'!' as libc::c_ulong) << IOC_TYPE_SHIFT)
+        | number as libc::c_ulong
+}
+
+#[cfg(target_os = "linux")]
+fn receive_linux_seccomp_notification(
+    listener: std::os::fd::RawFd,
+) -> std::io::Result<LinuxSeccompNotification> {
+    let mut notification = LinuxSeccompNotification::default();
+    loop {
+        if unsafe {
+            libc::ioctl(
+                listener,
+                linux_ioctl_read_write::<LinuxSeccompNotification>(0),
+                &raw mut notification,
+            )
+        } == 0
+        {
+            return Ok(notification);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn answer_linux_seccomp_notification(
+    listener: std::os::fd::RawFd,
+    response: &mut LinuxSeccompResponse,
+) -> std::io::Result<()> {
+    loop {
+        if unsafe {
+            libc::ioctl(
+                listener,
+                linux_ioctl_read_write::<LinuxSeccompResponse>(1),
+                response as *mut LinuxSeccompResponse,
+            )
+        } == 0
+        {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn send_linux_seccomp_listener(
+    socket: std::os::fd::RawFd,
+    listener: std::os::fd::RawFd,
+) -> std::io::Result<()> {
+    let mut payload = [0_u8; 1];
+    let mut io = libc::iovec {
+        iov_base: payload.as_mut_ptr().cast(),
+        iov_len: payload.len(),
+    };
+    // CMSG_* may dereference a cmsghdr at this address, so the backing storage
+    // must have native alignment rather than the byte alignment of `[u8; N]`.
+    let mut control = [0 as libc::c_ulong; 8];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &raw mut io;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = std::mem::size_of_val(&control);
+    let header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
+    if header.is_null() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "seccomp listener control message has no header",
+        ));
+    }
+    unsafe {
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as usize;
+        std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>(), listener);
+        message.msg_controllen = (*header).cmsg_len;
+    }
+    if unsafe { libc::sendmsg(socket, &raw const message, 0) } == 1 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn receive_linux_seccomp_listener(
+    socket: std::os::fd::RawFd,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+
+    let mut payload = [0_u8; 1];
+    let mut io = libc::iovec {
+        iov_base: payload.as_mut_ptr().cast(),
+        iov_len: payload.len(),
+    };
+    // Match the native cmsghdr alignment required by CMSG_FIRSTHDR/CMSG_DATA.
+    let mut control = [0 as libc::c_ulong; 8];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &raw mut io;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = std::mem::size_of_val(&control);
+    let received = unsafe { libc::recvmsg(socket, &raw mut message, libc::MSG_CMSG_CLOEXEC) };
+    if received != 1 {
+        return Err(if received == -1 {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "probe exited before transferring its seccomp listener",
+            )
+        });
+    }
+    let header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
+    if header.is_null()
+        || unsafe { (*header).cmsg_level } != libc::SOL_SOCKET
+        || unsafe { (*header).cmsg_type } != libc::SCM_RIGHTS
+        || unsafe { (*header).cmsg_len }
+            < unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as usize }
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "probe transferred an invalid seccomp listener",
+        ));
+    }
+    let listener =
+        unsafe { std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>()) };
+    if listener < 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "probe transferred a negative seccomp listener",
+        ));
+    }
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(listener) })
+}
+
+#[cfg(target_os = "linux")]
+fn supervise_linux_probe_execs(
+    receiver: std::os::fd::OwnedFd,
+    stop: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let listener = receive_linux_seccomp_listener(receiver.as_raw_fd())?;
+    let first = receive_linux_seccomp_notification(listener.as_raw_fd())?;
+    if first.flags != 0
+        || first.data.arch != LINUX_AUDIT_ARCH
+        || first.data.nr != libc::SYS_execveat as libc::c_int
+        || first.data.args[0] != HELD_PROBE_FD as u64
+        || first.data.args[4] != libc::AT_EMPTY_PATH as u64
+    {
+        let mut denied = LinuxSeccompResponse {
+            id: first.id,
+            error: -libc::EPERM,
+            ..LinuxSeccompResponse::default()
+        };
+        let _ = answer_linux_seccomp_notification(listener.as_raw_fd(), &mut denied);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "first supervised probe exec did not match the bound descriptor call",
+        ));
+    }
+    // The first notification can only originate in the single-threaded
+    // post-fork pre-exec closure: parser code has not run yet and cannot race
+    // its arguments. Continuing it is therefore the one safe use of the
+    // notification API; every request after the image starts is denied.
+    let mut allowed = LinuxSeccompResponse {
+        id: first.id,
+        flags: SECCOMP_USER_NOTIF_FLAG_CONTINUE,
+        ..LinuxSeccompResponse::default()
+    };
+    answer_linux_seccomp_notification(listener.as_raw_fd(), &mut allowed)?;
+
+    while !stop.load(Ordering::Acquire) {
+        let mut descriptor = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&raw mut descriptor, 1, 25) };
+        if ready == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
+        if descriptor.revents & libc::POLLIN == 0 {
+            // HUP after the last filtered task exits is the normal terminal
+            // event. Closing this listener also leaves every racing notified
+            // exec failed closed by the kernel.
+            break;
+        }
+        let request = match receive_linux_seccomp_notification(listener.as_raw_fd()) {
+            Ok(request) => request,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        };
+        let mut denied = LinuxSeccompResponse {
+            id: request.id,
+            error: -libc::EPERM,
+            ..LinuxSeccompResponse::default()
+        };
+        match answer_linux_seccomp_notification(listener.as_raw_fd(), &mut denied) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxProbeExecSupervisor {
+    child_sender: Option<std::os::fd::OwnedFd>,
+    child_sender_fd: std::os::fd::RawFd,
+    child_receiver_fd: std::os::fd::RawFd,
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProbeExecSupervisor {
+    fn start() -> std::io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let mut sockets = [-1; 2];
+        if unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                0,
+                sockets.as_mut_ptr(),
+            )
+        } == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let receiver_fd = unsafe { libc::fcntl(sockets[0], libc::F_DUPFD_CLOEXEC, 10) };
+        let sender_fd = unsafe { libc::fcntl(sockets[1], libc::F_DUPFD_CLOEXEC, 10) };
+        unsafe {
+            libc::close(sockets[0]);
+            libc::close(sockets[1]);
+        }
+        if receiver_fd == -1 || sender_fd == -1 {
+            if receiver_fd != -1 {
+                unsafe { libc::close(receiver_fd) };
+            }
+            if sender_fd != -1 {
+                unsafe { libc::close(sender_fd) };
+            }
+            return Err(std::io::Error::last_os_error());
+        }
+        let receiver = unsafe { std::os::fd::OwnedFd::from_raw_fd(receiver_fd) };
+        let child_sender = unsafe { std::os::fd::OwnedFd::from_raw_fd(sender_fd) };
+        let child_receiver_fd = receiver.as_raw_fd();
+        let child_sender_fd = child_sender.as_raw_fd();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::Builder::new()
+            .name("plurx-probe-exec".to_owned())
+            .spawn(move || supervise_linux_probe_execs(receiver, worker_stop))?;
+        Ok(Self {
+            child_sender: Some(child_sender),
+            child_sender_fd,
+            child_receiver_fd,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn child_sender_fd(&self) -> std::os::fd::RawFd {
+        self.child_sender_fd
+    }
+
+    fn child_receiver_fd(&self) -> std::os::fd::RawFd {
+        self.child_receiver_fd
+    }
+
+    fn parent_after_spawn(&mut self) {
+        self.child_sender.take();
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.parent_after_spawn();
+        self.stop.store(true, Ordering::Release);
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        worker
+            .join()
+            .map_err(|_| std::io::Error::other("probe seccomp supervisor panicked"))?
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxProbeExecSupervisor {
+    fn drop(&mut self) {
+        self.parent_after_spawn();
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(unix)]
+struct ProbeExecutionSupervisor {
+    #[cfg(target_os = "linux")]
+    linux: Option<LinuxProbeExecSupervisor>,
+}
+
+#[cfg(unix)]
+impl ProbeExecutionSupervisor {
+    fn none() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            linux: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux(supervisor: LinuxProbeExecSupervisor) -> Self {
+        Self {
+            linux: Some(supervisor),
+        }
+    }
+
+    fn parent_after_spawn(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(supervisor) = self.linux.as_mut() {
+            supervisor.parent_after_spawn();
+        }
+    }
+
+    fn finish(&mut self) -> Result<(), DecodeFactError> {
+        #[cfg(target_os = "linux")]
+        if let Some(supervisor) = self.linux.as_mut() {
+            supervisor
+                .finish()
+                .map_err(|error| DecodeFactError::Read(error.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -759,9 +1204,9 @@ fn configure_probe_execution(
     source_fd: Option<std::os::fd::RawFd>,
     arg0: &Path,
     arguments: &[OsString],
-) -> Result<(), DecodeFactError> {
+) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
     #[cfg(target_os = "linux")]
-    let production_arguments = if launch_mode == ProbeLaunchMode::Production {
+    let production_arguments = if launch_mode.is_production() {
         Some(
             LinuxExecveArguments::new(arg0.as_os_str(), arguments)
                 .map_err(|error| DecodeFactError::Spawn(error.to_string()))?,
@@ -770,7 +1215,7 @@ fn configure_probe_execution(
         None
     };
     #[cfg(target_os = "linux")]
-    let production_seccomp = if launch_mode == ProbeLaunchMode::Production {
+    let production_seccomp = if launch_mode.is_production() {
         Some(
             build_linux_probe_seccomp()
                 .map_err(|error| DecodeFactError::Spawn(error.to_string()))?,
@@ -780,6 +1225,23 @@ fn configure_probe_execution(
     };
     #[cfg(not(target_os = "linux"))]
     let _ = (arg0, arguments);
+    #[cfg(target_os = "linux")]
+    let production_supervisor = if launch_mode.is_production() {
+        Some(
+            LinuxProbeExecSupervisor::start()
+                .map_err(|error| DecodeFactError::Spawn(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let supervisor_sender_fd = production_supervisor
+        .as_ref()
+        .map(LinuxProbeExecSupervisor::child_sender_fd);
+    #[cfg(target_os = "linux")]
+    let supervisor_receiver_fd = production_supervisor
+        .as_ref()
+        .map(LinuxProbeExecSupervisor::child_receiver_fd);
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
@@ -787,35 +1249,46 @@ fn configure_probe_execution(
                 Some(source_fd) => install_probe_child_fds(source_fd, executable_fd)?,
                 None => install_child_fd(executable_fd, HELD_PROBE_FD)?,
             }
-            match launch_mode {
-                #[cfg(test)]
-                ProbeLaunchMode::Fixture => Ok(()),
-                ProbeLaunchMode::Production => {
-                    #[cfg(target_os = "linux")]
-                    {
-                        mark_unrelated_fds_close_on_exec()?;
-                        install_linux_filesystem_execute_denial()?;
-                        let Some(seccomp) = production_seccomp.as_ref() else {
-                            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
-                        };
-                        let Some(arguments) = production_arguments.as_ref() else {
-                            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
-                        };
-                        seccomp.install()?;
-                        arguments.execute_held_probe()
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Unsupported,
-                            "qualified FFprobe execution requires Linux isolation",
-                        ))
-                    }
-                }
+            if !launch_mode.is_production() {
+                return Ok(());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let Some(receiver_fd) = supervisor_receiver_fd else {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                };
+                libc::close(receiver_fd);
+                mark_unrelated_fds_close_on_exec()?;
+                install_linux_filesystem_execute_denial()?;
+                let Some(seccomp) = production_seccomp.as_ref() else {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                };
+                let Some(arguments) = production_arguments.as_ref() else {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                };
+                let Some(sender_fd) = supervisor_sender_fd else {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                };
+                let listener = seccomp.install_listener()?;
+                use std::os::fd::AsRawFd;
+                send_linux_seccomp_listener(sender_fd, listener.as_raw_fd())?;
+                drop(listener);
+                arguments.execute_held_probe()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "qualified FFprobe execution requires Linux isolation",
+                ))
             }
         });
     }
-    Ok(())
+    #[cfg(target_os = "linux")]
+    if let Some(supervisor) = production_supervisor {
+        return Ok(ProbeExecutionSupervisor::linux(supervisor));
+    }
+    Ok(ProbeExecutionSupervisor::none())
 }
 
 #[cfg(unix)]
@@ -828,12 +1301,30 @@ fn start_probe_session() -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-async fn terminate_probe_session(child: &mut tokio::process::Child, session: &ProbeSessionGuard) {
+async fn terminate_probe_session(
+    child: &mut tokio::process::Child,
+    session: &ProbeSessionGuard,
+    supervisor: &mut ProbeExecutionSupervisor,
+    _launch_mode: ProbeLaunchMode,
+) {
     // This potentially unbounded reap runs only inside an owned task. The
     // caller-facing deadline detaches that task while it retains every source
     // and admission guard needed for safe cleanup.
     session.kill_once();
-    let _ = child.wait().await;
+    let _ = wait_for_probe_reap(child, _launch_mode).await;
+    let _ = supervisor.finish();
+}
+
+#[cfg(unix)]
+async fn wait_for_probe_reap(
+    child: &mut tokio::process::Child,
+    _launch_mode: ProbeLaunchMode,
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(all(test, target_os = "linux"))]
+    if _launch_mode.inject_slow_reap() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    child.wait().await
 }
 
 #[cfg(unix)]
@@ -848,13 +1339,21 @@ fn kill_probe_session(process_group: Option<libc::pid_t>) {
 #[cfg(target_os = "linux")]
 struct ProbeExitAnchor {
     pidfd: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+    #[cfg(test)]
+    inject_read_failure: bool,
 }
 
 #[cfg(target_os = "linux")]
 impl ProbeExitAnchor {
-    fn open(process_group: Option<libc::pid_t>) -> std::io::Result<Self> {
+    fn open(
+        process_group: Option<libc::pid_t>,
+        launch_mode: ProbeLaunchMode,
+    ) -> std::io::Result<Self> {
         use std::os::fd::FromRawFd;
 
+        if launch_mode.inject_pidfd_open_failure() {
+            return Err(std::io::Error::other("injected FFprobe pidfd open failure"));
+        }
         let pid = process_group.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -874,10 +1373,19 @@ impl ProbeExitAnchor {
         let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) };
         Ok(Self {
             pidfd: tokio::io::unix::AsyncFd::new(owned)?,
+            #[cfg(test)]
+            inject_read_failure: launch_mode.inject_pidfd_read_failure(),
         })
     }
 
     async fn wait_until_exit(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.inject_read_failure {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            return Err(std::io::Error::other(
+                "injected FFprobe pidfd readiness failure",
+            ));
+        }
         let _readiness = self.pidfd.readable().await?;
         Ok(())
     }
@@ -1189,15 +1697,43 @@ async fn probe_version(
     configured_path: &Path,
     launch_mode: ProbeLaunchMode,
 ) -> Result<Vec<u8>, DecodeFactError> {
+    probe_version_with_deadline(executable, configured_path, launch_mode, VERSION_DEADLINE).await
+}
+
+#[cfg(unix)]
+async fn probe_version_with_deadline(
+    executable: &ExecutableSnapshot,
+    configured_path: &Path,
+    launch_mode: ProbeLaunchMode,
+    deadline: Duration,
+) -> Result<Vec<u8>, DecodeFactError> {
+    probe_version_with_deadline_on(
+        executable,
+        configured_path,
+        launch_mode,
+        deadline,
+        version_gate(),
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn probe_version_with_deadline_on(
+    executable: &ExecutableSnapshot,
+    configured_path: &Path,
+    launch_mode: ProbeLaunchMode,
+    deadline: Duration,
+    gate: Arc<tokio::sync::Semaphore>,
+) -> Result<Vec<u8>, DecodeFactError> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
     let started = std::time::Instant::now();
-    let version_permit = tokio::time::timeout(VERSION_DEADLINE, version_gate().acquire_owned())
+    let version_permit = tokio::time::timeout(deadline, gate.acquire_owned())
         .await
         .map_err(|_| DecodeFactError::Deadline)?
         .map_err(|_| DecodeFactError::CacheInvariant)?;
-    let remaining = VERSION_DEADLINE.saturating_sub(started.elapsed());
+    let remaining = deadline.saturating_sub(started.elapsed());
     if remaining.is_zero() {
         return Err(DecodeFactError::Deadline);
     }
@@ -1211,7 +1747,7 @@ async fn probe_version(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    configure_probe_execution(
+    let mut supervisor = configure_probe_execution(
         &mut command,
         launch_mode,
         executable_fd,
@@ -1219,28 +1755,34 @@ async fn probe_version(
         configured_path,
         &arguments,
     )?;
-    let mut child = command
-        .spawn()
-        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
-    let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
-    let session = ProbeSessionGuard::new(process_group);
-    #[cfg(target_os = "linux")]
-    let exit_anchor = match ProbeExitAnchor::open(process_group) {
-        Ok(anchor) => anchor,
+    let spawned = command.spawn();
+    supervisor.parent_after_spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
         Err(error) => {
-            terminate_probe_session(&mut child, &session).await;
-            return Err(DecodeFactError::Spawn(format!(
-                "opening FFprobe exit anchor: {error}"
-            )));
+            let _ = supervisor.finish();
+            return Err(DecodeFactError::Spawn(error.to_string()));
         }
     };
+    let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
+    let session = ProbeSessionGuard::new(process_group);
     let terminator = session.terminator();
     let mut task = tokio::spawn(async move {
         let _version_permit = version_permit;
+        #[cfg(target_os = "linux")]
+        let exit_anchor = match ProbeExitAnchor::open(process_group, launch_mode) {
+            Ok(anchor) => anchor,
+            Err(error) => {
+                terminate_probe_session(&mut child, &session, &mut supervisor, launch_mode).await;
+                return Err(DecodeFactError::Spawn(format!(
+                    "opening FFprobe exit anchor: {error}"
+                )));
+            }
+        };
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
-                terminate_probe_session(&mut child, &session).await;
+                terminate_probe_session(&mut child, &session, &mut supervisor, launch_mode).await;
                 return Err(DecodeFactError::MissingPipe);
             }
         };
@@ -1253,23 +1795,33 @@ async fn probe_version(
             exited
         });
         #[cfg(target_os = "linux")]
-        let status = {
+        let (status, exit_error) = {
             // pidfd readiness proves exit without reaping. The zombie anchors
             // the PID/PGID until descendants are killed and only then is the
             // leader reaped.
-            let exited = exited.map_err(|error| DecodeFactError::Read(error.to_string()));
-            exited?;
-            child.wait().await
+            let exit_error = exited
+                .err()
+                .map(|error| DecodeFactError::Read(error.to_string()));
+            (
+                wait_for_probe_reap(&mut child, launch_mode).await,
+                exit_error,
+            )
         };
         #[cfg(not(target_os = "linux"))]
         let (stdout, status) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait());
         #[cfg(not(target_os = "linux"))]
         session.kill_once();
+        #[cfg(not(target_os = "linux"))]
+        let exit_error: Option<DecodeFactError> = None;
+        let supervisor_result = supervisor.finish();
+        if let Some(error) = exit_error {
+            return Err(error);
+        }
+        supervisor_result?;
         let stdout = stdout?;
         let status = match status {
             Ok(status) => status,
             Err(error) => {
-                terminate_probe_session(&mut child, &session).await;
                 return Err(DecodeFactError::Read(error.to_string()));
             }
         };
@@ -1581,7 +2133,7 @@ async fn collect(
     use std::os::unix::process::CommandExt;
 
     let source_fd = source.as_raw_fd();
-    if probe.launch_mode == ProbeLaunchMode::Production
+    if probe.launch_mode.is_production()
         && source
             .metadata()
             .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?
@@ -1636,7 +2188,7 @@ async fn collect(
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
     command.args(&arguments);
-    configure_probe_execution(
+    let mut supervisor = configure_probe_execution(
         &mut command,
         probe.launch_mode,
         executable_fd,
@@ -1644,20 +2196,27 @@ async fn collect(
         probe.executable(),
         &arguments,
     )?;
-    let mut child = command
+    let spawned = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+        .spawn();
+    supervisor.parent_after_spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = supervisor.finish();
+            return Err(DecodeFactError::Spawn(error.to_string()));
+        }
+    };
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
     #[cfg(target_os = "linux")]
-    let exit_anchor = match ProbeExitAnchor::open(process_group) {
+    let exit_anchor = match ProbeExitAnchor::open(process_group, probe.launch_mode) {
         Ok(anchor) => anchor,
         Err(error) => {
-            terminate_probe_session(&mut child, &session).await;
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
             return Err(DecodeFactError::Spawn(format!(
                 "opening FFprobe exit anchor: {error}"
             )));
@@ -1666,21 +2225,26 @@ async fn collect(
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            terminate_probe_session(&mut child, &session).await;
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
             return Err(DecodeFactError::MissingPipe);
         }
     };
     let stderr = match child.stderr.take() {
         Some(stderr) => stderr,
         None => {
-            terminate_probe_session(&mut child, &session).await;
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
             return Err(DecodeFactError::MissingPipe);
         }
     };
     let outcome = tokio::select! {
         biased;
         _ = wait_for_cancellation(cancelled) => {
-            terminate_probe_session(&mut child, &session).await;
+            terminate_probe_session(
+                &mut child,
+                &session,
+                &mut supervisor,
+                probe.launch_mode,
+            ).await;
             return Err(DecodeFactError::Cancelled);
         }
         outcome = tokio::time::timeout(budget.min(PROBE_DEADLINE), async {
@@ -1695,10 +2259,14 @@ async fn collect(
                 },
             );
             #[cfg(target_os = "linux")]
-            let status = {
-                let exited = exited.map_err(|error| DecodeFactError::Read(error.to_string()));
-                exited?;
-                child.wait().await
+            let (status, exit_error) = {
+                let exit_error = exited
+                    .err()
+                    .map(|error| DecodeFactError::Read(error.to_string()));
+                (
+                    wait_for_probe_reap(&mut child, probe.launch_mode).await,
+                    exit_error,
+                )
             };
             #[cfg(not(target_os = "linux"))]
             let (stdout, stderr, status) = tokio::join!(
@@ -1708,23 +2276,29 @@ async fn collect(
             );
             #[cfg(not(target_os = "linux"))]
             session.kill_once();
-            Ok::<_, DecodeFactError>((stdout, stderr, status))
+            #[cfg(not(target_os = "linux"))]
+            let exit_error: Option<DecodeFactError> = None;
+            Ok::<_, DecodeFactError>((stdout, stderr, status, exit_error))
         }) => outcome,
     };
-    let (stdout, stderr, status) = match outcome {
-        Ok(Ok((stdout, stderr, status))) => (stdout, stderr, status),
+    let (stdout, stderr, status, exit_error) = match outcome {
+        Ok(Ok((stdout, stderr, status, exit_error))) => (stdout, stderr, status, exit_error),
         Ok(Err(error)) => return Err(error),
         Err(_) => {
-            terminate_probe_session(&mut child, &session).await;
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
             return Err(DecodeFactError::Deadline);
         }
     };
+    let supervisor_result = supervisor.finish();
+    if let Some(error) = exit_error {
+        return Err(error);
+    }
+    supervisor_result?;
     let stdout = stdout?;
     let stderr = stderr?;
     let status = match status {
         Ok(status) => status,
         Err(error) => {
-            terminate_probe_session(&mut child, &session).await;
             return Err(DecodeFactError::Read(error.to_string()));
         }
     };
@@ -1846,8 +2420,12 @@ mod tests {
 #define NR_WRITE 1
 #define NR_CLOSE 3
 #define NR_LSEEK 8
+#define NR_NANOSLEEP 35
+#define NR_FORK 57
 #define NR_EXECVE 59
 #define NR_FCHMOD 91
+#define NR_FCNTL 72
+#define NR_SETSID 112
 #define NR_EXIT 60
 #define NR_MEMFD_CREATE 319
 #define NR_EXECVEAT 322
@@ -1856,8 +2434,12 @@ mod tests {
 #undef NR_WRITE
 #undef NR_CLOSE
 #undef NR_LSEEK
+#undef NR_NANOSLEEP
+#undef NR_FORK
 #undef NR_EXECVE
 #undef NR_FCHMOD
+#undef NR_FCNTL
+#undef NR_SETSID
 #undef NR_EXIT
 #undef NR_MEMFD_CREATE
 #undef NR_EXECVEAT
@@ -1865,13 +2447,21 @@ mod tests {
 #define NR_WRITE 64
 #define NR_CLOSE 57
 #define NR_LSEEK 62
+#define NR_NANOSLEEP 101
+#define NR_FORK 220
 #define NR_EXECVE 221
 #define NR_FCHMOD 52
+#define NR_FCNTL 25
+#define NR_SETSID 157
 #define NR_EXIT 93
 #define NR_MEMFD_CREATE 279
 #define NR_EXECVEAT 281
 #endif
 #define AT_EMPTY_PATH 0x1000
+#define FD_CLOEXEC 1
+#define F_DUPFD 0
+#define F_SETFD 2
+#define SIGCHLD 17
 
 #if defined(__x86_64__)
 static long syscall6(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
@@ -1954,7 +2544,53 @@ void probe_main(unsigned long *stack) {
     syscall6(NR_LSEEK, copy, 0, 0, 0, 0, 0);
     char *next[] = { "copy", "copied", 0 };
     syscall6(NR_EXECVEAT, copy, (long)"", (long)next, 0, AT_EMPTY_PATH, 0);
+    syscall6(NR_EXECVEAT, 4, (long)"/proc/self/fd/5", (long)next, 0, AT_EMPTY_PATH, 0);
     write_text(1, "blocked:memfd\n");
+#elif PROBE_MODE == 3
+    if (argc > 1 && same(argv[1], "reentered")) {
+        long rebound = syscall6(NR_FCNTL, 5, F_DUPFD, 4, 0, 0, 0);
+        char *again[] = { "replacement", "copied", 0 };
+        syscall6(NR_EXECVEAT, rebound, (long)"", (long)again, 0, AT_EMPTY_PATH, 0);
+        finish(93);
+    }
+    long copy = syscall6(NR_MEMFD_CREATE, (long)"replacement", 0, 0, 0, 0, 0);
+    if (copy < 0) finish(86);
+    syscall6(NR_LSEEK, 4, 0, 0, 0, 0, 0);
+    char buffer[4096];
+    for (;;) {
+        long count = syscall6(NR_READ, 4, (long)buffer, sizeof(buffer), 0, 0, 0);
+        if (count < 0) finish(87);
+        if (count == 0) break;
+        if (syscall6(NR_WRITE, copy, (long)buffer, count, 0, 0, 0) != count) finish(88);
+    }
+    syscall6(NR_FCHMOD, copy, 0500, 0, 0, 0, 0);
+    syscall6(NR_LSEEK, copy, 0, 0, 0, 0, 0);
+    long changed = syscall6(NR_FCNTL, 4, F_SETFD, FD_CLOEXEC, 0, 0, 0);
+    char *next[] = { "sealed", "reentered", 0 };
+    if (changed == 0) {
+        syscall6(NR_EXECVEAT, 4, (long)"", (long)next, 0, AT_EMPTY_PATH, 0);
+        finish(94);
+    }
+    write_text(1, "blocked:fd-reuse\n");
+#elif PROBE_MODE == 4
+    if (argc > 1 && same(argv[1], "-version")) {
+        write_text(1, facts);
+        finish(0);
+    }
+    long child;
+#if defined(__x86_64__)
+    child = syscall6(NR_FORK, 0, 0, 0, 0, 0, 0);
+#else
+    child = syscall6(NR_FORK, SIGCHLD, 0, 0, 0, 0, 0);
+#endif
+    if (child < 0) finish(89);
+    if (child == 0) {
+        long escaped = syscall6(NR_SETSID, 0, 0, 0, 0, 0, 0);
+        unsigned long delay[2] = { 0, 500000000 };
+        syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
+        if (escaped >= 0) write_text(1, "escaped-session\n");
+        finish(0);
+    }
 #endif
     write_text(1, facts);
     finish(0);
@@ -2116,9 +2752,13 @@ void probe_main(unsigned long *stack) {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn production_probe_blocks_path_and_second_memfd_exec() {
+    async fn production_probe_allows_only_the_initial_bound_exec() {
         let root = crate::test_tempdir().expect("tempdir");
-        for (mode, name) in [(1, "path-launcher"), (2, "memfd-launcher")] {
+        for (mode, name) in [
+            (1, "path-launcher"),
+            (2, "direct-and-proc-memfd-launcher"),
+            (3, "fd-reuse-launcher"),
+        ] {
             let probe = root.path().join(name);
             build_static_probe(&probe, mode);
             DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -2127,6 +2767,135 @@ void probe_main(unsigned long *stack) {
                     panic!("{name} must enter and observe blocked exec: {error}")
                 });
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn production_probe_descendants_cannot_leave_the_kill_domain() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("session-escape-probe");
+        build_static_probe(&probe, 4);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production probe identity");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"source").expect("media");
+        let source = Arc::new(std::fs::File::open(media).expect("open media"));
+        tokio::time::timeout(
+            Duration::from_millis(400),
+            DecodeFactCache::new().get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(source),
+                None,
+                ProbeStreamSelection::Absolute(4),
+                Duration::from_secs(2),
+                None,
+            ),
+        )
+        .await
+        .expect("escaped child must not retain the probe pipes")
+        .expect("denied setsid child remains in the killed process group");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pidfd_open_failure_detaches_bounded_version_cleanup() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            "#!/bin/sh\nprintf '%s\\n' 'ffprobe version pidfd-open'\n",
+        );
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("fixture identity");
+        let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_version_with_deadline_on(
+                &identity.executable_snapshot,
+                identity.executable(),
+                ProbeLaunchMode::FixturePidfdOpenFailure,
+                Duration::from_millis(100),
+                Arc::clone(&ownership),
+            )
+            .await,
+            Err(DecodeFactError::Deadline)
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "pidfd-open cleanup must remain behind the caller deadline"
+        );
+        assert!(
+            Arc::clone(&ownership).try_acquire_owned().is_err(),
+            "version ownership remains held until explicit reap"
+        );
+        let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
+            .await
+            .expect("detached pidfd-open cleanup finishes")
+            .expect("version ownership returns after reap");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pidfd_read_failure_retains_source_ownership_until_reap() {
+        use std::io::{Seek, SeekFrom};
+
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version pidfd-read'; exit 0; fi
+printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","disposition":{"attached_pic":0}}]}'
+sleep 5
+"###,
+        );
+        let mut identity =
+            DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+                .await
+                .expect("fixture identity");
+        identity.launch_mode = ProbeLaunchMode::FixturePidfdReadFailure;
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"0123456789").expect("media");
+        let mut opened = std::fs::File::open(media).expect("open media");
+        opened.seek(SeekFrom::Start(3)).expect("set source offset");
+        let source = Arc::new(opened);
+        let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            DecodeFactCache::new()
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::new(Arc::clone(&source), Arc::clone(&ownership)),
+                    None,
+                    ProbeStreamSelection::Absolute(4),
+                    Duration::from_millis(400),
+                    None,
+                )
+                .await,
+            Err(DecodeFactError::Deadline)
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(800),
+            "pidfd-read cleanup must remain behind the caller deadline"
+        );
+        assert!(
+            Arc::clone(&ownership).try_acquire_owned().is_err(),
+            "source ownership remains held until explicit reap"
+        );
+        let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
+            .await
+            .expect("detached pidfd-read cleanup finishes")
+            .expect("source ownership returns after reap");
+        assert_eq!(
+            source
+                .try_clone()
+                .expect("source view")
+                .stream_position()
+                .expect("restored source offset"),
+            3
+        );
     }
 
     #[cfg(target_os = "linux")]

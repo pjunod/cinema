@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 third-review repair awaiting exact-head review · **Updated:** 2026-09-06 ·
+**Status:** M1 fourth-review repairs validated locally · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -23,17 +23,17 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Exact code head `29dd8e88`: macOS collector 17/17 and pinned Linux 1.97.1 collector 24/24. Linux composes production discovery, sealed-FD execution, deny-all path execution, exact-FD seccomp, pidfd-before-reap cleanup, bound source FD 3, JSON parsing, path and second-memfd escape denial, and executable-source refusal. The complete Rust unit profile passes: core 955/955, decoder integration 34/34, store 87/87, PGS 20/20, daemon 1,777/1,777, 3 declared ignores, and no failures; denied-warning all-target Clippy passes on macOS and pinned Linux |
-| Exact receipt | `b0b206df`: exact post-map history audit 1,359, catalog 24/30/1,436, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass. Earlier `608dd04d` runs were precommit source-tree evidence, not an exact post-map receipt |
+| Focused validation | Working tree after `adce1125`: macOS collector 17/17, pinned Linux 1.97.1 collector 27/27, neutral legacy route 1/1, cross-platform all-target Clippy with warnings denied, status/ownership contracts 13/13, catalog 24/30/1,437, history 1,361, and operations 211/211. Linux composes production discovery, sealed-FD execution, one-shot supervised `execveat`, deny-all path execution, pidfd-before-reap cleanup, bound source FD 3, JSON parsing, direct and `/proc/self/fd` second-memfd denial, FD-reuse denial, session-escape denial, executable-source refusal, and injected pidfd failure ownership |
+| Exact receipt | `adce1125`: exact post-map history audit 1,361, catalog 24/30/1,437, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass. Both exact-head reviews requested the fourth repair; this receipt is not approval evidence |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
-| Blocker | Obtain exact-head adversarial approval for the mapped repair before the one clean full-suite qualification |
+| Blocker | Commit the fourth-review repairs and obtain new exact-head adversarial approval before the one clean full-suite qualification |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Exact-head repair review pending | `29dd8e88` replaces the invalid anonymous-memfd Landlock allow rule with sealed-FD `execveat`, deny-all path execution, exact-FD seccomp, and pidfd-anchored cleanup; mandatory Linux production-path regressions pass 24/24 |
+| M1 · explicit plan and facts | Fourth-review repair validated locally | The working tree replaces the bypassable stateless exec allow rule with one-shot supervision, denies session/group escape, and retains ownership through injected pidfd failures; mandatory Linux collector regressions pass 27/27 |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -57,8 +57,10 @@ The enforced production boundary requires a self-contained Linux ELF with no
 interpreter or dynamic dependency closure and copies it to a sealed anonymous
 descriptor. The child executes that exact descriptor with `execveat`; a
 deny-all Landlock execution domain blocks path-backed replacements, while a
-seccomp filter permits later `execveat` only for retained FD 4 and prevents
-closing, replacing, or injecting that descriptor. Unsupported kernels,
+seccomp user-notification owner continues exactly the trusted pre-exec call
+and denies every later `execveat` from the installed image or its descendants.
+The BPF layer also prevents the parser from changing FD 4 or leaving its
+killable session/process group. Unsupported kernels,
 architectures, production Unix targets, scripts, and dynamic or indirect
 launchers fail closed; M1 treats the unavailable observation as neutral and
 continues the unchanged legacy route. Test-only scripted fixtures are selected
@@ -167,10 +169,13 @@ its sole process-group kill. The current repair classifies the sealed bytes,
 uses FD-based first execution under a deny-all filesystem-exec domain, restricts
 later execution and FD mutation with architecture-checked seccomp, refuses an
 executable source FD, and uses pidfd readiness to kill the group before reap.
-The mandatory pinned-Linux production API test on `29dd8e88` exercises static discovery,
+The mandatory pinned-Linux production API tests exercise static discovery,
 sealed FD 4, source FD 3, version output, JSON facts, and cleanup; companion
-tests prove path-backed and second-memfd attempts are denied without treating
-unsupported isolation as a pass.
+tests prove path-backed, direct-memfd, absolute `/proc/self/fd` memfd, FD-reuse,
+and process-session escape attempts are denied without treating unsupported
+isolation as a pass. Injected pidfd-open and readiness failures prove the
+caller deadline can detach cleanup without releasing version or source
+ownership before explicit reap.
 
 ## M0 frozen source inventory
 
@@ -505,7 +510,7 @@ full-base diff. The exact head then passed the full PR suite recorded below.
 | 2026-09-06 | Run qualification through task-scoped `ffmpeg-full` 8.1.2_2 wrappers | The installed full build provides `zscale`; the wrappers add only the retained x265 ABI 216 library path and leave the host installation unchanged |
 | 2026-09-06 | Accept two declared full-suite skips on this Darwin builder | Android device validation requires unavailable `adb`; the two-node Live TV drill is Linux-only. Both remain explicit M8 fleet/client prerequisites rather than passing claims |
 | 2026-09-06 | Reuse warmed cluster targets for the final exact-head suite | The first diagnostic run spent its 1,800-second bound compiling vendor targets. Warm targets change no source or test semantics and let the complete three-node workload run inside the same fixed bound |
-| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact plus kernel isolation for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. The supported path requires memfd seals, `execveat`, Landlock, seccomp-BPF, `close_range`, and pidfds on x86-64 or arm64 Linux; failure is a neutral M1 observation and keeps legacy routing. Other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name these prerequisites rather than hide them behind a code feature gate |
+| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact plus kernel isolation for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. The supported path requires memfd seals, `execveat`, Landlock, seccomp-BPF with user notification, `close_range`, pidfds, and a supervised native thread on x86-64 or arm64 Linux; failure is a neutral M1 observation and keeps legacy routing. Other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name these prerequisites rather than hide them behind a code feature gate |
 
 ## Validation ledger
 
@@ -605,6 +610,9 @@ lane and focused tests provide earlier feedback.
 | `29dd8e88` source tree | macOS and pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · macOS 17/17 and Linux 24/24. Linux runs the normal production API through sealed FD 4 and bound source FD 3, rejects path and second-memfd exec, classifies captured bytes, refuses executable media, and kills descendants before leader reap |
 | `29dd8e88` source tree | `CARGO='rustup run 1.97.1 cargo' make unit` with qualified FFmpeg 8.1.2 and loopback fixture permission | Pass · core 955/955, decoder integration 34/34, store 87/87, PGS 20/20, daemon 1,777/1,777, 3 declared ignores, and no failures |
 | `29dd8e88` source tree | macOS plus pinned Linux 1.97.1 `cargo clippy --locked -p plurxd --all-targets -- -D warnings` | Pass · no warnings on either platform |
+| `adce1125` | Exact planner and subprocess adversarial reviews | Changes requested · both reviewers demonstrated the stateless FD-4 `execveat` rule could execute an absolute `/proc/self/fd` memfd; the subprocess review additionally found session/group escape and pidfd-open/readiness ownership gaps |
+| Working tree after `adce1125` | pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · 27/27, including one-shot exec supervision, absolute proc-memfd and FD-reuse attempts, session-escape denial, and injected pidfd-open/readiness cleanup ownership |
+| Working tree after `adce1125` | macOS focused tests, cross-platform all-target Clippy, repository contracts, and policy audits | Pass · macOS collector 17/17, neutral legacy routing 1/1, no Clippy warnings on macOS or pinned Linux, status/ownership 13/13, catalog 24/30/1,437, history 1,361, operations 211/211, formatting, and diff check |
 
 ## Remaining evidence before release
 
