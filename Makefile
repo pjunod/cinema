@@ -560,6 +560,12 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::production_collector_preserves_private_transport_when_public_listener_is_closed \
 	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::identity_mismatch_discards_peer_local_state \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::public_transport_fallback_requires_matching_observer_identity \
+	  -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  config::tests::snapshot_deadline_durations_are_bounded_before_instant_arithmetic \

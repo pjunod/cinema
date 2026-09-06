@@ -916,10 +916,14 @@ fn join_observations(
         let (mut state, mut status, transport, mut error_class) = if member.node_id == local_node_id
         {
             local.hostname = member.hostname.clone();
+            let transport = (local.raft_id == Some(member.raft_id))
+                .then(|| local.transport.clone())
+                .flatten()
+                .filter(|transport| transport.observing_node_id == member.raft_id);
             (
                 ObservationState::Answered,
                 Some(local.clone()),
-                local.transport.clone(),
+                transport,
                 None,
             )
         } else if let Some(outcome) = remote.remove(&member.node_id) {
@@ -929,11 +933,17 @@ fn join_observations(
             let fallback_transport = outcome
                 .status
                 .as_ref()
+                .filter(|status| status.raft_id == Some(member.raft_id))
                 .and_then(|status| status.transport.clone());
+            let private_transport = outcome
+                .transport
+                .filter(|transport| transport.observing_node_id == member.raft_id);
+            let fallback_transport = fallback_transport
+                .filter(|transport| transport.observing_node_id == member.raft_id);
             (
                 outcome.state,
                 outcome.status,
-                outcome.transport.or(fallback_transport),
+                private_transport.or(fallback_transport),
                 error,
             )
         } else {
@@ -1927,7 +1937,8 @@ mod tests {
                 permanent_majority_loss_supported: false,
             },
         };
-        let status = test_local_status("node-a", Some(8));
+        let mut status = test_local_status("node-a", Some(8));
+        status.transport = Some(test_transport_status(7, 0, Some(1_000)));
         let mut remote = BTreeMap::new();
         remote.insert(
             "node-a".to_owned(),
@@ -1947,6 +1958,62 @@ mod tests {
         );
         assert_eq!(rows[0].observation, ObservationState::IdentityMismatch);
         assert!(rows[0].status.is_none());
+        assert!(rows[0].transport.is_none());
+    }
+
+    #[test]
+    fn public_transport_fallback_requires_matching_observer_identity() {
+        let membership = test_membership("node-1", 2);
+        let mut peer = test_local_status("node-2", Some(2));
+        peer.transport = Some(test_transport_status(7, 0, Some(1_000)));
+        let mut remote = BTreeMap::new();
+        remote.insert(
+            "node-2".to_owned(),
+            PeerStatusOutcome {
+                node_id: "node-2".to_owned(),
+                state: ObservationState::Answered,
+                status: Some(peer),
+                transport: None,
+            },
+        );
+
+        let rows = join_observations(
+            &membership,
+            "node-1",
+            test_local_status("node-1", Some(1)),
+            remote,
+            unix_ms(),
+        );
+        assert_eq!(rows[1].observation, ObservationState::Answered);
+        assert!(rows[1].status.is_some());
+        assert!(rows[1].transport.is_none());
+
+        let mut peer = test_local_status("node-2", Some(2));
+        peer.transport = Some(test_transport_status(2, 0, Some(1_000)));
+        let mut remote = BTreeMap::new();
+        remote.insert(
+            "node-2".to_owned(),
+            PeerStatusOutcome {
+                node_id: "node-2".to_owned(),
+                state: ObservationState::Answered,
+                status: Some(peer),
+                transport: None,
+            },
+        );
+        let rows = join_observations(
+            &membership,
+            "node-1",
+            test_local_status("node-1", Some(1)),
+            remote,
+            unix_ms(),
+        );
+        assert_eq!(
+            rows[1]
+                .transport
+                .as_ref()
+                .map(|transport| transport.observing_node_id),
+            Some(2)
+        );
     }
 
     #[test]
