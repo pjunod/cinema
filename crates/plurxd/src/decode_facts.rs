@@ -84,6 +84,8 @@ enum ProbeLaunchMode {
     #[cfg(all(test, target_os = "linux"))]
     ProductionSteadyResponseInterruptedUntilDeadline,
     #[cfg(all(test, target_os = "linux"))]
+    ProductionSteadyResponseInterruptedUntilStop,
+    #[cfg(all(test, target_os = "linux"))]
     ProductionFdExport(std::os::fd::RawFd),
 }
 
@@ -101,6 +103,7 @@ impl ProbeLaunchMode {
             | Self::ProductionBootstrapInterrupted
             | Self::ProductionBootstrapInterruptedUntilDeadline(_)
             | Self::ProductionSteadyResponseInterruptedUntilDeadline
+            | Self::ProductionSteadyResponseInterruptedUntilStop
             | Self::ProductionFdExport(_) => true,
         }
     }
@@ -190,6 +193,19 @@ impl ProbeLaunchMode {
             Self::ProductionSteadyResponseInterruptedUntilDeadline => {
                 return LinuxBootstrapInterrupts {
                     steady_notification_response: u8::MAX,
+                    steady_notification_response_interrupts: Some(
+                        &STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS,
+                    ),
+                    ..LinuxBootstrapInterrupts::default()
+                };
+            }
+            Self::ProductionSteadyResponseInterruptedUntilStop => {
+                return LinuxBootstrapInterrupts {
+                    steady_notification_response: u8::MAX,
+                    steady_notification_response_interrupts: Some(
+                        &STEADY_RESPONSE_STOP_INTERRUPT_HITS,
+                    ),
+                    stop_after_steady_notification_response_interrupt: true,
                     ..LinuxBootstrapInterrupts::default()
                 };
             }
@@ -210,6 +226,9 @@ impl ProbeLaunchMode {
             }
             Self::ProductionSteadyResponseInterruptedUntilDeadline => {
                 Some(&STEADY_RESPONSE_SUPERVISOR_OWNERS)
+            }
+            Self::ProductionSteadyResponseInterruptedUntilStop => {
+                Some(&STEADY_RESPONSE_STOP_SUPERVISOR_OWNERS)
             }
             _ => None,
         }
@@ -1002,6 +1021,12 @@ struct LinuxBootstrapInterrupts {
     first_notification_receive: u8,
     first_notification_response: u8,
     steady_notification_response: u8,
+    /// Test-only launch modes attach a mode-local observation counter so the
+    /// regression cannot pass merely because some earlier operation stalled.
+    steady_notification_response_interrupts: Option<&'static std::sync::atomic::AtomicUsize>,
+    /// Test-only stop-path injection. Production constructs `false` through
+    /// `Default`, so only the explicit regression can request this signal.
+    stop_after_steady_notification_response_interrupt: bool,
     invalidate_first_notification_on_interrupt: bool,
     first_notification_invalidated: bool,
 }
@@ -1079,6 +1104,8 @@ fn answer_linux_seccomp_notification_until(
     deadline: Option<std::time::Instant>,
     stop: Option<&AtomicBool>,
     injected_interrupts: &mut u8,
+    injected_interrupt_observer: Option<&std::sync::atomic::AtomicUsize>,
+    stop_after_injected_interrupt: bool,
 ) -> std::io::Result<()> {
     loop {
         if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
@@ -1086,6 +1113,16 @@ fn answer_linux_seccomp_notification_until(
         }
         ensure_linux_probe_deadline(deadline)?;
         let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
+        if injected {
+            if let Some(observer) = injected_interrupt_observer {
+                observer.fetch_add(1, Ordering::Release);
+            }
+            if stop_after_injected_interrupt {
+                if let Some(stop) = stop {
+                    stop.store(true, Ordering::Release);
+                }
+            }
+        }
         let answered = if injected {
             -1
         } else {
@@ -1520,6 +1557,8 @@ fn supervise_linux_probe_execs(
             Some(launch_deadline),
             None,
             &mut interrupts.first_notification_response,
+            None,
+            false,
         );
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -1541,6 +1580,8 @@ fn supervise_linux_probe_execs(
         Some(launch_deadline),
         None,
         &mut interrupts.first_notification_response,
+        None,
+        false,
     )?;
 
     while !stop.load(Ordering::Acquire) {
@@ -1592,6 +1633,8 @@ fn supervise_linux_probe_execs(
             Some(launch_deadline),
             Some(stop.as_ref()),
             &mut interrupts.steady_notification_response,
+            interrupts.steady_notification_response_interrupts,
+            interrupts.stop_after_steady_notification_response_interrupt,
         ) {
             Ok(()) => {}
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
@@ -1742,6 +1785,18 @@ static INTERRUPTED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(all(test, target_os = "linux"))]
 static STEADY_RESPONSE_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, target_os = "linux"))]
+static STEADY_RESPONSE_STOP_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, target_os = "linux"))]
+static STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, target_os = "linux"))]
+static STEADY_RESPONSE_STOP_INTERRUPT_HITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(unix)]
@@ -3797,6 +3852,7 @@ void probe_main(unsigned long *stack) {
             .await
             .expect("production probe identity and version");
         assert_eq!(STEADY_RESPONSE_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+        STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS.store(0, Ordering::Release);
         let ownership = Arc::new(tokio::sync::Semaphore::new(1));
         let started = std::time::Instant::now();
         assert_eq!(
@@ -3809,6 +3865,10 @@ void probe_main(unsigned long *stack) {
             )
             .await,
             Err(DecodeFactError::Deadline)
+        );
+        assert!(
+            STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS.load(Ordering::Acquire) > 1,
+            "the production supervisor must receive the second exec notification and consume persistent response interruptions"
         );
         assert!(
             started.elapsed() < Duration::from_millis(500),
@@ -3824,6 +3884,48 @@ void probe_main(unsigned long *stack) {
             .expect("steady-response cleanup cannot wedge supervisor join")
             .expect("version ownership returns after reap and supervisor teardown");
         assert_eq!(STEADY_RESPONSE_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn supervisor_stop_bounds_persistent_steady_response_interrupts() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("second-exec-stop-static-ffprobe");
+        build_static_probe(&probe, 2);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production probe identity and version");
+        assert_eq!(
+            STEADY_RESPONSE_STOP_SUPERVISOR_OWNERS.load(Ordering::Acquire),
+            0
+        );
+        STEADY_RESPONSE_STOP_INTERRUPT_HITS.store(0, Ordering::Release);
+        let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+        let started = std::time::Instant::now();
+        probe_version_with_deadline_on(
+            &identity.executable_snapshot,
+            identity.executable(),
+            ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilStop,
+            Duration::from_secs(2),
+            Arc::clone(&ownership),
+        )
+        .await
+        .expect("the supervisor stop signal releases the response loop before deadline");
+        assert!(
+            STEADY_RESPONSE_STOP_INTERRUPT_HITS.load(Ordering::Acquire) >= 1,
+            "the stop-path proof must first consume a steady response interruption"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the stop signal, not the long launch deadline, must release the response loop"
+        );
+        let _ownership = ownership
+            .try_acquire_owned()
+            .expect("stop-path supervisor and version ownership return before completion");
+        assert_eq!(
+            STEADY_RESPONSE_STOP_SUPERVISOR_OWNERS.load(Ordering::Acquire),
+            0
+        );
     }
 
     #[cfg(target_os = "linux")]
