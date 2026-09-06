@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["b54f5c2c"]
+commits = ["b54f5c2c", "09b9c044"]
 points = [
   "cluster.auth",
   "cluster.membership",
@@ -21,4 +21,4 @@ checks = [
   "operations-contract",
   "web-static",
 ]
-reason = "Authenticated public and private transport responses retain process-local monotonic receipt times outside the wire schema, so cached observations are aged from their individual receipts rather than a shared fanout start. A paused-time delayed-peer regression proves independently sampled attempt ages normalize to the same selection instant."
+reason = "Authenticated public and private transport responses retain process-local monotonic receipt times outside the wire schema, so cached observations are aged from their individual receipts rather than a shared fanout start. A paused-time delayed-peer regression proves independently sampled attempt ages normalize to the same selection instant, and the follow-up test-lane commit permanently executes that exact regression in the cluster/WAL fast lane."
