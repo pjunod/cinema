@@ -4679,7 +4679,16 @@ impl VodServe {
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
-        // Materialized → serve immediately: the overwhelmingly common case.
+        // Materialized → serve immediately: the overwhelmingly common case,
+        // and until now the invisible one. It never reaches the wait pool, so
+        // nothing counted it: a node serving a hundred concurrent cache hits
+        // and one serving none reported the same thing, and "is this node
+        // busy" was a question only `ps` could answer.
+        //
+        // The guard, not a counter pair, because the request future is dropped
+        // when a client goes away and a decrement on the success path leaks on
+        // exactly the disconnects worth seeing.
+        let _serving = self.shared.pool.metrics_handle().serving();
         if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
             return Ok(ready);
         }
