@@ -490,6 +490,32 @@ test("transport status shows outbound evidence and expires stale samples", () =>
   assert.equal(watermark.text, "waiting for startup watermark");
 });
 
+test("stalled transport renders its observer and sample age", () => {
+  const ui = sandbox();
+  const membership = status("degraded", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "learner", { bounded_read_ready: false }),
+  ]);
+  const operations = operationStatus(membership);
+  operations.nodes[0].status.transport = {
+    observations: [
+      transportObservation("stalled", {
+        observing_node_id: 1,
+        peer_node_id: 2,
+        direction: "outbound",
+        sample_age_ms: 65_000,
+      }),
+    ],
+  };
+
+  const html = ui.clusterNodeOperationsHtml(membership.nodes[1], operations);
+  assert.match(html, /Transport<\/span>snapshot stalled · observer 1 · 1m ago/);
+  assert.match(
+    html,
+    /Bounded-read recovery evidence<\/dt><dd>snapshot stalled · observer 1 · 1m ago/,
+  );
+});
+
 // ---- the two-voter state is the point -------------------------------------
 
 test("two voters render as a reconfiguration in progress, never as redundancy", () => {

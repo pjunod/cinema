@@ -1777,9 +1777,11 @@ During a rolling update, HTTP 404 means that peer does not expose transport
 progress yet and must be rendered as unavailable.
 
 The Cluster panel joins each node's authenticated operations status with the
-roster using at most eight concurrent requests, a one-second deadline per
-peer, and a five-second process-local cache. A healthy sender can therefore
-report outbound evidence for a learner whose public listener is still closed.
+roster using at most eight concurrent peer refreshes, a one-second deadline
+per peer, and a five-second process-local cache. Each refresh probes the public
+and private listeners concurrently, so up to sixteen bounded HTTP requests may
+be in flight. A healthy sender can therefore report outbound evidence for a
+learner whose public listener is still closed.
 Status older than five minutes expires instead of continuing to claim an
 active transfer. The panel reports observer and sample age and keeps
 `bounded_read_ready` separate: receiving, waiting for acknowledgement,

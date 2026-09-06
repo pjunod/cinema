@@ -39,6 +39,8 @@ pub(crate) const INTERNAL_PATH: &str = "/api/v1/internal/cluster/operations-stat
 const AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
 const PEER_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
+const PEER_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(4);
+const TRANSPORT_OBSERVATION_TTL_MS: u64 = 5 * 60 * 1_000;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FRESH_AGE_MS: u64 = 5_000;
 
@@ -636,6 +638,7 @@ pub(crate) struct PeerStatusCache {
 #[derive(Clone)]
 struct CachedPeerStatuses {
     stored_at: tokio::time::Instant,
+    sample_age_anchor: tokio::time::Instant,
     statuses: BTreeMap<String, PeerStatusOutcome>,
 }
 
@@ -643,18 +646,55 @@ impl PeerStatusCache {
     async fn fresh(&self) -> Option<BTreeMap<String, PeerStatusOutcome>> {
         let cache = self.inner.lock().await;
         cache.as_ref().and_then(|cached| {
-            (tokio::time::Instant::now().saturating_duration_since(cached.stored_at)
-                < PEER_STATUS_CACHE_TTL)
-                .then(|| cached.statuses.clone())
+            let now = tokio::time::Instant::now();
+            (now.saturating_duration_since(cached.stored_at) < PEER_STATUS_CACHE_TTL).then(|| {
+                let mut statuses = cached.statuses.clone();
+                age_cached_transport_observations(
+                    &mut statuses,
+                    now.saturating_duration_since(cached.sample_age_anchor),
+                );
+                statuses
+            })
         })
     }
 
-    async fn store(&self, statuses: &BTreeMap<String, PeerStatusOutcome>) {
+    async fn store(
+        &self,
+        statuses: &BTreeMap<String, PeerStatusOutcome>,
+        sample_age_anchor: tokio::time::Instant,
+    ) {
         *self.inner.lock().await = Some(CachedPeerStatuses {
             stored_at: tokio::time::Instant::now(),
+            sample_age_anchor,
             statuses: statuses.clone(),
         });
     }
+}
+
+fn age_cached_transport_observations(
+    statuses: &mut BTreeMap<String, PeerStatusOutcome>,
+    elapsed: Duration,
+) {
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    for outcome in statuses.values_mut() {
+        if let Some(transport) = outcome.transport.as_mut() {
+            age_transport_observations(transport, elapsed_ms);
+        }
+        if let Some(transport) = outcome
+            .status
+            .as_mut()
+            .and_then(|status| status.transport.as_mut())
+        {
+            age_transport_observations(transport, elapsed_ms);
+        }
+    }
+}
+
+fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_ms: u64) {
+    transport.observations.retain_mut(|observation| {
+        observation.sample_age_ms = observation.sample_age_ms.saturating_add(elapsed_ms);
+        observation.sample_age_ms <= TRANSPORT_OBSERVATION_TTL_MS
+    });
 }
 
 /// Refresh authenticated peer observations away from page renders and
@@ -675,7 +715,10 @@ pub(crate) async fn peer_status_cache_loop(
                     deadline,
                 )
                 .await;
-                state.peer_status_cache.store(&statuses).await;
+                state
+                    .peer_status_cache
+                    .store(&statuses, refresh_started)
+                    .await;
             }
             Err(error) => {
                 tracing::warn!(%error, "could not refresh bounded cluster operations cache");
@@ -683,7 +726,7 @@ pub(crate) async fn peer_status_cache_loop(
         }
         tokio::select! {
             () = shutdown.cancelled() => break,
-            () = tokio::time::sleep_until(refresh_started + Duration::from_secs(4)) => {}
+            () = tokio::time::sleep_until(refresh_started + PEER_STATUS_REFRESH_INTERVAL) => {}
         }
     }
 }
@@ -694,40 +737,61 @@ async fn collect_peer_statuses(
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     deadline: tokio::time::Instant,
 ) -> BTreeMap<String, PeerStatusOutcome> {
-    collect_peer_statuses_with(peers, deadline, move |peer, peer_deadline| {
+    let public = move |peer: ActivityPeer, peer_deadline| {
         let transport = transport.clone();
-        let replication = replication.clone();
         async move {
             let node_id = peer.node_id.clone();
-            let public = async {
-                if !peer.reachable {
-                    PeerStatusOutcome {
-                        node_id: node_id.clone(),
-                        state: ObservationState::Unreachable,
-                        status: None,
-                        transport: None,
-                    }
-                } else if let Some(base) = peer.http_base {
-                    fetch_peer_status(&transport, &node_id, &base, peer_deadline).await
-                } else {
-                    PeerStatusOutcome {
-                        node_id: node_id.clone(),
-                        state: ObservationState::Unreachable,
-                        status: None,
-                        transport: None,
-                    }
+            if !peer.reachable {
+                PeerStatusOutcome {
+                    node_id,
+                    state: ObservationState::Unreachable,
+                    status: None,
+                    transport: None,
                 }
-            };
-            let private = tokio::time::timeout(
-                Duration::from_millis(900),
-                replication.peer_transport_status(peer.raft_id),
-            );
+            } else if let Some(base) = peer.http_base {
+                fetch_peer_status(&transport, &node_id, &base, peer_deadline).await
+            } else {
+                PeerStatusOutcome {
+                    node_id,
+                    state: ObservationState::Unreachable,
+                    status: None,
+                    transport: None,
+                }
+            }
+        }
+    };
+    let private = move |peer_node_id| {
+        let replication = replication.clone();
+        async move { replication.peer_transport_status(peer_node_id).await }
+    };
+    collect_peer_statuses_with_sources(peers, deadline, public, private).await
+}
+
+async fn collect_peer_statuses_with_sources<Public, PublicFuture, Private, PrivateFuture>(
+    peers: Vec<ActivityPeer>,
+    deadline: tokio::time::Instant,
+    public: Public,
+    private: Private,
+) -> BTreeMap<String, PeerStatusOutcome>
+where
+    Public: Fn(ActivityPeer, tokio::time::Instant) -> PublicFuture + Clone,
+    PublicFuture: std::future::Future<Output = PeerStatusOutcome>,
+    Private: Fn(u64) -> PrivateFuture + Clone,
+    PrivateFuture: std::future::Future<Output = Result<Option<SnapshotTransportStatus>, String>>,
+{
+    collect_peer_statuses_with(peers, deadline, move |peer, peer_deadline| {
+        let public = public.clone();
+        let private = private.clone();
+        async move {
+            let peer_node_id = peer.raft_id;
+            let public = public(peer, peer_deadline);
+            let private = tokio::time::timeout(Duration::from_millis(900), private(peer_node_id));
             let (mut outcome, private_transport) = tokio::join!(public, private);
             outcome.transport = private_transport
                 .ok()
                 .and_then(Result::ok)
                 .flatten()
-                .filter(|status| status.observing_node_id == peer.raft_id);
+                .filter(|status| status.observing_node_id == peer_node_id);
             outcome
         }
     })
@@ -1421,6 +1485,42 @@ mod tests {
     use super::*;
     use plurx_core::cluster::membership::{ClusterRecoveryStatus, NodeRole};
 
+    fn test_transport_status(
+        observing_node_id: u64,
+        sample_age_ms: u64,
+    ) -> SnapshotTransportStatus {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "observing_node_id": observing_node_id,
+            "observed_at_unix_ms": unix_ms(),
+            "observations": [{
+                "observing_node_id": observing_node_id,
+                "peer_node_id": 1,
+                "raft_group": "sqlite",
+                "boot_id": "test-boot",
+                "attempt_id": 7,
+                "snapshot_id": "test-snapshot",
+                "socket_epoch": 3,
+                "direction": "inbound",
+                "attempted_offset": 64,
+                "acknowledged_offset": null,
+                "locally_received_bytes": 64,
+                "total_bytes": null,
+                "attempt_age_ms": 100,
+                "last_acknowledgement_age_ms": null,
+                "last_local_receive_age_ms": 10,
+                "active_deadline_remaining_ms": 1_000,
+                "sample_age_ms": sample_age_ms,
+                "phase": "transferring",
+                "reconnect_count": 0,
+                "retry_count": 0,
+                "last_error_category": null,
+                "operation_owns_work": false
+            }]
+        }))
+        .expect("deserialize transport fixture through the public schema")
+    }
+
     #[tokio::test(start_paused = true)]
     async fn peer_fanout_applies_the_one_second_per_peer_deadline() {
         let peers = (0..MAX_OPERATIONS_PEERS)
@@ -1495,13 +1595,57 @@ mod tests {
                 transport: None,
             },
         )]);
-        cache.store(&statuses).await;
+        cache.store(&statuses, tokio::time::Instant::now()).await;
         assert_eq!(cache.fresh().await.expect("fresh cache").len(), 1);
 
         tokio::time::advance(PEER_STATUS_CACHE_TTL - Duration::from_millis(1)).await;
         assert!(cache.fresh().await.is_some());
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(cache.fresh().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cached_transport_observation_ages_and_expires_at_five_minutes() {
+        let cache = PeerStatusCache::default();
+        let statuses = BTreeMap::from([(
+            "node-2".to_owned(),
+            PeerStatusOutcome {
+                node_id: "node-2".to_owned(),
+                state: ObservationState::Unreachable,
+                status: None,
+                transport: Some(test_transport_status(2, 299_000)),
+            },
+        )]);
+        let refresh_started = tokio::time::Instant::now();
+        cache.store(&statuses, refresh_started).await;
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        let fresh = cache.fresh().await.expect("cache itself is still fresh");
+        assert_eq!(
+            fresh["node-2"].transport.as_ref().unwrap().observations[0].sample_age_ms,
+            299_999
+        );
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        let fresh = cache
+            .fresh()
+            .await
+            .expect("cache remains inside five seconds");
+        assert!(fresh["node-2"]
+            .transport
+            .as_ref()
+            .unwrap()
+            .observations
+            .is_empty());
+    }
+
+    #[test]
+    fn peer_status_refresh_keeps_one_second_of_cache_margin() {
+        assert_eq!(
+            PEER_STATUS_CACHE_TTL - PEER_STATUS_REFRESH_INTERVAL,
+            Duration::from_secs(1)
+        );
+        assert!(PEER_STATUS_REFRESH_INTERVAL < PEER_STATUS_CACHE_TTL);
     }
 
     #[test]
@@ -1700,24 +1844,37 @@ mod tests {
         assert!(!rollout_verdict(&membership, &rows).safe_to_restart_one);
     }
 
-    #[test]
-    fn private_transport_evidence_survives_a_closed_public_listener() {
+    #[tokio::test]
+    async fn production_collector_preserves_private_transport_when_public_listener_is_closed() {
         let membership = test_membership("node-1", 2);
-        let transport = SnapshotTransportStatus {
-            schema_version: 1,
-            observing_node_id: 2,
-            observed_at_unix_ms: unix_ms(),
-            observations: Vec::new(),
-        };
-        let remote = BTreeMap::from([(
-            "node-2".to_owned(),
-            PeerStatusOutcome {
-                node_id: "node-2".to_owned(),
-                state: ObservationState::Unreachable,
-                status: None,
-                transport: Some(transport),
+        let peers = vec![ActivityPeer {
+            node_id: "node-2".to_owned(),
+            raft_id: 2,
+            http_base: Some("http://127.0.0.1:32400".to_owned()),
+            reachable: true,
+        }];
+        let private_transport = test_transport_status(2, 0);
+        let remote = collect_peer_statuses_with_sources(
+            peers,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            |peer, _deadline| async move {
+                assert_eq!(peer.node_id, "node-2");
+                PeerStatusOutcome {
+                    node_id: peer.node_id,
+                    state: ObservationState::Unreachable,
+                    status: None,
+                    transport: None,
+                }
             },
-        )]);
+            move |raft_id| {
+                let private_transport = private_transport.clone();
+                async move {
+                    assert_eq!(raft_id, 2);
+                    Ok(Some(private_transport))
+                }
+            },
+        )
+        .await;
         let rows = join_observations(
             &membership,
             "node-1",
@@ -1732,6 +1889,14 @@ mod tests {
                 .as_ref()
                 .map(|status| status.observing_node_id),
             Some(2)
+        );
+        assert_eq!(
+            rows[1]
+                .transport
+                .as_ref()
+                .and_then(|status| status.observations.first())
+                .map(|observation| observation.locally_received_bytes),
+            Some(Some(64))
         );
     }
 

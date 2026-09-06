@@ -1637,9 +1637,12 @@ for (const startupDelay of [0, 1600, 7000]) {
 
         daemon_transport_tests = (
             "peer_fanout_applies_the_one_second_per_peer_deadline",
+            "peer_fanout_never_exceeds_the_eight_peer_bound",
             "peer_status_cache_is_fresh_for_five_seconds_then_expires",
+            "cached_transport_observation_ages_and_expires_at_five_minutes",
+            "peer_status_refresh_keeps_one_second_of_cache_margin",
             "aggregate_request_path_reads_cache_without_peer_network_fanout",
-            "private_transport_evidence_survives_a_closed_public_listener",
+            "production_collector_preserves_private_transport_when_public_listener_is_closed",
         )
         for test_name in daemon_transport_tests:
             matching = [command for command in wal_commands if test_name in command]
