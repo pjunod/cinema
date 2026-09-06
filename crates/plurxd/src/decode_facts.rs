@@ -1132,8 +1132,6 @@ struct LinuxProbeReceiver {
 #[cfg(target_os = "linux")]
 impl LinuxProbeReceiver {
     fn raw_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
-        use std::os::fd::AsRawFd;
-
         self.descriptor
             .lock()
             .map_err(|_| std::io::Error::other("probe receiver owner was poisoned"))?
