@@ -16334,6 +16334,75 @@ mod tests {
     /// The expensive half — two store reads to resolve a candidate — is what
     /// this exists to skip, on an exchange that runs about once a second per
     /// client under an absolute deadline.
+    /// A seek is not a change of ask, however hard it looks like one.
+    ///
+    /// The last of §1's eleven races, and the one whose absence was easiest to
+    /// miss: every other case moves *something* about the selection, so a
+    /// scheduler keying on the wrong field would be caught by one of them. A
+    /// seek moves nothing about it. The playhead jumps, the buffer empties and
+    /// refills, the render state goes to seeking and back — and the viewer has
+    /// not asked for a different recipe, so work in flight for the recipe they
+    /// *did* ask for has to survive it.
+    ///
+    /// Same-quality on purpose. A seek that also changed the quality would
+    /// pass with the two conflated, which is exactly the bug: the rule is that
+    /// a destination change is not a recipe change, and only a seek that
+    /// leaves the recipe alone can say whether that holds.
+    ///
+    /// Asserted on the recorded ask and not only on `changed`, because those
+    /// are different claims. `changed` is what the scheduler reads this
+    /// exchange; the digest is what survives to be compared against the next
+    /// one, and a seek that quietly advanced it would refuse a successor built
+    /// moments earlier for a recipe nobody has left.
+    #[test]
+    fn a_same_quality_seek_does_not_move_the_ask() {
+        let request = request();
+        let asked_for = selection_at(QualitySelection::Manual { height: 720 });
+        let mut state = ControlState::default();
+        let started = Instant::now();
+
+        state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None).asking(&asked_for),
+            )
+            .expect("the first exchange is accepted");
+        let settled = state
+            .desired_digest_for_test()
+            .map(str::to_owned)
+            .expect("the ask the viewer arrived with");
+
+        // The seek: a later exchange carrying the very same selection.
+        state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None).asking(&asked_for),
+            )
+            .expect("the seek exchange is accepted");
+
+        assert_eq!(
+            state.desired_digest_for_test(),
+            Some(settled.as_str()),
+            "seeking is asking for a different position, not a different recipe"
+        );
+
+        // And what the scheduler reads agrees: nothing to rebuild, and no
+        // durable ask to write for a request the viewer never made.
+        let observation = state.observe(&asked_for, None);
+        assert!(
+            !observation.changed,
+            "a seek must not spend the work the gate exists to save"
+        );
+    }
+
     #[test]
     fn the_actor_reports_when_a_selection_moved() {
         let started = Instant::now();
