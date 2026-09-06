@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | exact candidate `d92cb791` passed its complete lane but three adversarial reviews rejected manual-only activation and one found a stale local roster window. The replacement automatically activates under the distributed exclusion and global cache fence, waits for the exact claim before reading membership, and binds SQL to that claim; focused compile, lint, and regressions are green, with complete requalification next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | replacement `d3ee4166` automatically activates under the distributed exclusion and global cache fence, waits for the exact claim before reading membership, and binds SQL to that claim. The complete cluster/WAL lane, workspace compile, denied-warning Clippy, 197 operations contracts, validation/history, and focused web suites pass; three fresh exact-candidate reviews are in progress | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | the reviewed campaign implementation has been rebuilt in an independent clone on the latest M4 line and passes pinned workspace check and denied-warning Clippy; it will move to the replacement M4 commit before qualification | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -205,7 +205,9 @@ cluster-wide cache invalidation, waits for the exact claim to reach local
 applied SQL before consulting the roster, and requires that same claim in both
 activation and readiness SQL. A delayed-apply/add-member regression, automatic
 activation regression, exact-claim rejection, static lane inventory, workspace
-check, and denied-warning Clippy pass; complete focused qualification remains.
+check, denied-warning Clippy, complete cluster/WAL lane, 197 operations
+contracts, validation/history, and focused web suites pass on `d3ee4166`.
+Three fresh exact-candidate reviews are the remaining M4 prerequisite.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
