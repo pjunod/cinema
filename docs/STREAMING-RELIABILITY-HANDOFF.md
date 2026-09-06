@@ -221,7 +221,7 @@ fixture defect on the same day.**
   request and the delivery view separately and reads each for what it is. A
   rendered-progress field on `DeliveryView` would duplicate what the request
   already carries.
-- **PARTIAL — capping exists, fairness does not.** Session-close cleanup is
+- **PARTIAL — fairness is the only piece left, and it is deferred by decision.** Session-close cleanup is
   done (`waitpool.rs` `retire_session`, wired at `vodserve.rs:2825`), and both
   caps with typed refusal classes are done. Still open, and each for a stated
   reason:
@@ -229,17 +229,33 @@ fixture defect on the same day.**
     under a per-session ceiling. `waitpool.rs`'s own
     `the_two_caps_bound_a_viewer_and_the_node_but_do_not_share_fairly` says so
     by name rather than implying otherwise.
-  - *Total GET admission.* The pool admits **blocked** GETs only. A GET served
-    from materialized bytes is admitted against nothing.
-  - *Bounded `NoRoom`.* Still an indefinite advisory `Hold` with no deadline,
-    no escalation and no terminal (`playback_control.rs:1722-1740`,
-    `vodserve.rs:3702-3730`). **This needs a protocol decision before it can be
-    implemented**: `ProducerDecisionReason` has no capacity variant and adding
-    one would be a category error — node capacity is not a producer decision —
-    so bounding it means either a new action or a bound on `Hold` itself.
-    Whichever it is, escalating to a *terminal* would tell a client to tear
-    down a player over a server working as designed, which is the failure this
-    action exists to prevent.
+  - *Total GET admission.* **Visible, still uncapped.** The pool admits
+    **blocked** GETs only; a GET served from materialized bytes is admitted
+    against nothing, and until now was also *counted* by nothing — a node
+    serving a hundred concurrent cache hits and one serving none reported the
+    same numbers. `BlockedGetMetrics::serving` and `plurx_vod_gets_serving`
+    now count them, held by a guard so the gauge falls on client disconnect
+    rather than only on success
+    (`a_served_get_is_counted_and_bounded_by_nothing`).
+
+    Deliberately a gauge and not a cap, and this is the open decision:
+    refusing a viewer a segment that is already on disk is a choice about what
+    that viewer loses, and nobody has made it. The gauge is the number such a
+    choice would have to be set from. Whoever adds a ceiling fails that test
+    and must say in its replacement what happens to the viewer who hits it.
+  - *Bounded `NoRoom`.* **DONE.** The decision was taken as a bound on `Hold`
+    itself rather than a new action or a capacity variant of
+    `ProducerDecisionReason` — node capacity is not a producer decision, and
+    that category error is why this was blocked. `Hold` now carries
+    `revisit_after_ms`, and `no_room` asks for four ordinary exchanges rather
+    than one because nothing the client does clears it.
+
+    It is a revisit contract, not an expiry: nothing fails when the interval
+    passes. Escalating to a terminal was rejected for the reason recorded here
+    — it would tell a client to tear down a player over a server working as
+    designed. Additive on the existing action, so clients predating the field
+    hold exactly as they did; both ports read it
+    (`a_hold_says_when_to_ask_again_and_no_room_says_later`).
 - **OPEN, and currently the opposite.** VOD owner loss is classified
   `Unrecoverable` by design (`media_sessions.rs:2580-2605`), pinned by
   `a_route_the_takeover_path_can_never_accept_is_unrecoverable`. The only
@@ -266,9 +282,25 @@ fixture defect on the same day.**
   `enforceCaseResult` turns any non-terminal status into a failure. Still open:
   the strongest cases (steady, seek-storm, stall-recovery) are deliberately
   excluded from the PR gate (`ci.yml:545-555`); evidence retention is 3-14 days
-  and CI-scoped; there is no durable action/outcome ledger, so no failure
-  evidence survives a daemon restart; and nothing inspects a deployed node's
-  health or encoder capability — `scripts/ship` has no status probe at all.
+  and CI-scoped.
+
+  The durable action/outcome ledger exists now. `durable_outcome` writes a
+  terminal, a retry backoff, a withheld recovery and a suppressed action into
+  the node-local `playback_events` table, so a refusal outlives the process
+  that made it. Deliberately not every exchange — one happens every few
+  seconds per viewer, and a ledger recording the healthy path is one nobody
+  reads. Evidence retention for browser runs is still CI-scoped and the
+  strongest cases are still outside the PR gate.
+
+  `scripts/ship --status` closes the last of those. It asks every node in the
+  inventory for `/readyz` and `/metrics` and prints build, readiness,
+  cache-hit GETs in flight, and blocked GETs against their cap — then names
+  any node that did not answer rather than omitting it, and warns when more
+  than one build is serving, because a partial deploy is invisible in a
+  per-node list nobody adds up. The daemon already served every one of those
+  facts; this is the first thing that reads them. Read-only by construction
+  and tested as such (`tests/operations/test_ship_status_probe.py`).
+  **Encoder capability is still not probed.**
 
 ### 4. Executable prepared transaction and three client adapters
 

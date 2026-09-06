@@ -114,6 +114,20 @@ impl WaitRefused {
 /// parallel suite.
 #[derive(Debug, Default)]
 pub struct BlockedGetMetrics {
+    /// Segment GETs being served from bytes that are already on disk.
+    ///
+    /// These never reach the pool: `serve_segment` opens a materialized
+    /// segment and returns, so nothing counts them and no cap applies. That is
+    /// the overwhelmingly common case and the one an operator has had no way
+    /// to see — a node serving a hundred concurrent cache hits and one serving
+    /// none report the same thing, which makes "is this node busy" a question
+    /// only `ps` can answer.
+    ///
+    /// A gauge and not a cap. Refusing a viewer a segment that exists on disk
+    /// is a policy decision about what a viewer loses, and nobody has made it;
+    /// this is the number that decision would have to be set from, and the
+    /// evidence for whether it needs making at all.
+    serving: AtomicUsize,
     waiting: AtomicUsize,
     cap: AtomicUsize,
     admitted: AtomicU64,
@@ -131,6 +145,7 @@ impl BlockedGetMetrics {
     /// which is the entire question this exists to answer.
     pub fn snapshot(&self) -> BlockedGets {
         BlockedGets {
+            serving: self.serving.load(Relaxed),
             waiting: self.waiting.load(Relaxed),
             cap: self.cap.load(Relaxed),
             admitted: self.admitted.load(Relaxed),
@@ -147,6 +162,9 @@ impl BlockedGetMetrics {
 /// What blocked-GET admission looks like right now, and what it has done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockedGets {
+    /// Segment GETs being served from disk right now, admitted against
+    /// nothing. See [`BlockedGetMetrics::serving`].
+    pub serving: usize,
     /// Parked right now.
     pub waiting: usize,
     /// The node-wide ceiling those waits are against.
@@ -155,6 +173,28 @@ pub struct BlockedGets {
     pub admitted: u64,
     /// Refused since boot, in [`REFUSAL_REASONS`] order.
     pub refused: [u64; 2],
+}
+
+/// Holds the serving gauge up for as long as one cache-hit GET is in flight.
+///
+/// A guard rather than a pair of counter calls, for the reason every other
+/// gauge here is guarded: the request future is dropped when the client goes
+/// away, and a decrement that lives on the success path leaks on exactly the
+/// disconnects an operator most wants to see.
+pub struct ServingGuard(Arc<BlockedGetMetrics>);
+
+impl Drop for ServingGuard {
+    fn drop(&mut self) {
+        self.0.serving.fetch_sub(1, Relaxed);
+    }
+}
+
+impl BlockedGetMetrics {
+    /// Count one GET being served from bytes already on disk.
+    pub fn serving(self: &Arc<Self>) -> ServingGuard {
+        self.serving.fetch_add(1, Relaxed);
+        ServingGuard(Arc::clone(self))
+    }
 }
 
 impl BlockedGets {
@@ -168,6 +208,11 @@ impl BlockedGets {
 fn render_blocked_gets(snapshot: BlockedGets) -> String {
     use std::fmt::Write;
     let mut out = String::from(
+        "# HELP plurx_vod_gets_serving Segment GETs being served from disk right now, admitted against no cap.\n\
+         # TYPE plurx_vod_gets_serving gauge\n",
+    );
+    let _ = writeln!(out, "plurx_vod_gets_serving {}", snapshot.serving);
+    out.push_str(
         "# HELP plurx_vod_blocked_gets_waiting Segment GETs parked waiting for media right now.\n\
          # TYPE plurx_vod_blocked_gets_waiting gauge\n",
     );
@@ -875,6 +920,53 @@ mod tests {
     /// refused. This states that outcome rather than hiding it: the
     /// fair-service item is still open, and a test implying otherwise would
     /// close it by assertion.
+    /// A GET served from disk is counted, and it is counted against nothing.
+    ///
+    /// Two claims, and the second is the one worth writing down. The gauge
+    /// exists because the cache-hit path never reaches this pool — a node
+    /// serving a hundred concurrent segments off disk and one serving none
+    /// report identical pool numbers, which makes the busiest thing the node
+    /// does the one thing an operator cannot see.
+    ///
+    /// It is deliberately not a cap. Refusing a viewer a segment that is
+    /// already on disk is a decision about what a viewer loses, and nobody has
+    /// made it; this is the number such a decision would have to be set from,
+    /// and the evidence for whether it needs making. If a cap is ever added,
+    /// this test fails and its replacement has to say what happens to the
+    /// viewer at the ceiling.
+    ///
+    /// The guard is the mechanism because the request future is dropped when a
+    /// client disconnects, so a decrement written on the success path would
+    /// leak on exactly the departures worth counting.
+    #[test]
+    fn a_served_get_is_counted_and_bounded_by_nothing() {
+        let pool = WaitPool::new(1, 1);
+        let metrics = pool.metrics_handle();
+        assert_eq!(metrics.snapshot().serving, 0);
+
+        // Far past both caps, and every one is admitted.
+        let guards = (0..64).map(|_| metrics.serving()).collect::<Vec<_>>();
+        assert_eq!(
+            metrics.snapshot().serving,
+            64,
+            "a cache hit is admitted against no ceiling, and the gauge says so",
+        );
+        assert_eq!(
+            metrics.snapshot().waiting,
+            0,
+            "and it never enters the wait pool",
+        );
+
+        // Dropped rather than completed: the disconnect path.
+        drop(guards);
+        assert_eq!(
+            metrics.snapshot().serving,
+            0,
+            "the gauge falls when the request future is dropped, not only when \
+             it succeeds",
+        );
+    }
+
     #[test]
     fn the_two_caps_bound_a_viewer_and_the_node_but_do_not_share_fairly() {
         let pool = WaitPool::new(6, 4);
@@ -1022,6 +1114,7 @@ mod tests {
         assert_eq!(
             metrics.snapshot(),
             BlockedGets {
+                serving: 0,
                 waiting: 0,
                 cap: 3,
                 admitted: 0,
@@ -1048,6 +1141,7 @@ mod tests {
         assert_eq!(
             after,
             BlockedGets {
+                serving: 0,
                 waiting: 3,
                 cap: 3,
                 admitted: 3,

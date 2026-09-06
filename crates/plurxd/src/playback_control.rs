@@ -12598,6 +12598,86 @@ fn preparation_indices(decision: PreparationDecision) -> Option<(usize, usize)> 
     Some((axis, outcome))
 }
 
+/// The durable half of recording an exchange: what a person would need after
+/// a restart to explain why a playback stopped.
+///
+/// [`record_action`] counts into process atomics, and those are gone the
+/// moment the daemon restarts — which is frequently the same moment somebody
+/// wants to know what happened. A viewer whose film was terminated at 21:04
+/// leaves no trace at all once the process that refused them has exited.
+///
+/// Deliberately not every exchange. A control exchange happens every few
+/// seconds per viewer, so persisting all of them would turn routine playback
+/// into a write-heavy workload and bury the four rows that matter under
+/// millions that do not. What is kept is the set a human asks about:
+///
+/// - **`terminal`** — the playback was told to stop. The single most
+///   important thing to be able to explain later, and today the least
+///   recoverable.
+/// - **`retry_resource`** — a producer decision made the client back off. It
+///   is transient by design, which is exactly why it leaves nothing behind.
+/// - **a hold that was withheld** — the server had something to say and the
+///   client had not declared the action, so it went unsaid. Silent
+///   degradation, invisible in a response that looks ordinary.
+/// - **a suppressed action** — same shape, for a decision rather than a hold.
+///
+/// An ordinary `hold`, `none`, and a successful `prepare` are not kept.
+/// Nothing is wrong in those, and a ledger that records the healthy path is
+/// one nobody can read.
+///
+/// Pure, and returning the event rather than writing it, because the decision
+/// of *what deserves to survive a restart* is the part worth testing — and
+/// because the call sites that hold a store are not the ones that resolve an
+/// action.
+pub(crate) fn durable_outcome(
+    action: &ControlAction,
+    delivery: &DeliveryView,
+    request: &ControlRequestV1,
+    metrics: &ActionMetrics,
+    at_unix_ms: i64,
+) -> Option<plurx_core::domain::PlaybackEvent> {
+    let (event, level, detail) = match action {
+        ControlAction::Terminal { code, message } => (
+            "control_terminal",
+            "error",
+            Some(format!("{}: {message}", code.status())),
+        ),
+        ControlAction::RetryResource { reason, after_ms } => (
+            "control_retry_resource",
+            "warn",
+            Some(format!("{} (retry after {after_ms}ms)", reason.status())),
+        ),
+        _ if metrics.recovery_withheld => (
+            "control_hold_withheld",
+            "warn",
+            metrics
+                .hold_reason
+                .map(|reason| format!("{reason:?} not sent: client does not accept hold")),
+        ),
+        _ if metrics.suppressed => (
+            "control_action_suppressed",
+            "warn",
+            Some("a decision this server could name was not sent".to_owned()),
+        ),
+        _ => return None,
+    };
+
+    Some(plurx_core::domain::PlaybackEvent {
+        at_unix_ms,
+        session_id: Some(request.client_instance_id.clone()),
+        event: event.to_owned(),
+        level: Some(level.to_owned()),
+        // The delivery facts that make a terminal explicable rather than just
+        // recorded: what the client had left, and what the server was
+        // managing to hand it.
+        runway_ds: Some(delivery.client_runway_ms / 100),
+        delivered_bps: delivery.delivered_bps,
+        hold_reason: delivery.hold_reason.clone(),
+        detail,
+        ..plurx_core::domain::PlaybackEvent::default()
+    })
+}
+
 /// Record what one accepted exchange's action was, and what it could not be.
 pub(crate) fn record_action(
     action: &ControlAction,
@@ -14420,6 +14500,144 @@ mod tests {
             ..contiguous
         };
         assert_eq!(contiguous_runway_ms(&exact, 10_000), 30_000);
+    }
+
+    /// What survives a restart is the failures, and only the failures.
+    ///
+    /// `record_action` counts into process atomics, so a viewer terminated at
+    /// 21:04 leaves nothing behind once that process exits — which tends to be
+    /// the same restart that prompted the question. The durable half exists
+    /// for the person asking afterwards.
+    ///
+    /// Both halves of the rule are asserted, and the second is the one that
+    /// keeps the ledger readable: an exchange happens every few seconds per
+    /// viewer, so keeping the healthy path would bury the four rows that
+    /// matter under millions that do not, and turn ordinary playback into a
+    /// write-heavy workload.
+    #[test]
+    fn only_the_outcomes_worth_explaining_later_are_kept() {
+        let request = request();
+        let mut delivery = delivery_with_hold(None);
+        delivery.client_runway_ms = 2_500;
+        delivery.delivered_bps = Some(1_200_000);
+
+        let kept = |action: &ControlAction| {
+            let metrics = action_metrics(action, &delivery, &request, false);
+            durable_outcome(action, &delivery, &request, &metrics, 1_700_000_000_000)
+        };
+
+        let terminal = ControlAction::Terminal {
+            code: ProducerDecisionReason::Unsupported,
+            message: "the file is gone".to_owned(),
+        };
+        let event = kept(&terminal).expect("a terminal must outlive the process that sent it");
+        assert_eq!(event.event, "control_terminal");
+        assert_eq!(event.level.as_deref(), Some("error"));
+        assert!(
+            event
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("the file is gone")),
+            "the message the viewer's client was given is the thing being explained",
+        );
+        assert_eq!(
+            event.runway_ds,
+            Some(25),
+            "what the client had left is what makes a terminal explicable rather \
+             than merely recorded",
+        );
+        assert_eq!(event.delivered_bps, Some(1_200_000));
+
+        let retry = ControlAction::RetryResource {
+            after_ms: 4_000,
+            reason: ProducerDecisionReason::ProgressDeadline,
+        };
+        assert_eq!(
+            kept(&retry)
+                .expect("a backoff leaves nothing behind by design")
+                .event,
+            "control_retry_resource",
+        );
+
+        // The healthy path, which must not be written.
+        for quiet in [
+            ControlAction::None,
+            ControlAction::Hold {
+                reason: HoldReason::WorkingSet,
+                revisit_after_ms: NEXT_EXCHANGE_MS,
+            },
+        ] {
+            assert!(
+                kept(&quiet).is_none(),
+                "{quiet:?} is routine; a ledger that records the healthy path is \
+                 one nobody can read",
+            );
+        }
+    }
+
+    /// Silence is an outcome too, and it is the one nothing else records.
+    ///
+    /// Two different silences, and they are separate rows because they have
+    /// separate causes. A *withheld* recovery is one the ranking decided to
+    /// send and the client could not receive; a *suppressed* action is the
+    /// broader case of any decision this server could name going unsent. Both
+    /// leave a response that looks entirely ordinary on the wire, which is why
+    /// neither is visible without a row.
+    ///
+    /// Asserted by exact event name. An earlier version of this test accepted
+    /// either name, and disabling the withheld branch outright still passed it
+    /// — the case fell through to `suppressed` and nothing noticed. A test
+    /// that accepts two answers proves neither.
+    #[test]
+    fn a_withheld_recovery_and_a_suppressed_action_are_separate_rows() {
+        // The recovery ranking's own preconditions, so this is genuinely the
+        // withheld path rather than the general one wearing its name.
+        let mut stalled = request();
+        // Accepts hold — that is the point. A withheld recovery is a hold the
+        // client could have received and the ranking chose not to send,
+        // because production state must not veto fetching bytes already
+        // published. A client that cannot receive a hold is the *other* case.
+        stalled.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        stalled.render_state = RenderState::Stalled;
+        stalled.observation = Some(ClientObservation {
+            dropped_frames: None,
+            decoder_state: Some(DecoderState::Starved),
+            error_code: None,
+            error_detail: None,
+        });
+        let mut delivery = delivery_with_hold(Some("no_room"));
+        delivery.client_runway_ms = 0;
+        delivery.produced_through_ms = Some(120_000);
+        delivery.fetched_through_ms = 60_000;
+        assert!(
+            recovery_outranks_hold(&delivery, &stalled),
+            "the fixture must actually reach the withheld path",
+        );
+
+        let action = resolve_action(&ControlAction::None, &delivery, &stalled);
+        let metrics = action_metrics(&action, &delivery, &stalled, false);
+        assert!(metrics.recovery_withheld, "this is the withheld case");
+        let event = durable_outcome(&action, &delivery, &stalled, &metrics, 1_700_000_000_000)
+            .expect("the withholding is the fact worth keeping");
+        assert_eq!(event.event, "control_hold_withheld");
+        assert_eq!(event.level.as_deref(), Some("warn"));
+        assert_eq!(
+            event.hold_reason.as_deref(),
+            Some("no_room"),
+            "the reason the server could not pass on is the point of the row",
+        );
+
+        // And the broader case, which must not be filed under the narrow name.
+        let mut passive = request();
+        passive.supported_actions = Some(vec![]);
+        let ordinary = delivery_with_hold(Some("working_set"));
+        let action = resolve_action(&ControlAction::None, &ordinary, &passive);
+        let metrics = action_metrics(&action, &ordinary, &passive, false);
+        assert!(!metrics.recovery_withheld);
+        assert!(metrics.suppressed);
+        let event = durable_outcome(&action, &ordinary, &passive, &metrics, 1_700_000_000_000)
+            .expect("a decision that went unsent is still an outcome");
+        assert_eq!(event.event, "control_action_suppressed");
     }
 
     #[test]

@@ -1615,7 +1615,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # neither parent's value describes the merged tree. Every ownership
 # obligation recorded above is retained on both sides; the total is read
 # off the merge rather than added up.
-expected_occurrences = 263
+# +2 for the durable control-outcome ledger: `code.status()` and
+# `reason.status()` inside `durable_outcome`, naming a terminal's code and a
+# retry's reason in the detail line the row carries. Both are the same
+# `&'static str` lookup on a fieldless enum counted ten times above — no child
+# process, no producer, nothing owned. The emit they feed does spawn, but it
+# goes through `telemetry::emit`, which already owns that task and is already
+# counted where it lives.
+expected_occurrences = 265
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -4914,6 +4914,32 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
             // a probe anyway.
             None,
         );
+        // Persist the outcome before the commit machinery, because a terminal
+        // is the thing most worth explaining after a restart and the atomics
+        // that count it do not survive one. `durable_outcome` decides what
+        // deserves a row; this only carries it to the store.
+        //
+        // Not awaited and not fatal: `emit` spawns, and a telemetry write that
+        // fails must not turn a terminal the viewer's client is waiting on
+        // into an error. Losing the row is worse than not having it only if
+        // the alternative is losing the terminal.
+        {
+            let metrics = crate::playback_control::action_metrics(
+                &response.action,
+                &response.delivery,
+                &self.request,
+                result.action_suppressed,
+            );
+            if let Some(event) = crate::playback_control::durable_outcome(
+                &response.action,
+                &response.delivery,
+                &self.request,
+                &metrics,
+                server_time_unix_ms,
+            ) {
+                crate::telemetry::emit(Arc::clone(&self.store), event);
+            }
+        }
         let response_json = serde_json::to_string(&RetainedTerminalResponse {
             platform: result.platform,
             response: response.clone(),
