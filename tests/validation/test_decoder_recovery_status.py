@@ -19,7 +19,7 @@ FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M1_EFFORT_BASE = "a8bbe574"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
-M1_RECEIPT_HEAD = "f80100bd"
+M1_RECEIPT_HEAD = "33c60bd9"
 M1_RUNTIME_RECEIPT_HEAD = "bc3c3bee"
 M1_REPAIR_HEAD = "07c8f905"
 
@@ -176,8 +176,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_m1_review_repair_distinguishes_exact_and_working_tree_evidence(self) -> None:
         self.assertIn(
-            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact mapped history audit 1,380, "
-            "catalog 24 points / 30 checks / 1,443 audited files, validation 124/124, "
+            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact mapped history audit 1,382, "
+            "catalog 24 points / 30 checks / 1,444 audited files, validation 125/125, "
             "operations 211/211, formatting, and the pinned all-target workspace "
             "compile pass",
             self.status,
@@ -193,7 +193,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             self.status,
         )
         self.assertIn(
-            "`f80100bd` pins that outer validation ceiling to exactly 3,600 seconds",
+            "`33c60bd9` pins that outer validation ceiling to exactly 3,600 seconds",
             self.status,
         )
         self.assertIn("sealed, self-contained Linux FFprobe artifact", self.status)
