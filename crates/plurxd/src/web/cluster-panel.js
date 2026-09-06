@@ -163,9 +163,14 @@
       const transport=(row&&row.transport)||(status&&status.transport);
       (transport&&transport.observations||[]).forEach(observation=>{
         if(observation.raft_group!=="sqlite") return;
-        if(Number(observation.sample_age_ms)>300000) return;
-        if(Number(observation.observing_node_id)!==Number(raftId)&&
-           Number(observation.peer_node_id)!==Number(raftId)) return;
+        const hasActiveDeadline=observation.active_deadline_remaining_ms!==null&&
+          observation.active_deadline_remaining_ms!==undefined;
+        if(Number(observation.sample_age_ms)>300000&&!hasActiveDeadline) return;
+        const receiverId=observation.direction==="inbound"
+          ?observation.observing_node_id
+          :observation.direction==="outbound"
+            ?observation.peer_node_id:null;
+        if(Number(receiverId)!==Number(raftId)) return;
         candidates.push(observation);
       });
     });

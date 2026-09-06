@@ -298,6 +298,7 @@ enum WritePayload {
 #[derive(Default)]
 struct ConnectionResetState {
     epoch: AtomicU64,
+    connected: AtomicBool,
     notify: Notify,
 }
 
@@ -328,6 +329,18 @@ impl ConnectionShutdownState {
 impl ConnectionResetState {
     fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    fn mark_connected(&self) {
+        self.connected.store(true, Ordering::Release);
+    }
+
+    fn mark_disconnected(&self) {
+        self.connected.store(false, Ordering::Release);
     }
 
     fn request_reset(&self, observed_epoch: u64) {
@@ -559,6 +572,7 @@ impl NetworkStreaming {
                 match connection {
                     Ok(socket) => {
                         info!("WebSocket connected successfully");
+                        reset.mark_connected();
                         socket
                     }
                     Err(err) => {
@@ -822,6 +836,7 @@ impl NetworkStreaming {
                 }
             }
 
+            reset.mark_disconnected();
             stop_stream_tasks(&tx_write, handle_write, handle_read, forced_reset).await;
 
             for (_, ack) in in_flight.drain() {
@@ -1277,7 +1292,10 @@ where
         network.node.id,
         attempt_id,
         &attempt.snapshot_id,
-        network.reset.epoch(),
+        crate::transport_status::OutboundSnapshotSocket {
+            epoch: network.reset.epoch(),
+            connected: network.reset.is_connected(),
+        },
         attempt.transfer_deadline,
     );
     {
@@ -2564,7 +2582,10 @@ mod tests {
             network.node.id,
             13,
             "snapshot",
-            network.reset.epoch(),
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: network.reset.epoch(),
+                connected: network.reset.is_connected(),
+            },
             attempt.transfer_deadline,
         );
         network.snapshot_attempt = Arc::new(StdMutex::new(Some(Arc::clone(&attempt))));
@@ -2652,7 +2673,10 @@ mod tests {
             network.node.id,
             21,
             "snapshot-higher-vote",
-            network.reset.epoch(),
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: network.reset.epoch(),
+                connected: network.reset.is_connected(),
+            },
             time::Instant::now() + Duration::from_secs(120),
         );
         let responder = tokio::spawn(async move {

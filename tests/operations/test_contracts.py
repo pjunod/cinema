@@ -1412,6 +1412,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         makefile = read("Makefile")
         precommit = read("scripts/pre-commit")
         catalog = tomllib.loads(read("validation/points.toml"))
+        membership_web_tests = read("tests/web/cluster-membership.test.js")
 
         # Forgejo has no GitHub merge-queue event. The single required
         # aggregate workflow fires on main-bound pull requests, while the
@@ -1492,6 +1493,16 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
         self.assertIn("run: make web-check", effort)
+        web_check = makefile.split(".PHONY: web-check", 1)[1].split(".PHONY:", 1)[0]
+        self.assertIn("node tests/web/cluster-membership.test.js", web_check)
+        self.assertIn(
+            'test("transport recovery is attributed only to the receiving node"',
+            membership_web_tests,
+        )
+        self.assertIn(
+            'test("active transport stays visible through its server-projected deadline"',
+            membership_web_tests,
+        )
         self.assertNotIn("make ci-rust-gate", effort)
         self.assertNotIn("make cluster-", effort)
         self.assertNotIn("make apple-test", effort)
@@ -1572,7 +1583,8 @@ for (const startupDelay of [0, 1600, 7000]) {
             "shutdown_before_submission_is_latched_and_admits_no_work",
             "admission_deadline_never_executes_the_timed_out_job",
             "accepted_partial_write_finishes_before_same_offset_retry",
-            "production_executor_completion_records_local_bytes_before_returning_response",
+            "production_snapshot_executor_worker_records_status_around_injected_installer",
+            "inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
             "replacement_socket_drops_cancelled_request_after_consuming_reset",
             "live_request_on_stale_socket_requires_reconnect",
@@ -1613,7 +1625,15 @@ for (const startupDelay of [0, 1600, 7000]) {
             "inbound_progress_is_monotonic_and_new_identity_clears_attempt_state",
             "same_peer_inbound_install_and_outbound_transfer_do_not_collide",
             "terminal_wrapper_preserves_the_actionable_failure_category",
-            "active_observation_stalls_then_expires_without_renewing_sample_age",
+            "specific_terminal_failure_replaces_prior_transient_category",
+            "outbound_live_socket_counts_the_first_reconnect",
+            "stale_inbound_completion_cannot_mutate_newer_snapshot_identity",
+            "abandoned_inbound_admission_records_retry_without_stealing_worker_result",
+            "inbound_socket_epoch_and_reconnect_count_are_attempt_local",
+            "configured_inbound_inter_chunk_deadline_uses_minimum_and_maximum",
+            "configured_peer_capacity_covers_both_groups_and_directions",
+            "active_observation_remains_visible_through_deadline_then_expires",
+            "live_install_longer_than_five_minutes_remains_visible_through_its_deadline",
             "configured_chunk_deadline_controls_awaiting_ack_stall_projection",
             "completed_observation_never_projects_as_stalled_and_eventually_expires",
             "valid_install_does_not_stall_at_the_chunk_window",

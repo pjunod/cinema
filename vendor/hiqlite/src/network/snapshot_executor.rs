@@ -178,7 +178,7 @@ where
 }
 
 pub(crate) struct SnapshotExecutorRequest<C: RaftTypeConfig> {
-    pub(crate) peer_node_id: u64,
+    pub(crate) status_attempt: Option<crate::transport_status::InboundSnapshotAttempt>,
     pub(crate) request: InstallSnapshotRequest<C>,
 }
 
@@ -187,29 +187,36 @@ pub(crate) type SnapshotExecutor<C> =
 
 fn record_inbound_snapshot_result<C>(
     snapshot_transport: &crate::LocalSnapshotTransportStatus,
-    raft_group: &'static str,
-    peer_node_id: u64,
+    status_attempt: Option<&crate::transport_status::InboundSnapshotAttempt>,
     locally_received_offset: u64,
     done: bool,
+    next_chunk_deadline: Option<time::Instant>,
     request_vote: openraft::Vote<u64>,
     result: &SnapshotResult<C>,
 ) where
     C: RaftTypeConfig<NodeId = u64>,
 {
-    let error_category = match result {
-        Ok(response) if response.vote <= request_vote => None,
-        Ok(_) => Some("higher_vote"),
-        Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => {
-            Some("snapshot_mismatch")
+    let Some(status_attempt) = status_attempt else {
+        return;
+    };
+    let disposition = match result {
+        Ok(response) if response.vote <= request_vote => {
+            crate::transport_status::InboundSnapshotDisposition::Succeeded
         }
-        Err(_) => Some("snapshot_install_error"),
+        Ok(_) => crate::transport_status::InboundSnapshotDisposition::Failed("higher_vote"),
+        Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => {
+            crate::transport_status::InboundSnapshotDisposition::Retrying("snapshot_mismatch")
+        }
+        Err(RaftError::Fatal(_)) => {
+            crate::transport_status::InboundSnapshotDisposition::Failed("snapshot_install_fatal")
+        }
     };
     snapshot_transport.inbound_finished(
-        raft_group,
-        peer_node_id,
+        status_attempt,
         locally_received_offset,
         done,
-        error_category,
+        next_chunk_deadline,
+        disposition,
     );
 }
 
@@ -217,41 +224,64 @@ pub(crate) fn start_snapshot_executor<C>(
     raft: Raft<C>,
     admission_timeout: Duration,
     install_timeout: Duration,
-    raft_group: &'static str,
+    _raft_group: &'static str,
     snapshot_transport: crate::LocalSnapshotTransportStatus,
 ) -> SnapshotExecutor<C>
 where
     C: RaftTypeConfig<NodeId = u64>,
     C::SnapshotData: tokio::io::AsyncRead + tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin,
 {
+    start_snapshot_executor_with_installer(
+        admission_timeout,
+        install_timeout,
+        snapshot_transport,
+        move |request| {
+            let raft = raft.clone();
+            async move { raft.install_snapshot(request).await }
+        },
+    )
+}
+
+fn start_snapshot_executor_with_installer<C, Install, InstallFuture>(
+    admission_timeout: Duration,
+    install_timeout: Duration,
+    snapshot_transport: crate::LocalSnapshotTransportStatus,
+    mut install: Install,
+) -> SnapshotExecutor<C>
+where
+    C: RaftTypeConfig<NodeId = u64>,
+    Install: FnMut(InstallSnapshotRequest<C>) -> InstallFuture + Send + 'static,
+    InstallFuture: Future<Output = SnapshotResult<C>> + Send + 'static,
+{
     NodeOwnedExecutor::start(admission_timeout, move |job: SnapshotExecutorRequest<C>| {
-        let raft = raft.clone();
         let snapshot_transport = snapshot_transport.clone();
+        let request_vote = job.request.vote;
+        let done = job.request.done;
+        let acknowledged_offset = job
+            .request
+            .offset
+            .saturating_add(job.request.data.len() as u64);
+        let install = install(job.request);
         async move {
-            let request_vote = job.request.vote;
-            let done = job.request.done;
-            let acknowledged_offset = job
-                .request
-                .offset
-                .saturating_add(job.request.data.len() as u64);
-            snapshot_transport.inbound_admitted(
-                raft_group,
-                job.peer_node_id,
-                done,
-                time::Instant::now()
-                    + if done {
-                        install_timeout
-                    } else {
-                        admission_timeout
-                    },
-            );
-            let result = raft.install_snapshot(job.request).await;
+            if let Some(status_attempt) = job.status_attempt.as_ref() {
+                snapshot_transport.inbound_admitted(
+                    status_attempt,
+                    done,
+                    time::Instant::now()
+                        + if done {
+                            install_timeout
+                        } else {
+                            admission_timeout
+                        },
+                );
+            }
+            let result = install.await;
             record_inbound_snapshot_result::<C>(
                 &snapshot_transport,
-                raft_group,
-                job.peer_node_id,
+                job.status_attempt.as_ref(),
                 acknowledged_offset,
                 done,
+                (!done).then(|| time::Instant::now() + admission_timeout),
                 request_vote,
                 &result,
             );
@@ -271,49 +301,58 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
-    async fn production_executor_completion_records_local_bytes_before_returning_response() {
+    async fn production_snapshot_executor_worker_records_status_around_injected_installer() {
         use crate::store::state_machine::sqlite::TypeConfigSqlite;
-        use openraft::Vote;
+        use openraft::{SnapshotMeta, Vote};
 
         let status =
             crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
-        status.inbound_received(crate::transport_status::InboundSnapshotChunk {
-            raft_group: "sqlite",
-            peer_node_id: 1,
-            snapshot_id: "executor-ordering",
-            offset: 0,
-            len: 64,
-            done: true,
-            deadline: time::Instant::now() + Duration::from_secs(30),
-        });
-        let worker_status = status.clone();
-        let executor = NodeOwnedExecutor::start(Duration::from_secs(1), move |()| {
-            let worker_status = worker_status.clone();
-            async move {
-                let request_vote = Vote::new_committed(1, 1);
-                worker_status.inbound_admitted(
-                    "sqlite",
-                    1,
-                    true,
-                    time::Instant::now() + Duration::from_secs(30),
-                );
-                let result: SnapshotResult<TypeConfigSqlite> =
-                    Ok(InstallSnapshotResponse { vote: request_vote });
-                record_inbound_snapshot_result::<TypeConfigSqlite>(
-                    &worker_status,
-                    "sqlite",
-                    1,
-                    64,
-                    true,
-                    request_vote,
-                    &result,
-                );
-                result
-            }
-        });
+        let status_attempt = status
+            .inbound_received(crate::transport_status::InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: "executor-ordering",
+                offset: 0,
+                len: 64,
+                done: true,
+                socket_epoch: 1,
+                deadline: time::Instant::now() + Duration::from_secs(30),
+            })
+            .expect("track inbound snapshot");
+        let installer_status = status.clone();
+        let executor = start_snapshot_executor_with_installer::<TypeConfigSqlite, _, _>(
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            status.clone(),
+            move |request| {
+                let installer_status = installer_status.clone();
+                async move {
+                    let installing = &installer_status.snapshot().observations[0];
+                    assert_eq!(installing.phase, crate::SnapshotTransportPhase::Installing);
+                    assert!(installing.operation_owns_work);
+                    Ok(InstallSnapshotResponse { vote: request.vote })
+                }
+            },
+        );
         let (_connection, mut connection_closed) = watch::channel(false);
         let response = executor
-            .submit((), &mut connection_closed)
+            .submit(
+                SnapshotExecutorRequest {
+                    status_attempt: Some(status_attempt),
+                    request: InstallSnapshotRequest {
+                        vote: Vote::new_committed(1, 1),
+                        meta: SnapshotMeta {
+                            last_log_id: None,
+                            last_membership: Default::default(),
+                            snapshot_id: "executor-ordering".to_owned(),
+                        },
+                        offset: 0,
+                        data: vec![0; 64],
+                        done: true,
+                    },
+                },
+                &mut connection_closed,
+            )
             .await
             .expect("executor response");
         assert!(response.is_ok());
@@ -322,6 +361,113 @@ mod tests {
         assert_eq!(observation.acknowledged_offset, None);
         assert_eq!(observation.phase, crate::SnapshotTransportPhase::Complete);
         assert!(!observation.operation_owns_work);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal() {
+        use crate::store::state_machine::sqlite::TypeConfigSqlite;
+        use openraft::error::{Fatal, SnapshotMismatch};
+        use openraft::{SnapshotSegmentId, Vote};
+
+        fn tracked_status(
+            snapshot_id: &'static str,
+        ) -> (
+            crate::LocalSnapshotTransportStatus,
+            crate::transport_status::InboundSnapshotAttempt,
+        ) {
+            let status =
+                crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+            let attempt = status
+                .inbound_received(crate::transport_status::InboundSnapshotChunk {
+                    raft_group: "sqlite",
+                    peer_node_id: 1,
+                    snapshot_id,
+                    offset: 0,
+                    len: 64,
+                    done: true,
+                    socket_epoch: 1,
+                    deadline: time::Instant::now() + Duration::from_secs(30),
+                })
+                .expect("track inbound snapshot");
+            status.inbound_admitted(
+                &attempt,
+                true,
+                time::Instant::now() + Duration::from_secs(30),
+            );
+            (status, attempt)
+        }
+
+        let request_vote = Vote::new_committed(1, 1);
+        let (mismatch_status, mismatch_attempt) = tracked_status("mismatch");
+        let mismatch: SnapshotResult<TypeConfigSqlite> = Err(RaftError::APIError(
+            InstallSnapshotError::SnapshotMismatch(SnapshotMismatch {
+                expect: SnapshotSegmentId::from(("mismatch", 0)),
+                got: SnapshotSegmentId::from(("mismatch", 64)),
+            }),
+        ));
+        record_inbound_snapshot_result::<TypeConfigSqlite>(
+            &mismatch_status,
+            Some(&mismatch_attempt),
+            64,
+            true,
+            None,
+            request_vote,
+            &mismatch,
+        );
+        let mismatch_observation = &mismatch_status.snapshot().observations[0];
+        assert_eq!(
+            mismatch_observation.phase,
+            crate::SnapshotTransportPhase::Retrying
+        );
+        assert_eq!(
+            mismatch_observation.last_error_category.as_deref(),
+            Some("snapshot_mismatch")
+        );
+
+        let (higher_status, higher_attempt) = tracked_status("higher-vote");
+        let higher_vote: SnapshotResult<TypeConfigSqlite> = Ok(InstallSnapshotResponse {
+            vote: Vote::new_committed(2, 2),
+        });
+        record_inbound_snapshot_result::<TypeConfigSqlite>(
+            &higher_status,
+            Some(&higher_attempt),
+            64,
+            true,
+            None,
+            request_vote,
+            &higher_vote,
+        );
+        let higher_observation = &higher_status.snapshot().observations[0];
+        assert_eq!(
+            higher_observation.phase,
+            crate::SnapshotTransportPhase::Failed
+        );
+        assert_eq!(
+            higher_observation.last_error_category.as_deref(),
+            Some("higher_vote")
+        );
+
+        let (fatal_status, fatal_attempt) = tracked_status("fatal");
+        let fatal: SnapshotResult<TypeConfigSqlite> = Err(RaftError::Fatal(Fatal::Stopped));
+        record_inbound_snapshot_result::<TypeConfigSqlite>(
+            &fatal_status,
+            Some(&fatal_attempt),
+            64,
+            true,
+            None,
+            request_vote,
+            &fatal,
+        );
+        let fatal_observation = &fatal_status.snapshot().observations[0];
+        assert_eq!(
+            fatal_observation.phase,
+            crate::SnapshotTransportPhase::Failed
+        );
+        assert_eq!(
+            fatal_observation.last_error_category.as_deref(),
+            Some("snapshot_install_fatal")
+        );
     }
 
     #[derive(Clone)]

@@ -441,6 +441,37 @@ test("transport direction keeps sender and receiver explanations honest", () => 
   assert.equal(inboundComplete.text, "snapshot received; sender acknowledgement unconfirmed");
 });
 
+test("transport recovery is attributed only to the receiving node", () => {
+  const ui = sandbox();
+  const inbound = transportObservation("installing", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+  });
+  const outbound = transportObservation("transferring", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+  });
+
+  assert.equal(
+    ui.clusterTransportExplanation(transportOps([inbound]), 1, false).observation,
+    null,
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(transportOps([outbound]), 1, false).observation,
+    null,
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(transportOps([inbound]), 2, false).observation,
+    inbound,
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(transportOps([outbound]), 2, false).observation,
+    outbound,
+  );
+});
+
 test("private cluster-listener evidence survives a closed public listener", () => {
   const ui = sandbox();
   const recovery = ui.clusterTransportExplanation(
@@ -479,6 +510,8 @@ test("transport status shows outbound evidence and expires stale samples", () =>
   const watermark = ui.clusterTransportExplanation(
     transportOps([
       transportObservation("complete", {
+        observing_node_id: 1,
+        peer_node_id: 2,
         direction: "outbound",
         acknowledged_offset: 3145728,
       }),
@@ -514,6 +547,24 @@ test("stalled transport renders its observer and sample age", () => {
     html,
     /Bounded-read recovery evidence<\/dt><dd>snapshot stalled · observer 1 · 1m ago/,
   );
+});
+
+test("active transport stays visible through its server-projected deadline", () => {
+  const ui = sandbox();
+  const installing = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("installing", {
+        sample_age_ms: 300001,
+        active_deadline_remaining_ms: 3299000,
+        operation_owns_work: true,
+      }),
+    ]),
+    2,
+    false,
+  );
+
+  assert.equal(installing.code, "installing");
+  assert.equal(installing.text, "installing snapshot");
 });
 
 // ---- the two-voter state is the point -------------------------------------

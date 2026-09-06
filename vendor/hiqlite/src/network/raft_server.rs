@@ -180,6 +180,7 @@ async fn handle_socket(
             return Ok(());
         }
     };
+    let socket_epoch = state.snapshot_transport.next_inbound_socket_epoch();
 
     let (tx_write, rx_write) = flume::bounded::<WsWriteMsg>(1);
     let (rx, write) = ws.split(tokio::io::split);
@@ -277,7 +278,13 @@ async fn handle_socket(
         }
 
         let mut work_connection_closed = tx_connection_closed.subscribe();
-        let work = execute_raft_request(&state, peer_node_id, req, &mut work_connection_closed);
+        let work = execute_raft_request(
+            &state,
+            peer_node_id,
+            socket_epoch,
+            req,
+            &mut work_connection_closed,
+        );
         tokio::pin!(work);
         let work_result = tokio::select! {
             biased;
@@ -407,9 +414,46 @@ async fn raft_response_writer<S>(
     let _ = finished.send(outcome);
 }
 
+fn record_inbound_submit_error<C: openraft::RaftTypeConfig>(
+    snapshot_transport: &crate::LocalSnapshotTransportStatus,
+    status_attempt: Option<&crate::transport_status::InboundSnapshotAttempt>,
+    error: &crate::network::snapshot_executor::SubmitError,
+    executor: &crate::network::snapshot_executor::SnapshotExecutor<C>,
+) {
+    let Some(status_attempt) = status_attempt else {
+        return;
+    };
+    let disposition = match error {
+        crate::network::snapshot_executor::SubmitError::AdmissionTimeout => {
+            crate::transport_status::InboundSnapshotDisposition::Retrying(
+                "snapshot_admission_timeout",
+            )
+        }
+        crate::network::snapshot_executor::SubmitError::ConnectionClosed => {
+            crate::transport_status::InboundSnapshotDisposition::Retrying(
+                "snapshot_connection_closed",
+            )
+        }
+        crate::network::snapshot_executor::SubmitError::ExecutorClosed => {
+            crate::transport_status::InboundSnapshotDisposition::Failed("snapshot_executor_closed")
+        }
+        crate::network::snapshot_executor::SubmitError::ResponseClosed => {
+            crate::transport_status::InboundSnapshotDisposition::Failed(
+                "snapshot_executor_response_closed",
+            )
+        }
+    };
+    snapshot_transport.inbound_request_ended(
+        status_attempt,
+        (!status_attempt.done).then(|| executor.admission_deadline()),
+        disposition,
+    );
+}
+
 async fn execute_raft_request(
     state: &AppStateExt,
     peer_node_id: u64,
+    socket_epoch: u64,
     request: RaftStreamRequest,
     connection_closed: &mut watch::Receiver<bool>,
 ) -> Result<
@@ -434,7 +478,7 @@ async fn execute_raft_request(
         }
         #[cfg(feature = "sqlite")]
         RaftStreamRequest::SnapshotDB((request_id, request)) => {
-            state.snapshot_transport.inbound_received(
+            let status_attempt = state.snapshot_transport.inbound_received(
                 crate::transport_status::InboundSnapshotChunk {
                     raft_group: "sqlite",
                     peer_node_id,
@@ -442,6 +486,7 @@ async fn execute_raft_request(
                     offset: request.offset,
                     len: request.data.len(),
                     done: request.done,
+                    socket_epoch,
                     deadline: state.raft_db.snapshot_executor.admission_deadline(),
                 },
             );
@@ -450,12 +495,24 @@ async fn execute_raft_request(
                 .snapshot_executor
                 .submit(
                     crate::network::snapshot_executor::SnapshotExecutorRequest {
-                        peer_node_id,
+                        status_attempt: status_attempt.clone(),
                         request,
                     },
                     connection_closed,
                 )
-                .await?;
+                .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    record_inbound_submit_error(
+                        &state.snapshot_transport,
+                        status_attempt.as_ref(),
+                        &error,
+                        &state.raft_db.snapshot_executor,
+                    );
+                    return Err(error);
+                }
+            };
             (request_id, RaftStreamResponsePayload::SnapshotDB(result))
         }
         #[cfg(feature = "cache")]
@@ -478,7 +535,7 @@ async fn execute_raft_request(
         }
         #[cfg(feature = "cache")]
         RaftStreamRequest::SnapshotCache((request_id, request)) => {
-            state.snapshot_transport.inbound_received(
+            let status_attempt = state.snapshot_transport.inbound_received(
                 crate::transport_status::InboundSnapshotChunk {
                     raft_group: "cache",
                     peer_node_id,
@@ -486,6 +543,7 @@ async fn execute_raft_request(
                     offset: request.offset,
                     len: request.data.len(),
                     done: request.done,
+                    socket_epoch,
                     deadline: state.raft_cache.snapshot_executor.admission_deadline(),
                 },
             );
@@ -494,12 +552,24 @@ async fn execute_raft_request(
                 .snapshot_executor
                 .submit(
                     crate::network::snapshot_executor::SnapshotExecutorRequest {
-                        peer_node_id,
+                        status_attempt: status_attempt.clone(),
                         request,
                     },
                     connection_closed,
                 )
-                .await?;
+                .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    record_inbound_submit_error(
+                        &state.snapshot_transport,
+                        status_attempt.as_ref(),
+                        &error,
+                        &state.raft_cache.snapshot_executor,
+                    );
+                    return Err(error);
+                }
+            };
             (request_id, RaftStreamResponsePayload::SnapshotCache(result))
         }
         #[cfg(feature = "cache")]
