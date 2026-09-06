@@ -166,20 +166,24 @@
       ?value:Number(value)+elapsed;
     const projectAgeAndDeadline=observation=>{
       const sourceAge=Number(observation.sample_age_ms||0);
-      const remaining=observation.active_deadline_remaining_ms===null||
+      const serializedRemaining=observation.active_deadline_remaining_ms===null||
         observation.active_deadline_remaining_ms===undefined
         ?null:Number(observation.active_deadline_remaining_ms);
-      const deadlineStillActive=remaining!==null&&remaining>elapsed;
       const stalledPhases=["connecting","transferring","awaiting_acknowledgement",
         "installing","retrying"];
+      const fallbackBoundary=serializedRemaining===null&&stalledPhases.includes(observation.phase);
+      const remaining=fallbackBoundary?Math.max(0,30000-sourceAge):serializedRemaining;
+      const deadlineStillActive=remaining!==null&&remaining>elapsed;
       const deadlineCrossed=remaining!==null&&remaining<=elapsed&&
         stalledPhases.includes(observation.phase);
-      const projectedStalledRetention=deadlineCrossed&&elapsed-remaining<=300000;
+      const stalledAge=fallbackBoundary
+        ?Math.max(0,sourceAge+elapsed-30000):Math.max(0,elapsed-remaining);
+      const projectedStalledRetention=deadlineCrossed&&stalledAge<=300000;
       if(sourceAge+elapsed>300000&&!deadlineStillActive&&!projectedStalledRetention)
         return null;
       if(!elapsed&&!deadlineCrossed) return observation;
       const projected=Object.assign({},observation,{
-        sample_age_ms:deadlineCrossed?Math.max(0,elapsed-remaining):sourceAge+elapsed,
+        sample_age_ms:deadlineCrossed?stalledAge:sourceAge+elapsed,
       });
       for(const field of ["attempt_age_ms","last_acknowledgement_age_ms",
         "last_local_receive_age_ms"])
@@ -273,8 +277,13 @@
       // leader's retained acknowledgement must not hide a newer attempt after a
       // receiver restart or leadership change; legacy and malformed identities
       // remain attempt-local.
+      const nonComplete=current.filter(observation=>observation.phase!=="complete");
+      const freshestNonComplete=nonComplete.length
+        ?Math.min(...nonComplete.map(age)):Number.POSITIVE_INFINITY;
+      const completionCanSupersede=observation=>age(observation)<=freshestNonComplete;
       const acknowledged=group.fingerprint
-        ?current.filter(acknowledgedComplete):[];
+        ?current.filter(observation=>
+          acknowledgedComplete(observation)&&completionCanSupersede(observation)):[];
       if(acknowledged.length){
         acknowledged.sort((left,right)=>age(left)-age(right)||tieBreak(left,right));
         representatives.push(acknowledged[0]);
@@ -286,8 +295,8 @@
       // not reach it. An acknowledged sender Complete is causally stronger and
       // already returned above. Apply this exception once at the group boundary;
       // it does not cover inbound failures or unrelated fingerprints.
-      const receiverComplete=current.some(observation=>
-        observation.phase==="complete"&&observation.direction==="inbound");
+      const receiverComplete=current.some(observation=>observation.phase==="complete"&&
+        observation.direction==="inbound"&&completionCanSupersede(observation));
       if(group.fingerprint&&receiverComplete)
         current=current.filter(observation=>
           observation.direction!=="outbound"||acknowledgedComplete(observation));

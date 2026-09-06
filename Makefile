@@ -595,6 +595,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::deadline_less_retry_serializes_its_effective_fallback_stall_boundary \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  transport_status::tests::live_install_longer_than_five_minutes_remains_visible_through_its_deadline \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -666,7 +670,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
-	  http::cluster_operations::tests::cached_inactive_transport_observation_expires_at_five_minutes \
+	  http::cluster_operations::tests::cached_deadline_less_active_transport_uses_the_producer_fallback_boundary \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cached_terminal_transport_observation_expires_at_five_minutes \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::transport_projection_uses_local_monotonic_age_despite_remote_clock_skew \
@@ -840,6 +847,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::internal_auth_revocation::tests::credential_revocation_uses_the_exact_committed_security_roster \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::credential_revocation_accepts_more_than_the_diagnostics_probe_limit \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::internal_auth_revocation::tests::membership_added_between_begin_passes_is_fenced_before_store_admission \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
@@ -860,6 +870,11 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::failed_combined_promotion_never_authorizes_the_old_session \
 	  -- --exact
+	$(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
+	  --test store_contract \
+	  clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure \
+	  -- --exact --test-threads=1
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::concurrent_admin_demote_and_delete_preserve_one_administrator \
 	  -- --exact

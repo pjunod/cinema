@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
     ActivityPeer, CacheAdminRevocationCleanupOutcome, CacheAdminRevocationLease, MembershipManager,
-    MAX_OPERATIONS_PEERS,
+    MAX_CACHE_ADMIN_REVOCATION_PEERS,
 };
 use plurx_core::store::CacheAdminMutationClaim;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ pub(crate) const PATH: &str = "/api/v1/internal/auth/cache-revocation";
 pub(crate) const MAX_REQUEST_BYTES: usize = 256;
 const FANOUT_TIMEOUT: Duration = Duration::from_secs(2);
 const FANOUT_CONCURRENCY: usize = 8;
-const MAX_STABLE_ROSTER_PASSES: usize = MAX_OPERATIONS_PEERS + 2;
+const MAX_STABLE_ROSTER_PASSES: usize = MAX_CACHE_ADMIN_REVOCATION_PEERS + 2;
 const WIRE_SCHEMA_VERSION: u32 = 2;
 const MEMBERSHIP_EXCLUSION_DURATION: Duration = Duration::from_secs(15);
 const EXCLUSION_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(50);
@@ -270,7 +270,7 @@ impl ClusterCacheRevocation {
                     return Err(error);
                 }
                 roster.acknowledge(&unfenced);
-                if roster.len() > MAX_OPERATIONS_PEERS {
+                if !revocation_peer_count_is_bounded(roster.len()) {
                     cleanup_begin(&transport, &roster.peers(), &request).await;
                     membership_exclusion.release().await?;
                     return Err(propagation_error());
@@ -323,7 +323,7 @@ impl ClusterCacheRevocation {
             .cloned()
             .collect::<Vec<_>>();
         let peers = merge_peers(self.peers.iter().chain(current.iter()));
-        if peers.len() > MAX_OPERATIONS_PEERS {
+        if !revocation_peer_count_is_bounded(peers.len()) {
             let _ = fanout(
                 &self.transport,
                 &self.peers,
@@ -410,10 +410,14 @@ async fn peer_directory(
         .await
         .map_err(|_| propagation_error())?
         .map_err(|_| propagation_error())?;
-    if peers.len() > MAX_OPERATIONS_PEERS {
+    if !revocation_peer_count_is_bounded(peers.len()) {
         return Err(propagation_error());
     }
     Ok(peers)
+}
+
+fn revocation_peer_count_is_bounded(peer_count: usize) -> bool {
+    peer_count <= MAX_CACHE_ADMIN_REVOCATION_PEERS
 }
 
 async fn fanout(
@@ -566,7 +570,9 @@ mod tests {
     };
     use crate::http::extract::CacheOnlyAdminProofCache;
     use plurx_core::auth;
-    use plurx_core::cluster::membership::ActivityPeer;
+    use plurx_core::cluster::membership::{
+        ActivityPeer, MAX_CACHE_ADMIN_REVOCATION_PEERS, MAX_OPERATIONS_PEERS,
+    };
     use plurx_core::domain::User;
 
     #[test]
@@ -787,6 +793,30 @@ mod tests {
         let (third, stable) = roster.observe(vec![peer_b, peer_c]);
         assert!(third.is_empty());
         assert!(stable, "only an unchanged fully fenced roster admits Store");
+    }
+
+    #[test]
+    fn credential_revocation_accepts_more_than_the_diagnostics_probe_limit() {
+        let peers = (1..=MAX_OPERATIONS_PEERS + 1)
+            .map(|index| peer(&format!("node-{index}"), index as u64 + 1))
+            .collect::<Vec<_>>();
+        let mut roster = StableBeginRoster::default();
+
+        let (unfenced, stable) = roster.observe(peers);
+        assert!(!stable);
+        assert_eq!(unfenced.len(), MAX_OPERATIONS_PEERS + 1);
+        roster.acknowledge(&unfenced);
+        assert!(
+            super::revocation_peer_count_is_bounded(roster.len()),
+            "the security barrier must admit every peer in a supported committed roster"
+        );
+        assert!(super::revocation_peer_count_is_bounded(
+            MAX_CACHE_ADMIN_REVOCATION_PEERS
+        ));
+        assert!(!super::revocation_peer_count_is_bounded(
+            MAX_CACHE_ADMIN_REVOCATION_PEERS + 1
+        ));
+        assert_eq!(super::FANOUT_CONCURRENCY, MAX_OPERATIONS_PEERS);
     }
 
     #[test]

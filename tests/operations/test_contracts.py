@@ -1558,6 +1558,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         hiqlite_snapshot_tests = (
             "raw_write_frame_stays_idle_after_transport_recovers_until_an_explicit_flush",
+            "deadline_less_retry_serializes_its_effective_fallback_stall_boundary",
             "real_tls_tail_backpressure_completes_for_every_payload_direction",
             "real_tls_no_backpressure_control_completes_without_an_extra_frame",
             "frame_completion_flushes_the_underlying_transport",
@@ -1698,7 +1699,8 @@ for (const startupDelay of [0, 1600, 7000]) {
             "membership_projection_refresh_is_bounded_and_preserves_last_good_sample",
             "long_install_crosses_to_stalled_then_expires_after_the_post_deadline_window",
             "cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero",
-            "cached_inactive_transport_observation_expires_at_five_minutes",
+            "cached_deadline_less_active_transport_uses_the_producer_fallback_boundary",
+            "cached_terminal_transport_observation_expires_at_five_minutes",
             "transport_projection_uses_local_monotonic_age_despite_remote_clock_skew",
             "peer_status_refresh_keeps_strict_cycle_overhead_margin",
             "aggregate_request_reads_only_node_owned_projections",
@@ -1721,6 +1723,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner",
             "cleanup_retry_backoff_is_capped_and_shutdown_interruptible",
             "credential_revocation_uses_the_exact_committed_security_roster",
+            "credential_revocation_accepts_more_than_the_diagnostics_probe_limit",
             "membership_added_between_begin_passes_is_fenced_before_store_admission",
             "replicated_membership_exclusion_spans_final_roster_read_and_peer_end",
             "replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew",
@@ -1781,6 +1784,20 @@ for (const startupDelay of [0, 1600, 7000]) {
             command = matching[0]
             self.assertIn("cargo test --locked -p plurx-core --lib", command)
             self.assertIn("-- --exact", command)
+
+        clustered_store_tests = (
+            "clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure",
+        )
+        for test_name in clustered_store_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn(
+                "--features cluster-read-cost-validation,hiqlite-contract-tests",
+                command,
+            )
+            self.assertIn("--test store_contract", command)
+            self.assertIn("-- --exact --test-threads=1", command)
 
         proxy_writer_test = (
             "server::proxy::stream::tests::"

@@ -402,8 +402,12 @@ impl LocalSnapshotTransportStatus {
                     last_local_receive_age_ms: observation
                         .last_local_receive
                         .map(|at| duration_ms(now.saturating_duration_since(at))),
-                    active_deadline_remaining_ms: observation
-                        .deadline
+                    // A few ownership states intentionally have no explicit
+                    // RPC deadline. They still stall at `last_update + 30s`;
+                    // serialize that effective boundary so daemon and browser
+                    // cache projection cannot leave them active for five
+                    // minutes after this producer would report Stalled.
+                    active_deadline_remaining_ms: stall_boundary
                         .map(|deadline| duration_ms(deadline.saturating_duration_since(now))),
                     sample_age_ms: duration_ms(sample_age),
                     phase: observation.phase,
@@ -2545,6 +2549,37 @@ mod tests {
 
         tokio::time::advance(STALLED_AFTER + EXPIRE_AFTER + Duration::from_millis(1)).await;
         assert!(status.snapshot().observations.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_less_retry_serializes_its_effective_fallback_stall_boundary() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let attempt = status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            8,
+            "fallback-boundary",
+            OutboundSnapshotSocket {
+                epoch: 4,
+                connected: true,
+            },
+            deadline,
+        );
+        status.outbound_retry_owned(&attempt, "snapshot_retry", None);
+
+        let active = &status.snapshot().observations[0];
+        assert_eq!(active.phase, SnapshotTransportPhase::Retrying);
+        assert_eq!(
+            active.active_deadline_remaining_ms,
+            Some(duration_ms(STALLED_AFTER))
+        );
+
+        tokio::time::advance(STALLED_AFTER).await;
+        let stalled = &status.snapshot().observations[0];
+        assert_eq!(stalled.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(stalled.active_deadline_remaining_ms, Some(0));
+        assert_eq!(stalled.sample_age_ms, 0);
     }
 
     #[tokio::test(start_paused = true)]

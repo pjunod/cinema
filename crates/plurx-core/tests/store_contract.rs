@@ -248,6 +248,7 @@ const USER_METHODS: &[&str] = &[
     "count_admins",
     "set_password",
     "reset_password_and_revoke_tokens",
+    "promote_user_and_reset_password",
     "set_admin",
     "demote_user_preserving_admin",
     "delete_tokens_for_user",
@@ -20444,6 +20445,142 @@ async fn replaceable_cache_touch_burst_has_one_physical_write_budget() {
     );
 }
 
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect promotion contract client");
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset promotion contract state");
+    client
+        .execute(
+            "CREATE TABLE cluster_cache_admin_revocation_leases (\
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+               node_id TEXT NOT NULL, \
+               claim_id TEXT NOT NULL UNIQUE, \
+               expires_at INTEGER NOT NULL, \
+               retain_release_receipt INTEGER NOT NULL \
+                 CHECK (retain_release_receipt IN (0, 1))\
+             ) STRICT",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("install cache-admin claim schema");
+    let user = store
+        .create_user("claim-viewer", "old-hash", false)
+        .await
+        .expect("create claim viewer");
+    store
+        .create_token("claim-viewer-session", user.id, None)
+        .await
+        .expect("create claim viewer token");
+
+    let missing =
+        plurx_core::cluster::membership::MembershipManager::prepare_cache_admin_revocation_claim(
+            "contract-node",
+            Duration::from_secs(15),
+        )
+        .expect("prepare absent promotion claim");
+    assert!(!store
+        .promote_user_and_reset_password(
+            user.id,
+            "missing-claim-hash",
+            Some(missing.mutation_claim()),
+        )
+        .await
+        .expect("absent promotion claim is a no-op"));
+
+    let active =
+        plurx_core::cluster::membership::MembershipManager::prepare_cache_admin_revocation_claim(
+            "contract-node",
+            Duration::from_secs(15),
+        )
+        .expect("prepare active promotion claim");
+    client
+        .execute(
+            "INSERT INTO cluster_cache_admin_revocation_leases \
+               (singleton, node_id, claim_id, expires_at, retain_release_receipt) \
+             VALUES (1, $1, $2, 9000000000000, 0)",
+            hiqlite::params!("contract-node", active.claim_id()),
+        )
+        .await
+        .expect("install exact promotion claim");
+
+    let wrong =
+        plurx_core::cluster::membership::MembershipManager::prepare_cache_admin_revocation_claim(
+            "contract-node",
+            Duration::from_secs(15),
+        )
+        .expect("prepare wrong promotion claim");
+    assert!(!store
+        .promote_user_and_reset_password(user.id, "wrong-claim-hash", Some(wrong.mutation_claim()),)
+        .await
+        .expect("wrong promotion claim is a no-op"));
+
+    client
+        .execute(
+            "CREATE TRIGGER reject_clustered_promotion_token_delete \
+             BEFORE DELETE ON tokens \
+             BEGIN SELECT RAISE(ABORT, 'injected clustered promotion failure'); END",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("install clustered promotion fault");
+    store
+        .promote_user_and_reset_password(user.id, "rolled-back-hash", Some(active.mutation_claim()))
+        .await
+        .expect_err("token failure must roll back clustered promotion");
+    let unchanged = store
+        .get_user(user.id)
+        .await
+        .expect("read rolled-back viewer")
+        .expect("rolled-back viewer");
+    assert!(!unchanged.is_admin);
+    assert_eq!(unchanged.password_hash, "old-hash");
+    assert!(store
+        .user_for_token("claim-viewer-session")
+        .await
+        .expect("read retained old session")
+        .is_some());
+
+    client
+        .execute(
+            "DROP TRIGGER reject_clustered_promotion_token_delete",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("remove clustered promotion fault");
+    assert!(store
+        .promote_user_and_reset_password(user.id, "promoted-hash", Some(active.mutation_claim()),)
+        .await
+        .expect("commit clustered promotion"));
+    let promoted = store
+        .get_user(user.id)
+        .await
+        .expect("read promoted viewer")
+        .expect("promoted viewer");
+    assert!(promoted.is_admin);
+    assert_eq!(promoted.password_hash, "promoted-hash");
+    assert!(store
+        .user_for_token("claim-viewer-session")
+        .await
+        .expect("read revoked old session")
+        .is_none());
+}
+
 #[tokio::test]
 async fn user_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
@@ -20531,6 +20668,26 @@ async fn user_contract_runs_through_dyn_store() {
             .user_for_token("token-two")
             .await
             .expect("revoked token lookup")
+            .is_none());
+        store
+            .create_token("promotion-token", viewer.id, None)
+            .await
+            .expect("promotion token");
+        assert!(store
+            .promote_user_and_reset_password(viewer.id, "hash-promoted", None)
+            .await
+            .expect("atomic promotion"));
+        let promoted = store
+            .get_user(viewer.id)
+            .await
+            .expect("get promoted user")
+            .expect("promoted user");
+        assert!(promoted.is_admin, "backend {backend}");
+        assert_eq!(promoted.password_hash, "hash-promoted", "backend {backend}");
+        assert!(store
+            .user_for_token("promotion-token")
+            .await
+            .expect("promoted token lookup")
             .is_none());
         store
             .create_token("token-three", viewer.id, None)

@@ -44,6 +44,7 @@ const PEER_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_DIRECTORY_TIMEOUT: Duration = Duration::from_millis(500);
 const PEER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
 const PEER_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const TRANSPORT_FALLBACK_STALL_MS: u64 = 30 * 1_000;
 const TRANSPORT_OBSERVATION_TTL_MS: u64 = 5 * 60 * 1_000;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FRESH_AGE_MS: u64 = 5_000;
@@ -1512,8 +1513,9 @@ where
 fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_ms: u64) {
     transport.observations.retain_mut(|observation| {
         let source_phase = observation.phase;
+        let source_sample_age_ms = observation.sample_age_ms;
         let source_deadline_remaining_ms = observation.active_deadline_remaining_ms;
-        observation.sample_age_ms = observation.sample_age_ms.saturating_add(elapsed_ms);
+        observation.sample_age_ms = source_sample_age_ms.saturating_add(elapsed_ms);
         for age_ms in [
             &mut observation.attempt_age_ms,
             &mut observation.last_acknowledgement_age_ms,
@@ -1523,8 +1525,6 @@ fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_m
                 *age_ms = age_ms.saturating_add(elapsed_ms);
             }
         }
-        let deadline_still_active =
-            source_deadline_remaining_ms.is_some_and(|remaining_ms| remaining_ms > elapsed_ms);
         let active_phase = matches!(
             source_phase,
             SnapshotTransportPhase::Connecting
@@ -1533,22 +1533,38 @@ fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_m
                 | SnapshotTransportPhase::Installing
                 | SnapshotTransportPhase::Retrying
         );
+        // Older peers serialize `None` for the producer's 30-second fallback
+        // stall boundary. Derive that same boundary from producer sample age
+        // so mixed-version cached evidence follows the current contract.
+        let fallback_boundary = active_phase && source_deadline_remaining_ms.is_none();
+        let effective_remaining_ms = source_deadline_remaining_ms.or_else(|| {
+            fallback_boundary
+                .then(|| TRANSPORT_FALLBACK_STALL_MS.saturating_sub(source_sample_age_ms))
+        });
+        let stalled_age_ms = if fallback_boundary {
+            source_sample_age_ms
+                .saturating_add(elapsed_ms)
+                .saturating_sub(TRANSPORT_FALLBACK_STALL_MS)
+        } else {
+            effective_remaining_ms
+                .map(|remaining_ms| elapsed_ms.saturating_sub(remaining_ms))
+                .unwrap_or(0)
+        };
+        let deadline_still_active =
+            effective_remaining_ms.is_some_and(|remaining_ms| remaining_ms > elapsed_ms);
         let deadline_crossed = active_phase
-            && source_deadline_remaining_ms.is_some_and(|remaining_ms| remaining_ms <= elapsed_ms);
-        let projected_stalled_retention = deadline_crossed
-            && source_deadline_remaining_ms.is_some_and(|remaining_ms| {
-                elapsed_ms.saturating_sub(remaining_ms) <= TRANSPORT_OBSERVATION_TTL_MS
-            });
-        if let Some(remaining_ms) = observation.active_deadline_remaining_ms.as_mut() {
-            *remaining_ms = remaining_ms.saturating_sub(elapsed_ms);
+            && effective_remaining_ms.is_some_and(|remaining_ms| remaining_ms <= elapsed_ms);
+        let projected_stalled_retention =
+            deadline_crossed && stalled_age_ms <= TRANSPORT_OBSERVATION_TTL_MS;
+        if active_phase {
+            observation.active_deadline_remaining_ms =
+                effective_remaining_ms.map(|remaining_ms| remaining_ms.saturating_sub(elapsed_ms));
         }
         if deadline_crossed {
             // A producer that observes its own deadline starts the stalled
             // retention age at that boundary. Preserve the same wire meaning
             // when an aggregator's monotonic cache clock crosses it later.
-            if let Some(source_remaining_ms) = source_deadline_remaining_ms {
-                observation.sample_age_ms = elapsed_ms.saturating_sub(source_remaining_ms);
-            }
+            observation.sample_age_ms = stalled_age_ms;
             observation.phase = SnapshotTransportPhase::Stalled;
             observation.last_error_category = Some("snapshot_stalled".to_owned());
         }
@@ -3028,11 +3044,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cached_deadline_less_active_transport_uses_the_producer_fallback_boundary() {
+        let source = test_transport_status(2, 1_000, None);
+
+        let mut just_before_stall = source.clone();
+        age_transport_observations(&mut just_before_stall, 28_999);
+        let observation = &just_before_stall.observations[0];
+        assert_eq!(observation.phase, SnapshotTransportPhase::Transferring);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(1));
+        assert_eq!(observation.sample_age_ms, 29_999);
+
+        let mut at_stall = source.clone();
+        age_transport_observations(&mut at_stall, 29_000);
+        let observation = &at_stall.observations[0];
+        assert_eq!(observation.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(0));
+        assert_eq!(observation.sample_age_ms, 0);
+
+        let mut at_expiry = source.clone();
+        age_transport_observations(&mut at_expiry, 29_000 + TRANSPORT_OBSERVATION_TTL_MS);
+        assert_eq!(
+            at_expiry.observations[0].phase,
+            SnapshotTransportPhase::Stalled
+        );
+        assert_eq!(
+            at_expiry.observations[0].sample_age_ms,
+            TRANSPORT_OBSERVATION_TTL_MS
+        );
+
+        let mut expired = source;
+        age_transport_observations(&mut expired, 29_000 + TRANSPORT_OBSERVATION_TTL_MS + 1);
+        assert!(expired.observations.is_empty());
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn cached_inactive_transport_observation_expires_at_five_minutes() {
+    async fn cached_terminal_transport_observation_expires_at_five_minutes() {
         let cache = PeerStatusCache::default();
         let source_observed_ms = 1_000_000;
         let mut transport = test_transport_status(2, 299_000, None);
+        transport.observations[0].phase = SnapshotTransportPhase::Failed;
         transport.observed_at_unix_ms = source_observed_ms;
         let statuses = BTreeMap::from([(
             "node-2".to_owned(),

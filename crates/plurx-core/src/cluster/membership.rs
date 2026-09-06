@@ -826,6 +826,10 @@ const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 /// while only the first eight are probed.
 const MAX_COMMITTED_ROSTER_MEMBERS: usize = 64;
 const MAX_ACTIVITY_PEERS: usize = MAX_COMMITTED_ROSTER_MEMBERS;
+/// Maximum remote peers in a cache-admin revocation barrier. Unlike the
+/// diagnostics probe budget below, credential invalidation must cover every
+/// committed member other than the local node.
+pub const MAX_CACHE_ADMIN_REVOCATION_PEERS: usize = MAX_COMMITTED_ROSTER_MEMBERS - 1;
 /// The operations page is one bounded fan-out, not a general cluster crawler.
 pub const MAX_OPERATIONS_PEERS: usize = 8;
 const OPERATIONS_PEERS_SQL: &str = "SELECT node.node_id, node.raft_id, node.last_seen_at, \

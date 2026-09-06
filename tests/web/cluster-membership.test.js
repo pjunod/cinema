@@ -513,7 +513,7 @@ test("private transport renders while public status is closed for learners and v
     assert.match(operationsHtml, /Not observed/);
     assert.match(
       operationsHtml,
-      /Transport<\/span>installing snapshot · observer 2 · 1m ago/,
+      /Transport<\/span>snapshot stalled · observer 2 · 35s ago/,
     );
     const nodeHtml = ui.clusterNodeRow(target, "node-a", true, {
       operations,
@@ -521,7 +521,7 @@ test("private transport renders while public status is closed for learners and v
     });
     assert.match(
       nodeHtml,
-      /Transport<\/span>installing snapshot · observer 2 · 1m ago/,
+      /Transport<\/span>snapshot stalled · observer 2 · 35s ago/,
       `${role} node card hides private transport evidence`,
     );
   }
@@ -576,7 +576,7 @@ test("transport status shows outbound evidence and expires stale samples", () =>
   assert.equal(outbound.observation.observing_node_id, 1);
 
   const expired = ui.clusterTransportExplanation(
-    transportOps([transportObservation("transferring", { sample_age_ms: 300001 })]),
+    transportOps([transportObservation("transferring", { sample_age_ms: 330001 })]),
     2,
     false,
   );
@@ -601,20 +601,42 @@ test("transport status shows outbound evidence and expires stale samples", () =>
 
 test("retained transport evidence ages, stalls, and expires while refreshes fail", () => {
   const ui = sandbox();
-  const inactiveObservation = transportObservation("installing", {
+  const inactiveObservation = transportObservation("failed", {
     sample_age_ms: 40,
     active_deadline_remaining_ms: null,
   });
   const inactive = transportOps([inactiveObservation]);
 
   let current = ui.clusterTransportExplanation(inactive, 2, false, 299_960);
-  assert.equal(current.code, "installing");
+  assert.equal(current.code, "failed");
   assert.equal(current.observation.sample_age_ms, 300_000);
   assert.equal(
     ui.clusterTransportExplanation(inactive, 2, false, 299_961).code,
     "unavailable",
   );
   assert.equal(inactiveObservation.sample_age_ms, 40, "client aging must not renew the retained payload");
+
+  const fallbackObservation = transportObservation("retrying", {
+    sample_age_ms: 1_000,
+    active_deadline_remaining_ms: null,
+    operation_owns_work: true,
+  });
+  const fallback = transportOps([fallbackObservation]);
+  current = ui.clusterTransportExplanation(fallback, 2, false, 28_999);
+  assert.equal(current.code, "retrying");
+  assert.equal(current.observation.active_deadline_remaining_ms, 1);
+  current = ui.clusterTransportExplanation(fallback, 2, false, 29_000);
+  assert.equal(current.code, "stalled");
+  assert.equal(current.observation.sample_age_ms, 0);
+  assert.equal(current.observation.active_deadline_remaining_ms, 0);
+  assert.equal(
+    ui.clusterTransportExplanation(fallback, 2, false, 329_000).code,
+    "stalled",
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(fallback, 2, false, 329_001).code,
+    "unavailable",
+  );
 
   const activeObservation = transportObservation("installing", {
     sample_age_ms: 301_000,
@@ -1178,7 +1200,7 @@ test("stale completion evidence never suppresses a newer same-fingerprint succes
     attempt_id: 4,
     socket_epoch: 2,
     acknowledged_offset: 4096,
-    sample_age_ms: 20_000,
+    sample_age_ms: 4_000,
   });
   const successors = [
     transportObservation("installing", {
@@ -1218,7 +1240,7 @@ test("stale completion evidence never suppresses a newer same-fingerprint succes
   }
 });
 
-test("stale receiver completion never suppresses a newer outbound failure", () => {
+test("older receiver completion never suppresses a newer outbound failure", () => {
   const ui = sandbox();
   const snapshotFingerprint = "e".repeat(64);
   const staleReceiver = transportObservation("complete", {
@@ -1227,7 +1249,7 @@ test("stale receiver completion never suppresses a newer outbound failure", () =
     boot_id: "former-receiver",
     attempt_id: 4,
     socket_epoch: 2,
-    sample_age_ms: 20_000,
+    sample_age_ms: 4_000,
   });
   const currentFailure = transportObservation("failed", {
     observing_node_id: 1,
