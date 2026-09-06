@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5cf263a5"]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate"]
+reason = "Test fixtures were published with rename, so a second test process regenerating the same fixture unlinked the inode a first process's tests were already reading. Device, inode, size and mtime all survive that, but the unlink moves ctime, and ctime is a component of the object version SourceFence::unchanged compares — so four vodserve resurrection tests failed with 'source changed before fragment publication' for a source that never changed, on a cold target/ only. Publication now uses a hard link, which refuses rather than replaces, and temporaries carry the pid so two processes cannot interleave into one file. republishing_a_fixture_leaves_a_held_reader_undisturbed asserts the held handle's ctime is untouched and fails if publication returns to rename; the four vodserve tests were reproduced failing under a racing renamer and pass under a racing linker."
