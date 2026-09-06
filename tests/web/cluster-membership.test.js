@@ -972,8 +972,8 @@ test("late predecessor failure cannot hide an already-started successor attempt"
     boot_id: "current-receiver",
     attempt_id: 9,
     socket_epoch: 7,
-    sample_age_ms: 500,
-    attempt_age_ms: 1_000,
+    sample_age_ms: 6_000,
+    attempt_age_ms: 10_000,
     active_deadline_remaining_ms: 60_000,
   });
 
@@ -990,6 +990,101 @@ test("late predecessor failure cannot hide an already-started successor attempt"
     assert.equal(current.code, "installing");
     assert.equal(current.observation.boot_id, "current-receiver");
     assert.equal(current.observation.attempt_id, 9);
+  }
+});
+
+test("late predecessor failure cannot hide a newer different-snapshot successor", () => {
+  const ui = sandbox();
+  const predecessor = transportObservation("failed", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "former-snapshot",
+    snapshot_fingerprint: "1".repeat(64),
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 0,
+    attempt_age_ms: 60_000,
+  });
+  const successor = transportObservation("installing", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+    snapshot_id: "successor-snapshot",
+    snapshot_fingerprint: "2".repeat(64),
+    boot_id: "current-receiver",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 500,
+    attempt_age_ms: 1_000,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [[predecessor, successor], [successor, predecessor]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.snapshot_id, "successor-snapshot");
+  }
+});
+
+test("mixed-version attempt ages use one permutation-invariant event-age fallback", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "3".repeat(64);
+  const evidence = {
+    currentA: transportObservation("retrying", {
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "current-a",
+      attempt_id: 11,
+      socket_epoch: 5,
+      sample_age_ms: 100,
+      attempt_age_ms: 1_000,
+    }),
+    currentB: transportObservation("retrying", {
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "current-b",
+      attempt_id: 12,
+      socket_epoch: 6,
+      sample_age_ms: 0,
+      attempt_age_ms: 2_000,
+    }),
+    legacy: transportObservation("retrying", {
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "legacy",
+      attempt_id: 3,
+      socket_epoch: 2,
+      sample_age_ms: 50,
+      attempt_age_ms: null,
+    }),
+  };
+  const permutations = [
+    ["currentA", "currentB", "legacy"],
+    ["currentA", "legacy", "currentB"],
+    ["currentB", "currentA", "legacy"],
+    ["currentB", "legacy", "currentA"],
+    ["legacy", "currentA", "currentB"],
+    ["legacy", "currentB", "currentA"],
+  ];
+
+  for (const order of permutations) {
+    const operations = {
+      nodes: order.map((name) => ({
+        transport: {
+          observing_node_id: evidence[name].observing_node_id,
+          observations: [evidence[name]],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.observation.boot_id, "current-b", order.join(","));
   }
 });
 

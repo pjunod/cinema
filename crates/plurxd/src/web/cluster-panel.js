@@ -219,6 +219,8 @@
       transferring:4,connecting:3,failed:2,complete:1};
     const age=observation=>Number(observation.sample_age_ms||0);
     const attemptAge=observation=>{
+      if(observation.attempt_age_ms===null||observation.attempt_age_ms===undefined)
+        return null;
       const value=Number(observation.attempt_age_ms);
       return Number.isFinite(value)&&value>=0?value:null;
     };
@@ -261,6 +263,15 @@
     const withinIdentity=(left,right)=>
       (priority[right.phase]||0)-(priority[left.phase]||0)||
       age(left)-age(right)||tieBreak(left,right);
+    const chronologyOrder=observations=>{
+      // One comparison cohort must use one basis. Pairwise fallback between
+      // attempt age and event age is non-transitive in a rolling deployment.
+      const useAttemptAge=observations.length>0&&
+        observations.every(observation=>attemptAge(observation)!==null);
+      return (left,right)=>(useAttemptAge
+        ?attemptAge(left)-attemptAge(right):age(left)-age(right))||
+        (priority[right.phase]||0)-(priority[left.phase]||0)||tieBreak(left,right);
+    };
     const groups=new Map();
     candidates.forEach(observation=>{
       const key=identity(observation);
@@ -272,7 +283,8 @@
     const representatives=[];
     groups.forEach(group=>{
       const freshest=Math.min(...group.observations.map(age));
-      let current=group.observations.filter(observation=>age(observation)<=freshest+5000);
+      const completionCohort=group.observations.filter(
+        observation=>age(observation)<=freshest+5000);
       // A flushed sender acknowledgement is causally later than every
       // contemporaneous receiver-side phase for the same exact snapshot: the
       // receiver had to finish the install and return that response before the
@@ -281,12 +293,12 @@
       // leader's retained acknowledgement must not hide a newer attempt after a
       // receiver restart or leadership change; legacy and malformed identities
       // remain attempt-local.
-      const nonComplete=current.filter(observation=>observation.phase!=="complete");
+      const nonComplete=completionCohort.filter(observation=>observation.phase!=="complete");
       const freshestNonComplete=nonComplete.length
         ?Math.min(...nonComplete.map(age)):Number.POSITIVE_INFINITY;
       const completionCanSupersede=observation=>age(observation)<=freshestNonComplete;
       const acknowledged=group.fingerprint
-        ?current.filter(observation=>
+        ?completionCohort.filter(observation=>
           acknowledgedComplete(observation)&&completionCanSupersede(observation)):[];
       if(acknowledged.length){
         acknowledged.sort((left,right)=>age(left)-age(right)||tieBreak(left,right));
@@ -299,8 +311,9 @@
       // not reach it. An acknowledged sender Complete is causally stronger and
       // already returned above. Apply this exception once at the group boundary;
       // it does not cover inbound failures or unrelated fingerprints.
-      const receiverComplete=current.some(observation=>observation.phase==="complete"&&
+      const receiverComplete=completionCohort.some(observation=>observation.phase==="complete"&&
         observation.direction==="inbound"&&completionCanSupersede(observation));
+      let current=group.observations;
       if(group.fingerprint&&receiverComplete)
         current=current.filter(observation=>
           observation.direction!=="outbound"||acknowledgedComplete(observation));
@@ -320,18 +333,13 @@
         observations.sort(withinIdentity);
         attemptRepresentatives.push(observations[0]);
       });
-      attemptRepresentatives.sort((left,right)=>
-        (attemptAge(left)!==null&&attemptAge(right)!==null
-          ?attemptAge(left)-attemptAge(right):age(left)-age(right))||
-        (priority[right.phase]||0)-(priority[left.phase]||0)||tieBreak(left,right));
+      attemptRepresentatives.sort(chronologyOrder(attemptRepresentatives));
       representatives.push(attemptRepresentatives[0]);
     });
-    // Identity representatives form one total order: freshness first, then
-    // phase severity, then stable observation fields. Input row order cannot
-    // change the selected recovery explanation.
-    representatives.sort((left,right)=>
-      age(left)-age(right)||
-      (priority[right.phase]||0)-(priority[left.phase]||0)||tieBreak(left,right));
+    // Completion authority stays fingerprint-local above. Every surviving
+    // identity representative shares one total chronology order here, so a
+    // former leader's late terminal event cannot hide a successor snapshot.
+    representatives.sort(chronologyOrder(representatives));
     return representatives[0]||null;
   }
   function clusterTransportExplanation(ops,raftId,boundedReadReady,clientElapsedMs=0){
