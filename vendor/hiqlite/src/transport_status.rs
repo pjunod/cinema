@@ -995,29 +995,4 @@ mod tests {
             saturated.inner.capacity
         );
     }
-
-    #[test]
-    fn transport_route_contract_is_authenticated_memory_only_and_404_compatible() {
-        let routes = include_str!("network/../start.rs");
-        let management = include_str!("network/management.rs");
-        let client = include_str!("client/mgmt.rs");
-        let handler = management
-            .split("pub(crate) async fn snapshot_transport_sqlite")
-            .nth(1)
-            .expect("transport handler")
-            .split("\n}")
-            .next()
-            .expect("transport handler body");
-
-        assert!(routes.contains("\"/transport/sqlite\""));
-        assert!(handler.contains("validate_secret(&state, &headers)?"));
-        assert!(handler.contains("state.snapshot_transport.snapshot()"));
-        assert!(handler.contains("observation.raft_group == \"sqlite\""));
-        assert!(handler.contains("Json(snapshot).into_response()"));
-        assert!(!handler.contains("state.raft"));
-        assert!(!handler.contains("Store"));
-        assert!(client.contains("reqwest::StatusCode::NOT_FOUND"));
-        assert!(client.contains("return Ok(None)"));
-        assert!(!client.contains("RaftStreamResponsePayload::SnapshotTransport"));
-    }
 }

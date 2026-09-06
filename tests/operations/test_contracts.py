@@ -1618,7 +1618,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "completed_observation_never_projects_as_stalled_and_eventually_expires",
             "valid_install_does_not_stall_at_the_chunk_window",
             "retired_peers_are_bounded",
-            "transport_route_contract_is_authenticated_memory_only_and_404_compatible",
+            "production_transport_route_enforces_auth_and_returns_memory_only_json",
             "production_transport_client_uses_exact_authenticated_route_and_accepts_404",
         )
         for test_name in hiqlite_snapshot_tests:

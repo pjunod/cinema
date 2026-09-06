@@ -463,7 +463,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
-	  transport_status::tests::transport_route_contract_is_authenticated_memory_only_and_404_compatible \
+	  network::management::transport_route_tests::production_transport_route_enforces_auth_and_returns_memory_only_json \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \

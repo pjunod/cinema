@@ -63,15 +63,20 @@ pub fn serialize_network<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 #[inline(always)]
-fn validate_secret(state: &AppStateExt, headers: &HeaderMap) -> Result<(), Error> {
+fn validate_secret_value(secret_api: &str, headers: &HeaderMap) -> Result<(), Error> {
     match headers.get(HEADER_NAME_SECRET) {
         None => Err(Error::Token("API Secret missing".into())),
         Some(secret) => {
-            if state.secret_api.as_bytes() != secret.as_bytes() {
+            if secret_api.as_bytes() != secret.as_bytes() {
                 Err(Error::Token("Invalid API Secret".into()))
             } else {
                 Ok(())
             }
         }
     }
+}
+
+#[inline(always)]
+fn validate_secret(state: &AppStateExt, headers: &HeaderMap) -> Result<(), Error> {
+    validate_secret_value(&state.secret_api, headers)
 }

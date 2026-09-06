@@ -1876,10 +1876,10 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn production_connection_supervisor_does_not_invent_snapshot_work() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("reserve a connection-refused endpoint");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind handshake observer");
         let address = listener.local_addr().expect("read endpoint");
-        drop(listener);
         let transport =
             crate::LocalSnapshotTransportStatus::new(1, std::collections::BTreeSet::from([2]));
         let mut factory = NetworkStreaming {
@@ -1904,8 +1904,12 @@ mod tests {
             &node,
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (attempted_socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .expect("production supervisor must attempt the observed connection")
+            .expect("accept production connection attempt");
         assert!(transport.snapshot().observations.is_empty());
+        drop(attempted_socket);
         drop(connection);
     }
 

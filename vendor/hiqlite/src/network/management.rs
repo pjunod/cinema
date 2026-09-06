@@ -1,13 +1,16 @@
 use crate::NodeId;
 use crate::app_state::{AppState, RaftType};
-use crate::network::{AppStateExt, Error, fmt_ok, get_payload, validate_secret};
+use crate::network::{
+    AppStateExt, Error, fmt_ok, get_payload, validate_secret, validate_secret_value,
+};
 use crate::{Node, helpers};
 use axum::Json;
 use axum::body;
 use axum::body::Body;
-use axum::extract::Path;
+use axum::extract::{Extension, Path};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
+use axum::routing::{MethodRouter, get};
 use openraft::error::{CheckIsLeaderError, ForwardToLeader, RaftError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -27,6 +30,25 @@ pub struct LearnerReq {
 pub struct ClusterLeaveReq {
     pub node_id: u64,
     pub stay_as_learner: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct SnapshotTransportEndpoint {
+    secret_api: Arc<str>,
+    status: crate::LocalSnapshotTransportStatus,
+}
+
+pub(crate) fn snapshot_transport_sqlite_route<S>(
+    secret_api: &str,
+    status: crate::LocalSnapshotTransportStatus,
+) -> MethodRouter<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    get(snapshot_transport_sqlite).layer(Extension(SnapshotTransportEndpoint {
+        secret_api: Arc::from(secret_api),
+        status,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -422,13 +444,74 @@ pub(crate) async fn metrics(
 /// only node-owned memory and therefore remains available while the embedding
 /// daemon is still waiting to open its public listener.
 pub(crate) async fn snapshot_transport_sqlite(
-    state: AppStateExt,
+    Extension(endpoint): Extension<SnapshotTransportEndpoint>,
     headers: HeaderMap,
 ) -> Result<Response, Error> {
-    validate_secret(&state, &headers)?;
-    let mut snapshot = state.snapshot_transport.snapshot();
+    validate_secret_value(&endpoint.secret_api, &headers)?;
+    let mut snapshot = endpoint.status.snapshot();
     snapshot
         .observations
         .retain(|observation| observation.raft_group == "sqlite");
     Ok(Json(snapshot).into_response())
+}
+
+#[cfg(test)]
+mod transport_route_tests {
+    use super::*;
+    use axum::Router;
+    use reqwest::StatusCode;
+
+    #[tokio::test]
+    async fn production_transport_route_enforces_auth_and_returns_memory_only_json() {
+        let status = crate::LocalSnapshotTransportStatus::new(7, BTreeSet::from([8]));
+        let app = Router::new().route(
+            "/cluster/transport/sqlite",
+            snapshot_transport_sqlite_route("route-secret", status),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind production route test");
+        let address = listener.local_addr().expect("route test address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve route test");
+        });
+        let url = format!("http://{address}/cluster/transport/sqlite");
+        let client = reqwest::Client::new();
+
+        assert_eq!(
+            client
+                .get(&url)
+                .send()
+                .await
+                .expect("missing secret")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get(&url)
+                .header(crate::network::HEADER_NAME_SECRET, "wrong")
+                .send()
+                .await
+                .expect("wrong secret")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let response = client
+            .get(&url)
+            .header(crate::network::HEADER_NAME_SECRET, "route-secret")
+            .send()
+            .await
+            .expect("valid secret");
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = response
+            .json::<crate::SnapshotTransportStatus>()
+            .await
+            .expect("memory-only status JSON");
+        assert_eq!(snapshot.observing_node_id, 7);
+        assert!(snapshot.observations.is_empty());
+
+        server.abort();
+        let _ = server.await;
+    }
 }

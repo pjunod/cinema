@@ -211,7 +211,10 @@ where
                 .route("/metrics/{raft_type}", get(management::metrics))
                 .route(
                     "/transport/sqlite",
-                    get(management::snapshot_transport_sqlite),
+                    management::snapshot_transport_sqlite_route(
+                        &state.secret_api,
+                        state.snapshot_transport.clone(),
+                    ),
                 )
                 .route("/elect/{raft_type}", post(management::elect)),
         )
