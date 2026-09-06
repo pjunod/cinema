@@ -30,15 +30,18 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | every current review finding is fixed; moved-base Rust 1.97.1 fast-lane qualification and three replacement adversarial reviews are pending | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | every current review finding is fixed and the moved-base Rust 1.97.1 fast lane is green; three replacement exact-candidate adversarial reviews are pending | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
 
 The current M4 integration tree is rebased onto merged M3 effort tip
-`f5c688a9`; its replayed head is `6faebf61`. The moved-base history audit
-passes with explicit current-check mappings for every corrective M4 commit.
+`f5c688a9`. Its moved-base focused cluster/WAL lane, 197 operations contracts,
+web suite, 23-point/29-check validation catalog, workspace all-target check,
+root and vendored denied-warning Clippy, formatting, diff hygiene, and history
+audit pass on Rust 1.97.1. Explicit current-check mappings cover every
+corrective M4 commit.
 Candidates `7e220e0c` and `d1472a55` passed their pre-review fast lanes but
 failed exact-SHA adversarial review; neither candidate will be pushed or opened
 as a pull request. Their findings were corrected and committed on a replacement
