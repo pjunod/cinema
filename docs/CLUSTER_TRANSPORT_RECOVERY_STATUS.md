@@ -29,7 +29,7 @@ change.
 |---|---|---|---|---|
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
-| M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | rebased candidate passing focused Rust, virtual-time, deployment, and operations tests; exact-SHA adversarial review is next | Virtual-time exact bounds · config/env/Compose precedence |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | all eight first-pass adversarial findings are fixed; the replacement candidate passes the focused fast lane and awaits exact-SHA re-review | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
 | M5 · recovery campaign | planned | not opened | not started | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
@@ -54,10 +54,10 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | Vendored denied-warning Clippy | pass | Prescribed auto-heal+cache+macros+SQLite and cache-only library lanes pass with `-D warnings`; seven pre-existing Rust 1.97.1 lint findings were corrected rather than suppressed |
 | Dependency resolution | pass | Standalone vendor lock now matches the daemon transport stack: Tokio 1.53.1 and rustls 0.23.42 |
 | Persistent regression map | pass | The transport tests are in `cluster-wal-check`; a command wrapper fails exact filters unless one test executes, the broad snapshot filter requires ten passing tests, and operations contracts preserve both guards |
-| Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the ninth-review fixes, including exact-socket proxy refusal/coalescing, caller-cancellation recovery, retained decoded responses, and dedicated leader-control/backpressure regressions, with enforced nonzero counts for every exact filter; loopback tests used the normal unsandboxed allowance |
-| Operations contracts | pass · 186 tests | Persistent command/count guards include the new caller-cancellation recovery regression; the existing deployment, CI, and UI-baseline contracts pass with the port-reservation fixture using the normal unsandboxed loopback allowance |
-| M3 snapshot RPC suite | pass · 32 tests | The standalone `raft_client` suite covers one absolute transfer deadline, a latched final-install deadline, caller cancellation, exact-socket reset ownership, mismatch phase transitions, and stale-attempt isolation |
-| M3 configuration suite | pass · 11 tests | Chunk, transfer, and install budgets accept documented bounds, reject invalid ordering and overflow, and preserve defaults when environment variables are empty |
+| Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the M3 review fixes, including both production `full_snapshot` wrappers, final-mismatch reread ownership, simultaneous timer/phase transition, hard-TTL shorter than C, configured receiver admission, and bounded standalone durations; every exact filter executed and loopback tests used the normal unsandboxed allowance |
+| Operations contracts | pass · 192 tests | Persistent command/count guards include every new M3 regression; the existing deployment, CI, and UI-baseline contracts pass with the port-reservation fixture using the normal unsandboxed loopback allowance |
+| M3 snapshot RPC suite | pass · 37 tests | The standalone `raft_client` suite covers one absolute transfer deadline, a latched final-install deadline, caller cancellation, exact-socket reset ownership, typed mismatch restoration before reread, simultaneous phase/timer readiness, both production snapshot wrappers, and stale-attempt isolation |
+| M3 configuration suite | pass · 11 root tests + 1 standalone bound test | Chunk, transfer, and install budgets accept documented bounds, reject invalid ordering and oversized values, preserve defaults for empty environment variables, and cannot reach unchecked `Instant` arithmetic |
 | M3 production timing seam | pass | The `hiqlite-store` migration test proves the production startup catch-up deadline is exactly transfer + install + 45 seconds |
 | M3 deployment and operations contracts | pass · 192 tests | Compose health timing derives from the three startup phases; preflight validates explicit values, opaque mounts, bounds, and chunk ≤ transfer precedence |
 | M3 compile and lint | pass | Root all-target check and denied-warning Clippy pass; standalone vendored SQLite, SQLite+cache, and full library matrices pass; root and standalone formatting pass |
@@ -87,15 +87,23 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    first preflight exposed an unmapped validation helper; the merged correction
    routes changes to that helper through the cluster/WAL lane it protects and
    has its own scope regression.
+6. **Treat receiver admission as the configured chunk budget.** The first M3
+   adversarial pass found that sender C had been configured while the receiving
+   snapshot executor still admitted work under the old fixed frame-write
+   timeout. The node-owned executor now captures the validated C value at
+   startup, and its capacity-one regression uses a non-default scaled budget.
 
-## Next checkpoint — review and merge the bounded M3 candidate
+## Next checkpoint — exact-SHA re-review and merge of M3
 
-M1/M2 are merged into the effort at `5f96469a94`. The M3 candidate rebased
-cleanly onto that exact merge and retains the original two reviewable commits.
-Its next checkpoint is an exact-tree rerun of the focused cluster/WAL lane and
-compiler evidence, followed by three adversarial review tracks and an effort
-PR. Evidence remains explicitly bounded to helper and virtual-time deadline
-tests; real socket/install acceptance is open for M5.
+M1/M2 are merged into the effort at `5f96469a94`. The first exact-SHA M3 review
+found eight boundary gaps: final mismatch restored T too late, a stale T timer
+could beat a ready final-stage update, standalone durations could overflow
+`Instant`, both production wrappers lacked direct pins, hard TTL below C was
+untested, numeric overflow evidence was missing, the Dockerfile comment was
+stale, and receiver admission still used the old fixed timeout. All eight are
+fixed and the focused fast lane is green. The replacement SHA now goes through
+the same three adversarial tracks before the effort PR opens. Real
+socket/install acceptance remains explicitly open for M5.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only
