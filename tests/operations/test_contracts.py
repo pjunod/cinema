@@ -2403,6 +2403,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         for offset, regression in enumerate(exact_regressions, start=2):
             self.assertIn(regression, make_commands[offset])
+            self.assertIn("scripts/require-test-count", make_commands[offset])
             self.assertIn("--lib -- --exact", make_commands[offset])
         self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[7])
         self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[8])
@@ -2422,6 +2423,13 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("if-no-files-found: error", recovery)
         self.assertIn(
             "steps.transport_recovery.outcome != 'success'", recovery
+        )
+        receipt_contract = runpy.run_path(
+            str(ROOT / "validation/ci_lane_receipt.py")
+        )
+        self.assertIn(
+            "cluster-transport-recovery",
+            receipt_contract["LANES"],
         )
 
         for aggregate_name in ("publish_main", "pr_gate"):

@@ -61,6 +61,22 @@ class CiLaneReceiptCase(unittest.TestCase):
             with self.subTest(lane=lane):
                 self.assertEqual(self.receipt(lane=lane)["lane"], lane)
 
+    def test_receipt_accepts_the_transport_recovery_lane(self):
+        environment = self.environment()
+        environment["GITHUB_JOB"] = "cluster_transport_recovery"
+
+        receipt = self.receipt(
+            environment=environment,
+            lane="cluster-transport-recovery",
+            commands=["make cluster-transport-recovery-check"],
+            log_name="cluster-transport-recovery.log",
+        )
+
+        self.assertEqual(receipt["lane"], "cluster-transport-recovery")
+        self.assertEqual(
+            receipt["commands"], ["make cluster-transport-recovery-check"]
+        )
+
     def test_receipt_refuses_unknown_lanes_results_or_empty_commands(self):
         for overrides in (
             {"lane": "cluster-wal"},

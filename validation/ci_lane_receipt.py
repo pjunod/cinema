@@ -17,7 +17,13 @@ class LaneReceiptError(ValueError):
 
 
 LANES = frozenset(
-    {"cluster-store", "cluster-store-legacy", "cluster-store-backstop", "cluster-topology"}
+    {
+        "cluster-store",
+        "cluster-store-legacy",
+        "cluster-store-backstop",
+        "cluster-topology",
+        "cluster-transport-recovery",
+    }
 )
 RESULTS = frozenset({"success", "failure", "cancelled"})
 
