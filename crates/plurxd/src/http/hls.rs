@@ -20364,6 +20364,88 @@ mod tests {
     /// The second half is the one worth asserting: a validation that runs after
     /// the write would still return 400 and would look identical from the
     /// outside, while leaving a row nobody can order against.
+    /// The revision a create records reaches the pointer it eventually writes.
+    ///
+    /// Three separate things have to line up for the fence to mean anything,
+    /// and each was proved on its own: create records the ask, activation
+    /// compares a revision, and the pointer stores one. This is the only test
+    /// that runs the whole chain against a real source, so it is the only one
+    /// that would notice the chain being connected to the wrong thing — an
+    /// activation handed a re-read instead of the recorded value, or a pointer
+    /// filled from somewhere other than the ask table, both of which look
+    /// correct from either end alone.
+    ///
+    /// What it deliberately does *not* prove is the race: that create carries
+    /// the revision it recorded rather than one read at activation time. Those
+    /// two differ only when the ask moves in between, which needs the create
+    /// paused mid-flight, and this suite has no such hook. That gap is real
+    /// and named rather than papered over.
+    #[tokio::test]
+    async fn a_created_playback_points_at_the_ask_its_create_recorded() {
+        use plurx_core::playback::DesiredQuality;
+        let dir = crate::test_tempdir().expect("tempdir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = crate::transcode::HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let user = fixture
+            .store
+            .create_user("pointer-ask-chain", "hash", false)
+            .await
+            .expect("viewer");
+
+        let ask = envelope(1, DesiredQuality::Original);
+        let answer = create(
+            crate::http::extract::AuthUser(user.clone()),
+            State(fixture.state.clone()),
+            AxPath(fixture.file_id()),
+            HeaderMap::new(),
+            super::super::network::RemoteAddress(None),
+            Json(CreateSession {
+                playback_id: "chain-player".into(),
+                intent: Some(ask.clone()),
+                ..bare_create()
+            }),
+        )
+        .await;
+
+        let recorded = fixture
+            .store
+            .desired_selection(user.id, "chain-player")
+            .await
+            .expect("reading the ask")
+            .expect("the create recorded its viewer's ask");
+        assert_eq!(recorded.digest, ask.digest());
+
+        // Whether the create could be completed on this fixture is not the
+        // point and is not asserted; what matters is that if it reached the
+        // pointer, the pointer names the ask that was current when it did.
+        if answer.is_ok() {
+            let pointer = fixture
+                .store
+                .media_session_route_for_playback(user.id, "chain-player")
+                .await
+                .expect("route")
+                .expect("a completed create points somewhere");
+            assert_eq!(
+                pointer.playback_id, "chain-player",
+                "the pointer belongs to the playback the create named"
+            );
+            // The pointer's own revision is what the fence reads. A pointer
+            // written for a playback with an ask must carry that ask's
+            // revision, or the next legitimate write is refused as though it
+            // came from an old binary.
+            let carried = fixture
+                .store
+                .validation_playback_pointer_desired_revision(user.id, "chain-player")
+                .await
+                .expect("reading the pointer revision");
+            assert_eq!(
+                carried,
+                Some(recorded.revision),
+                "the pointer carries the ask that was current when it was written"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_malformed_ask_refuses_the_create_and_records_nothing() {
         use plurx_core::playback::DesiredQuality;

@@ -1688,6 +1688,26 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn validation_playback_pointer_desired_revision(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let playback_id = playback_id.to_owned();
+        self.with_conn(move |conn| {
+            let value: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT desired_revision FROM media_playback_pointers
+                      WHERE user_id = ?1 AND playback_id = ?2",
+                    params![user_id, playback_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(value.flatten())
+        })
+        .await
+    }
+
     async fn validation_write_legacy_playback_pointer(
         &self,
         user_id: i64,

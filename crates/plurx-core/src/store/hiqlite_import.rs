@@ -2646,6 +2646,35 @@ mod tests {
         assert_eq!(names.len(), 40, "review every imported durable table");
     }
 
+    /// A source from before the pointer fence has no revision to attribute its
+    /// pointers to, and the import must say so rather than invent one.
+    ///
+    /// `NULL` is the whole point. The fence reads a null on a playback that
+    /// *has* an ask as a writer from before the column, so a restore that
+    /// filled this in with the ask that happens to be current would hand every
+    /// imported pointer a token it never earned — which is the "never replace
+    /// a missing expected token with the current revision" rule, arriving
+    /// through a restore instead of through a write. It is safe precisely
+    /// because such a source has no asks either: the ask table arrived one
+    /// version earlier and the fence only fires where an ask exists.
+    #[test]
+    fn a_pre_fence_source_projects_a_null_pointer_revision() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "media_playback_pointers")
+            .copied()
+            .expect("pointer table plan");
+        assert!(
+            value_projection(table, 48, false).ends_with("updated_at_ms, NULL"),
+            "a source from before the column carries no revision for its pointers"
+        );
+        assert!(
+            value_projection(table, SQLITE_SCHEMA_VERSION, false)
+                .ends_with("updated_at_ms, desired_revision"),
+            "and a current source carries the one its pointers were written against"
+        );
+    }
+
     #[test]
     fn pre_v44_conversion_projection_supplies_a_null_recovery_guard_link() {
         let table = TABLES

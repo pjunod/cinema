@@ -355,6 +355,14 @@ impl From<&mut Row<'_>> for PointerRow {
     }
 }
 
+struct PointerRevisionRow(Option<i64>);
+
+impl From<&mut Row<'_>> for PointerRevisionRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("desired_revision"))
+    }
+}
+
 struct DesiredRow(crate::domain::DesiredOwnership);
 
 impl From<&mut Row<'_>> for DesiredRow {
@@ -1879,6 +1887,20 @@ impl MediaSessionStore for HiqliteAuthStore {
         desired_row(self, user_id, playback_id)
             .await?
             .ok_or_else(|| StoreError::Database("desired selection vanished".to_owned()))
+    }
+
+    async fn validation_playback_pointer_desired_revision(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let rows: Vec<PointerRevisionRow> = timeout_store(self.client().query_consistent_map(
+            "SELECT desired_revision FROM media_playback_pointers
+              WHERE user_id = $1 AND playback_id = $2",
+            params!(user_id, playback_id),
+        ))
+        .await?;
+        Ok(rows.first().and_then(|row| row.0))
     }
 
     async fn validation_write_legacy_playback_pointer(

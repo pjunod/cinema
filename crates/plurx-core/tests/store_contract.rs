@@ -485,6 +485,7 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "desired_selection",
     // Test-only in intent, declared on the trait because the fence it proves
     // has to be proved on both backends. See its doc comment.
+    "validation_playback_pointer_desired_revision",
     "validation_write_legacy_playback_pointer",
     "claim_media_session_request",
     "assign_media_session_request_owner",
@@ -15656,7 +15657,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 293, "review the Store method count");
+    assert_eq!(declared.len(), 294, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

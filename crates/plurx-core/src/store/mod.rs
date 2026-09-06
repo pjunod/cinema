@@ -3051,6 +3051,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// It is deliberately not a bypass: it takes no revision, so it cannot be
     /// used to write a pointer *around* the fence, only to attempt the exact
     /// write the fence exists to refuse.
+    /// The ask a playback's pointer was written against, as the fence reads it.
+    ///
+    /// A read rather than a shape: the column is not on `MediaSessionRoute`
+    /// and has no business being there — nothing serving a stream needs it —
+    /// but a proof that the write chain reaches it does.
+    async fn validation_playback_pointer_desired_revision(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<i64>, StoreError>;
+
     async fn validation_write_legacy_playback_pointer(
         &self,
         user_id: i64,
