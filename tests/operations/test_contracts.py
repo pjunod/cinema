@@ -982,6 +982,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("name: Main promotion gate", workflow)
         self.assertIn("branches: [main]", workflow)
+        self.assertIn("effort/*|integration/*-into-main)", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  check:", 1)[1].split(

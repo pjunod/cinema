@@ -5,7 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   # Task pull requests aimed at effort/** use effort-ci.yml's compile-only
-  # development gate. A final effort/** -> main pull request lands here and
+  # development gate. A final effort/** -> main pull request, or its
+  # integration/*-into-main conflict-resolution branch, lands here and
   # deliberately expands to the complete fan-out below.
   pull_request:
     branches: [main]
@@ -57,7 +58,7 @@ jobs:
           if [ "$EVENT_NAME" = pull_request ] \
             && [ "$BASE_REF" = main ]; then
             case "$HEAD_REF" in
-              effort/*)
+              effort/*|integration/*-into-main)
                 scope_event=effort_qualification
                 qualification=true
                 ;;
