@@ -9462,8 +9462,7 @@ pub struct TranscodeManager {
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
     decode_facts: crate::decode_facts::DecodeFactCache,
-    decode_ffprobe: String,
-    decode_ffprobe_build_digest: Option<String>,
+    decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
@@ -9805,8 +9804,7 @@ impl TranscodeManager {
             caps,
             decoders: Vec::new(),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
-            decode_ffprobe: crate::ffmpeg::ffprobe_bin(),
-            decode_ffprobe_build_digest: None,
+            decode_probe_identity: None,
             pipeline,
             admissions: Admissions::new(),
             cache: None,
@@ -9925,9 +9923,11 @@ impl TranscodeManager {
         self
     }
 
-    pub fn with_decode_probe(mut self, ffprobe: String, build_digest: Option<String>) -> Self {
-        self.decode_ffprobe = ffprobe;
-        self.decode_ffprobe_build_digest = build_digest;
+    pub fn with_decode_probe(
+        mut self,
+        identity: Option<crate::decode_facts::DecodeProbeIdentity>,
+    ) -> Self {
+        self.decode_probe_identity = identity;
         self
     }
 
@@ -12967,17 +12967,18 @@ impl TranscodeManager {
             expected_source_snapshot: _,
             bound_source,
         } = request.clone();
-        if let (Some(source), Some(build_digest)) = (
-            bound_source.as_ref(),
-            self.decode_ffprobe_build_digest.as_deref(),
-        ) {
+        if let (Some(source), Some(probe)) =
+            (bound_source.as_ref(), self.decode_probe_identity.as_ref())
+        {
             match self
                 .decode_facts
                 .get_or_probe(
-                    &self.decode_ffprobe,
-                    build_digest,
+                    probe,
                     Arc::clone(&source.handle),
                     None,
+                    crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
+                    deadline.saturating_duration_since(Instant::now()),
+                    cancelled,
                 )
                 .await
             {
@@ -12988,6 +12989,14 @@ impl TranscodeManager {
                     facts_digest = facts.facts_digest(),
                     "collected bound decoder facts for explicit planning"
                 ),
+                Err(crate::decode_facts::DecodeFactError::Cancelled) => return Ok(None),
+                Err(crate::decode_facts::DecodeFactError::Deadline) => {
+                    tracing::warn!(
+                        recipe = %hash,
+                        "decoder fact collection exhausted the startup deadline"
+                    );
+                    return Ok(None);
+                }
                 Err(error) => tracing::warn!(
                     recipe = %hash,
                     %error,

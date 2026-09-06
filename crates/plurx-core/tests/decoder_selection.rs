@@ -1,9 +1,11 @@
+use plurx_core::domain::DolbyVisionFacts;
 use plurx_core::transcode::{
     resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCapabilities,
-    DecodeCapability, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
-    DecodeReason, DecodeSourceIdentity, EffectiveRateControl, Encoder, FrameDomain,
-    FrameRateProvenance, OutputGrade, Pipeline, PlanError, SoftwareDecoder,
-    StreamSelectionProvenance, ToneMap, TranscodeMediaOptions, TranscodeRequest,
+    DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence,
+    DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
+    DecodeSurfaceContract, EffectiveRateControl, Encoder, FrameDomain, FrameRateProvenance,
+    OutputGrade, Pipeline, PlanError, SoftwareDecoder, StreamSelectionProvenance,
+    SubtitleRendering, ToneMap, TranscodeMediaOptions, TranscodeRequest,
 };
 use serde_json::{json, Value};
 
@@ -69,6 +71,64 @@ fn capability(
         codec: codec.to_owned(),
         profile: profile.map(str::to_owned),
         pixel_format: pixel_format.map(str::to_owned),
+        bit_depth: None,
+        dynamic_range: None,
+        max_width: None,
+        max_height: None,
+        max_pixel_rate: None,
+        surface: None,
+        status,
+    }
+}
+
+fn snapshot_identity() -> DecodeCapabilitySnapshotIdentity {
+    DecodeCapabilitySnapshotIdentity::new(
+        "f".repeat(64),
+        "test-node".to_owned(),
+        Some("e".repeat(64)),
+    )
+    .expect("valid snapshot identity")
+}
+
+fn exact_capability(
+    backend: DecodeBackend,
+    input: &DecodeFacts,
+    pipeline: Pipeline,
+    encoder: Encoder,
+    subtitle_rendering: SubtitleRendering,
+    status: CapabilityStatus,
+) -> DecodeCapability {
+    let rate = input.frame_rate().value().expect("known fixture rate");
+    let pixels = u128::from(input.width().expect("known fixture width"))
+        * u128::from(input.height().expect("known fixture height"))
+        * u128::from(rate.numerator());
+    let pixel_rate = pixels.div_ceil(u128::from(rate.denominator()));
+    DecodeCapability {
+        backend,
+        codec: input.codec().expect("known fixture codec").to_owned(),
+        profile: Some(input.profile().expect("known fixture profile").to_owned()),
+        pixel_format: Some(
+            input
+                .pixel_format()
+                .expect("known fixture pixel format")
+                .to_owned(),
+        ),
+        bit_depth: Some(input.bit_depth().expect("known fixture bit depth")),
+        dynamic_range: Some(
+            input
+                .dynamic_range_class()
+                .expect("known fixture dynamic range"),
+        ),
+        max_width: input.width(),
+        max_height: input.height(),
+        max_pixel_rate: Some(u64::try_from(pixel_rate).expect("fixture pixel rate")),
+        surface: Some(DecodeSurfaceContract::for_plan(
+            backend,
+            pipeline,
+            input,
+            encoder,
+            subtitle_rendering,
+        )),
         status,
     }
 }
@@ -81,10 +141,11 @@ fn capabilities(rows: Vec<DecodeCapability>) -> DecodeCapabilities {
             codec,
             None,
             None,
-            CapabilityStatus::Qualified,
+            CapabilityStatus::Advertised,
         )
     }));
     DecodeCapabilities::new(
+        snapshot_identity(),
         rows,
         ["h264", "hevc", "mpeg4"]
             .into_iter()
@@ -97,8 +158,27 @@ fn capabilities(rows: Vec<DecodeCapability>) -> DecodeCapabilities {
     .expect("valid capability snapshot")
 }
 
+fn capabilities_with_qualified_software(
+    input: &DecodeFacts,
+    pipeline: Pipeline,
+    encoder: Encoder,
+    subtitle_rendering: SubtitleRendering,
+    mut rows: Vec<DecodeCapability>,
+) -> DecodeCapabilities {
+    rows.push(exact_capability(
+        DecodeBackend::Software,
+        input,
+        pipeline,
+        encoder,
+        subtitle_rendering,
+        CapabilityStatus::Qualified,
+    ));
+    capabilities(rows)
+}
+
 fn unqualified_software_capabilities(codec: &str) -> DecodeCapabilities {
     DecodeCapabilities::new(
+        snapshot_identity(),
         vec![],
         vec![SoftwareDecoder {
             codec: codec.to_owned(),
@@ -192,7 +272,7 @@ fn legacy_h264_preferences_match_existing_encoder_routes() {
         assert_eq!(
             plan.decode().evidence(),
             if backend == DecodeBackend::Software {
-                DecodeEvidence::Qualified
+                DecodeEvidence::LegacyUnverified
             } else {
                 DecodeEvidence::LegacyUnverified
             }
@@ -228,7 +308,10 @@ fn heavy_legacy_qsv_and_vaapi_inputs_preserve_hardware_decode() {
         .expect("heavy legacy route resolves");
         assert_eq!(plan.decode().backend(), backend);
         assert_eq!(plan.decode().evidence(), DecodeEvidence::LegacyUnverified);
-        assert_eq!(plan.decode().surface().download_format(), Some("p010le"));
+        assert_eq!(
+            plan.decode().surface().decoder_download_format(),
+            Some("p010le")
+        );
     }
 }
 
@@ -254,7 +337,7 @@ fn cropped_sdr_hevc_does_not_claim_a_measured_hardware_preference() {
             "hevc",
             None,
             None,
-            CapabilityStatus::Qualified,
+            CapabilityStatus::Advertised,
         )]),
         DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
     )
@@ -276,13 +359,31 @@ fn enforce_requires_the_qualified_profile_and_pixel_class() {
         "24/1",
         Some("smpte2084"),
     ));
-    let caps = capabilities(vec![capability(
-        DecodeBackend::Qsv,
-        "hevc",
+    let supported = facts(video(
+        0,
+        Some("hevc"),
         Some("main 10"),
+        3840,
+        2160,
         Some("yuv420p10le"),
-        CapabilityStatus::Qualified,
-    )]);
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    let caps = capabilities_with_qualified_software(
+        &input,
+        Pipeline::Cpu,
+        Encoder::Qsv,
+        SubtitleRendering::None,
+        vec![exact_capability(
+            DecodeBackend::Qsv,
+            &supported,
+            Pipeline::Cpu,
+            Encoder::Qsv,
+            SubtitleRendering::None,
+            CapabilityStatus::Qualified,
+        )],
+    );
     let plan = resolve(
         Encoder::Qsv,
         Pipeline::Cpu,
@@ -313,13 +414,20 @@ fn a_qualified_hardware_class_is_distinct_from_an_advertised_one() {
         (CapabilityStatus::Qualified, DecodeBackend::Qsv),
         (CapabilityStatus::Rejected, DecodeBackend::Software),
     ] {
-        let caps = capabilities(vec![capability(
-            DecodeBackend::Qsv,
-            "hevc",
-            Some("main 10"),
-            Some("yuv420p10le"),
-            status,
-        )]);
+        let caps = capabilities_with_qualified_software(
+            &input,
+            Pipeline::Cpu,
+            Encoder::Qsv,
+            SubtitleRendering::None,
+            vec![exact_capability(
+                DecodeBackend::Qsv,
+                &input,
+                Pipeline::Cpu,
+                Encoder::Qsv,
+                SubtitleRendering::None,
+                status,
+            )],
+        );
         let plan = resolve(
             Encoder::Qsv,
             Pipeline::Cpu,
@@ -329,6 +437,9 @@ fn a_qualified_hardware_class_is_distinct_from_an_advertised_one() {
         )
         .expect("software fallback remains available");
         assert_eq!(plan.decode().backend(), expected);
+        if status == CapabilityStatus::Qualified {
+            assert_eq!(plan.decode().reason(), DecodeReason::LegacyPreference);
+        }
     }
 }
 
@@ -343,7 +454,7 @@ fn software_inventory_is_not_silently_promoted_to_qualification() {
         Some("yuv420p"),
         "24/1",
         "24/1",
-        None,
+        Some("bt709"),
     ));
     let caps = unqualified_software_capabilities("h264");
     let legacy = resolve(
@@ -501,18 +612,18 @@ fn continuation_restriction_cannot_be_bypassed_by_a_new_hardware_preference() {
         Some("yuv420p"),
         "60/1",
         "60/1",
-        None,
+        Some("bt709"),
     ));
     let plan = resolve_transcode(
         &TranscodeRequest::new(Encoder::Nvenc, options(Pipeline::Cpu)),
         &input,
-        &capabilities(vec![capability(
-            DecodeBackend::Cuda,
-            "h264",
-            None,
-            None,
-            CapabilityStatus::Qualified,
-        )]),
+        &capabilities_with_qualified_software(
+            &input,
+            Pipeline::Cpu,
+            Encoder::Nvenc,
+            SubtitleRendering::None,
+            vec![],
+        ),
         &DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
         &AttemptRestrictions::requiring(DecodeBackend::Software),
     )
@@ -586,10 +697,17 @@ fn missing_codec_or_uninventoried_software_decoder_is_a_typed_refusal() {
 }
 
 #[test]
-fn policy_snapshot_is_immutable_and_preserves_all_legacy_false_spellings() {
-    for spelling in ["off", "0", "false", "no", "OFF", " False "] {
+fn policy_snapshot_is_immutable_and_preserves_exact_legacy_false_spellings() {
+    for spelling in ["off", "0", "false", "no"] {
         let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some(spelling));
         assert!(policy.force_software_decode(), "{spelling}");
+    }
+    for automatic in ["OFF", " False ", "auto", "on", "1"] {
+        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some(automatic));
+        assert!(
+            !policy.force_software_decode(),
+            "legacy parsing must not broaden for {automatic:?}"
+        );
     }
     let automatic = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("auto"));
     assert!(!automatic.force_software_decode());
@@ -616,16 +734,42 @@ fn rational_values_are_reduced_and_positive_geometry_is_conservative() {
 }
 
 #[test]
+fn pixel_layout_parsing_never_downgrades_unrecognized_high_bit_depth() {
+    for (pixel_format, expected_depth, expected_chroma) in [
+        ("yuv420p16le", Some(16), Some("420")),
+        ("yuv444p14be", Some(14), Some("444")),
+        ("yuv420p9le", Some(9), Some("420")),
+        ("p010le", Some(10), Some("420")),
+        ("p012be", Some(12), Some("420")),
+        ("nv12", Some(8), Some("420")),
+    ] {
+        let input = facts(video(
+            0,
+            Some("hevc"),
+            Some("main"),
+            1920,
+            1080,
+            Some(pixel_format),
+            "24/1",
+            "24/1",
+            None,
+        ));
+        assert_eq!(input.bit_depth(), expected_depth, "{pixel_format}");
+        assert_eq!(input.chroma_sampling(), expected_chroma, "{pixel_format}");
+    }
+}
+
+#[test]
 fn contradictory_capability_rows_are_rejected() {
     let row = capability(
         DecodeBackend::Qsv,
         "hevc",
         None,
         None,
-        CapabilityStatus::Qualified,
+        CapabilityStatus::Advertised,
     );
     assert!(matches!(
-        DecodeCapabilities::new(vec![row.clone(), row], vec![]),
+        DecodeCapabilities::new(snapshot_identity(), vec![row.clone(), row], vec![]),
         Err(PlanError::DuplicateCapability)
     ));
 }
@@ -634,13 +778,14 @@ fn contradictory_capability_rows_are_rejected() {
 fn overlapping_equal_specificity_capabilities_are_rejected() {
     assert!(matches!(
         DecodeCapabilities::new(
+            snapshot_identity(),
             vec![
                 capability(
                     DecodeBackend::Qsv,
                     "hevc",
                     Some("main 10"),
                     None,
-                    CapabilityStatus::Qualified,
+                    CapabilityStatus::Advertised,
                 ),
                 capability(
                     DecodeBackend::Qsv,
@@ -672,11 +817,12 @@ fn continuation_can_require_the_already_compatible_hardware_backend() {
     let plan = resolve_transcode(
         &TranscodeRequest::new(Encoder::Qsv, options(Pipeline::VppQsv)),
         &input,
-        &capabilities(vec![capability(
+        &capabilities(vec![exact_capability(
             DecodeBackend::Qsv,
-            "hevc",
-            None,
-            None,
+            &input,
+            Pipeline::VppQsv,
+            Encoder::Qsv,
+            SubtitleRendering::None,
             CapabilityStatus::Qualified,
         )]),
         &DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
@@ -712,7 +858,7 @@ fn decoder_renderer_surface_mismatch_is_a_typed_refusal() {
                 "hevc",
                 None,
                 None,
-                CapabilityStatus::Qualified,
+                CapabilityStatus::Advertised,
             )]),
             &DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
             &AttemptRestrictions::requiring(DecodeBackend::Cuda),
@@ -744,11 +890,12 @@ fn presentation_contract_records_color_tracks_subtitle_and_av_correction() {
     let plan = resolve_transcode(
         &TranscodeRequest::new(Encoder::Qsv, media),
         &input,
-        &capabilities(vec![capability(
+        &capabilities(vec![exact_capability(
             DecodeBackend::Qsv,
-            "hevc",
-            None,
-            None,
+            &input,
+            Pipeline::Hdr10Passthrough,
+            Encoder::Qsv,
+            SubtitleRendering::BitmapBurn,
             CapabilityStatus::Qualified,
         )]),
         &DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
@@ -769,12 +916,18 @@ fn presentation_contract_records_color_tracks_subtitle_and_av_correction() {
         contract.subtitle_rendering(),
         plurx_core::transcode::SubtitleRendering::BitmapBurn
     );
-    assert_eq!(plan.decode().surface().download_format(), Some("p010le"));
     assert_eq!(
-        plan.decode().surface().upload_domain(),
+        plan.decode().surface().decoder_download_format(),
+        Some("p010le")
+    );
+    assert_eq!(
+        plan.decode().surface().encoder_upload_domain(),
         Some(FrameDomain::Qsv)
     );
-    assert_eq!(plan.decode().surface().upload_format(), Some("p010le"));
+    assert_eq!(
+        plan.decode().surface().encoder_upload_format(),
+        Some("p010le")
+    );
 }
 
 #[test]
@@ -808,17 +961,282 @@ fn vendor_graphs_expose_their_hardware_surface_family() {
             encoder,
             pipeline,
             &input,
-            &capabilities(vec![capability(
+            &capabilities(vec![exact_capability(
                 backend,
-                "hevc",
-                None,
-                None,
+                &input,
+                pipeline,
+                encoder,
+                SubtitleRendering::None,
                 CapabilityStatus::Qualified,
             )]),
             DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
         )
         .expect("qualified vendor graph");
-        assert_eq!(plan.decode().surface().frame_domain(), domain);
-        assert_eq!(plan.decode().surface().download_format(), None);
+        assert_eq!(plan.decode().surface().decode_domain(), domain);
+        assert_eq!(plan.decode().surface().decoder_download_format(), None);
     }
+}
+
+#[test]
+fn unknown_layout_cannot_match_a_qualified_envelope() {
+    let input = facts(video(
+        0,
+        Some("hevc"),
+        Some("main"),
+        3840,
+        2160,
+        Some("mystery-layout"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let row = DecodeCapability {
+        backend: DecodeBackend::Qsv,
+        codec: "hevc".to_owned(),
+        profile: Some("main".to_owned()),
+        pixel_format: Some("mystery-layout".to_owned()),
+        bit_depth: Some(8),
+        dynamic_range: input.dynamic_range_class(),
+        max_width: Some(3840),
+        max_height: Some(2160),
+        max_pixel_rate: Some(3840 * 2160 * 24),
+        surface: Some(DecodeSurfaceContract::for_plan(
+            DecodeBackend::Qsv,
+            Pipeline::Cpu,
+            &input,
+            Encoder::Qsv,
+            SubtitleRendering::None,
+        )),
+        status: CapabilityStatus::Qualified,
+    };
+    assert_eq!(
+        resolve(
+            Encoder::Qsv,
+            Pipeline::Cpu,
+            &input,
+            &capabilities(vec![row]),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
+        ),
+        Err(PlanError::CapabilityUnavailable(DecodeBackend::Software))
+    );
+}
+
+#[test]
+fn qualified_envelopes_do_not_cover_larger_geometry_or_a_different_surface() {
+    let small = facts(video(
+        0,
+        Some("hevc"),
+        Some("main"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let large = facts(video(
+        0,
+        Some("hevc"),
+        Some("main"),
+        3840,
+        2160,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    for qualified in [
+        exact_capability(
+            DecodeBackend::Qsv,
+            &small,
+            Pipeline::Cpu,
+            Encoder::Qsv,
+            SubtitleRendering::None,
+            CapabilityStatus::Qualified,
+        ),
+        exact_capability(
+            DecodeBackend::Qsv,
+            &large,
+            Pipeline::VppQsv,
+            Encoder::Qsv,
+            SubtitleRendering::None,
+            CapabilityStatus::Qualified,
+        ),
+    ] {
+        let plan = resolve(
+            Encoder::Qsv,
+            Pipeline::Cpu,
+            &large,
+            &capabilities_with_qualified_software(
+                &large,
+                Pipeline::Cpu,
+                Encoder::Qsv,
+                SubtitleRendering::None,
+                vec![qualified],
+            ),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
+        )
+        .expect("precisely qualified software fallback");
+        assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+    }
+}
+
+#[test]
+fn capability_snapshot_identity_rejects_unbound_builds_and_drivers() {
+    assert!(matches!(
+        DecodeCapabilitySnapshotIdentity::new(
+            "not-a-digest".to_owned(),
+            "qsv-gen12".to_owned(),
+            None,
+        ),
+        Err(PlanError::InvalidCapabilityIdentity("ffmpeg build digest"))
+    ));
+    assert!(matches!(
+        DecodeCapabilitySnapshotIdentity::new(
+            "a".repeat(64),
+            "qsv-gen12".to_owned(),
+            Some("bad-driver".to_owned()),
+        ),
+        Err(PlanError::InvalidCapabilityIdentity(
+            "driver environment digest"
+        ))
+    ));
+}
+
+#[test]
+fn catalog_hdr_and_dolby_facts_are_merged_and_contradictions_refused() {
+    let stream = video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        None,
+    );
+    let dolby = DolbyVisionFacts {
+        profile: Some(8),
+        level: Some(6),
+        bl_compat_id: Some(1),
+        el_present: Some(false),
+        rpu_present: Some(true),
+    };
+    let catalog = DecodeCatalogMetadata::new(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8"),
+        dolby,
+    )
+    .expect("typed catalog metadata");
+    let merged = DecodeFacts::from_ffprobe_json_with_catalog(
+        &json!({"streams": [stream.clone()]}),
+        identity('e'),
+        &catalog,
+    )
+    .expect("catalog fills selective-probe omissions");
+    assert_eq!(merged.dynamic_range(), Some("dolby_vision"));
+    assert_eq!(merged.dolby_vision(), dolby);
+
+    let hdr10 = DecodeCatalogMetadata::new(Some("hdr10"), Some("HDR10"), Default::default())
+        .expect("HDR10 catalog");
+    let mut hlg_stream = stream;
+    hlg_stream["color_transfer"] = json!("arib-std-b67");
+    assert_eq!(
+        DecodeFacts::from_ffprobe_json_with_catalog(
+            &json!({"streams": [hlg_stream]}),
+            identity('f'),
+            &hdr10,
+        ),
+        Err(PlanError::ConflictingMetadata("dynamic range"))
+    );
+}
+
+#[test]
+fn presentation_geometry_records_the_no_upscale_even_output() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1280,
+        720,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let plan = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &capabilities(vec![]),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("legacy presentation");
+    assert_eq!(plan.output_contract().requested_max_height(), 1080);
+    assert_eq!(plan.output_contract().effective_width(), Some(1280));
+    assert_eq!(plan.output_contract().effective_height(), Some(720));
+}
+
+#[test]
+fn surface_contracts_name_vendor_subtitle_vulkan_and_opencl_transitions() {
+    let input = facts(video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    for (pipeline, encoder, backend, native) in [
+        (
+            Pipeline::VppQsv,
+            Encoder::Qsv,
+            DecodeBackend::Qsv,
+            FrameDomain::Qsv,
+        ),
+        (
+            Pipeline::TonemapVaapi,
+            Encoder::Vaapi,
+            DecodeBackend::Vaapi,
+            FrameDomain::Vaapi,
+        ),
+    ] {
+        let surface = DecodeSurfaceContract::for_plan(
+            backend,
+            pipeline,
+            &input,
+            encoder,
+            SubtitleRendering::BitmapBurn,
+        );
+        assert_eq!(surface.decode_domain(), native);
+        assert_eq!(surface.renderer_download_format(), Some("nv12"));
+        assert_eq!(surface.encoder_upload_domain(), Some(native));
+        assert_eq!(surface.encoder_upload_format(), Some("nv12"));
+    }
+
+    let vulkan = DecodeSurfaceContract::for_plan(
+        DecodeBackend::Cuda,
+        Pipeline::Libplacebo,
+        &input,
+        Encoder::Nvenc,
+        SubtitleRendering::None,
+    );
+    assert_eq!(vulkan.renderer_domain(), FrameDomain::Vulkan);
+    assert_eq!(vulkan.renderer_upload_format(), Some("yuv420p10le"));
+    assert_eq!(vulkan.renderer_download_format(), Some("nv12"));
+
+    let opencl = DecodeSurfaceContract::for_plan(
+        DecodeBackend::Cuda,
+        Pipeline::TonemapOpencl,
+        &input,
+        Encoder::Nvenc,
+        SubtitleRendering::None,
+    );
+    assert_eq!(opencl.renderer_domain(), FrameDomain::OpenCl);
+    assert_eq!(opencl.renderer_upload_format(), Some("p010le"));
+    assert_eq!(opencl.renderer_download_format(), Some("nv12"));
 }

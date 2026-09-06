@@ -54,9 +54,12 @@ pub struct SystemInfo {
     pub ffprobe: String,
     /// First line of `ffmpeg -version`, if ffmpeg ran at all.
     pub ffmpeg_version: Option<String>,
-    /// Digest of the complete bounded `ffprobe -version` output. Decoder fact
-    /// cache entries are scoped to this exact reported build identity.
+    /// Digest of the canonical FFprobe executable bytes plus its complete
+    /// bounded `-version` output. Decoder facts are scoped to this identity.
     pub ffprobe_build_digest: Option<String>,
+    /// Runtime-only binding to the executable that produced the digest.
+    #[serde(skip)]
+    pub(crate) decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     /// PLURX_HWACCEL preference, or "auto".
     pub hwaccel_pref: String,
     pub encoders: EncoderCaps,
@@ -820,7 +823,7 @@ impl AppState {
                 system.tone_map.selected(),
             )
             .with_decoders(system.decoders.clone())
-            .with_decode_probe(system.ffprobe.clone(), system.ffprobe_build_digest.clone())
+            .with_decode_probe(system.decode_probe_identity.clone())
             .with_dv_strippable(system.dovi_rpu)
             .with_dv_convertible(system.dolby_vision_convert)
             .with_dovi_reshape(system.dovi_reshape)

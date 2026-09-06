@@ -14,6 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{EffectiveRateControl, Encoder, OutputGrade, Pipeline, SubtitleBurn, ToneMap};
+use crate::domain::{DolbyVisionFacts, MediaFile};
 
 const MAX_FACT_TOKEN_BYTES: usize = 128;
 const MAX_DECODER_NAME_BYTES: usize = 128;
@@ -46,7 +47,7 @@ impl DecodeBackend {
 
 /// Whether selection was supported by a qualified input probe or inherited
 /// from the pre-plan routing policy during migration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecodeEvidence {
     Qualified,
@@ -63,6 +64,35 @@ pub enum CapabilityStatus {
     Rejected,
 }
 
+/// Proven input dynamic-range class. `None` on [`DecodeFacts`] remains
+/// genuinely unknown; SDR is represented explicitly only when stream color
+/// metadata proves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DynamicRangeClass {
+    Sdr,
+    Hdr10,
+    Hdr10Plus,
+    Hlg,
+    DolbyVision,
+}
+
+impl DynamicRangeClass {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sdr => "sdr",
+            Self::Hdr10 => "hdr10",
+            Self::Hdr10Plus => "hdr10plus",
+            Self::Hlg => "hlg",
+            Self::DolbyVision => "dolby_vision",
+        }
+    }
+
+    fn is_hdr(self) -> bool {
+        self != Self::Sdr
+    }
+}
+
 /// Why one complete pipeline was selected. Display text is derived elsewhere;
 /// these stable values are safe for identity and bounded diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -73,44 +103,115 @@ pub enum DecodeReason {
     OperatorSoftwareOverride,
     ContinuationRestriction,
     LegacyPreference,
-    QualifiedPreference,
+    MeasuredPreference,
     CapabilityFallback,
 }
 
 /// Where decoded frames live before rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FrameDomain {
     SystemMemory,
     Qsv,
     Vaapi,
+    Vulkan,
+    OpenCl,
 }
 
 /// The validated handoff between the selected decoder and renderer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct DecodeSurfaceContract {
-    frame_domain: FrameDomain,
-    download_format: Option<String>,
-    upload_domain: Option<FrameDomain>,
-    upload_format: Option<String>,
+    decode_domain: FrameDomain,
+    decoder_download_format: Option<String>,
+    renderer_domain: FrameDomain,
+    renderer_upload_format: Option<String>,
+    renderer_download_format: Option<String>,
+    encoder_upload_domain: Option<FrameDomain>,
+    encoder_upload_format: Option<String>,
     required_side_data: bool,
 }
 
 impl DecodeSurfaceContract {
-    pub fn frame_domain(&self) -> FrameDomain {
-        self.frame_domain
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        decode_domain: FrameDomain,
+        decoder_download_format: Option<String>,
+        renderer_domain: FrameDomain,
+        renderer_upload_format: Option<String>,
+        renderer_download_format: Option<String>,
+        encoder_upload_domain: Option<FrameDomain>,
+        encoder_upload_format: Option<String>,
+        required_side_data: bool,
+    ) -> Result<Self, PlanError> {
+        for format in [
+            decoder_download_format.as_deref(),
+            renderer_upload_format.as_deref(),
+            renderer_download_format.as_deref(),
+            encoder_upload_format.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if format.is_empty()
+                || format.len() > MAX_FACT_TOKEN_BYTES
+                || !format
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                return Err(PlanError::InvalidFact("surface pixel format"));
+            }
+        }
+        if encoder_upload_domain.is_some() != encoder_upload_format.is_some() {
+            return Err(PlanError::InvalidFact("encoder surface upload"));
+        }
+        Ok(Self {
+            decode_domain,
+            decoder_download_format,
+            renderer_domain,
+            renderer_upload_format,
+            renderer_download_format,
+            encoder_upload_domain,
+            encoder_upload_format,
+            required_side_data,
+        })
     }
 
-    pub fn download_format(&self) -> Option<&str> {
-        self.download_format.as_deref()
+    pub fn for_plan(
+        backend: DecodeBackend,
+        pipeline: Pipeline,
+        facts: &DecodeFacts,
+        encoder: Encoder,
+        subtitle_rendering: SubtitleRendering,
+    ) -> Self {
+        surface_contract(backend, pipeline, facts, encoder, subtitle_rendering)
     }
 
-    pub fn upload_domain(&self) -> Option<FrameDomain> {
-        self.upload_domain
+    pub fn decode_domain(&self) -> FrameDomain {
+        self.decode_domain
     }
 
-    pub fn upload_format(&self) -> Option<&str> {
-        self.upload_format.as_deref()
+    pub fn decoder_download_format(&self) -> Option<&str> {
+        self.decoder_download_format.as_deref()
+    }
+
+    pub fn renderer_domain(&self) -> FrameDomain {
+        self.renderer_domain
+    }
+
+    pub fn renderer_upload_format(&self) -> Option<&str> {
+        self.renderer_upload_format.as_deref()
+    }
+
+    pub fn renderer_download_format(&self) -> Option<&str> {
+        self.renderer_download_format.as_deref()
+    }
+
+    pub fn encoder_upload_domain(&self) -> Option<FrameDomain> {
+        self.encoder_upload_domain
+    }
+
+    pub fn encoder_upload_format(&self) -> Option<&str> {
+        self.encoder_upload_format.as_deref()
     }
 
     pub fn requires_side_data(&self) -> bool {
@@ -210,6 +311,101 @@ impl DecodeSourceIdentity {
     }
 }
 
+/// Already-scanned source metadata that selective on-demand FFprobe output
+/// cannot be trusted to reproduce on every supported build. Its digest enters
+/// both the fact cache key and the resolved fact digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecodeCatalogMetadata {
+    dynamic_range: Option<DynamicRangeClass>,
+    hdr_format: Option<String>,
+    dolby_vision: DolbyVisionFacts,
+    digest: String,
+}
+
+impl DecodeCatalogMetadata {
+    pub fn from_media_file(file: &MediaFile) -> Result<Self, PlanError> {
+        Self::new(
+            file.hdr.as_deref(),
+            file.hdr_format.as_deref(),
+            file.dolby_vision,
+        )
+    }
+
+    pub fn new(
+        dynamic_range: Option<&str>,
+        hdr_format: Option<&str>,
+        dolby_vision: DolbyVisionFacts,
+    ) -> Result<Self, PlanError> {
+        let mut dynamic_range = dynamic_range.map(parse_catalog_dynamic_range).transpose()?;
+        let hdr_format = validated_optional_text(hdr_format, "catalog hdr format")?;
+        if hdr_format
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains("hdr10+"))
+        {
+            dynamic_range = Some(DynamicRangeClass::Hdr10Plus);
+        }
+        if !dolby_vision.is_empty() {
+            if !matches!(dolby_vision.profile, Some(4 | 5 | 7 | 8 | 9 | 10))
+                || !dolby_vision
+                    .level
+                    .is_none_or(|level| (0..=13).contains(&level))
+                || !dolby_vision
+                    .bl_compat_id
+                    .is_none_or(|id| (0..=6).contains(&id))
+            {
+                return Err(PlanError::InvalidFact("catalog dolby vision"));
+            }
+            if dynamic_range != Some(DynamicRangeClass::DolbyVision) {
+                return Err(PlanError::ConflictingMetadata("dolby vision"));
+            }
+        }
+        let encoded = serde_json::to_vec(&(dynamic_range, hdr_format.as_deref(), dolby_vision))
+            .map_err(|_| PlanError::InvalidFact("catalog serialization"))?;
+        Ok(Self {
+            dynamic_range,
+            hdr_format,
+            dolby_vision,
+            digest: hex::encode(Sha256::digest(encoded)),
+        })
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+fn parse_catalog_dynamic_range(value: &str) -> Result<DynamicRangeClass, PlanError> {
+    let value = value.trim();
+    if value.len() > MAX_FACT_TOKEN_BYTES || value.chars().any(char::is_control) {
+        return Err(PlanError::InvalidFact("catalog hdr"));
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "hdr10" => Ok(DynamicRangeClass::Hdr10),
+        "hdr10plus" | "hdr10+" => Ok(DynamicRangeClass::Hdr10Plus),
+        "hlg" => Ok(DynamicRangeClass::Hlg),
+        "dolby_vision" => Ok(DynamicRangeClass::DolbyVision),
+        _ => Err(PlanError::InvalidFact("catalog hdr")),
+    }
+}
+
+fn validated_optional_text(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<Option<String>, PlanError> {
+    const MAX_METADATA_TEXT_BYTES: usize = 512;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > MAX_METADATA_TEXT_BYTES || value.chars().any(char::is_control) {
+        return Err(PlanError::InvalidFact(field));
+    }
+    Ok(Some(value.to_owned()))
+}
+
 /// Immutable input facts parsed from selective FFprobe JSON for one selected
 /// absolute stream. Fields stay unknown when FFprobe cannot prove them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -224,7 +420,13 @@ pub struct DecodeFacts {
     height: Option<u32>,
     frame_rate: FrameRate,
     bit_depth: Option<u8>,
-    dynamic_range: Option<String>,
+    color_range: Option<String>,
+    color_space: Option<String>,
+    color_transfer: Option<String>,
+    color_primaries: Option<String>,
+    dynamic_range: Option<DynamicRangeClass>,
+    hdr_format: Option<String>,
+    dolby_vision: DolbyVisionFacts,
     source_identity: DecodeSourceIdentity,
     facts_digest: String,
 }
@@ -241,7 +443,13 @@ struct FactsDigest<'a> {
     height: Option<u32>,
     frame_rate: FrameRate,
     bit_depth: Option<u8>,
-    dynamic_range: &'a Option<String>,
+    color_range: &'a Option<String>,
+    color_space: &'a Option<String>,
+    color_transfer: &'a Option<String>,
+    color_primaries: &'a Option<String>,
+    dynamic_range: Option<DynamicRangeClass>,
+    hdr_format: &'a Option<String>,
+    dolby_vision: DolbyVisionFacts,
     source_identity: &'a DecodeSourceIdentity,
 }
 
@@ -253,7 +461,18 @@ impl DecodeFacts {
         json: &Value,
         source_identity: DecodeSourceIdentity,
     ) -> Result<Self, PlanError> {
-        Self::from_ffprobe_json_inner(json, source_identity, None)
+        Self::from_ffprobe_json_inner(json, source_identity, None, None)
+    }
+
+    /// Parse the first playable video stream and merge the source's retained
+    /// typed HDR/Dolby facts. Contradictions refuse planning rather than
+    /// letting a build-specific omission downgrade a known source.
+    pub fn from_ffprobe_json_with_catalog(
+        json: &Value,
+        source_identity: DecodeSourceIdentity,
+        catalog: &DecodeCatalogMetadata,
+    ) -> Result<Self, PlanError> {
+        Self::from_ffprobe_json_inner(json, source_identity, None, Some(catalog))
     }
 
     /// Parse one explicitly selected absolute video stream.
@@ -262,13 +481,14 @@ impl DecodeFacts {
         source_identity: DecodeSourceIdentity,
         absolute_index: u32,
     ) -> Result<Self, PlanError> {
-        Self::from_ffprobe_json_inner(json, source_identity, Some(absolute_index))
+        Self::from_ffprobe_json_inner(json, source_identity, Some(absolute_index), None)
     }
 
     fn from_ffprobe_json_inner(
         json: &Value,
         source_identity: DecodeSourceIdentity,
         requested_index: Option<u32>,
+        catalog: Option<&DecodeCatalogMetadata>,
     ) -> Result<Self, PlanError> {
         let streams = json
             .get("streams")
@@ -297,7 +517,18 @@ impl DecodeFacts {
         let height = positive_u32(selected, "height");
         let frame_rate = parse_frame_rate(selected);
         let bit_depth = parse_bit_depth(selected, pixel_format.as_deref());
-        let dynamic_range = parse_dynamic_range(selected);
+        let color_range = bounded_token(selected, "color_range")?;
+        let color_space = bounded_token(selected, "color_space")?;
+        let color_transfer = bounded_token(selected, "color_transfer")?;
+        let color_primaries = bounded_token(selected, "color_primaries")?;
+        let probed_dynamic_range = parse_dynamic_range(selected);
+        let dynamic_range = merge_dynamic_range(
+            probed_dynamic_range,
+            catalog.and_then(|metadata| metadata.dynamic_range),
+        )?;
+        let hdr_format = catalog.and_then(|metadata| metadata.hdr_format.clone());
+        let dolby_vision =
+            catalog.map_or_else(DolbyVisionFacts::default, |metadata| metadata.dolby_vision);
         let digest_input = FactsDigest {
             input_video_stream,
             selection_provenance,
@@ -309,7 +540,13 @@ impl DecodeFacts {
             height,
             frame_rate,
             bit_depth,
-            dynamic_range: &dynamic_range,
+            color_range: &color_range,
+            color_space: &color_space,
+            color_transfer: &color_transfer,
+            color_primaries: &color_primaries,
+            dynamic_range,
+            hdr_format: &hdr_format,
+            dolby_vision,
             source_identity: &source_identity,
         };
         let encoded = serde_json::to_vec(&digest_input)
@@ -326,7 +563,13 @@ impl DecodeFacts {
             height,
             frame_rate,
             bit_depth,
+            color_range,
+            color_space,
+            color_transfer,
+            color_primaries,
             dynamic_range,
+            hdr_format,
+            dolby_vision,
             source_identity,
             facts_digest,
         })
@@ -373,7 +616,45 @@ impl DecodeFacts {
     }
 
     pub fn dynamic_range(&self) -> Option<&str> {
-        self.dynamic_range.as_deref()
+        self.dynamic_range.map(DynamicRangeClass::name)
+    }
+
+    pub fn dynamic_range_class(&self) -> Option<DynamicRangeClass> {
+        self.dynamic_range
+    }
+
+    pub fn is_hdr(&self) -> bool {
+        self.dynamic_range.is_some_and(DynamicRangeClass::is_hdr)
+    }
+
+    fn routing_dynamic_range(&self) -> Option<&'static str> {
+        self.dynamic_range
+            .filter(|dynamic_range| dynamic_range.is_hdr())
+            .map(DynamicRangeClass::name)
+    }
+
+    pub fn color_range(&self) -> Option<&str> {
+        self.color_range.as_deref()
+    }
+
+    pub fn color_space(&self) -> Option<&str> {
+        self.color_space.as_deref()
+    }
+
+    pub fn color_transfer(&self) -> Option<&str> {
+        self.color_transfer.as_deref()
+    }
+
+    pub fn color_primaries(&self) -> Option<&str> {
+        self.color_primaries.as_deref()
+    }
+
+    pub fn hdr_format(&self) -> Option<&str> {
+        self.hdr_format.as_deref()
+    }
+
+    pub fn dolby_vision(&self) -> DolbyVisionFacts {
+        self.dolby_vision
     }
 
     pub fn source_identity(&self) -> &DecodeSourceIdentity {
@@ -455,60 +736,164 @@ fn parse_bit_depth(stream: &Value, pixel_format: Option<&str>) -> Option<u8> {
         return Some(value);
     }
     let pixel_format = pixel_format?;
-    if pixel_format.contains("12le")
-        || pixel_format.contains("12be")
-        || pixel_format.contains("p012")
-    {
-        Some(12)
-    } else if pixel_format.contains("10le")
-        || pixel_format.contains("10be")
-        || pixel_format.contains("p010")
-    {
-        Some(10)
-    } else if pixel_format.starts_with("yuv") || pixel_format.starts_with("nv12") {
-        Some(8)
-    } else {
-        None
+    if pixel_format.starts_with("p010") {
+        return Some(10);
     }
+    if pixel_format.starts_with("p012") {
+        return Some(12);
+    }
+    if let Some(planar) = pixel_format.rsplit_once('p').map(|(_, suffix)| suffix) {
+        let digits = planar
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .collect::<Vec<_>>();
+        if !digits.is_empty() {
+            return std::str::from_utf8(&digits)
+                .ok()?
+                .parse::<u8>()
+                .ok()
+                .filter(|depth| (1..=32).contains(depth));
+        }
+    }
+    if (pixel_format.starts_with("yuv") && pixel_format.contains('p'))
+        || matches!(pixel_format, "nv12" | "nv21")
+    {
+        return Some(8);
+    }
+    None
 }
 
 fn chroma_from_pixel_format(pixel_format: &str) -> Option<String> {
+    if pixel_format.starts_with("nv12")
+        || pixel_format.starts_with("nv21")
+        || pixel_format.starts_with("p010")
+        || pixel_format.starts_with("p012")
+    {
+        return Some("420".to_owned());
+    }
     ["420", "422", "444"]
         .into_iter()
         .find(|sampling| pixel_format.contains(sampling))
         .map(str::to_owned)
 }
 
-fn parse_dynamic_range(stream: &Value) -> Option<String> {
-    let has_dolby = stream
+fn parse_dynamic_range(stream: &Value) -> Option<DynamicRangeClass> {
+    let side_data = stream
         .get("side_data_list")
         .and_then(Value::as_array)
-        .is_some_and(|entries| {
-            entries.iter().any(|entry| {
-                entry
-                    .get("side_data_type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|value| value.contains("DOVI") || value.contains("Dolby Vision"))
-            })
-        });
-    if has_dolby {
-        return Some("dolby_vision".to_owned());
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("side_data_type").and_then(Value::as_str))
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if side_data
+        .iter()
+        .any(|value| value.contains("dovi") || value.contains("dolby vision"))
+    {
+        return Some(DynamicRangeClass::DolbyVision);
     }
-    match stream.get("color_transfer").and_then(Value::as_str) {
-        Some("smpte2084") => Some("hdr10".to_owned()),
-        Some("arib-std-b67") => Some("hlg".to_owned()),
+    if side_data
+        .iter()
+        .any(|value| value.contains("smpte2094-40") || value.contains("dynamic hdr plus"))
+    {
+        return Some(DynamicRangeClass::Hdr10Plus);
+    }
+    match stream
+        .get("color_transfer")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("smpte2084") => Some(DynamicRangeClass::Hdr10),
+        Some("arib-std-b67") => Some(DynamicRangeClass::Hlg),
+        Some("bt709" | "iec61966-2-1") => Some(DynamicRangeClass::Sdr),
         _ => None,
     }
 }
 
-/// One build/device qualification row. Optional profile and pixel-format
-/// fields are explicit class wildcards, not missing evidence on the input.
+fn merge_dynamic_range(
+    probed: Option<DynamicRangeClass>,
+    catalog: Option<DynamicRangeClass>,
+) -> Result<Option<DynamicRangeClass>, PlanError> {
+    match (probed, catalog) {
+        (Some(probed), Some(catalog)) if probed != catalog => {
+            Err(PlanError::ConflictingMetadata("dynamic range"))
+        }
+        (Some(probed), _) => Ok(Some(probed)),
+        (None, catalog) => Ok(catalog),
+    }
+}
+
+/// Exact identity of the build and device environment that produced a
+/// capability snapshot. It is deliberately node-local and never contains a
+/// device path or physical identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeCapabilitySnapshotIdentity {
+    ffmpeg_build_digest: String,
+    device_class: String,
+    driver_environment_digest: Option<String>,
+}
+
+impl DecodeCapabilitySnapshotIdentity {
+    pub fn new(
+        ffmpeg_build_digest: String,
+        device_class: String,
+        driver_environment_digest: Option<String>,
+    ) -> Result<Self, PlanError> {
+        validate_sha256(&ffmpeg_build_digest)
+            .map_err(|_| PlanError::InvalidCapabilityIdentity("ffmpeg build digest"))?;
+        let device_class = validated_capability_token(device_class, "device class")?;
+        if let Some(digest) = driver_environment_digest.as_deref() {
+            validate_sha256(digest)
+                .map_err(|_| PlanError::InvalidCapabilityIdentity("driver environment digest"))?;
+        }
+        Ok(Self {
+            ffmpeg_build_digest,
+            device_class,
+            driver_environment_digest,
+        })
+    }
+
+    pub fn ffmpeg_build_digest(&self) -> &str {
+        &self.ffmpeg_build_digest
+    }
+
+    pub fn device_class(&self) -> &str {
+        &self.device_class
+    }
+
+    pub fn driver_environment_digest(&self) -> Option<&str> {
+        self.driver_environment_digest.as_deref()
+    }
+}
+
+fn validate_sha256(value: &str) -> Result<(), ()> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+/// One build/device qualification row. A qualified row has no wildcards: it
+/// describes the exact tested input class, maximum geometry/pixel rate, and
+/// the full surface-transfer contract exercised by the fixture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeCapability {
     pub backend: DecodeBackend,
     pub codec: String,
     pub profile: Option<String>,
     pub pixel_format: Option<String>,
+    pub bit_depth: Option<u8>,
+    pub dynamic_range: Option<DynamicRangeClass>,
+    pub max_width: Option<u32>,
+    pub max_height: Option<u32>,
+    pub max_pixel_rate: Option<u64>,
+    pub surface: Option<DecodeSurfaceContract>,
     pub status: CapabilityStatus,
 }
 
@@ -523,12 +908,14 @@ pub struct SoftwareDecoder {
 /// Node-local capability snapshot for the exact FFmpeg build and device class.
 #[derive(Debug, Clone)]
 pub struct DecodeCapabilities {
+    identity: DecodeCapabilitySnapshotIdentity,
     capabilities: Vec<DecodeCapability>,
     software_decoders: BTreeMap<String, String>,
 }
 
 impl DecodeCapabilities {
     pub fn new(
+        identity: DecodeCapabilitySnapshotIdentity,
         capabilities: Vec<DecodeCapability>,
         software_decoders: Vec<SoftwareDecoder>,
     ) -> Result<Self, PlanError> {
@@ -554,13 +941,46 @@ impl DecodeCapabilities {
                     .pixel_format
                     .map(|value| validated_capability_token(value, "capability pixel format"))
                     .transpose()?,
+                bit_depth: capability.bit_depth,
+                dynamic_range: capability.dynamic_range,
+                max_width: capability.max_width,
+                max_height: capability.max_height,
+                max_pixel_rate: capability.max_pixel_rate,
+                surface: capability.surface,
                 status: capability.status,
             };
+            if capability.status == CapabilityStatus::Qualified
+                && (capability.profile.is_none()
+                    || capability.pixel_format.is_none()
+                    || capability.bit_depth.is_none()
+                    || capability.dynamic_range.is_none()
+                    || capability.max_width.is_none()
+                    || capability.max_height.is_none()
+                    || capability.max_pixel_rate.is_none()
+                    || capability.surface.is_none())
+            {
+                return Err(PlanError::IncompleteQualifiedCapability);
+            }
+            if capability
+                .bit_depth
+                .is_some_and(|depth| !(1..=32).contains(&depth))
+                || capability.max_width == Some(0)
+                || capability.max_height == Some(0)
+                || capability.max_pixel_rate == Some(0)
+            {
+                return Err(PlanError::InvalidFact("capability envelope"));
+            }
             let key = (
                 capability.backend,
                 capability.codec.clone(),
                 capability.profile.clone(),
                 capability.pixel_format.clone(),
+                capability.bit_depth,
+                capability.dynamic_range,
+                capability.max_width,
+                capability.max_height,
+                capability.max_pixel_rate,
+                capability.surface.clone(),
             );
             if !keys.insert(key) {
                 return Err(PlanError::DuplicateCapability);
@@ -576,16 +996,26 @@ impl DecodeCapabilities {
             validated.push(capability);
         }
         Ok(Self {
+            identity,
             capabilities: validated,
             software_decoders: mapped,
         })
+    }
+
+    pub fn identity(&self) -> &DecodeCapabilitySnapshotIdentity {
+        &self.identity
     }
 
     fn software_decoder(&self, codec: &str) -> Option<&str> {
         self.software_decoders.get(codec).map(String::as_str)
     }
 
-    fn status(&self, backend: DecodeBackend, facts: &DecodeFacts) -> CapabilityStatus {
+    fn status(
+        &self,
+        backend: DecodeBackend,
+        facts: &DecodeFacts,
+        surface: &DecodeSurfaceContract,
+    ) -> CapabilityStatus {
         let Some(codec) = facts.codec() else {
             return CapabilityStatus::Unavailable;
         };
@@ -602,17 +1032,46 @@ impl DecodeCapabilities {
                         .pixel_format
                         .as_deref()
                         .is_none_or(|pixel_format| facts.pixel_format() == Some(pixel_format))
+                    && entry
+                        .bit_depth
+                        .is_none_or(|depth| facts.bit_depth() == Some(depth))
+                    && entry
+                        .dynamic_range
+                        .is_none_or(|range| facts.dynamic_range_class() == Some(range))
+                    && entry
+                        .max_width
+                        .is_none_or(|width| facts.width().is_some_and(|actual| actual <= width))
+                    && entry
+                        .max_height
+                        .is_none_or(|height| facts.height().is_some_and(|actual| actual <= height))
+                    && entry.max_pixel_rate.is_none_or(|limit| {
+                        source_pixel_rate(facts).is_some_and(|actual| actual <= limit)
+                    })
+                    && entry
+                        .surface
+                        .as_ref()
+                        .is_none_or(|expected| expected == surface)
             })
-            .max_by_key(|entry| {
-                usize::from(entry.profile.is_some()) + usize::from(entry.pixel_format.is_some())
-            })
+            .max_by_key(|entry| capability_specificity(entry))
             .map(|entry| entry.status)
             .unwrap_or(CapabilityStatus::Unavailable)
     }
 }
 
 fn capability_specificity(capability: &DecodeCapability) -> usize {
-    usize::from(capability.profile.is_some()) + usize::from(capability.pixel_format.is_some())
+    [
+        capability.profile.is_some(),
+        capability.pixel_format.is_some(),
+        capability.bit_depth.is_some(),
+        capability.dynamic_range.is_some(),
+        capability.max_width.is_some(),
+        capability.max_height.is_some(),
+        capability.max_pixel_rate.is_some(),
+        capability.surface.is_some(),
+    ]
+    .into_iter()
+    .map(usize::from)
+    .sum()
 }
 
 fn capability_dimensions_overlap(left: &DecodeCapability, right: &DecodeCapability) -> bool {
@@ -622,6 +1081,24 @@ fn capability_dimensions_overlap(left: &DecodeCapability, right: &DecodeCapabili
         && (left.pixel_format.is_none()
             || right.pixel_format.is_none()
             || left.pixel_format.as_deref() == right.pixel_format.as_deref())
+        && (left.bit_depth.is_none()
+            || right.bit_depth.is_none()
+            || left.bit_depth == right.bit_depth)
+        && (left.dynamic_range.is_none()
+            || right.dynamic_range.is_none()
+            || left.dynamic_range == right.dynamic_range)
+        && (left.surface.is_none() || right.surface.is_none() || left.surface == right.surface)
+}
+
+fn source_pixel_rate(facts: &DecodeFacts) -> Option<u64> {
+    let width = u128::from(facts.width()?);
+    let height = u128::from(facts.height()?);
+    let rate = facts.frame_rate().value()?;
+    let numerator = width
+        .checked_mul(height)?
+        .checked_mul(u128::from(rate.numerator()))?;
+    let denominator = u128::from(rate.denominator());
+    u64::try_from(numerator.div_ceil(denominator)).ok()
 }
 
 fn validated_capability_token(value: String, field: &'static str) -> Result<String, PlanError> {
@@ -664,8 +1141,11 @@ pub struct DecodePolicySnapshot {
 
 impl DecodePolicySnapshot {
     pub fn new(plan_policy: DecodePlanPolicy, compatibility_value: Option<&str>) -> Self {
-        let compatibility_value =
-            compatibility_value.map(|value| value.trim().to_ascii_lowercase());
+        let compatibility_value = compatibility_value
+            .filter(|value| {
+                value.len() <= MAX_FACT_TOKEN_BYTES && !value.chars().any(char::is_control)
+            })
+            .map(str::to_owned);
         let force_software_decode = compatibility_value
             .as_deref()
             .is_some_and(|value| matches!(value, "off" | "0" | "false" | "no"));
@@ -793,7 +1273,9 @@ pub struct PresentationContract {
     output_matrix: String,
     output_primaries: String,
     width_rule: OutputWidthRule,
-    target_height: i64,
+    requested_max_height: u32,
+    effective_width: Option<u32>,
+    effective_height: Option<u32>,
     audio_channels: u32,
     audio_bitrate_kbps: u32,
     audio_index: Option<i64>,
@@ -843,8 +1325,16 @@ impl PresentationContract {
         self.width_rule
     }
 
-    pub fn target_height(&self) -> i64 {
-        self.target_height
+    pub fn requested_max_height(&self) -> u32 {
+        self.requested_max_height
+    }
+
+    pub fn effective_width(&self) -> Option<u32> {
+        self.effective_width
+    }
+
+    pub fn effective_height(&self) -> Option<u32> {
+        self.effective_height
     }
 
     pub fn subtitle_rendering(&self) -> SubtitleRendering {
@@ -937,7 +1427,10 @@ pub enum PlanError {
     InvalidStreamIndex,
     InvalidSourceIdentity,
     InvalidFact(&'static str),
+    ConflictingMetadata(&'static str),
     InvalidSoftwareDecoder,
+    InvalidCapabilityIdentity(&'static str),
+    IncompleteQualifiedCapability,
     DuplicateCapability,
     AmbiguousCapability,
     InvalidMediaOption(&'static str),
@@ -957,7 +1450,15 @@ impl fmt::Display for PlanError {
             }
             Self::InvalidSourceIdentity => formatter.write_str("bound source identity is invalid"),
             Self::InvalidFact(field) => write!(formatter, "decode fact {field} is invalid"),
+            Self::ConflictingMetadata(field) => {
+                write!(formatter, "decode metadata disagrees about {field}")
+            }
             Self::InvalidSoftwareDecoder => formatter.write_str("software decoder name is invalid"),
+            Self::InvalidCapabilityIdentity(field) => {
+                write!(formatter, "decode capability {field} is invalid")
+            }
+            Self::IncompleteQualifiedCapability => formatter
+                .write_str("qualified decode capability is missing tested envelope evidence"),
             Self::DuplicateCapability => {
                 formatter.write_str("decode capability snapshot contains a duplicate class")
             }
@@ -999,7 +1500,7 @@ pub fn resolve_transcode(
     let mut options = request.options.clone();
     validate_media_options(&options)?;
     if !options.pipeline.pairs_with(request.encoder)
-        || !options.pipeline.handles(facts.dynamic_range())
+        || !options.pipeline.handles(facts.routing_dynamic_range())
         || request
             .encoder
             .video_codec_for(options.pipeline.output_grade())
@@ -1007,6 +1508,11 @@ pub fn resolve_transcode(
     {
         return Err(PlanError::IncompatibleRenderer);
     }
+    let subtitle_rendering = match options.subtitle_burn.as_ref() {
+        None => SubtitleRendering::None,
+        Some(subtitle) if subtitle.bitmap => SubtitleRendering::BitmapBurn,
+        Some(_) => SubtitleRendering::TextBurn,
+    };
 
     let (mut preferred, mut reason) = preferred_backend(request.encoder, options.pipeline, facts);
     if let Some(required) = restrictions.required {
@@ -1043,22 +1549,28 @@ pub fn resolve_transcode(
     }
 
     let (backend, evidence, reason) = if preferred == DecodeBackend::Software {
+        let surface = surface_contract(
+            DecodeBackend::Software,
+            options.pipeline,
+            facts,
+            request.encoder,
+            subtitle_rendering,
+        );
         (
             DecodeBackend::Software,
-            software_evidence(capabilities, facts, policy)?,
+            software_evidence(capabilities, facts, &surface, policy)?,
             reason,
         )
     } else {
-        match capabilities.status(preferred, facts) {
-            CapabilityStatus::Qualified => (
-                preferred,
-                DecodeEvidence::Qualified,
-                if reason == DecodeReason::LegacyPreference {
-                    DecodeReason::QualifiedPreference
-                } else {
-                    reason
-                },
-            ),
+        let preferred_surface = surface_contract(
+            preferred,
+            options.pipeline,
+            facts,
+            request.encoder,
+            subtitle_rendering,
+        );
+        match capabilities.status(preferred, facts, &preferred_surface) {
+            CapabilityStatus::Qualified => (preferred, DecodeEvidence::Qualified, reason),
             CapabilityStatus::Advertised if policy.plan_policy() == DecodePlanPolicy::Legacy => {
                 (preferred, DecodeEvidence::LegacyUnverified, reason)
             }
@@ -1076,9 +1588,16 @@ pub fn resolve_transcode(
                 if !options.pipeline.decode_args().is_empty() {
                     options.pipeline = grade_preserving_software_renderer(options.pipeline)?;
                 }
+                let surface = surface_contract(
+                    DecodeBackend::Software,
+                    options.pipeline,
+                    facts,
+                    request.encoder,
+                    subtitle_rendering,
+                );
                 (
                     DecodeBackend::Software,
-                    software_evidence(capabilities, facts, policy)?,
+                    software_evidence(capabilities, facts, &surface, policy)?,
                     DecodeReason::CapabilityFallback,
                 )
             }
@@ -1100,11 +1619,6 @@ pub fn resolve_transcode(
         .encoder
         .video_codec_for(output_grade)
         .ok_or(PlanError::IncompatibleRenderer)?;
-    let subtitle_rendering = match options.subtitle_burn.as_ref() {
-        None => SubtitleRendering::None,
-        Some(subtitle) if subtitle.bitmap => SubtitleRendering::BitmapBurn,
-        Some(_) => SubtitleRendering::TextBurn,
-    };
     let surface = surface_contract(
         backend,
         options.pipeline,
@@ -1112,6 +1626,7 @@ pub fn resolve_transcode(
         request.encoder,
         subtitle_rendering,
     );
+    let effective_geometry = effective_output_geometry(facts, options.target_height as u32);
     let output_contract = PresentationContract {
         output_grade,
         output_codec: match output_grade {
@@ -1131,7 +1646,9 @@ pub fn resolve_transcode(
         output_matrix: output_grade.matrix().to_owned(),
         output_primaries: output_grade.primaries().to_owned(),
         width_rule: OutputWidthRule::PreserveAspectEven,
-        target_height: options.target_height,
+        requested_max_height: options.target_height as u32,
+        effective_width: effective_geometry.map(|geometry| geometry.0),
+        effective_height: effective_geometry.map(|geometry| geometry.1),
         audio_channels: options.audio_channels,
         audio_bitrate_kbps: options.audio_bitrate_kbps,
         audio_index: options.audio_index,
@@ -1157,6 +1674,15 @@ pub fn resolve_transcode(
         source_facts_digest: facts.facts_digest.clone(),
         output_contract,
     })
+}
+
+fn effective_output_geometry(facts: &DecodeFacts, requested_max_height: u32) -> Option<(u32, u32)> {
+    let source_width = u64::from(facts.width?);
+    let source_height = u64::from(facts.height?);
+    let height = u64::from(requested_max_height).min(source_height).max(2) & !1;
+    let width =
+        ((source_width.checked_mul(height)? + source_height / 2) / source_height).max(2) & !1;
+    Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
 }
 
 fn validate_media_options(options: &TranscodeMediaOptions) -> Result<(), PlanError> {
@@ -1203,13 +1729,14 @@ fn pipeline_accepts_decode(pipeline: Pipeline, backend: DecodeBackend) -> bool {
 fn software_evidence(
     capabilities: &DecodeCapabilities,
     facts: &DecodeFacts,
+    surface: &DecodeSurfaceContract,
     policy: &DecodePolicySnapshot,
 ) -> Result<DecodeEvidence, PlanError> {
     let codec = facts.codec().ok_or(PlanError::MissingCodec)?;
     capabilities
         .software_decoder(codec)
         .ok_or(PlanError::SoftwareDecoderUnavailable)?;
-    match capabilities.status(DecodeBackend::Software, facts) {
+    match capabilities.status(DecodeBackend::Software, facts, surface) {
         CapabilityStatus::Qualified => Ok(DecodeEvidence::Qualified),
         CapabilityStatus::Unavailable | CapabilityStatus::Advertised
             if policy.plan_policy() == DecodePlanPolicy::Legacy =>
@@ -1240,7 +1767,7 @@ fn preferred_backend(
         _ => {}
     }
     let heavy = matches!(facts.codec(), Some("hevc" | "h265" | "hevc10"))
-        && (facts.dynamic_range().is_some() || facts.height().is_some_and(|height| height >= 2160));
+        && (facts.is_hdr() || facts.height().is_some_and(|height| height >= 2160));
     let backend = match encoder {
         Encoder::Software => DecodeBackend::Software,
         Encoder::Nvenc => DecodeBackend::Cuda,
@@ -1267,47 +1794,87 @@ fn surface_contract(
     encoder: Encoder,
     subtitle_rendering: SubtitleRendering,
 ) -> DecodeSurfaceContract {
-    let ten_bit =
-        facts.bit_depth().is_some_and(|depth| depth >= 10) || facts.dynamic_range().is_some();
-    let frame_domain = match backend {
+    let ten_bit = facts.bit_depth().is_some_and(|depth| depth >= 10) || facts.is_hdr();
+    let decode_domain = match backend {
         DecodeBackend::Qsv => FrameDomain::Qsv,
         DecodeBackend::Vaapi => FrameDomain::Vaapi,
         DecodeBackend::Software | DecodeBackend::VideoToolbox | DecodeBackend::Cuda => {
             FrameDomain::SystemMemory
         }
     };
-    let remains_vendor_resident = matches!(
-        (backend, pipeline),
-        (DecodeBackend::Qsv, Pipeline::VppQsv) | (DecodeBackend::Vaapi, Pipeline::TonemapVaapi)
-    ) && subtitle_rendering == SubtitleRendering::None;
-    let download_format = if matches!(backend, DecodeBackend::Qsv | DecodeBackend::Vaapi)
-        && !remains_vendor_resident
-    {
-        Some(if ten_bit { "p010le" } else { "nv12" }.to_owned())
-    } else {
-        None
+    let vendor_native = matches!(
+        (decode_domain, pipeline),
+        (FrameDomain::Qsv, Pipeline::VppQsv) | (FrameDomain::Vaapi, Pipeline::TonemapVaapi)
+    );
+    let decoder_download_format =
+        if matches!(decode_domain, FrameDomain::Qsv | FrameDomain::Vaapi) && !vendor_native {
+            Some(if ten_bit { "p010le" } else { "nv12" }.to_owned())
+        } else {
+            None
+        };
+    let renderer_domain = match pipeline {
+        Pipeline::VppQsv => FrameDomain::Qsv,
+        Pipeline::TonemapVaapi => FrameDomain::Vaapi,
+        Pipeline::Libplacebo => FrameDomain::Vulkan,
+        Pipeline::TonemapOpencl if facts.is_hdr() => FrameDomain::OpenCl,
+        Pipeline::TonemapOpencl
+        | Pipeline::DoviTonemapx
+        | Pipeline::DoviPassthrough
+        | Pipeline::Hdr10Passthrough
+        | Pipeline::Cpu => FrameDomain::SystemMemory,
     };
-    let upload_domain = if remains_vendor_resident {
-        None
-    } else {
-        match encoder {
-            Encoder::Qsv => Some(FrameDomain::Qsv),
-            Encoder::Vaapi => Some(FrameDomain::Vaapi),
-            Encoder::Software | Encoder::Nvenc | Encoder::VideoToolbox => None,
+    let renderer_upload_format = match renderer_domain {
+        FrameDomain::Vulkan => decoder_download_format
+            .clone()
+            .or_else(|| facts.pixel_format.clone()),
+        FrameDomain::OpenCl => Some("p010le".to_owned()),
+        FrameDomain::Qsv | FrameDomain::Vaapi | FrameDomain::SystemMemory => None,
+    };
+    let renderer_download_format = match pipeline {
+        Pipeline::Libplacebo => Some("nv12".to_owned()),
+        Pipeline::TonemapOpencl if facts.is_hdr() => Some("nv12".to_owned()),
+        Pipeline::VppQsv | Pipeline::TonemapVaapi
+            if subtitle_rendering != SubtitleRendering::None =>
+        {
+            Some("nv12".to_owned())
         }
+        Pipeline::VppQsv
+        | Pipeline::TonemapVaapi
+        | Pipeline::TonemapOpencl
+        | Pipeline::DoviTonemapx
+        | Pipeline::DoviPassthrough
+        | Pipeline::Hdr10Passthrough
+        | Pipeline::Cpu => None,
     };
-    let upload_format = match upload_domain {
+    let rendered_domain = if renderer_download_format.is_some() {
+        FrameDomain::SystemMemory
+    } else {
+        renderer_domain
+    };
+    let encoder_upload_domain = match encoder {
+        Encoder::Qsv if rendered_domain != FrameDomain::Qsv => Some(FrameDomain::Qsv),
+        Encoder::Vaapi if rendered_domain != FrameDomain::Vaapi => Some(FrameDomain::Vaapi),
+        Encoder::Software
+        | Encoder::Nvenc
+        | Encoder::Qsv
+        | Encoder::Vaapi
+        | Encoder::VideoToolbox => None,
+    };
+    let encoder_upload_format = match encoder_upload_domain {
         Some(FrameDomain::Qsv) if pipeline.output_grade() == OutputGrade::Hdr10 => {
             Some("p010le".to_owned())
         }
         Some(FrameDomain::Qsv | FrameDomain::Vaapi) => Some("nv12".to_owned()),
-        Some(FrameDomain::SystemMemory) | None => None,
+        Some(FrameDomain::SystemMemory | FrameDomain::Vulkan | FrameDomain::OpenCl) | None => None,
     };
     DecodeSurfaceContract {
-        frame_domain,
-        download_format,
-        upload_domain,
-        upload_format,
+        decode_domain,
+        decoder_download_format,
+        renderer_domain,
+        renderer_upload_format,
+        renderer_download_format,
+        encoder_upload_domain,
+        encoder_upload_format,
         required_side_data: pipeline.requires_software_decode(),
     }
 }

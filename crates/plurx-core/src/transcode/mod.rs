@@ -21,11 +21,12 @@ mod recipe;
 
 pub use decode::{
     resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCapabilities,
-    DecodeCapability, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
-    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, FrameDomain, FrameRate,
-    FrameRateProvenance, OutputWidthRule, PlanError, PresentationContract, Rational,
-    ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
-    SubtitleRendering, TranscodeMediaOptions, TranscodeRequest,
+    DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence,
+    DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
+    DecodeSurfaceContract, DynamicRangeClass, FrameDomain, FrameRate, FrameRateProvenance,
+    OutputWidthRule, PlanError, PresentationContract, Rational, ResolvedDecode, ResolvedTranscode,
+    SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering, TranscodeMediaOptions,
+    TranscodeRequest,
 };
 pub use encoder::{
     detect_encoders, detect_video_decoders, validate_quality_rate_control,
