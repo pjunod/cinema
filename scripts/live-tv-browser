@@ -228,15 +228,34 @@ def main(argv: list[str]) -> int:
             page.evaluate("delete document.visibilityState")
 
             watch()
+            # The orphan has to be made through a release the browser actually
+            # sends. This step used to set the flag and navigate away, waiting
+            # for an unload DELETE to be lost -- and none ever arrived, so
+            # nothing was dropped, every session closed cleanly, and the
+            # "orphaned start blocks replacement" claim below was proven by a
+            # run that had no orphan in it. Pause is a release this fixture has
+            # already serviced nine times.
+            orphan = active()[0]
+            attempted = len(deletes)
             mode["drop_delete"] = True
+            page.get_by_role("button", name="Pause", exact=True).click()
+            until(
+                lambda: len(deletes) > attempted,
+                "the client never tried to release the orphan",
+                timeout=45,
+            )
+            assert deletes[attempted] == orphan, deletes
+            assert active() == [orphan], "a lost DELETE must not close the session"
+            # Now the reload, with a capability the server still holds and the
+            # client believes it has given back.
             page.goto("about:blank")
-            # Unload delivery is not guaranteed. Deliberately lose DELETE and
-            # prove a replacement document cannot allocate a second tuner.
             page.goto(host.base_url + "/#/live-tv")
             assert page.evaluate("Object.keys(localStorage).some(key => key.startsWith('plurx_live_tv_pending_v1:'))")
             page.get_by_role("button", name="Watch live", exact=True).nth(0).click()
             page.get_by_text("90 seconds", exact=False).wait_for()
-            assert active() == ["fixture-10"] and len(sessions) == 10
+            # Nothing new was allocated: the replacement document adopted the
+            # outstanding capability rather than opening an eleventh tuner.
+            assert active() == [orphan] and len(sessions) == 10, (active(), len(sessions))
             assert not forbidden, "Live TV wrote VOD/account state: " + repr(forbidden)
             assert not errors, "browser page errors: " + repr(errors)
             assert events == [entry for i in range(1, 10) for entry in (f"start:fixture-{i}", f"release:fixture-{i}")] + ["start:fixture-10"], events
@@ -244,11 +263,13 @@ def main(argv: list[str]) -> int:
             # Its backend orphan expiry belongs to backend/hardware acceptance,
             # not an invented reaper inside this browser fixture.
             assert all(deletes.count(f"fixture-{i}") == 1 for i in range(1, 10)), deletes
-            # Zero satisfies "at most three" while proving nothing about the
-            # unload DELETE the claim below advertises.
-            assert 1 <= deletes.count("fixture-10") <= 3, deletes
+            # Reachable at last: the orphan's DELETE really is sent and
+            # really is lost, so this counts attempts rather than describing a
+            # request that was never made. The upper bound keeps the client's
+            # retry from becoming a loop.
+            assert 1 <= deletes.count(orphan) <= 3, deletes
             assert not violations, violations
-    print("PASS decoded H.264/AAC frames advance; pause/resume, fullscreen stop, switch, navigation, typed refusal and late-start cleanup")
+            print("PASS decoded H.264/AAC frames advance; pause/resume, fullscreen stop, switch, navigation, typed refusal and late-start cleanup")
             print("PASS active owner loss, producer failure, capability expiry, paused timeout, visibility event and lost-unload reload quarantine")
             print("PASS no account token on capability requests; no VOD or account write from any Live TV path; ten starts, nine confirmed releases, one deliberately orphaned start blocks replacement")
             context.close()
