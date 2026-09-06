@@ -1503,6 +1503,10 @@ for (const startupDelay of [0, 1600, 7000]) {
             'test("active transport stays visible through its server-projected deadline"',
             membership_web_tests,
         )
+        self.assertIn(
+            'test("transport observer age advances the repaint projection"',
+            membership_web_tests,
+        )
         self.assertNotIn("make ci-rust-gate", effort)
         self.assertNotIn("make cluster-", effort)
         self.assertNotIn("make apple-test", effort)
@@ -1585,6 +1589,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "accepted_partial_write_finishes_before_same_offset_retry",
             "production_snapshot_executor_worker_records_status_around_injected_installer",
             "production_snapshot_executor_fifo_status_ignores_later_admission_waiter",
+            "production_shared_executor_drops_abandoned_other_peer_without_phantom_status",
             "inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
             "replacement_socket_drops_cancelled_request_after_consuming_reset",
@@ -1629,6 +1634,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "terminal_wrapper_preserves_the_actionable_failure_category",
             "specific_terminal_failure_replaces_prior_transient_category",
             "outbound_live_socket_counts_the_first_reconnect",
+            "production_supervisor_start_before_snapshot_attempt_counts_first_reconnect",
             "stale_inbound_completion_cannot_mutate_newer_snapshot_identity",
             "abandoned_inbound_admission_does_not_displace_worker_result",
             "inbound_socket_epoch_and_reconnect_count_are_attempt_local",
@@ -1665,6 +1671,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "peer_fanout_never_exceeds_the_eight_peer_bound",
             "peer_status_cache_is_fresh_for_five_seconds_then_expires",
             "cached_active_transport_observation_ages_past_five_minutes_and_deadline_counts_down",
+            "cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero",
             "cached_inactive_transport_observation_expires_at_five_minutes",
             "peer_status_refresh_keeps_one_second_of_cache_margin",
             "aggregate_request_path_reads_cache_without_peer_network_fanout",

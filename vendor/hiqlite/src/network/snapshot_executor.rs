@@ -542,6 +542,150 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_shared_executor_drops_abandoned_other_peer_without_phantom_status() {
+        use crate::store::state_machine::sqlite::TypeConfigSqlite;
+        use crate::transport_status::{
+            InboundSnapshotAttempt, InboundSnapshotChunk, InboundSnapshotDisposition,
+        };
+        use openraft::{SnapshotMeta, Vote};
+
+        fn track_attempt(
+            status: &crate::LocalSnapshotTransportStatus,
+            peer_node_id: u64,
+            snapshot_id: &str,
+        ) -> InboundSnapshotAttempt {
+            status
+                .inbound_received(InboundSnapshotChunk {
+                    raft_group: "sqlite",
+                    peer_node_id,
+                    snapshot_id,
+                    offset: 0,
+                    len: 64,
+                    done: true,
+                    socket_epoch: 1,
+                    deadline: time::Instant::now() + Duration::from_secs(30),
+                })
+                .expect("track inbound snapshot")
+        }
+
+        fn request(
+            status_attempt: InboundSnapshotAttempt,
+            snapshot_id: &str,
+        ) -> SnapshotExecutorRequest<TypeConfigSqlite> {
+            SnapshotExecutorRequest {
+                status_attempt: Some(status_attempt),
+                request: InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: SnapshotMeta {
+                        last_log_id: None,
+                        last_membership: Default::default(),
+                        snapshot_id: snapshot_id.to_owned(),
+                    },
+                    offset: 0,
+                    data: vec![0; 64],
+                    done: true,
+                },
+            }
+        }
+
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1, 3]));
+        let running_attempt = track_attempt(&status, 1, "running");
+        let gate = Arc::new(Semaphore::new(0));
+        let started = Arc::new(Mutex::new(Vec::<String>::new()));
+        let executor = Arc::new(start_snapshot_executor_with_installer::<
+            TypeConfigSqlite,
+            _,
+            _,
+        >(
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            status.clone(),
+            {
+                let gate = Arc::clone(&gate);
+                let started = Arc::clone(&started);
+                move |request| {
+                    let gate = Arc::clone(&gate);
+                    let started = Arc::clone(&started);
+                    async move {
+                        started.lock().await.push(request.meta.snapshot_id.clone());
+                        gate.acquire().await.expect("test gate").forget();
+                        Ok(InstallSnapshotResponse { vote: request.vote })
+                    }
+                }
+            },
+        ));
+
+        let (_running_close, mut running_closed) = watch::channel(false);
+        let running = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(request(running_attempt, "running"), &mut running_closed)
+                    .await
+            }
+        });
+        while started.lock().await.as_slice() != ["running"] {
+            tokio::task::yield_now().await;
+        }
+
+        let abandoned_attempt = track_attempt(&status, 3, "abandoned");
+        assert_eq!(status.snapshot().observations.len(), 1);
+        let (abandoned_close, mut abandoned_closed) = watch::channel(false);
+        let abandoned = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            let abandoned_attempt = abandoned_attempt.clone();
+            async move {
+                executor
+                    .submit(
+                        request(abandoned_attempt, "abandoned"),
+                        &mut abandoned_closed,
+                    )
+                    .await
+            }
+        });
+        while !executor.tx.is_full() {
+            tokio::task::yield_now().await;
+        }
+        abandoned_close.send_replace(true);
+        assert_eq!(
+            abandoned.await.expect("abandoned caller task"),
+            Err(SubmitError::ConnectionClosed)
+        );
+        status.inbound_request_ended(
+            &abandoned_attempt,
+            None,
+            InboundSnapshotDisposition::Retrying("snapshot_connection_closed"),
+        );
+        let only_running = status.snapshot();
+        assert_eq!(only_running.observations.len(), 1);
+        assert_eq!(only_running.observations[0].peer_node_id, 1);
+        assert!(only_running.observations[0].operation_owns_work);
+
+        gate.add_permits(1);
+        assert!(
+            running
+                .await
+                .expect("running caller task")
+                .expect("running response")
+                .is_ok()
+        );
+        while executor.tx.is_full() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(started.lock().await.as_slice(), ["running"]);
+        let completed = status.snapshot();
+        assert_eq!(completed.observations.len(), 1);
+        assert_eq!(completed.observations[0].peer_node_id, 1);
+        assert_eq!(
+            completed.observations[0].phase,
+            crate::SnapshotTransportPhase::Complete
+        );
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+    }
+
+    #[cfg(feature = "sqlite")]
     #[tokio::test(start_paused = true)]
     async fn inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal() {
         use crate::store::state_machine::sqlite::TypeConfigSqlite;

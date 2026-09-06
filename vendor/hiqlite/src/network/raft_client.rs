@@ -302,6 +302,7 @@ enum WritePayload {
 #[derive(Default)]
 struct ConnectionResetState {
     epoch: AtomicU64,
+    connection_attempt_sequence: AtomicU64,
     connected: AtomicBool,
     notify: Notify,
 }
@@ -337,6 +338,16 @@ impl ConnectionResetState {
 
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
+    }
+
+    fn begin_connection_attempt(&self) -> u64 {
+        self.connection_attempt_sequence
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    fn connection_attempt_sequence(&self) -> u64 {
+        self.connection_attempt_sequence.load(Ordering::Acquire)
     }
 
     fn mark_connected(&self) {
@@ -558,11 +569,13 @@ impl NetworkStreaming {
                 break;
             }
 
+            let connection_attempt_sequence = reset.begin_connection_attempt();
             snapshot_transport.connecting_owned(
                 raft_group,
                 node.id,
                 transport_connection_id,
                 reset.epoch(),
+                connection_attempt_sequence,
             );
             info!("Trying to open WebSocket stream");
             let socket = {
@@ -1323,11 +1336,12 @@ where
     C::SnapshotData: tokio::io::AsyncRead + tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin,
     NetworkConnectionStreaming: RaftNetwork<C>,
 {
-    let transport_attempt = network.snapshot_transport.next_outbound_attempt(
+    let mut transport_attempt = network.snapshot_transport.next_outbound_attempt(
         network.raft_group,
         network.node.id,
         network.transport_connection_id,
     );
+    transport_attempt.connection_attempt_sequence = network.reset.connection_attempt_sequence();
     let attempt_id = transport_attempt.attempt_id;
     let attempt = SnapshotAttempt::tracked(
         transport_attempt,
@@ -1342,6 +1356,13 @@ where
             connected: network.reset.is_connected(),
         },
         attempt.transfer_deadline,
+    );
+    network.snapshot_transport.connecting_owned(
+        network.raft_group,
+        network.node.id,
+        network.transport_connection_id,
+        network.reset.epoch(),
+        network.reset.connection_attempt_sequence(),
     );
     {
         let mut slot = network
@@ -1985,6 +2006,73 @@ mod tests {
             .expect("accept production connection attempt");
         assert!(transport.snapshot().observations.is_empty());
         drop(attempted_socket);
+        drop(connection);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_supervisor_start_before_snapshot_attempt_counts_first_reconnect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind handshake observer");
+        let address = listener.local_addr().expect("read endpoint");
+        let transport =
+            crate::LocalSnapshotTransportStatus::new(1, std::collections::BTreeSet::from([2]));
+        let mut factory = NetworkStreaming {
+            node_id: 1,
+            tls_config: None,
+            secret_raft: b"test-secret".to_vec(),
+            raft_type: RaftType::Sqlite,
+            heartbeat_interval: 0,
+            is_raft_stopped: Arc::new(AtomicBool::new(false)),
+            is_startup_finished: Arc::new(AtomicBool::new(true)),
+            snapshot_budgets: test_snapshot_budgets(),
+            snapshot_transport: transport.clone(),
+        };
+        let node = Node {
+            id: 2,
+            addr_raft: address.to_string(),
+            addr_api: "127.0.0.1:1".to_owned(),
+        };
+        let connection = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+            &mut factory,
+            node.id,
+            &node,
+        )
+        .await;
+        let (first_socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .expect("supervisor must start before the snapshot attempt")
+            .expect("accept initial connection attempt");
+        assert_eq!(connection.reset.connection_attempt_sequence(), 1);
+
+        let mut attempt =
+            transport.next_outbound_attempt("sqlite", node.id, connection.transport_connection_id);
+        attempt.connection_attempt_sequence = connection.reset.connection_attempt_sequence();
+        let deadline = time::Instant::now() + Duration::from_secs(120);
+        transport.begin_owned_outbound_attempt(
+            &attempt,
+            "race-snapshot",
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: connection.reset.epoch(),
+                connected: connection.reset.is_connected(),
+            },
+            deadline,
+        );
+        assert_eq!(transport.snapshot().observations[0].reconnect_count, 0);
+
+        drop(first_socket);
+        let (second_socket, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .expect("failed initial handshake must start the first reconnect")
+            .expect("accept first reconnect");
+        let observation = &transport.snapshot().observations[0];
+        assert_eq!(connection.reset.connection_attempt_sequence(), 2);
+        assert_eq!(observation.reconnect_count, 1);
+        assert_eq!(observation.snapshot_id.as_deref(), Some("race-snapshot"));
+        assert!(observation.operation_owns_work);
+
+        drop(second_socket);
         drop(connection);
     }
 

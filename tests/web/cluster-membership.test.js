@@ -2845,6 +2845,27 @@ test("the projection ignores what moves on its own and nothing else", () => {
   assert.equal(ui.clusterOpsProjection(shuffled), ui.clusterOpsProjection(first));
 });
 
+test("transport observer age advances the repaint projection", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const first = operationStatus(cluster);
+  first.nodes[0].status.transport = {
+    observations: [transportObservation("transferring", { sample_age_ms: 1_000 })],
+  };
+  const later = JSON.parse(JSON.stringify(first));
+  later.nodes[0].status.transport.observations[0].sample_age_ms = 61_000;
+
+  assert.notEqual(
+    ui.clusterOpsProjection(later),
+    ui.clusterOpsProjection(first),
+    "rendered transport observer age must repaint even when all other evidence is identical",
+  );
+});
+
 // A settingsTick harness that can actually run the cluster branch: the tick
 // itself is shipped source, everything it reaches for is supplied here.
 function tickHarness({ cluster, ops, now }) {

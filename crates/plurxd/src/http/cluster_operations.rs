@@ -19,7 +19,8 @@ use plurx_core::cluster::membership::{
     ActivityPeer, ClusterNodeRecord, MembershipStatus, NodeRole, MAX_OPERATIONS_PEERS,
 };
 use plurx_core::cluster::migration::status::{
-    DbSnapshotMetricsSnapshot, SnapshotTransportStatus, WalRuntimeState, WalStatusSnapshot,
+    DbSnapshotMetricsSnapshot, SnapshotTransportPhase, SnapshotTransportStatus, WalRuntimeState,
+    WalStatusSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -696,8 +697,25 @@ fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_m
         let deadline_still_active = observation
             .active_deadline_remaining_ms
             .is_some_and(|remaining_ms| remaining_ms > elapsed_ms);
+        let deadline_crossed = observation
+            .active_deadline_remaining_ms
+            .is_some_and(|remaining_ms| remaining_ms <= elapsed_ms);
         if let Some(remaining_ms) = observation.active_deadline_remaining_ms.as_mut() {
             *remaining_ms = remaining_ms.saturating_sub(elapsed_ms);
+        }
+        if deadline_crossed
+            && matches!(
+                observation.phase,
+                SnapshotTransportPhase::Connecting
+                    | SnapshotTransportPhase::Transferring
+                    | SnapshotTransportPhase::AwaitingAcknowledgement
+                    | SnapshotTransportPhase::Installing
+                    | SnapshotTransportPhase::Retrying
+                    | SnapshotTransportPhase::Stalled
+            )
+        {
+            observation.phase = SnapshotTransportPhase::Stalled;
+            observation.last_error_category = Some("snapshot_stalled".to_owned());
         }
         observation.sample_age_ms <= TRANSPORT_OBSERVATION_TTL_MS || deadline_still_active
     });
@@ -1673,6 +1691,46 @@ mod tests {
                 .observations
                 .is_empty(),
             "an already-stale observation expires at its active deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero() {
+        let cache = PeerStatusCache::default();
+        let statuses = BTreeMap::from([(
+            "node-2".to_owned(),
+            PeerStatusOutcome {
+                node_id: "node-2".to_owned(),
+                state: ObservationState::Unreachable,
+                status: None,
+                transport: Some(test_transport_status(2, 1_000, Some(1_000))),
+            },
+        )]);
+        cache.store(&statuses, tokio::time::Instant::now()).await;
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        let still_active = cache.fresh().await.expect("cache itself is still fresh");
+        let observation = &still_active["node-2"]
+            .transport
+            .as_ref()
+            .expect("cached private transport evidence")
+            .observations[0];
+        assert_eq!(observation.phase, SnapshotTransportPhase::Transferring);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(1));
+        assert_eq!(observation.last_error_category, None);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let expired = cache.fresh().await.expect("cache itself remains fresh");
+        let observation = &expired["node-2"]
+            .transport
+            .as_ref()
+            .expect("cached private transport evidence")
+            .observations[0];
+        assert_eq!(observation.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(0));
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("snapshot_stalled")
         );
     }
 

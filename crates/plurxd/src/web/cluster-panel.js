@@ -620,6 +620,8 @@
   // themselves: the aggregate's and each status's `observed_at_unix_ms`, the
   // per-node `sample_age_ms`, and the Raft sample and watermark ages. Those are
   // what the "Reading age" row reports, and it is patched in place instead.
+  // A transport observation's `sample_age_ms` stays in the projection: its
+  // observer age is rendered in the recovery ledger and has no separate patch.
   // `last_seen_at` on the embedded membership record goes too: the roster owns
   // that reading and the panel never renders it from here, so a heartbeat is not
   // a reason to rewrite the screen.
@@ -650,9 +652,11 @@
     const walk=value=>{
       if(Array.isArray(value)) return value.map(walk);
       if(!value||typeof value!=="object") return value;
+      const transportObservation=(value.direction==="inbound"||value.direction==="outbound")
+        &&typeof value.raft_group==="string"&&Object.prototype.hasOwnProperty.call(value,"observing_node_id");
       const out={};
       for(const key of Object.keys(value).sort()){
-        if(clusterOpsSelfTicking(key)) continue;
+        if(clusterOpsSelfTicking(key)&&!(transportObservation&&key==="sample_age_ms")) continue;
         out[key]=walk(value[key]);
       }
       return out;
