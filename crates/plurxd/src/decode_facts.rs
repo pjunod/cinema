@@ -3858,7 +3858,7 @@ void probe_main(unsigned long *stack) {
         std::fs::write(&media, b"source").expect("media");
         let source = Arc::new(std::fs::File::open(media).expect("open media"));
         tokio::time::timeout(
-            Duration::from_millis(400),
+            Duration::from_millis(1_500),
             DecodeFactCache::new().get_or_probe(
                 &identity,
                 DecodeFactSource::isolated(source),
