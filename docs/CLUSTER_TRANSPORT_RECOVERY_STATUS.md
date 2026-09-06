@@ -1,7 +1,7 @@
 # Cluster transport recovery — live implementation status
 
 **Status:** active · **Effort:** `effort/cluster-transport-recovery` ·
-**Started:** 2026-09-05 · **Last updated:** 2026-09-05
+**Started:** 2026-09-05 · **Last updated:** 2026-09-06
 
 Companion to [OPERATIONS.md](OPERATIONS.md) (operator contracts) and
 [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md) (branch, gate, and
@@ -29,9 +29,9 @@ change.
 |---|---|---|---|---|
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
-| M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | all eight first-pass findings and the second-pass cache-only Clippy finding are fixed; the next replacement candidate awaits exact-SHA re-review | Virtual-time exact bounds · config/env/Compose precedence |
-| M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
-| M5 · recovery campaign | planned | not opened | not started | Actual TLS transport matrix · 20 learner and 20 voter cycles |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | awaiting submission | exact candidate `f7671683` passed three adversarial reviews and the focused fast lane; ready for its effort PR | Virtual-time exact bounds · config/env/Compose precedence |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | combined candidate is undergoing review-finding fixes before exact-SHA re-review | Authenticated pre-HTTP status · zero store calls · stale samples expire |
+| M5 · recovery campaign | isolated review-fix branch | not opened | campaign harness and resource evidence are undergoing review-finding fixes before final integration | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
@@ -93,7 +93,7 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    timeout. The node-owned executor now captures the validated C value at
    startup, and its capacity-one regression uses a non-default scaled budget.
 
-## Next checkpoint — exact-SHA re-review and merge of M3
+## Next checkpoint — submit and merge M3
 
 M1/M2 are merged into the effort at `5f96469a94`. The first exact-SHA M3 review
 found eight boundary gaps: final mismatch restored T too late, a stale T timer
@@ -101,13 +101,13 @@ could beat a ready final-stage update, standalone durations could overflow
 `Instant`, both production wrappers lacked direct pins, hard TTL below C was
 untested, numeric overflow evidence was missing, the Dockerfile comment was
 stale, and receiver admission still used the old fixed timeout. All eight are
-fixed and the focused fast lane is green. The replacement SHA now goes through
-the same three adversarial tracks before the effort PR opens. The first
-replacement review also caught a cache-only denied-warning lint in a helper's
-oversized `Result`; the helper now performs only the phase restoration and the
-trait implementations retain error mapping. All three prescribed standalone
-Clippy matrices and the 37-test snapshot client suite pass after that change.
-Real socket/install acceptance remains explicitly open for M5.
+fixed and the focused fast lane is green. The replacement SHA passed the same
+three adversarial tracks and is ready for its effort PR. The first replacement
+review also caught a cache-only denied-warning lint in a helper's oversized
+`Result`; the helper now performs only the phase restoration and the trait
+implementations retain error mapping. All three prescribed standalone Clippy
+matrices and the 37-test snapshot client suite pass after that change. Real
+socket/install acceptance remains explicitly open for M5.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only
