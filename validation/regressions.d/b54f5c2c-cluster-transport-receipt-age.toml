@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = ["b54f5c2c"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "core.media",
+  "identity.access",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "Authenticated public and private transport responses retain process-local monotonic receipt times outside the wire schema, so cached observations are aged from their individual receipts rather than a shared fanout start. A paused-time delayed-peer regression proves independently sampled attempt ages normalize to the same selection instant."
