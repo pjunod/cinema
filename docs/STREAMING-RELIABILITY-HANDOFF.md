@@ -282,9 +282,18 @@ fixture defect on the same day.**
   `enforceCaseResult` turns any non-terminal status into a failure. Still open:
   the strongest cases (steady, seek-storm, stall-recovery) are deliberately
   excluded from the PR gate (`ci.yml:545-555`); evidence retention is 3-14 days
-  and CI-scoped; there is no durable action/outcome ledger, so no failure
-  evidence survives a daemon restart; and nothing inspects a deployed node's
-  health or encoder capability — `scripts/ship` has no status probe at all.
+  and CI-scoped; and there is no durable action/outcome ledger, so no failure
+  evidence survives a daemon restart.
+
+  `scripts/ship --status` closes the last of those. It asks every node in the
+  inventory for `/readyz` and `/metrics` and prints build, readiness,
+  cache-hit GETs in flight, and blocked GETs against their cap — then names
+  any node that did not answer rather than omitting it, and warns when more
+  than one build is serving, because a partial deploy is invisible in a
+  per-node list nobody adds up. The daemon already served every one of those
+  facts; this is the first thing that reads them. Read-only by construction
+  and tested as such (`tests/operations/test_ship_status_probe.py`).
+  **Encoder capability is still not probed.**
 
 ### 4. Executable prepared transaction and three client adapters
 
