@@ -358,21 +358,25 @@ impl DecodeCatalogMetadata {
             if dynamic_range != Some(DynamicRangeClass::DolbyVision) {
                 return Err(PlanError::ConflictingMetadata("dolby vision"));
             }
-            if let Some(compatibility_id) = dolby_vision.bl_compat_id {
+            let labelled_base = hdr_format.as_deref().and_then(|format| {
+                if format.contains("HDR10-compatible") {
+                    Some(DynamicRangeClass::Hdr10)
+                } else if format.contains("HLG-compatible") {
+                    Some(DynamicRangeClass::Hlg)
+                } else {
+                    None
+                }
+            });
+            if dolby_vision.profile == Some(5) {
+                if !dolby_vision.bl_compat_id.is_none_or(|id| id == 0) || labelled_base.is_some() {
+                    return Err(PlanError::ConflictingMetadata("dolby compatibility"));
+                }
+            } else if let Some(compatibility_id) = dolby_vision.bl_compat_id {
                 let typed_base = match compatibility_id {
                     1 | 6 => Some(DynamicRangeClass::Hdr10),
                     4 => Some(DynamicRangeClass::Hlg),
                     _ => None,
                 };
-                let labelled_base = hdr_format.as_deref().and_then(|format| {
-                    if format.contains("HDR10-compatible") {
-                        Some(DynamicRangeClass::Hdr10)
-                    } else if format.contains("HLG-compatible") {
-                        Some(DynamicRangeClass::Hlg)
-                    } else {
-                        None
-                    }
-                });
                 if labelled_base.is_some() && labelled_base != typed_base {
                     return Err(PlanError::ConflictingMetadata("dolby compatibility"));
                 }
@@ -662,21 +666,26 @@ impl DecodeFacts {
 
     fn routing_dynamic_range(&self) -> Option<&'static str> {
         match self.dynamic_range {
+            Some(DynamicRangeClass::DolbyVision) if self.dolby_vision.profile == Some(5) => {
+                Some(DynamicRangeClass::DolbyVision.name())
+            }
             Some(DynamicRangeClass::DolbyVision) => match self.dolby_vision.bl_compat_id {
                 Some(1 | 6) => Some(DynamicRangeClass::Hdr10.name()),
                 Some(4) => Some(DynamicRangeClass::Hlg.name()),
                 Some(_) => Some(DynamicRangeClass::DolbyVision.name()),
-                None if self
-                    .hdr_format
-                    .as_deref()
-                    .is_some_and(|format| format.contains("HDR10-compatible")) =>
+                None if self.dolby_vision.is_empty()
+                    && self
+                        .hdr_format
+                        .as_deref()
+                        .is_some_and(|format| format.contains("HDR10-compatible")) =>
                 {
                     Some(DynamicRangeClass::Hdr10.name())
                 }
-                None if self
-                    .hdr_format
-                    .as_deref()
-                    .is_some_and(|format| format.contains("HLG-compatible")) =>
+                None if self.dolby_vision.is_empty()
+                    && self
+                        .hdr_format
+                        .as_deref()
+                        .is_some_and(|format| format.contains("HLG-compatible")) =>
                 {
                     Some(DynamicRangeClass::Hlg.name())
                 }

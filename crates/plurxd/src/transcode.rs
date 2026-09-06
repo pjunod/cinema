@@ -279,6 +279,15 @@ fn neutral_decode_fact_observation(
         Err(error) => NeutralDecodeFactObservation::ContinueLegacy(error),
     }
 }
+
+fn retain_production_budget_after_neutral_observation(
+    production_deadline: Instant,
+    observation_duration: Duration,
+) -> Instant {
+    production_deadline
+        .checked_add(observation_duration)
+        .unwrap_or(production_deadline)
+}
 /// How long ffmpeg's output timestamp may sit still. It is the actor's
 /// progress budget for every actor-managed rolling producer.
 /// How long a flow evaluation waits for the actor to order its desire.
@@ -12994,6 +13003,7 @@ impl TranscodeManager {
             expected_source_snapshot: _,
             bound_source,
         } = request.clone();
+        let mut deadline = deadline;
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
@@ -13016,6 +13026,7 @@ impl TranscodeManager {
         if let (Some(source), Some(probe)) =
             (bound_source.as_ref(), self.decode_probe_identity.as_ref())
         {
+            let observation_started = Instant::now();
             let catalog = match plurx_core::transcode::DecodeCatalogMetadata::from_media_file(file)
             {
                 Ok(catalog) => Some(catalog),
@@ -13044,6 +13055,10 @@ impl TranscodeManager {
                         cancelled,
                     )
                     .await,
+            );
+            deadline = retain_production_budget_after_neutral_observation(
+                deadline,
+                observation_started.elapsed(),
             );
             match observation {
                 NeutralDecodeFactObservation::Collected(facts) => tracing::debug!(
@@ -21671,6 +21686,22 @@ pub(crate) mod tests {
             neutral_decode_fact_observation(Err(crate::decode_facts::DecodeFactError::Cancelled)),
             NeutralDecodeFactObservation::Cancelled
         ));
+        let started = Instant::now();
+        let production_deadline = started + Duration::from_secs(1);
+        let observation_duration = Duration::from_secs(2);
+        let legacy_spawn_time = started + observation_duration;
+        let retained_deadline = retain_production_budget_after_neutral_observation(
+            production_deadline,
+            observation_duration,
+        );
+        assert!(
+            legacy_spawn_time < retained_deadline,
+            "a neutral probe timeout must leave the original production budget available"
+        );
+        assert_eq!(
+            retained_deadline.duration_since(legacy_spawn_time),
+            Duration::from_secs(1)
+        );
     }
 
     #[tokio::test]

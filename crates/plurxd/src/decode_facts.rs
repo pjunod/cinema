@@ -101,17 +101,18 @@ pub(crate) struct DecodeProbeIdentity {
 
 #[derive(Debug)]
 struct ExecutableSnapshot {
-    file: tempfile::NamedTempFile,
+    file: std::fs::File,
+    path: tempfile::TempPath,
 }
 
 impl ExecutableSnapshot {
     fn as_file(&self) -> &std::fs::File {
-        self.file.as_file()
+        &self.file
     }
 
     #[cfg(any(test, not(target_os = "linux")))]
     fn path(&self) -> &Path {
-        self.file.path()
+        self.path.as_ref()
     }
 }
 
@@ -121,7 +122,7 @@ impl Drop for ExecutableSnapshot {
         use std::os::fd::AsRawFd;
 
         unsafe {
-            libc::fchflags(self.file.as_file().as_raw_fd(), 0);
+            libc::fchflags(self.file.as_raw_fd(), 0);
         }
     }
 }
@@ -247,22 +248,59 @@ fn resolve_executable(_bin: &str) -> Result<PathBuf, DecodeFactError> {
 }
 
 #[cfg(unix)]
-fn install_child_fd(source: std::os::fd::RawFd, target: std::os::fd::RawFd) -> std::io::Result<()> {
+fn duplicate_child_fd(source: std::os::fd::RawFd) -> std::io::Result<std::os::fd::RawFd> {
     let duplicate = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 10) };
     if duplicate == -1 {
-        return Err(std::io::Error::last_os_error());
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(duplicate)
     }
+}
+
+#[cfg(unix)]
+fn assign_child_fd(
+    duplicate: std::os::fd::RawFd,
+    target: std::os::fd::RawFd,
+) -> std::io::Result<()> {
     if unsafe { libc::dup2(duplicate, target) } == -1 {
-        unsafe { libc::close(duplicate) };
         return Err(std::io::Error::last_os_error());
     }
-    unsafe { libc::close(duplicate) };
     let flags = unsafe { libc::fcntl(target, libc::F_GETFD) };
     if flags == -1 || unsafe { libc::fcntl(target, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1
     {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn install_child_fd(source: std::os::fd::RawFd, target: std::os::fd::RawFd) -> std::io::Result<()> {
+    let duplicate = duplicate_child_fd(source)?;
+    let result = assign_child_fd(duplicate, target);
+    unsafe { libc::close(duplicate) };
+    result
+}
+
+#[cfg(unix)]
+fn install_probe_child_fds(
+    source: std::os::fd::RawFd,
+    executable: std::os::fd::RawFd,
+) -> std::io::Result<()> {
+    let source_duplicate = duplicate_child_fd(source)?;
+    let executable_duplicate = match duplicate_child_fd(executable) {
+        Ok(duplicate) => duplicate,
+        Err(error) => {
+            unsafe { libc::close(source_duplicate) };
+            return Err(error);
+        }
+    };
+    let result = assign_child_fd(source_duplicate, 3)
+        .and_then(|()| assign_child_fd(executable_duplicate, HELD_PROBE_FD));
+    unsafe {
+        libc::close(source_duplicate);
+        libc::close(executable_duplicate);
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -338,7 +376,10 @@ fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, Dec
             ));
         }
     }
-    Ok(ExecutableSnapshot { file: snapshot })
+    let path = snapshot.into_temp_path();
+    let file = std::fs::File::open(&path)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    Ok(ExecutableSnapshot { file, path })
 }
 
 #[cfg(not(unix))]
@@ -857,8 +898,7 @@ async fn collect(
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
-            install_child_fd(source_fd, 3)?;
-            install_child_fd(executable_fd, HELD_PROBE_FD)
+            install_probe_child_fds(source_fd, executable_fd)
         });
     }
     let mut child = command
@@ -1645,6 +1685,48 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             probe.with_extension("started").exists(),
             "the regression must exercise collection after lease acquisition"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn crossed_source_and_executable_fds_are_duplicated_before_assignment() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+
+        let root = crate::test_tempdir().expect("tempdir");
+        let source_path = root.path().join("source");
+        let executable_path = root.path().join("executable");
+        std::fs::write(&source_path, b"bound-source\n").expect("source bytes");
+        std::fs::write(&executable_path, b"held-probe\n").expect("probe bytes");
+        let source = std::fs::File::open(source_path).expect("source");
+        let executable = std::fs::File::open(executable_path).expect("executable");
+        let source_fd = source.as_raw_fd();
+        let executable_fd = executable.as_raw_fd();
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "test \"$(cat <&3)\" = bound-source && test \"$(cat <&4)\" = held-probe",
+        ]);
+        unsafe {
+            command.pre_exec(move || {
+                let source_cross = duplicate_child_fd(source_fd)?;
+                let executable_cross = match duplicate_child_fd(executable_fd) {
+                    Ok(duplicate) => duplicate,
+                    Err(error) => {
+                        libc::close(source_cross);
+                        return Err(error);
+                    }
+                };
+                let crossed = assign_child_fd(executable_cross, 3)
+                    .and_then(|()| assign_child_fd(source_cross, HELD_PROBE_FD));
+                libc::close(source_cross);
+                libc::close(executable_cross);
+                crossed?;
+                install_probe_child_fds(HELD_PROBE_FD, 3)
+            });
+        }
+        assert!(command.status().expect("run descriptor check").success());
+        drop((source, executable));
     }
 
     #[tokio::test]

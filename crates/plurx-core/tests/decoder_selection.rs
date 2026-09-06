@@ -1387,6 +1387,75 @@ fn dolby_compatible_bases_preserve_legacy_routing_and_profile5_needs_rpu_graph()
         );
     }
 
+    for stale_label in [
+        "Dolby Vision · Profile 5 (HDR10-compatible)",
+        "Dolby Vision · Profile 5 (HLG-compatible)",
+    ] {
+        assert_eq!(
+            DecodeCatalogMetadata::new(
+                Some("dolby_vision"),
+                Some(stale_label),
+                DolbyVisionFacts {
+                    profile: Some(5),
+                    level: Some(6),
+                    bl_compat_id: None,
+                    el_present: Some(false),
+                    rpu_present: Some(true),
+                },
+            ),
+            Err(PlanError::ConflictingMetadata("dolby compatibility")),
+            "profile 5 cannot borrow a compatible-base label when its id is missing"
+        );
+    }
+
+    for impossible_id in [1, 4, 6] {
+        assert_eq!(
+            DecodeCatalogMetadata::new(
+                Some("dolby_vision"),
+                Some("Dolby Vision · Profile 5"),
+                DolbyVisionFacts {
+                    profile: Some(5),
+                    level: Some(6),
+                    bl_compat_id: Some(impossible_id),
+                    el_present: Some(false),
+                    rpu_present: Some(true),
+                },
+            ),
+            Err(PlanError::ConflictingMetadata("dolby compatibility")),
+            "profile 5 compatibility id {impossible_id} is impossible"
+        );
+    }
+
+    let incomplete_typed_compatibility = DecodeCatalogMetadata::new(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+        DolbyVisionFacts {
+            profile: Some(8),
+            level: Some(6),
+            bl_compat_id: None,
+            el_present: Some(false),
+            rpu_present: Some(true),
+        },
+    )
+    .expect("incomplete typed metadata remains observable but cannot borrow the label");
+    let incomplete_typed_compatibility = DecodeFacts::from_ffprobe_json_with_catalog(
+        &json!({"streams": [pq_stream.clone()]}),
+        identity('b'),
+        &incomplete_typed_compatibility,
+    )
+    .expect("merge incomplete typed compatibility");
+    assert_eq!(
+        resolve(
+            Encoder::Qsv,
+            Pipeline::Hdr10Passthrough,
+            &incomplete_typed_compatibility,
+            &capabilities(vec![]),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        ),
+        Err(PlanError::IncompatibleRenderer),
+        "compatibility prose cannot override a present typed Dolby profile"
+    );
+
     let stale_hlg = DecodeCatalogMetadata::new(
         Some("dolby_vision"),
         Some("Dolby Vision · Profile 5 (HLG-compatible)"),
