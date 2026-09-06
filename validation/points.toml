@@ -249,7 +249,7 @@ profiles = ["commit", "full", "nightly"]
 platforms = ["darwin", "linux"]
 requires = ["cargo", "make"]
 missing = "fail"
-timeout_seconds = 1800
+timeout_seconds = 3600
 
 [[checks]]
 id = "offline-contract"

@@ -90,6 +90,14 @@ class CatalogCase(unittest.TestCase):
         self.assertIsNotNone(pattern.match("web/player/app.js"))
         self.assertIsNone(pattern.match("web/player/app.css"))
 
+    def test_cluster_auth_budget_covers_a_cold_serial_run(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        cluster_auth = next(
+            check for check in catalog.checks if check.id == "cluster-auth"
+        )
+
+        self.assertGreaterEqual(cluster_auth.timeout_seconds, 3600)
+
     def test_provider_change_expands_consumers_and_deduplicates_checks(self):
         catalog = self.load()
         selection = select_points(catalog, ("src/domain.py",))
@@ -661,7 +669,7 @@ def routing_catalog(
         "crates/plurxd/src/http/cluster.rs",
     ),
     cluster_auth_contract: str = "Three voters agree on the replicated Store.",
-    cluster_check_timeout: int = 1800,
+    cluster_check_timeout: int = 3600,
     web_paths: tuple[str, ...] = ("crates/plurxd/src/web/app.js",),
     web_contract: str = "The browser renders every library.",
 ) -> str:

@@ -451,6 +451,15 @@ host it runs on is part of the experiment:
 |---|---|---|
 | `cluster-auth` (`make cluster-check`) | `cluster.auth` · `persistence.upgrades` | Three voters run as separate processes and every call carries a three-second per-operation deadline (`STORE_TIMEOUT` in `crates/plurx-core/src/store/hiqlite.rs`). Under a full `make validate` those voters compete with every other check for the same cores, and that deadline is reachable by scheduling pressure alone |
 
+The catalog gives this aggregate check a 3,600-second outer budget. That budget
+covers the cold vendor builds, the serial replicated-store sweep, the live
+topology workloads, and the daemon activation tests that `make cluster-check`
+contains. It does not relax any production operation deadline. A 1,800-second
+outer budget was too small on a loaded development host: the durable-store and
+topology contracts completed successfully, but the runner terminated the
+following activation suite partway through. The activation suite then passed
+7/7 in isolation in 73.83 seconds on the same candidate.
+
 **What a timeout there means.** `Database("replicated store operation timed out")`
 is the host reporting that it could not finish an operation in three seconds.
 It is not durable-state evidence in either direction: nothing was proved and
