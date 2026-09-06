@@ -174,15 +174,9 @@ struct State {
     next_inbound_attempt: u64,
     next_inbound_socket_epoch: u64,
     observations: BTreeMap<ObservationKey, Observation>,
-    pending_inbound: BTreeMap<ObservationKey, PendingInboundSnapshot>,
     current_peers: BTreeSet<u64>,
     #[cfg(feature = "sqlite")]
     sqlite_membership: Option<watch::Receiver<RaftMetrics<u64, crate::Node>>>,
-}
-
-struct PendingInboundSnapshot {
-    attempt: InboundSnapshotAttempt,
-    disposition: Option<(Option<Instant>, InboundSnapshotDisposition)>,
 }
 
 struct Inner {
@@ -215,7 +209,6 @@ impl LocalSnapshotTransportStatus {
                     next_inbound_attempt: 0,
                     next_inbound_socket_epoch: 0,
                     observations: BTreeMap::new(),
-                    pending_inbound: BTreeMap::new(),
                     current_peers: configured_peers,
                     #[cfg(feature = "sqlite")]
                     sqlite_membership: None,
@@ -311,7 +304,6 @@ impl LocalSnapshotTransportStatus {
         state.observations.retain(|key, observation| {
             current_peers.contains(&key.peer_node_id) || !observation_expired(observation, now)
         });
-        retain_pending_for_observations(&mut state);
         let capacity = observation_capacity(current_peers.len());
         while state.observations.len() > capacity {
             if !evict_oldest_retired(&mut state, &current_peers) {
@@ -669,8 +661,7 @@ impl LocalSnapshotTransportStatus {
         let existing_attempt_id = existing.map(|observation| observation.attempt_id);
         let existing_end = existing.and_then(|observation| observation.attempted_offset);
         let existing_started = existing.and_then(|observation| observation.attempt_started);
-        let existing_owns_work =
-            existing.is_some_and(|observation| observation.operation_owns_work);
+        let existing_is_present = existing.is_some();
         if changed_snapshot {
             state.next_inbound_attempt = state.next_inbound_attempt.saturating_add(1);
         }
@@ -703,23 +694,13 @@ impl LocalSnapshotTransportStatus {
             done,
         };
 
-        // The node-owned executor may still be completing an accepted request
-        // after its socket disappeared. Keep that owned attempt authoritative
-        // until it finishes; the queued replacement publishes itself when the
-        // executor actually admits it.
-        if changed_snapshot && existing_owns_work {
-            state.pending_inbound.insert(
-                key,
-                PendingInboundSnapshot {
-                    attempt: attempt.clone(),
-                    disposition: None,
-                },
-            );
+        // Socket receipt is not executor ownership. Keep the existing attempt
+        // authoritative until the node-owned FIFO actually starts this exact
+        // token in `inbound_admitted`. Otherwise a later admission waiter can
+        // overwrite the one queued request and make its real install look
+        // stale before it even begins.
+        if changed_snapshot && existing_is_present {
             return Some(attempt);
-        }
-
-        if changed_snapshot {
-            state.pending_inbound.remove(&key);
         }
 
         let observation = state
@@ -832,9 +813,6 @@ impl LocalSnapshotTransportStatus {
         next_chunk_deadline: Option<Instant>,
         disposition: InboundSnapshotDisposition,
     ) {
-        if self.record_pending_inbound_disposition(attempt, next_chunk_deadline, disposition) {
-            return;
-        }
         self.update_inbound_attempt(attempt, false, |observation, now| {
             // A worker may win the race with socket teardown. Never replace
             // its running or already-published result with an admission error.
@@ -862,32 +840,6 @@ impl LocalSnapshotTransportStatus {
         });
     }
 
-    fn record_pending_inbound_disposition(
-        &self,
-        attempt: &InboundSnapshotAttempt,
-        next_chunk_deadline: Option<Instant>,
-        disposition: InboundSnapshotDisposition,
-    ) -> bool {
-        let key = ObservationKey {
-            raft_group: attempt.raft_group,
-            peer_node_id: attempt.peer_node_id,
-            direction: SnapshotTransportDirection::Inbound,
-        };
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(pending) = state.pending_inbound.get_mut(&key) else {
-            return false;
-        };
-        if pending.attempt.attempt_id != attempt.attempt_id {
-            return false;
-        }
-        pending.disposition = Some((next_chunk_deadline, disposition));
-        true
-    }
-
     fn update_inbound_attempt(
         &self,
         attempt: &InboundSnapshotAttempt,
@@ -908,65 +860,21 @@ impl LocalSnapshotTransportStatus {
         if !self.make_room(&mut state, now, &key) {
             return;
         }
-        {
-            let observation = state
-                .observations
-                .entry(key.clone())
-                .or_insert_with(|| empty_observation(now));
-            if observation.attempt_id != attempt.attempt_id {
-                if !admit
-                    || observation.operation_owns_work
-                    || attempt.attempt_id < observation.attempt_id
-                {
-                    return;
-                }
-                reset_from_inbound_attempt(observation, attempt, now);
-            }
-            let previous = observation.phase;
-            mutate(observation, now);
-            log_transition(self.inner.observing_node_id, &key, previous, observation);
-        }
-
-        let current_attempt_id = state
-            .observations
-            .get(&key)
-            .map_or(0, |observation| observation.attempt_id);
-        let current_owns_work = state
-            .observations
-            .get(&key)
-            .is_some_and(|observation| observation.operation_owns_work);
-        if current_owns_work {
-            if admit
-                && state
-                    .pending_inbound
-                    .get(&key)
-                    .is_some_and(|pending| pending.attempt.attempt_id <= current_attempt_id)
-            {
-                state.pending_inbound.remove(&key);
-            }
-            return;
-        }
-        let Some(pending) = state.pending_inbound.remove(&key) else {
-            return;
-        };
-        if pending.attempt.attempt_id <= current_attempt_id {
-            return;
-        }
         let observation = state
             .observations
-            .get_mut(&key)
-            .expect("inbound observation exists after update");
-        let previous = observation.phase;
-        reset_from_inbound_attempt(observation, &pending.attempt, now);
-        if let Some((next_chunk_deadline, disposition)) = pending.disposition {
-            apply_pending_inbound_disposition(
-                observation,
-                pending.attempt.done,
-                next_chunk_deadline,
-                disposition,
-                now,
-            );
+            .entry(key.clone())
+            .or_insert_with(|| empty_observation(now));
+        if observation.attempt_id != attempt.attempt_id {
+            if !admit
+                || observation.operation_owns_work
+                || attempt.attempt_id < observation.attempt_id
+            {
+                return;
+            }
+            reset_from_inbound_attempt(observation, attempt, now);
         }
+        let previous = observation.phase;
+        mutate(observation, now);
         log_transition(self.inner.observing_node_id, &key, previous, observation);
     }
 
@@ -1052,7 +960,6 @@ impl LocalSnapshotTransportStatus {
         state.observations.retain(|key, observation| {
             current_peers.contains(&key.peer_node_id) || !observation_expired(observation, now)
         });
-        retain_pending_for_observations(state);
         let capacity = observation_capacity(current_peers.len());
         if state.observations.contains_key(incoming) || state.observations.len() < capacity {
             return true;
@@ -1070,7 +977,6 @@ fn evict_oldest_retired(state: &mut State, current_peers: &BTreeSet<u64>) -> boo
         .map(|(key, _)| key.clone());
     if let Some(key) = oldest_retired {
         state.observations.remove(&key);
-        state.pending_inbound.remove(&key);
         true
     } else {
         false
@@ -1142,38 +1048,6 @@ fn reset_from_inbound_attempt(
         SnapshotTransportPhase::Transferring
     };
     observation.connection_attempt_count = 1;
-}
-
-fn apply_pending_inbound_disposition(
-    observation: &mut Observation,
-    done: bool,
-    next_chunk_deadline: Option<Instant>,
-    disposition: InboundSnapshotDisposition,
-    now: Instant,
-) {
-    observation.operation_owns_work = false;
-    observation.last_update = now;
-    match disposition {
-        InboundSnapshotDisposition::Succeeded => {}
-        InboundSnapshotDisposition::Retrying(category) => {
-            observation.phase = SnapshotTransportPhase::Retrying;
-            observation.deadline = (!done).then_some(next_chunk_deadline).flatten();
-            observation.last_error_category = Some(category);
-            observation.retry_count = observation.retry_count.saturating_add(1);
-        }
-        InboundSnapshotDisposition::Failed(category) => {
-            observation.phase = SnapshotTransportPhase::Failed;
-            observation.deadline = None;
-            observation.last_error_category = Some(category);
-        }
-    }
-}
-
-fn retain_pending_for_observations(state: &mut State) {
-    let observed = state.observations.keys().cloned().collect::<BTreeSet<_>>();
-    state
-        .pending_inbound
-        .retain(|key, _| observed.contains(key));
 }
 
 fn observation_expired(observation: &Observation, now: Instant) -> bool {
@@ -1415,16 +1289,24 @@ mod tests {
             status.snapshot().observations[0].phase,
             SnapshotTransportPhase::Transferring
         );
-        status.inbound_received(InboundSnapshotChunk {
-            raft_group: "sqlite",
-            peer_node_id: 1,
-            snapshot_id: "snap-b",
-            offset: 0,
-            len: 8,
-            done: false,
-            socket_epoch: 2,
-            deadline,
-        });
+        let next_attempt = status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: "snap-b",
+                offset: 0,
+                len: 8,
+                done: false,
+                socket_epoch: 2,
+                deadline,
+            })
+            .expect("track next inbound attempt");
+        assert_eq!(
+            status.snapshot().observations[0].snapshot_id.as_deref(),
+            Some("snap-a"),
+            "a different identity cannot publish before executor admission"
+        );
+        status.inbound_admitted(&next_attempt, false, deadline);
         let next = &status.snapshot().observations[0];
         assert_eq!(next.snapshot_id.as_deref(), Some("snap-b"));
         assert_eq!(next.attempted_offset, Some(8));
@@ -1586,6 +1468,10 @@ mod tests {
             .expect("track queued replacement");
 
         status.inbound_finished(&old, 64, true, None, InboundSnapshotDisposition::Succeeded);
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.snapshot_id.as_deref(), Some("old"));
+        assert_eq!(completed.phase, SnapshotTransportPhase::Complete);
+        assert!(!completed.operation_owns_work);
         status.inbound_admitted(&new, true, deadline);
         status.inbound_finished(
             &old,
@@ -1605,7 +1491,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn abandoned_inbound_admission_records_retry_without_stealing_worker_result() {
+    async fn abandoned_inbound_admission_does_not_displace_worker_result() {
         let status = LocalSnapshotTransportStatus::new(2, BTreeSet::from([1]));
         let deadline = Instant::now() + Duration::from_secs(30);
         let owned = status
@@ -1650,15 +1536,11 @@ mod tests {
             None,
             InboundSnapshotDisposition::Succeeded,
         );
-        let retry = &status.snapshot().observations[0];
-        assert_eq!(retry.snapshot_id.as_deref(), Some("abandoned-admission"));
-        assert_eq!(retry.attempted_offset, Some(8));
-        assert_eq!(retry.locally_received_bytes, None);
-        assert_eq!(retry.phase, SnapshotTransportPhase::Retrying);
-        assert_eq!(
-            retry.last_error_category.as_deref(),
-            Some("snapshot_connection_closed")
-        );
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.snapshot_id.as_deref(), Some("worker-owned"));
+        assert_eq!(completed.locally_received_bytes, Some(64));
+        assert_eq!(completed.phase, SnapshotTransportPhase::Complete);
+        assert_eq!(completed.last_error_category, None);
 
         status.inbound_finished(
             &owned,
@@ -1669,7 +1551,7 @@ mod tests {
         );
         assert_eq!(
             status.snapshot().observations[0].snapshot_id.as_deref(),
-            Some("abandoned-admission")
+            Some("worker-owned")
         );
     }
 
@@ -1693,16 +1575,19 @@ mod tests {
         assert_eq!(reconnected.socket_epoch, 12);
         assert_eq!(reconnected.reconnect_count, 1);
 
-        status.inbound_received(InboundSnapshotChunk {
-            raft_group: "sqlite",
-            peer_node_id: 1,
-            snapshot_id: "new",
-            offset: 0,
-            len: 8,
-            done: false,
-            socket_epoch: 13,
-            deadline,
-        });
+        let next = status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: "new",
+                offset: 0,
+                len: 8,
+                done: false,
+                socket_epoch: 13,
+                deadline,
+            })
+            .expect("track next attempt");
+        status.inbound_admitted(&next, false, deadline);
         let new_attempt = &status.snapshot().observations[0];
         assert_eq!(new_attempt.socket_epoch, 13);
         assert_eq!(new_attempt.reconnect_count, 0);

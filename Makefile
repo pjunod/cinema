@@ -287,6 +287,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::production_snapshot_executor_fifo_status_ignores_later_admission_waiter \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::snapshot_executor::tests::inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -463,7 +467,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
-	  transport_status::tests::abandoned_inbound_admission_records_retry_without_stealing_worker_result \
+	  transport_status::tests::abandoned_inbound_admission_does_not_displace_worker_result \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -531,7 +535,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::peer_status_cache_is_fresh_for_five_seconds_then_expires \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
-	  http::cluster_operations::tests::cached_transport_observation_ages_and_expires_at_five_minutes \
+	  http::cluster_operations::tests::cached_active_transport_observation_ages_past_five_minutes_and_deadline_counts_down \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cached_inactive_transport_observation_expires_at_five_minutes \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::peer_status_refresh_keeps_one_second_of_cache_margin \

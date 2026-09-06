@@ -693,7 +693,13 @@ fn age_cached_transport_observations(
 fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_ms: u64) {
     transport.observations.retain_mut(|observation| {
         observation.sample_age_ms = observation.sample_age_ms.saturating_add(elapsed_ms);
-        observation.sample_age_ms <= TRANSPORT_OBSERVATION_TTL_MS
+        let deadline_still_active = observation
+            .active_deadline_remaining_ms
+            .is_some_and(|remaining_ms| remaining_ms > elapsed_ms);
+        if let Some(remaining_ms) = observation.active_deadline_remaining_ms.as_mut() {
+            *remaining_ms = remaining_ms.saturating_sub(elapsed_ms);
+        }
+        observation.sample_age_ms <= TRANSPORT_OBSERVATION_TTL_MS || deadline_still_active
     });
 }
 
@@ -1488,6 +1494,7 @@ mod tests {
     fn test_transport_status(
         observing_node_id: u64,
         sample_age_ms: u64,
+        active_deadline_remaining_ms: Option<u64>,
     ) -> SnapshotTransportStatus {
         serde_json::from_value(serde_json::json!({
             "schema_version": 1,
@@ -1509,7 +1516,7 @@ mod tests {
                 "attempt_age_ms": 100,
                 "last_acknowledgement_age_ms": null,
                 "last_local_receive_age_ms": 10,
-                "active_deadline_remaining_ms": 1_000,
+                "active_deadline_remaining_ms": active_deadline_remaining_ms,
                 "sample_age_ms": sample_age_ms,
                 "phase": "transferring",
                 "reconnect_count": 0,
@@ -1605,7 +1612,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cached_transport_observation_ages_and_expires_at_five_minutes() {
+    async fn cached_active_transport_observation_ages_past_five_minutes_and_deadline_counts_down() {
         let cache = PeerStatusCache::default();
         let statuses = BTreeMap::from([(
             "node-2".to_owned(),
@@ -1613,11 +1620,75 @@ mod tests {
                 node_id: "node-2".to_owned(),
                 state: ObservationState::Unreachable,
                 status: None,
-                transport: Some(test_transport_status(2, 299_000)),
+                transport: Some(test_transport_status(2, 301_000, Some(4_000))),
             },
         )]);
         let refresh_started = tokio::time::Instant::now();
         cache.store(&statuses, refresh_started).await;
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        let fresh = cache.fresh().await.expect("cache itself is still fresh");
+        assert_eq!(
+            fresh["node-2"]
+                .transport
+                .as_ref()
+                .expect("cached private transport evidence")
+                .observations[0]
+                .sample_age_ms,
+            301_999
+        );
+        assert_eq!(
+            fresh["node-2"]
+                .transport
+                .as_ref()
+                .expect("cached private transport evidence")
+                .observations[0]
+                .active_deadline_remaining_ms,
+            Some(3_001)
+        );
+
+        tokio::time::advance(Duration::from_millis(3_000)).await;
+        let fresh = cache
+            .fresh()
+            .await
+            .expect("cache remains inside five seconds");
+        let observation = &fresh["node-2"]
+            .transport
+            .as_ref()
+            .expect("cached private transport evidence")
+            .observations[0];
+        assert_eq!(observation.sample_age_ms, 304_999);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(1));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let fresh = cache
+            .fresh()
+            .await
+            .expect("cache remains inside five seconds");
+        assert!(
+            fresh["node-2"]
+                .transport
+                .as_ref()
+                .expect("cached private transport evidence")
+                .observations
+                .is_empty(),
+            "an already-stale observation expires at its active deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cached_inactive_transport_observation_expires_at_five_minutes() {
+        let cache = PeerStatusCache::default();
+        let statuses = BTreeMap::from([(
+            "node-2".to_owned(),
+            PeerStatusOutcome {
+                node_id: "node-2".to_owned(),
+                state: ObservationState::Unreachable,
+                status: None,
+                transport: Some(test_transport_status(2, 299_000, None)),
+            },
+        )]);
+        cache.store(&statuses, tokio::time::Instant::now()).await;
 
         tokio::time::advance(Duration::from_millis(999)).await;
         let fresh = cache.fresh().await.expect("cache itself is still fresh");
@@ -1858,7 +1929,7 @@ mod tests {
             http_base: Some("http://127.0.0.1:32400".to_owned()),
             reachable: true,
         }];
-        let private_transport = test_transport_status(2, 0);
+        let private_transport = test_transport_status(2, 0, Some(1_000));
         let remote = collect_peer_statuses_with_sources(
             peers,
             tokio::time::Instant::now() + Duration::from_secs(2),

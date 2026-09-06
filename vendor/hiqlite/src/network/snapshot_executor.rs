@@ -364,6 +364,184 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_snapshot_executor_fifo_status_ignores_later_admission_waiter() {
+        use crate::store::state_machine::sqlite::TypeConfigSqlite;
+        use crate::transport_status::{
+            InboundSnapshotAttempt, InboundSnapshotChunk, InboundSnapshotDisposition,
+        };
+        use openraft::{SnapshotMeta, Vote};
+
+        fn track_attempt(
+            status: &crate::LocalSnapshotTransportStatus,
+            snapshot_id: &str,
+            socket_epoch: u64,
+        ) -> InboundSnapshotAttempt {
+            status
+                .inbound_received(InboundSnapshotChunk {
+                    raft_group: "sqlite",
+                    peer_node_id: 1,
+                    snapshot_id,
+                    offset: 0,
+                    len: 64,
+                    done: true,
+                    socket_epoch,
+                    deadline: time::Instant::now() + Duration::from_secs(30),
+                })
+                .expect("track inbound snapshot")
+        }
+
+        fn request(
+            status_attempt: InboundSnapshotAttempt,
+            snapshot_id: &str,
+        ) -> SnapshotExecutorRequest<TypeConfigSqlite> {
+            SnapshotExecutorRequest {
+                status_attempt: Some(status_attempt),
+                request: InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: SnapshotMeta {
+                        last_log_id: None,
+                        last_membership: Default::default(),
+                        snapshot_id: snapshot_id.to_owned(),
+                    },
+                    offset: 0,
+                    data: vec![0; 64],
+                    done: true,
+                },
+            }
+        }
+
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        let first_attempt = track_attempt(&status, "fifo-a", 1);
+        let first_gate = Arc::new(Semaphore::new(0));
+        let second_gate = Arc::new(Semaphore::new(0));
+        let started = Arc::new(Mutex::new(Vec::<String>::new()));
+        let executor = Arc::new(start_snapshot_executor_with_installer::<
+            TypeConfigSqlite,
+            _,
+            _,
+        >(
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            status.clone(),
+            {
+                let first_gate = Arc::clone(&first_gate);
+                let second_gate = Arc::clone(&second_gate);
+                let started = Arc::clone(&started);
+                move |request| {
+                    let gate = match request.meta.snapshot_id.as_str() {
+                        "fifo-a" => Arc::clone(&first_gate),
+                        "fifo-b" => Arc::clone(&second_gate),
+                        other => panic!("unexpected admitted snapshot {other}"),
+                    };
+                    let started = Arc::clone(&started);
+                    async move {
+                        started.lock().await.push(request.meta.snapshot_id.clone());
+                        gate.acquire().await.expect("test gate").forget();
+                        Ok(InstallSnapshotResponse { vote: request.vote })
+                    }
+                }
+            },
+        ));
+
+        let (_close_first, mut first_closed) = watch::channel(false);
+        let first = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(request(first_attempt, "fifo-a"), &mut first_closed)
+                    .await
+            }
+        });
+        while started.lock().await.as_slice() != ["fifo-a"] {
+            tokio::task::yield_now().await;
+        }
+        let active = &status.snapshot().observations[0];
+        assert_eq!(active.snapshot_id.as_deref(), Some("fifo-a"));
+        assert!(active.operation_owns_work);
+
+        let second_attempt = track_attempt(&status, "fifo-b", 2);
+        let (_close_second, mut second_closed) = watch::channel(false);
+        let second = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(request(second_attempt, "fifo-b"), &mut second_closed)
+                    .await
+            }
+        });
+        while !executor.tx.is_full() {
+            tokio::task::yield_now().await;
+        }
+
+        let third_attempt = track_attempt(&status, "fifo-c", 3);
+        let (close_third, mut third_closed) = watch::channel(false);
+        let third = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            let third_attempt = third_attempt.clone();
+            async move {
+                executor
+                    .submit(request(third_attempt, "fifo-c"), &mut third_closed)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !third.is_finished(),
+            "third request must still be waiting behind the full FIFO"
+        );
+        let still_first = &status.snapshot().observations[0];
+        assert_eq!(still_first.snapshot_id.as_deref(), Some("fifo-a"));
+        assert!(still_first.operation_owns_work);
+
+        close_third.send_replace(true);
+        assert_eq!(
+            third.await.expect("third caller task"),
+            Err(SubmitError::ConnectionClosed)
+        );
+        status.inbound_request_ended(
+            &third_attempt,
+            None,
+            InboundSnapshotDisposition::Retrying("snapshot_connection_closed"),
+        );
+        assert_eq!(
+            status.snapshot().observations[0].snapshot_id.as_deref(),
+            Some("fifo-a")
+        );
+
+        first_gate.add_permits(1);
+        assert!(
+            first
+                .await
+                .expect("first caller task")
+                .expect("first response")
+                .is_ok()
+        );
+        while !started.lock().await.iter().any(|value| value == "fifo-b") {
+            tokio::task::yield_now().await;
+        }
+        let actual_fifo_owner = &status.snapshot().observations[0];
+        assert_eq!(actual_fifo_owner.snapshot_id.as_deref(), Some("fifo-b"));
+        assert!(actual_fifo_owner.operation_owns_work);
+        assert_eq!(actual_fifo_owner.last_error_category, None);
+
+        second_gate.add_permits(1);
+        assert!(
+            second
+                .await
+                .expect("second caller task")
+                .expect("second response")
+                .is_ok()
+        );
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.snapshot_id.as_deref(), Some("fifo-b"));
+        assert_eq!(completed.phase, crate::SnapshotTransportPhase::Complete);
+        assert!(!completed.operation_owns_work);
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+    }
+
+    #[cfg(feature = "sqlite")]
     #[tokio::test(start_paused = true)]
     async fn inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal() {
         use crate::store::state_machine::sqlite::TypeConfigSqlite;

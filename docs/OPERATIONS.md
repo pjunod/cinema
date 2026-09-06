@@ -1767,6 +1767,12 @@ WAL append, or quorum read. Sender acknowledgement offsets and receiver-local
 bytes are separate fields because a receiver may have accepted bytes whose
 reply has not reached the sender.
 
+For inbound work, a different snapshot identity becomes visible only when the
+node-owned FIFO executor actually admits that exact request. A queued request
+or later admission waiter cannot displace the running install's identity. This
+keeps `operation_owns_work` tied to the future that currently owns the durable
+state-machine operation, including while an older socket is disappearing.
+
 The existing private Hiqlite cluster listener serves
 `GET /cluster/transport/sqlite` with the same `X-API-SECRET` authentication as
 the adjacent cluster metrics route. The response is JSON and reads only the
@@ -1782,8 +1788,11 @@ per peer, and a five-second process-local cache. Each refresh probes the public
 and private listeners concurrently, so up to sixteen bounded HTTP requests may
 be in flight. A healthy sender can therefore report outbound evidence for a
 learner whose public listener is still closed.
-Status older than five minutes expires instead of continuing to claim an
-active transfer. The panel reports observer and sample age and keeps
+Inactive status older than five minutes expires instead of continuing to claim
+work. An observation with an active monotonic deadline remains visible past
+five minutes through that deadline; the five-second cache decreases its
+reported deadline remainder rather than granting more time. The panel reports
+observer and sample age and keeps
 `bounded_read_ready` separate: receiving, waiting for acknowledgement,
 installing, retrying, or stalled transport never grants reads. While port
 32400 is still closed, the daemon also emits one bounded startup-wait record
