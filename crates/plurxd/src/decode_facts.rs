@@ -1582,7 +1582,6 @@ fn supervise_linux_probe_execs(
             Some(launch_deadline),
             None,
             &mut interrupts.first_notification_response,
-            None,
             LinuxNotificationInterruptionHooks::default(),
         );
         return Err(std::io::Error::new(
@@ -1605,7 +1604,6 @@ fn supervise_linux_probe_execs(
         Some(launch_deadline),
         None,
         &mut interrupts.first_notification_response,
-        None,
         LinuxNotificationInterruptionHooks::default(),
     )?;
 
