@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | two chronology findings against exact candidate `a9ed1371` are fixed in `3f7530e8`; focused regressions are green and the replacement exact-SHA fast lane/reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | the late predecessor-failure finding against exact candidate `086eedcd` is fixed in `b554ecc8`; focused regressions are green and the replacement exact-SHA fast lane/reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -352,12 +352,14 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
     daemon and browser consumers derive the same boundary for rolling peers.
     Same-snapshot completion can suppress live evidence only when it is at
     least as fresh, preventing an older terminal sample from hiding a successor.
-28. **Order distinct recovery attempts by freshness.** Phase severity remains
+28. **Order distinct recovery attempts by start chronology.** Phase severity remains
     authoritative inside one concrete boot/attempt/socket identity, while a
-    fresher identity for the same snapshot fingerprint wins across retries and
-    restarts. The only cross-attempt override is validated, equally fresh causal
-    completion. A deadline-less observation that is already stalled also keeps
-    its original zero-remaining boundary across repeated status reads.
+    more recently started identity for the same snapshot fingerprint wins
+    across retries and restarts. Event freshness is only a rolling-peer fallback:
+    an old attempt may publish its cancellation after a successor starts. The
+    only cross-attempt override is validated, equally fresh causal completion.
+    A deadline-less observation that is already stalled also keeps its original
+    zero-remaining boundary across repeated status reads.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 
@@ -445,9 +447,12 @@ Review of exact candidate `a9ed1371` then found two final chronology gaps: a
 second read moved a deadline-less stalled boundary forward, and phase severity
 could let a four-second-old attempt hide a restarted attempt for the same
 fingerprint. Runtime correction `3f7530e8` fixes both with repeated paused-time
-and permutation-independent browser regressions. The focused tests pass; the
-complete focused lane, compiler/lint matrix, and three clean exact-candidate
-reviews are the next gate.
+and permutation-independent browser regressions. Review of exact candidate
+`086eedcd` then found that a predecessor could publish a fresh failure after a
+newer attempt had started. Runtime correction `b554ecc8` orders distinct
+attempts by their monotonic start age and covers that late-failure ordering in
+both input permutations. The focused tests pass; the complete focused lane,
+compiler/lint matrix, and three clean exact-candidate reviews are the next gate.
 M5 replacement work includes the earlier CI receipt and exact-test
 count corrections plus the later zero-resource-growth, early archive-identity,
 and cumulative-attempt corrections. It also refuses successful recovery or
