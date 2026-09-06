@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e8bae764"]
+points = ["persistence.upgrades", "playback.pipeline", "core.media"]
+checks = ["rust-gate"]
+reason = "Every desired-revision compare was application SQL that an older binary does not emit, and neither backend re-reads schema compatibility after a database is open — the check lives in open, bootstrap and the join preflight only — so a process already running when the cluster migrated kept writing the playback pointer with pre-rule statements. SQLite 48 to 49 and replicated AUTH 28 to 29 add media_playback_pointers.desired_revision, filled by every writer from media_playback_desired inside the same statement, plus BEFORE INSERT and BEFORE UPDATE triggers that refuse a write naming a revision the viewer has moved past or naming none while an ask exists. IS NOT rather than != because a null compared with != is null and the old writer would pass; reverting to != fails the proof, and disabling either trigger fails the case that reaches it. A playback with no ask row is untouched and an older import source projects NULL rather than a fabricated revision. a_pointer_written_without_an_ask_is_refused_while_an_ask_exists covers both the update and insert paths on both backends through for_each_backend, using validation_write_legacy_playback_pointer, which takes no revision and so can only attempt the write the fence refuses."
