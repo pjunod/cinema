@@ -6,6 +6,7 @@ artifact_dir = "target/validation"
 always_checks = ["catalog-contract", "history-regressions"]
 audit_paths = [
   ".dockerignore",
+  ".gitignore",
   ".github/actions/**",
   ".github/workflows/**",
   "Cargo.lock",
@@ -828,6 +829,7 @@ contract = "Every governed source file maps to a named point, every point maps t
 paths = [
   ".github/actions/**",
   ".github/workflows/**",
+  ".gitignore",
   "Makefile",
   "docs/VALIDATION.md",
   "docs/CI_EXECUTION_ACCELERATION_PLAN.md",

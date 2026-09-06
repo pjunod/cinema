@@ -459,10 +459,14 @@ outer budget was too small on a loaded development host: the durable-store and
 topology contracts completed successfully, but the runner terminated the
 following activation suite partway through. The activation suite then passed
 7/7 in isolation in 73.83 seconds on the same candidate.
-Every check runs in an owned process session. If this outer budget expires, the
-runner terminates, force-kills, and reaps that complete process group before it
-records exit 124 or starts another check, so Cargo, voter, and daemon children
-cannot contaminate later evidence.
+On POSIX, every check runs under an owned shell. If this outer budget expires,
+the runner recursively discovers and freezes the shell's descendant tree
+before any parent can orphan a child, including descendants that created
+another process group or session. It asks that frozen tree to terminate,
+force-kills survivors, and reaps the owned shell before recording exit 124 or
+starting another check, so Cargo, voter, and daemon children cannot contaminate
+later evidence. Windows uses bounded `taskkill /T /F`; failure to terminate the
+tree aborts validation instead of returning a misleading timeout verdict.
 
 **What a timeout there means.** `Database("replicated store operation timed out")`
 is the host reporting that it could not finish an operation in three seconds.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 import dataclasses
 import datetime as dt
 import json
@@ -559,7 +560,14 @@ def _run_shell(
         return process.returncode, output, time.monotonic() - started
     except subprocess.TimeoutExpired:
         _terminate_process_tree(process)
-        output, _ = process.communicate()
+        try:
+            output, _ = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            if process.stdout is not None:
+                process.stdout.close()
+            raise RuntimeError(
+                "timed-out validation tree retained an inherited output descriptor"
+            ) from error
         output += f"\nvalidation timed out after {timeout_seconds}s\n"
         return 124, output, time.monotonic() - started
 
@@ -568,35 +576,111 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Terminate a timed-out check and every process in its owned tree."""
 
     if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if process.poll() is None:
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired as error:
             process.kill()
-        process.wait()
+            process.wait(timeout=5)
+            raise RuntimeError("timed out terminating validation process tree") from error
+        if completed.returncode != 0 and process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+            raise RuntimeError(
+                f"taskkill refused validation process tree with {completed.returncode}"
+            )
+        if process.poll() is None:
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                process.wait(timeout=5)
+                raise RuntimeError(
+                    "validation process tree remained alive after taskkill"
+                ) from error
         return
 
+    frozen = _freeze_process_tree(process.pid)
+    _signal_processes(frozen, signal.SIGTERM)
+    _signal_processes(frozen, signal.SIGCONT)
+    time.sleep(0.25)
+    _signal_processes(frozen, signal.SIGKILL)
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        process.wait()
-        return
-
-    try:
-        process.wait(timeout=1.0)
-    except subprocess.TimeoutExpired:
-        pass
-
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    if process.poll() is None:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired as error:
         process.kill()
-    process.wait()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired as kill_error:
+            raise RuntimeError(
+                "validation shell remained alive after recursive process-tree kill"
+            ) from kill_error
+        raise RuntimeError(
+            "validation shell exceeded the recursive process-tree cleanup deadline"
+        ) from error
+
+
+def _freeze_process_tree(root_pid: int) -> set[int]:
+    """Stop the observed descendant tree before any parent can orphan a child."""
+
+    frozen = {root_pid}
+    stable_snapshots = 0
+    for _ in range(8):
+        discovered = _descendant_processes(root_pid)
+        new_processes = discovered - frozen
+        frozen.update(discovered)
+        _signal_processes((root_pid,), signal.SIGSTOP)
+        _signal_processes(sorted(frozen - {root_pid}), signal.SIGSTOP)
+        if new_processes:
+            stable_snapshots = 0
+        else:
+            stable_snapshots += 1
+            if stable_snapshots == 2:
+                break
+        time.sleep(0.01)
+    return frozen
+
+
+def _descendant_processes(root_pid: int) -> set[int]:
+    completed = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,ppid="],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=5,
+    )
+    children: dict[int, list[int]] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            continue
+        pid, parent_pid = (int(field) for field in fields)
+        children.setdefault(parent_pid, []).append(pid)
+
+    descendants = {root_pid}
+    pending = [root_pid]
+    while pending:
+        parent_pid = pending.pop()
+        for child_pid in children.get(parent_pid, ()):
+            if child_pid in descendants:
+                continue
+            descendants.add(child_pid)
+            pending.append(child_pid)
+    return descendants
+
+
+def _signal_processes(process_ids: Iterable[int], sig: signal.Signals) -> None:
+    for pid in process_ids:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
 
 
 def execute_checks(

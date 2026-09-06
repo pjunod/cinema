@@ -102,6 +102,16 @@ class CatalogCase(unittest.TestCase):
 
         self.assertEqual(cluster_auth.timeout_seconds, 3600)
 
+    def test_gitignore_changes_select_the_validation_framework(self):
+        catalog = load_catalog(ROOT / "validation/points.toml")
+        selection = select_points(catalog, (".gitignore",))
+        check_ids = {
+            check.id for check in selected_checks(catalog, selection, profile="full")
+        }
+
+        self.assertIn("validation.framework", selection.point_ids)
+        self.assertIn("catalog-contract", check_ids)
+
     def test_provider_change_expands_consumers_and_deduplicates_checks(self):
         catalog = self.load()
         selection = select_points(catalog, ("src/domain.py",))
@@ -590,46 +600,69 @@ checks = ["baseline"]
         self.assertIn("timed out", results[0].output)
 
     @unittest.skipIf(os.name == "nt", "POSIX process-group contract")
-    def test_timeout_terminates_and_reaps_descendants(self):
+    def test_timeout_terminates_descendants_across_sessions(self):
         catalog = self.load()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            marker = root / "survived"
-            parent = root / "parent.py"
-            parent.write_text(
-                """\
+        for isolation in ("setpgrp", "setsid"):
+            with (
+                self.subTest(isolation=isolation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                ready = root / "ready"
+                marker = root / "survived"
+                parent = root / "parent.py"
+                parent.write_text(
+                    """\
 from pathlib import Path
 import subprocess
 import sys
 import time
 
-marker = sys.argv[1]
+isolation = sys.argv[1]
+ready = sys.argv[2]
+marker = sys.argv[3]
 subprocess.Popen([
     sys.executable,
     "-c",
-    "from pathlib import Path; import signal, sys, time; "
-    "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(1.5); "
-    "Path(sys.argv[1]).write_text('survived', encoding='utf-8')",
+    "from pathlib import Path; import os, signal, sys, time; "
+    "os.setpgrp() if sys.argv[1] == 'setpgrp' else os.setsid(); "
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "Path(sys.argv[2]).write_text('ready', encoding='utf-8'); time.sleep(1.5); "
+    "Path(sys.argv[3]).write_text('survived', encoding='utf-8')",
+    isolation,
+    ready,
     marker,
 ])
+deadline = time.monotonic() + 5
+while not Path(ready).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not Path(ready).exists():
+    raise RuntimeError("grandchild did not enter its independent session")
 time.sleep(30)
 """,
-                encoding="utf-8",
-            )
-            timed_tree = dataclasses.replace(
-                catalog.check_map["baseline"],
-                command=f"{shlex.quote(sys.executable)} {shlex.quote(str(parent))} "
-                f"{shlex.quote(str(marker))}",
-                timeout_seconds=1,
-            )
-            with contextlib.redirect_stdout(io.StringIO()):
-                results = execute_checks(
-                    (timed_tree,), root, root / "artifacts", strict=True, fail_fast=True
+                    encoding="utf-8",
                 )
-            time.sleep(1.0)
+                timed_tree = dataclasses.replace(
+                    catalog.check_map["baseline"],
+                    command=f"{shlex.quote(sys.executable)} {shlex.quote(str(parent))} "
+                    f"{isolation} {shlex.quote(str(ready))} {shlex.quote(str(marker))}",
+                    timeout_seconds=1,
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    results = execute_checks(
+                        (timed_tree,),
+                        root,
+                        root / "artifacts",
+                        strict=True,
+                        fail_fast=True,
+                    )
 
-            self.assertEqual(results[0].returncode, 124)
-            self.assertFalse(marker.exists())
+                self.assertEqual(results[0].returncode, 124)
+                self.assertTrue(ready.exists())
+                wait_after_ready = 1.75 - (time.time() - ready.stat().st_mtime)
+                if wait_after_ready > 0:
+                    time.sleep(wait_after_ready)
+                self.assertFalse(marker.exists())
 
     def test_reports_preserve_point_status_and_parse_as_junit(self):
         catalog = self.load()
