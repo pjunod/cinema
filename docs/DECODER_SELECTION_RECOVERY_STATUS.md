@@ -24,7 +24,7 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | M1 code head `c03a98b3`: selector matrix 34/34, macOS bound FFprobe collector 14/14, Linux collector 15/15, and neutral observation policy 1/1 pass; default-feature Clippy denies warnings |
-| Effort receipt | `fa334c20`: history 1,352, catalog 24/30/1,430, operations 211/211, formatting, and pinned all-target workspace compile pass |
+| Exact receipt | `8cc77fa6`: history 1,353, catalog 24/30/1,431, operations 211/211, formatting, pinned all-target workspace compile, status contract, and effort-base diff check pass |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0; Historical pre-rebase head `01368ce1` remains history only; the M1 full suite waits until all fresh review findings are closed |
 | Blocker | None; the latest adversarial change requests are implemented and await exact-head verification before the single M1 full suite |
 
@@ -33,7 +33,7 @@ An unchecked item is not implied by a nearby passing check.
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Final re-review | Code head `c03a98b3` and validation receipt `fa334c20`: planner 34/34, macOS collector 14/14, Linux collector 15/15, neutral policy 1/1, Clippy, operations, compile, validation lint, and history audit pass; exact-head approvals and the single full suite remain |
+| M1 · explicit plan and facts | Final re-review | Code head `c03a98b3` and exact receipt `8cc77fa6`: planner 34/34, macOS collector 14/14, Linux collector 15/15, neutral policy 1/1, Clippy, operations, compile, validation lint, and history audit pass; exact-head approvals and the single full suite remain |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -85,10 +85,10 @@ Current focused code evidence on M1 code head `c03a98b3`:
 - `cargo clippy -p plurxd --all-targets -- -D warnings`: passed.
 - `cargo fmt --all -- --check` and the working-tree whitespace diff pass.
 
-Exact validation receipt `fa334c20` adds:
+Exact validation receipt `8cc77fa6` adds:
 
-- `make validation-lint`: 24 points, 30 checks, and 1,430 audited files pass.
-- `make history-check`: 1,352 corrective commits pass.
+- `make validation-lint`: 24 points, 30 checks, and 1,431 audited files pass.
+- `make history-check`: 1,353 corrective commits pass.
 - `make operations-check`: 211 passed.
 - `cargo check --workspace --locked --all-targets` on Rust 1.97.1: passed.
 
@@ -108,8 +108,9 @@ Fresh independent reviews cover the pure planner and the bound probe/cache
 owner separately. Their latest requests exposed incomplete Profile 5
 compatibility validation, neutral observation budget erosion, Linux snapshot
 writer ownership, and crossed fixed descriptors. Code head `c03a98b3` closes
-those gaps; both reviewers are being asked to verify the exact status head over
-validation receipt `fa334c20` before the single full suite and Forgejo PR.
+those gaps; both reviewers are being asked to verify the documentation-only
+successor to exact validation receipt `8cc77fa6` before the single full suite
+and Forgejo PR.
 
 ## M0 frozen source inventory
 
