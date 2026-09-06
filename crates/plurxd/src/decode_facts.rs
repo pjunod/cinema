@@ -155,6 +155,7 @@ impl ProbeLaunchMode {
                     acknowledgement_send: 1,
                     first_notification_receive: 1,
                     first_notification_response: 1,
+                    ..LinuxBootstrapInterrupts::default()
                 };
             }
             Self::ProductionBootstrapInterruptedUntilDeadline(phase) => {
