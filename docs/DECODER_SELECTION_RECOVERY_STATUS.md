@@ -25,7 +25,7 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | Exact code head `c2248aa7`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 33/33, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup, proves allocation-free post-fork failure paths, and injects absolute-deadline retries for ready send, acknowledgement, first seccomp receive, and first response |
-| Exact receipt | `0eac4425`: exact post-map history audit 1,365, catalog 24/30/1,441, status/ownership contracts 13/13, formatting, and diff check pass; its tracked effort hook also passed operations 211/211 and the pinned all-target workspace compile. Historical receipt `2baf0861` is evidence for `31dc5d26`, not its successors |
+| Exact receipt | `fa9e27d7`: exact post-map history audit 1,366, catalog 24/30/1,442, status/ownership contracts 13/13, formatting, and diff check pass; its tracked effort hook also passed operations 211/211 and the pinned all-target workspace compile. Historical receipt `0eac4425` is evidence for `c2248aa7`'s parent, not the sixth-review repair |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
 | Blocker | Obtain new exact-head adversarial approval, implement any findings, then run the one clean full-suite qualification |
 
@@ -680,6 +680,7 @@ lane and focused tests provide earlier feedback.
 | `19190ee8` | Unsupported RISC-V compile probe | Incomplete environment evidence · the target was installed, but a transitive native build required unavailable `riscv64-linux-gnu-gcc` and stopped before compiling Plurx. The unsupported audit-architecture fallback remains source-reviewed and fail-closed, not cross-compiled evidence |
 | `0eac4425` | Exact post-map receipt and ownership reconciliation | Pass · history 1,365, catalog 24/30/1,441, status/ownership contracts 13/13, formatting, and branch diff check. Its tracked effort hook additionally passed operations 211/211 and the pinned all-target workspace compile |
 | `c2248aa7` | Exact sixth-review repair and focused qualification | Pass · planner 35/35, macOS collector 20/20, pinned Linux collector 33/33, both real neutral-timeout producer regressions, status/ownership contracts 13/13, formatting, and denied-warning all-target Clippy on macOS and Linux. Its tracked effort hook passed history 1,365, catalog 24/30/1,441, operations 211/211, formatting, and the pinned workspace compile |
+| `fa9e27d7` | Exact post-map sixth-review receipt | Pass · history 1,366, catalog 24/30/1,442, status/ownership contracts 13/13, operations 211/211, formatting, branch diff check, and the pinned all-target workspace compile |
 
 ## Remaining evidence before release
 
