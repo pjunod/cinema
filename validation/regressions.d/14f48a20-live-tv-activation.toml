@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["14f48a20"]
+points = ["cluster.membership", "live-tv.integration", "server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "Retained Rust regressions execute the guarded Live-TV settings SQL under activation-versus-legacy-join and concurrent-writer races, require a rollback heartbeat and an absent capable node to fail closed without publishing any tuple field, and pin canonical generation comparison on both stores. Daemon tests retain quorum fences on public and signed owner routes, URL-redacted device failures, independent malformed-lineup-row handling, current FLEX DRM and Favorite markers, aggregate settings atomicity, the ordinary-channel graph-probe boundary, and one bounded device refresh for a concurrent forced burst."

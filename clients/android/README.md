@@ -20,9 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `71` — native viewer parity across phone, foldable,
-> and TV. Build 71 carries the streaming-reliability effort's client half; it
-> adds no viewer-visible behaviour of its own. Build 70 gives the library, search and settings screens a starting
+> Status: **v0.3.0**, build `72` — native viewer parity across phone, foldable,
+> and TV. Build 72 carries the streaming-reliability effort's client half on
+> current `main`; it adds no viewer-visible behaviour of its own. Build 70 gives
+> the library, search and settings screens a starting
 > focus and puts every layout's cards and episode rows in the D-pad's reach.
 > Build 66 retries the selected native subtitle once when its demanded
 > cache window becomes ready, without replacing video. Build 57 skips the
@@ -87,12 +88,22 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > source timeline, and draws them above the unchanged Dolby Vision, HDR, or SDR
 > video. Picture in Picture is unavailable while the overlay is active until
 > physical-device behavior is accepted.
-> Server administration remains in the web app; the viewing, discovery, and
+> HDHomeRun Live TV has dedicated live controls and Settings → Developer
+> runtime enablement, readiness and exact previous-owner recovery. Its durable
+> token-free marker prevents duplicate starts after interrupted cleanup or app
+> death. DRM, DVR, captions and guide scheduling are not supported.
+> General server administration remains in the web app; the viewing, discovery, and
 > playback surfaces are native here. The capability matrix is in
 > [Android client parity](../../docs/ANDROID-CLIENT-PARITY.md).
 
 ## What works
 
+- **HDHomeRun Live TV** — channel selection, pause/resume, mute, fullscreen and
+  stop on a dedicated H.264/AAC live player. No library watch-progress writes.
+  Settings → Developer documents the required private IPv4 tuner, committed
+  owner node, compatible fleet, FFmpeg, scratch space and session budget before
+  runtime enablement. [The Live TV plan](../../docs/HDHOMERUN-LIVE-TV-PLAN.md)
+  records limits and acceptance; source tests are not physical playback proof.
 - **Connect & sign in** to any plurx server by address (`http://192.168.1.10:32400`); the
   session is remembered so the app reconnects silently on next launch.
 - **Adaptive home** with Continue Watching, Next Up, and Recently Added hubs,

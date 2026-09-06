@@ -788,3 +788,19 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func selectQuality(_ height: Int?)"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
+
+[[fixes]]
+id = "android.unclassified-start-fails-closed"
+commits = ["5669cbd5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt"
+source_anchor = "error.code !in DEFINITIVE_START_REFUSALS"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "unrecognisedStartFailureKeepsTheDurableMarker"
+
+[[fixes]]
+id = "android.unconfirmed-release-recovers"
+commits = ["d0478fad"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt"
+source_anchor = "private fun scheduleRecovery(target: LiveTvStarted)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvTest.kt"
+test_anchor = "anUnconfirmedReleaseRecoversWithoutAUserGesture"

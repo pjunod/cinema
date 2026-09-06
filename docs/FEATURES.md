@@ -424,6 +424,117 @@ decoding shows what the file is versus what your browser is actually rendering.
 
 ---
 
+## 4a. Live TV — "the antenna, on every screen"
+
+**What it does:** plays live over-the-air television from one HDHomeRun tuner
+on the same screens that play the library — the web app, iOS, tvOS, and
+Android. It is off until an administrator turns it on, and it is a *viewer*,
+not a DVR: nothing is recorded, nothing is scheduled, and nothing is kept.
+
+- **One device, named by hand.** An administrator types the tuner's private
+  IPv4 into Settings → Developer. There is no broadcast discovery: a server
+  inside a Docker or VLAN network namespace cannot promise it will hear a
+  multicast reply, and a "Find my tuner" button that silently finds nothing is
+  worse than a field you fill in. The address must be private or link-local —
+  a public address or loopback is refused — and the hostname the device
+  advertises in its own `discover.json` is ignored in favour of the address
+  that was configured, so a device that renames itself cannot redirect the
+  server somewhere else.
+- **One node owns the tuner.** A tuner is a physical singleton: four cluster
+  nodes cannot each advertise leases on it. One node is configured as the
+  owner and is the only one that ever opens the device; any other node serves
+  the same live stream by relaying from the owner over the authenticated
+  cluster API. To a viewer, "which node am I talking to" is not a question
+  that has an answer.
+- **A channel becomes bounded HLS.** The owner opens the tuner **once** per
+  session, feeds it to one FFmpeg process, and publishes a rolling six-segment
+  live playlist. Six segments is the whole window: the scratch a live session
+  can occupy is bounded by construction rather than by a reaper racing an
+  encoder, and the segments behind the window are deleted as it moves.
+- **The session is a capability, not an account.** Starting a channel returns
+  one opaque capability. The playlist and its segments are fetched with that
+  capability alone and carry no account bearer, so a URL in a player's network
+  log is worth one live session and cannot read a library, write progress, or
+  touch an account. Capabilities are bound to the node that issued them and to
+  the settings generation they were issued under.
+- **Nobody's tuner is left open.** A session with no reader for 45 s expires; a
+  producer that stops making progress for 30 s is torn down; a session that
+  cannot start within 15 s fails with a named reason rather than hanging. When
+  a session ends — cleanly, on a closed tab, or by expiry — the FFmpeg process,
+  the tuner socket, the scratch, and the registry entry all go with it, and the
+  cleanup is confirmed rather than assumed.
+- **Every client tells you which way it failed.** `live_tv_disabled`,
+  `channel_not_found`, `tuner_capacity`, `drm_unsupported`, `codec_unsupported`,
+  `device_unavailable`, `owner_unavailable`, `startup_timeout`, `stream_failed`,
+  `settings_conflict`, `capability_expired` — each is a different problem with a
+  different fix, which a single "couldn't play that" would hide. Anything a
+  client does *not* recognise is treated as an unknown outcome, not as a
+  refusal: an unrecognised failure might mean a tuner did open, so the client
+  holds its place for 90 s rather than immediately trying again and holding two
+  physical tuners for one viewer.
+- **Protected channels are visible and unplayable.** plurx has no licensed DRM
+  path, so a channel the device flags as DRM is listed with its name and marked
+  unsupported instead of being hidden. Only a channel in the one known-playable
+  state gets a working "Watch live"; anything else — including a support state a
+  newer server invents — reads as not playable rather than as an enabled button
+  that will fail.
+- **Progress is measured in frames, not in seconds.** A live window's position
+  can legitimately move backwards during healthy playback, so the clients judge
+  "is this actually still playing" by decoded frames advancing. A frozen
+  picture expires; a live edge that shuffles does not.
+
+**What it needs:** one HDHomeRun on the same network as the owner node, a
+completed channel scan on the device itself, and an FFmpeg that can decode what
+the broadcaster sends. Reception is not decoding: ATSC 3.0 commonly carries
+HEVC and AC-4, and a device that receives them does not prove the installed
+FFmpeg handles them. The default is H.264/AAC at 720p, which every first-party
+client plays.
+
+**What a real tuner does, measured.** On an HDHomeRun FLEX 4K (firmware
+`20260326`, four tuners) over a real antenna: 55 channels, 52 of them playable;
+**6.4 s** from asking for a channel to a segment a player can fetch, against the
+15 s budget the runtime enforces, almost all of it inside the start request;
+**4.0 s** segments; a 1080i MPEG-2 broadcast with AC-3 5.1 arriving as H.264
+720p with AAC stereo. Two concurrent sessions filled the configured limit, the
+third was turned away with `tuner_capacity`, the device itself confirmed exactly
+two of its tuners were held and then free again, and a tuner another household
+client was already using was left alone throughout. A DRM-flagged channel was
+refused with `drm_unsupported`.
+
+**ATSC 3.0: the fatal bug is fixed, the latency is not settled.** Chasing an
+ATSC 3.0 channel on that device turned up three real defects, all now repaired.
+Every ATSC 3.0 channel carries HEVC **Main 10**, and the live filter chain
+pinned no pixel format, so libx264 — which is handed `-profile:v high` — was
+given 10-bit frames and refused outright ("high profile doesn't support a bit
+depth of 10"), killing FFmpeg before it published anything. That affected any
+10-bit live source, not just ATSC 3.0. It stayed hidden because a flat 15 s
+startup budget expired first, giving one message to both a channel that is
+quietly working and one that sent nothing at all. And `-probesize` was 8 MiB of
+*tuner stream*, which on a 2.8 Mbps mux is about 23 s of waiting on its own.
+
+With all three repaired, **ATSC 3.0 plays**: a HEVC Main 10 1080 channel with
+AC-3 5.1 arrives as H.264 720p with AAC stereo, playable **9.0 s** after asking
+against the same 15 s budget, on a mux reading only 51% signal quality — and the
+tuner comes back with no scratch left behind.
+
+What plurx still cannot open on that antenna is **protected** ATSC 3.0. Three
+channels are flagged DRM and refused by name. Two more are not flagged and
+behave exactly like the flagged ones: the device accepts the connection and
+returns nothing after a flat ten seconds, while reporting 98% signal quality —
+so that is the device declining to hand over protected content, not a weak
+signal, and not something plurx can fix. See
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
+
+**What else is limited, honestly.** Losing the owner node ends the live session
+in flight;
+reconfiguration stays possible while Live TV is disabled, and re-enabling wants
+either a confirmed drain of the old owner or an explicit physical-fencing
+attestation, because elapsed time cannot prove somebody else's FFmpeg let go of
+a tuner. An external HDHomeRun app can also win a tuner in the gap after plurx
+checks capacity; a `503` then is normal and says so.
+
+---
+
 ## 5. The player — "a real playback experience, not a gray box"
 
 **What it does:** a borderless, projection-style player in the web app.
@@ -736,6 +847,12 @@ Listed so the inventory above is unambiguous — these are deliberate, with reas
   monarr for its calendar if you paired one. plurx never tells another
   application to do something. Pushing watch state back to monarr is on the
   roadmap and is not built.
+- **Does not record television.** Live TV (§4a) plays one HDHomeRun tuner
+  and keeps nothing: no recording, no scheduling, no retention, no series
+  rules, no conflict resolution. It is also not a channel aggregator — no
+  streaming services, no discovery feed. DRM-flagged channels are listed and
+  refused because there is no licensed DRM path, and captions (608/708) are
+  not delivered until there is a fixture proving them end to end.
 - **Does not do a general music library** (v1 scope). The data model won't
   preclude it; it is not bolted on speculatively. Audiobooks *are* supported in
   Books libraries (§1b), and photos in Home libraries (§1a).

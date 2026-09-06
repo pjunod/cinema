@@ -238,7 +238,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
 test("Developer is where the switches that cost something live", () => {
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("developerPanel")} return developerPanel;`,
+    `${shippedSource("liveTvSettingsCard")}${shippedSource("developerPanel")} return developerPanel;`,
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
@@ -260,7 +260,9 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /no separate hidden server flag/);
   // The section says what it is for, so a switch that costs something has
   // somewhere honest to land rather than being buried under Streaming.
-  assert.match(html, /off on purpose/);
+  assert.match(html, /runtime settings; no special build/);
+  assert.match(html, /HDHomeRun Live TV/);
+  assert.match(html, /Save the configuration, check readiness, then enable/);
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {

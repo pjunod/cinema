@@ -306,6 +306,37 @@ missing = "fail"
 timeout_seconds = 600
 
 [[checks]]
+id = "live-tv-hardware"
+title = "A real HDHomeRun tunes, reports its own busy tuners, and hands them back"
+command = "scripts/live-tv-hardware --self-host --device \"$PLURX_LIVE_TV_DEVICE\" --tuners \"${PLURX_LIVE_TV_TUNERS:-1}\" --out target/live-tv-hardware"
+profiles = ["nightly"]
+platforms = ["darwin", "linux"]
+requires = ["python3", "cargo", "ffmpeg", "ffprobe"]
+requires_files = ["scripts/live-tv-hardware"]
+# Nothing here can be faked, which is the point, and nothing here can run
+# without hardware. PLURX_LIVE_TV_DEVICE names the tuner and is the operator
+# saying its tuners may be occupied for a few minutes; without it this skips
+# rather than pretending a fixture pass covers a tuner.
+preflight = "test -n \"$PLURX_LIVE_TV_DEVICE\""
+missing = "skip"
+timeout_seconds = 1800
+
+[[checks]]
+id = "live-tv-two-node"
+title = "Two real daemons relay one tuner and never take it over on elapsed time alone"
+command = "make live-tv-two-node-check"
+profiles = ["full", "nightly"]
+platforms = ["linux"]
+requires = ["cargo", "make", "ffmpeg"]
+requires_files = ["crates/plurxd/tests/live_tv_two_node.rs"]
+# The fixture device answers on the ports a real HDHomeRun uses, because that is
+# what `pinned_url` addresses. A host that cannot bind 80 and 5004 cannot host
+# the device, and saying so is more honest than passing without a tuner.
+preflight = '''python3 -c "import socket; [socket.socket().bind(('0.0.0.0', p)) for p in (80, 5004)]"'''
+missing = "skip"
+timeout_seconds = 1800
+
+[[checks]]
 id = "playback-exhaustive"
 title = "Every browser playback fixture, quality, and restart case"
 command = "make playback-full"
@@ -627,6 +658,25 @@ paths = [
 ]
 checks = ["rust-gate", "rust-gate-ci", "user-journey"]
 depends_on = ["core.media", "server.api", "library.catalog"]
+
+[[points]]
+id = "live-tv.integration"
+title = "HDHomeRun live television"
+contract = "The always-compiled Live TV runtime accepts only an explicit private or link-local IPv4 device, ignores advertised hostnames, refuses proxies and redirects, bounds device and peer documents, publishes one generation-fenced settings tuple, and obtains readiness plus a sanitized non-DRM channel lineup from one committed voter owner. Live HLS sessions preserve capability, cleanup, and finite-file-state boundaries through every ingress and first-party client."
+paths = [
+  "crates/plurxd/src/live_tv.rs",
+  "crates/plurxd/src/http/live_tv.rs",
+  "crates/plurxd/src/http/internal_live_tv.rs",
+  "crates/plurxd/src/web/live-tv.js",
+  "tests/web/live-tv.test.js",
+  "scripts/live-tv-browser",
+  "scripts/live-tv-endless",
+  "crates/plurxd/tests/live_tv_two_node.rs",
+  "scripts/live-tv-hardware",
+  "docs/HDHOMERUN-LIVE-TV-*.md",
+]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node", "live-tv-hardware"]
+depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]
 id = "playback.benchmark"

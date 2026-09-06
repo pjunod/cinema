@@ -1,6 +1,10 @@
 package tv.plurx.app.ui
 
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
@@ -16,6 +20,24 @@ import tv.plurx.app.data.ThemeId
 class HomeTopBarTest {
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun liveTvAndSettingsFitNarrowPhonesAndLiveActionIsReachable() {
+        var opened = false
+        compose.setContent {
+            Box(Modifier.width(320.dp)) {
+                HomeTopBar(theme = ThemeId.Classic, username = "viewer", formFactor = FormFactor.Compact,
+                    side = 20.dp, onRefresh = {}, onSearch = {}, onOpenSettings = {},
+                    safeInsets = WindowInsets(0, 0, 0, 0), onOpenLiveTv = { opened = true })
+            }
+        }
+        val live = compose.onNodeWithContentDescription("Live TV").assertIsDisplayed().assertHasClickAction()
+        val settings = compose.onNodeWithContentDescription("Settings").assertIsDisplayed()
+        assertTrue(live.getUnclippedBoundsInRoot().right <= 320.dp)
+        assertTrue(settings.getUnclippedBoundsInRoot().right <= 320.dp)
+        live.performClick()
+        compose.runOnIdle { assertTrue(opened) }
+    }
 
     @Test
     fun headerControlsClearTopAndSideSystemInsets() {

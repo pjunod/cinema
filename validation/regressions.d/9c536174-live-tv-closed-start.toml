@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9c536174"]
+points = ["live-tv.integration"]
+checks = ["web-static"]
+reason = "Three coverages drive the shipped lease block directly. An unrecognised typed 5xx must leave the durable marker and refuse the retry, so one viewer can never hold two tuners; a refusal decided before allocation must clear it so capacity costs no safety wait; and an unfamiliar channel support value must render refused rather than watchable. Each was executed against the unfixed implementation and observed to fail there."

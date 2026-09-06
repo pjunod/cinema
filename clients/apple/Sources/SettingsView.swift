@@ -176,6 +176,10 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Developer") {
+                NavigationLink("Enable features and check requirements") { LiveTvDeveloperView() }
+            }
+
             Section("About") {
                 LabeledContent("App version", value: AppBuildInfo.current)
             }

@@ -315,32 +315,45 @@ def _is_test_path(path: str) -> bool:
     )
 
 
-def _history_heads(root: Path) -> tuple[str, ...]:
-    """Audit the prospective commit's parents, including an in-progress merge.
+def _audit_tips(root: Path) -> tuple[str, ...]:
+    """The commits whose combined history this audit should cover.
 
-    Resolve Git's worktree-local path instead of assuming `.git` is a directory.
-    Unrelated branches must not make unreachable regression mappings valid.
-    Malformed pending-merge state is an error, not an ordinary single-parent audit.
+    Normally just HEAD, which the pre-commit hook sees as the parent of the
+    commit being made. While a merge is in progress the commit will have two
+    parents and its tree already carries both sides' coverage files, so the
+    audit has to see both -- otherwise every entry arriving through MERGE_HEAD
+    looks unmatched and a correct merge cannot be committed at all.
+
+    MERGE_HEAD can name more than one commit for an octopus merge, so every
+    line is taken.
     """
-
-    heads = [_git(root, "rev-parse", "--verify", "HEAD^{commit}").strip()]
-    merge_path = Path(_git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip())
-    if not merge_path.is_absolute():
-        merge_path = root / merge_path
+    # Asked of git rather than assembled from `root / ".git"`, because in a
+    # worktree `.git` is a file and the real path lives elsewhere.
+    merge_head = Path(_git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip())
+    if not merge_head.is_absolute():
+        merge_head = root / merge_head
     try:
-        merge_heads = merge_path.read_text(encoding="ascii").splitlines()
+        tips = merge_head.read_text(encoding="ascii").splitlines()
     except FileNotFoundError:
-        return tuple(heads)
+        return ("HEAD",)
     except (OSError, UnicodeError) as exc:
         raise HistoryError(f"cannot read pending merge heads: {exc}") from exc
-    if not merge_heads or any(
-        not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head)
-        for head in merge_heads
+    if not tips or any(
+        not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", tip) for tip in tips
     ):
         raise HistoryError("pending MERGE_HEAD must contain full Git commit hashes")
-    for head in merge_heads:
-        heads.append(_git(root, "rev-parse", "--verify", f"{head}^{{commit}}").strip())
-    return tuple(dict.fromkeys(heads))
+    return ("HEAD", *tips)
+
+
+def _history_heads(root: Path) -> tuple[str, ...]:
+    """Resolve every prospective merge parent to the exact audited commit."""
+
+    return tuple(
+        dict.fromkeys(
+            _git(root, "rev-parse", "--verify", f"{tip}^{{commit}}").strip()
+            for tip in _audit_tips(root)
+        )
+    )
 
 
 def discover_issues(

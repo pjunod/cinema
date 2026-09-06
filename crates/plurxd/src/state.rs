@@ -621,6 +621,8 @@ pub struct AppState {
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
     /// Authenticated remote start/abort and streaming HLS relay transport.
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
+    /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
+    pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -781,6 +783,10 @@ impl AppState {
             runtime_cache,
             renditions,
         } = dirs;
+        // The finite-media orphan sweep reserves this child. Only the Live TV
+        // registry can distinguish active tuner scratch from restart debris.
+        let live_tv_scratch = transcode_dir.join(crate::transcode::LIVE_TV_WORK_DIR_NAME);
+        let system = Arc::new(system);
         let jobs = Arc::new(
             JobManager::new_with_scan_prune_percent(
                 Arc::clone(&store),
@@ -851,6 +857,14 @@ impl AppState {
             membership.clone(),
             Arc::clone(&store),
         );
+        let live_tv = crate::live_tv::LiveTvManager::new(
+            Arc::clone(&store),
+            Arc::clone(&system),
+            Arc::clone(&transcode),
+            serving.authority(),
+            node_id.clone(),
+            live_tv_scratch,
+        );
         AppState {
             store,
             catalogue,
@@ -862,6 +876,7 @@ impl AppState {
             membership,
             media_pool,
             media_sessions,
+            live_tv,
             server_name,
             node_id,
             cluster_advertisement,
@@ -882,7 +897,7 @@ impl AppState {
             offline,
             publications: crate::http::publication::PublicationSessions::new(),
             trakt,
-            system: Arc::new(system),
+            system,
             logs: logs.general,
             cluster_logs: logs.cluster,
             coming_soon,
