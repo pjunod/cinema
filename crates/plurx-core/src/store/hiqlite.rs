@@ -73,7 +73,9 @@ const DV_CONVERSIONS_SCHEMA_VERSION: i64 = 24;
 const DV_RECOVERY_GUARDS_SCHEMA_VERSION: i64 = 25;
 const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
 const REQUEST_IDENTITY_SCHEMA_VERSION: i64 = 27;
-pub const AUTH_SCHEMA_VERSION: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
+const DESIRED_SELECTION_SCHEMA_VERSION: i64 = 28;
+const POINTER_DESIRED_FENCE_SCHEMA_VERSION: i64 = 29;
+pub const AUTH_SCHEMA_VERSION: i64 = POINTER_DESIRED_FENCE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -98,6 +100,8 @@ const DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE: i64 = STAGED_GENERATION_SCHEMA_VER
 const DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE: i64 = DV_CONVERSIONS_SCHEMA_VERSION;
 const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
 const REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
+const DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
+const POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = DESIRED_SELECTION_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2037,6 +2041,90 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // A new table rather than a column, so this step *is*
+                    // idempotent on its own — but it still settles through the
+                    // same helper as every other, because the schema-version
+                    // update is not: two voters observing the same predecessor
+                    // both try to advance it and exactly one may win.
+                    let statements = vec![
+                        (super::MEDIA_PLAYBACK_DESIRED_SCHEMA.to_owned(), params!()),
+                        (
+                            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                             WHERE singleton = 1 AND schema_version = $3"
+                                .to_owned(),
+                            params!(
+                                DESIRED_SELECTION_SCHEMA_VERSION,
+                                now,
+                                DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
+                            ),
+                        ),
+                    ];
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    // A column plus two triggers, settled through the same
+                    // helper as every other step. The three statements are one
+                    // step on purpose: a column nothing enforces is not a
+                    // fence, and a trigger cannot be created on a column that
+                    // does not exist. `ALTER TABLE ... ADD COLUMN` is not
+                    // idempotent, which is exactly why the schema-version CAS
+                    // below has to be the thing that decides who applied it.
+                    let mut statements = vec![
+                        (
+                            super::MEDIA_PLAYBACK_POINTER_DESIRED_REVISION_COLUMN.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                             WHERE singleton = 1 AND schema_version = $3"
+                                .to_owned(),
+                            params!(
+                                POINTER_DESIRED_FENCE_SCHEMA_VERSION,
+                                now,
+                                POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE
+                            ),
+                        ),
+                    ];
+                    // The `ALTER` is dropped when the column is already there,
+                    // and that is not belt-and-braces. A cluster bootstrapped
+                    // from the current install schema has the column from its
+                    // first moment, because the fresh table declares it — so a
+                    // database whose marker still names an older version has
+                    // the column but not the step, and replaying the chain
+                    // across it meets `duplicate column name` rather than an
+                    // upgrade. `settle_migration_attempt` cannot rescue that:
+                    // it forgives a failure only when *another voter* has
+                    // advanced the marker, and here nobody has. Asking the
+                    // schema what it already holds is the shape the analysis
+                    // component migration uses, for this exact reason.
+                    if self.pointer_desired_revision_column_present().await? {
+                        statements.remove(0);
+                    }
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2053,6 +2141,23 @@ impl HiqliteAuthStore {
     /// now current. Treat an error as commit/concurrency-unknown, reread the
     /// replicated marker consistently, and suppress it only when another
     /// transaction durably advanced beyond the exact predecessor we tried.
+    /// Whether `media_playback_pointers` already carries `desired_revision`.
+    ///
+    /// A fresh install declares the column in the table; an upgrade adds it.
+    /// Both are correct and both are reachable from the same marker, so the
+    /// migration asks rather than assumes.
+    async fn pointer_desired_revision_column_present(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM pragma_table_info('media_playback_pointers') \
+                 WHERE name = 'desired_revision'",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
     async fn settle_migration_attempt(
         &self,
         predecessor: i64,
@@ -3525,7 +3630,9 @@ fn schema_migration_action(
         | DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE
         | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE
         | ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE
-        | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE => {
+        | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE
+        | DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
+        | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5310,9 +5417,27 @@ mod tests {
             "v26 must advance exactly one step to the request-identity schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 22,
+            DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE, REQUEST_IDENTITY_SCHEMA_VERSION,
+            "the desired-selection migration must start from the exact v27 shape"
+        );
+        assert_eq!(
+            DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE + 1,
+            DESIRED_SELECTION_SCHEMA_VERSION,
+            "v27 must advance exactly one step to the desired-selection schema"
+        );
+        assert_eq!(
+            POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE, DESIRED_SELECTION_SCHEMA_VERSION,
+            "the pointer fence migration must start from the exact v28 shape"
+        );
+        assert_eq!(
+            POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE + 1,
+            POINTER_DESIRED_FENCE_SCHEMA_VERSION,
+            "v28 must advance exactly one step to the pointer fence schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 24,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v27 step"
+            "this implementation contains every additive v5→v29 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

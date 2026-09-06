@@ -167,6 +167,21 @@ pub(crate) struct ControlRequestV1 {
     /// Unknown names are ignored rather than refused: a client from a later
     /// version must be able to name actions this server has never heard of.
     pub supported_actions: Option<Vec<String>>,
+    /// The same envelope ordinary create carries.
+    ///
+    /// `selection` above says *what* is wanted and this says *which ask* that
+    /// is — which is the half no field on this request has ever carried. The
+    /// four counters that look like they might (`sequence`, `generation`,
+    /// `control_epoch`, and the client's own capture and attachment
+    /// generations) each move for something other than a change of media
+    /// intent, so none of them can order two asks.
+    ///
+    /// Optional so a client that has not been rebuilt keeps working exactly as
+    /// it does today. When it is present it must *agree* with `selection` —
+    /// see [`ControlRequestV1::validate`]. Carrying the ask twice is the price
+    /// of not breaking every deployed client at once; letting the two copies
+    /// disagree would be the price of a bug nobody could see.
+    pub intent: Option<plurx_core::playback::MediaIntentEnvelope>,
 }
 
 impl ControlRequestV1 {
@@ -269,6 +284,25 @@ impl ControlRequestV1 {
                     .any(|name| name.is_empty() || name.len() > MAX_ACTION_NAME_LEN)
             {
                 return Err("supported_actions");
+            }
+        }
+        if let Some(intent) = &self.intent {
+            if intent.validate().is_err() {
+                return Err("intent");
+            }
+            // The ask is on this request twice, in two shapes, and exactly one
+            // of them can be right. Refusing the disagreement is the only
+            // handling that does not silently pick a winner: taking
+            // `selection` would make the envelope decorative, and taking the
+            // envelope would let a client change the recipe through a field
+            // this server's own admission path does not read yet.
+            //
+            // It is also the only reading a client can act on. A 400 naming
+            // `intent` says "your two copies disagree, fix the one that is
+            // wrong"; serving one of them says nothing at all until a viewer
+            // notices the wrong track playing.
+            if intent.selection != self.selection.desired() {
+                return Err("intent.selection");
             }
         }
         Ok(())
@@ -3029,8 +3063,27 @@ pub(crate) struct SelectionObservation {
     /// ask has been dispatched yet, which stays true across every exchange
     /// until it has been.
     pub dispatch_preparation: bool,
+    /// The ask this exchange carries, and whether it still needs persisting.
+    ///
+    /// `Some` only while the durable row does not yet name this ask. The
+    /// handler must write it *before* reporting the exchange accepted — a
+    /// client told its new selection was taken, with nothing durable saying
+    /// so, is exactly the window §1 exists to close — and must call
+    /// [`ControlState::record_desired_persisted`] once the write has landed,
+    /// or every later exchange pays for a row that is already correct.
+    pub persist_desired: Option<PersistDesired>,
     /// The document the **session** is holding, not this exchange's.
     pub capabilities: Option<DynamicCapabilities>,
+}
+
+/// The ask to write, in the two forms the durable row wants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PersistDesired {
+    pub digest: String,
+    /// Written beside the digest so it is checkable — see the store's own
+    /// note on why a hash whose input is not recoverable is a value nobody
+    /// can verify.
+    pub canonical_form: String,
 }
 
 #[derive(Debug)]
@@ -3066,6 +3119,15 @@ pub(crate) struct ControlState {
     /// sequence space restarts, and a selection from before the advance is not
     /// something this client has since departed from.
     last_selection: Option<ClientSelection>,
+    /// The ask the durable row is known to name.
+    ///
+    /// Separate from `dispatched_digest` because they answer different
+    /// questions about different consumers: one is "has a candidate been built
+    /// for this", the other "does the store know about this". A single flag
+    /// would tie a durable write to a scheduling decision, so a candidate the
+    /// slot refused would suppress the write, and a write that failed would
+    /// suppress the candidate.
+    persisted_digest: Option<String>,
     /// The ask a preparation candidate was last dispatched for.
     ///
     /// Together with `desired_digest` this is the whole of retain-and-coalesce.
@@ -3138,6 +3200,7 @@ impl Default for ControlState {
             last_selection: None,
             desired_digest: None,
             dispatched_digest: None,
+            persisted_digest: None,
             last_capabilities: None,
             preparation: PreparationSlot::Empty,
         }
@@ -3357,6 +3420,12 @@ impl ControlState {
             self.last_selection = None;
             self.desired_digest = None;
             self.dispatched_digest = None;
+            // Not cleared on an epoch rollover, deliberately. A new owner
+            // inherits the same viewer's ask; forgetting it here would make
+            // every takeover rewrite a row that is already correct, and the
+            // row is keyed by playback rather than by owner precisely so it
+            // survives one.
+
             self.last_capabilities = None;
             inherited.map(|staged_incarnation_id| PreparationDirective::Abort {
                 staged_incarnation_id,
@@ -3666,7 +3735,13 @@ impl ControlState {
             .last_selection
             .as_ref()
             .is_some_and(|previous| previous.desired() != desired);
-        let dispatch_preparation = self.take_preparation_dispatch(&desired.digest());
+        let digest = desired.digest();
+        let dispatch_preparation = self.take_preparation_dispatch(&digest);
+        let persist_desired =
+            (self.persisted_digest.as_deref() != Some(digest.as_str())).then(|| PersistDesired {
+                canonical_form: desired.canonical_form(),
+                digest,
+            });
         self.last_selection = Some(selection.clone());
         if let Some(capabilities) = capabilities {
             self.last_capabilities = Some(capabilities.clone());
@@ -3674,7 +3749,27 @@ impl ControlState {
         SelectionObservation {
             changed,
             dispatch_preparation,
+            persist_desired,
             capabilities: self.last_capabilities.clone(),
+        }
+    }
+
+    /// The durable row now names this ask.
+    ///
+    /// Recorded only after the write has landed, so a failed write leaves the
+    /// next exchange still asking for it rather than leaving the store one ask
+    /// behind with nothing to notice. A digest that is no longer the current
+    /// ask is accepted and ignored: by the time a slow write returns the
+    /// viewer may have moved on, and the next exchange will carry the newer
+    /// one.
+    pub(crate) fn record_desired_persisted(&mut self, digest: &str) {
+        if self
+            .last_selection
+            .as_ref()
+            .map(|selection| selection.desired().digest())
+            == Some(digest.to_owned())
+        {
+            self.persisted_digest = Some(digest.to_owned());
         }
     }
 
@@ -4704,6 +4799,17 @@ impl PreparationExecutor {
                     now_ms,
                     lease_expires_at_ms,
                     control_receipt,
+                    // Read at the commit, not carried from the staging. The
+                    // gap between the two is a client round trip — announce,
+                    // prepare, acknowledge — and a viewer can change their
+                    // mind twice inside it.
+                    expected_desired_revision: self
+                        .store
+                        .desired_selection(self.user_id, &self.playback_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|desired| desired.revision),
                 },
             )
             .await?;
@@ -6636,6 +6742,12 @@ enum RollingControlCommand {
     },
     /// Take the preparation slot for a successor. `false` when it is already
     /// occupied or the playback is terminal.
+    /// The durable desired row now names this ask.
+    ///
+    /// Fire-and-forget: the write has already landed, and the only thing this
+    /// suppresses is a redundant repeat of it. A dropped command costs one
+    /// extra write on the next exchange, which is why it carries no reply.
+    RecordDesiredPersisted { digest: String },
     StagePreparation {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
@@ -6798,6 +6910,7 @@ impl RollingControlCommand {
             Self::ApplyProducerFlow { .. } => Some(19),
             Self::SettleProducerFlowSignal { .. } => Some(20),
             Self::StagePreparation { .. } => Some(21),
+            Self::RecordDesiredPersisted { .. } => None,
             Self::MayCommitPreparation { .. }
             | Self::BeginAbortPreparation { .. }
             | Self::RejectPreparationCommit { .. } => Some(22),
@@ -10218,6 +10331,9 @@ impl RollingControlActor {
                 } => {
                     let _ = reply.send(self.poll_producer_decision_at(after_sequence));
                 }
+                RollingControlCommand::RecordDesiredPersisted { digest } => {
+                    self.control.record_desired_persisted(&digest);
+                }
                 RollingControlCommand::StagePreparation {
                     staged_incarnation_id,
                     predecessor_incarnation_id,
@@ -11605,6 +11721,15 @@ impl RollingControlHandle {
         .await
         .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)?
+    }
+
+    /// The durable desired row now names this ask.
+    pub(crate) async fn record_desired_persisted(&self, digest: &str) {
+        let _ = self
+            .enqueue_command(RollingControlCommand::RecordDesiredPersisted {
+                digest: digest.to_owned(),
+            })
+            .await;
     }
 
     /// Take the preparation slot for a successor whose durable row already
@@ -13015,6 +13140,7 @@ mod tests {
 
     fn request() -> ControlRequestV1 {
         ControlRequestV1 {
+            intent: None,
             protocol: PROTOCOL_V1.to_owned(),
             generation: uuid::Uuid::new_v4().to_string(),
             control_epoch: 1,
@@ -14578,6 +14704,74 @@ mod tests {
         );
     }
 
+    /// The ask is offered for persistence until it has been, and then not
+    /// again.
+    ///
+    /// Two failures this guards against, pulling in opposite directions. A
+    /// state that offered the ask on every exchange would put a durable write
+    /// on a path that runs about once a second per client, for a row that is
+    /// already correct — and a control exchange that can fail on a store
+    /// hiccup is a control exchange that fails on heartbeats. A state that
+    /// stopped offering it after the first *attempt* would leave the store one
+    /// ask behind whenever a write failed, with nothing left to notice: the
+    /// client has been refused, retries, and the retry says nothing needs
+    /// writing.
+    ///
+    /// So the offer is retired by [`ControlState::record_desired_persisted`]
+    /// and by nothing else, which is what makes a failed write cost exactly
+    /// one refused exchange rather than a silently stale row.
+    #[test]
+    fn an_ask_is_offered_for_persistence_until_the_write_has_landed() {
+        let mut state = ControlState::default();
+        let first = selection_at(QualitySelection::Auto);
+        let second = selection_at(QualitySelection::Manual { height: 720 });
+
+        // A session's opening ask has to be written too: without it the store
+        // holds nothing for a viewer who never changes their mind, and an
+        // admission point comparing against "no row" cannot tell that from a
+        // viewer who has asked for something new.
+        let offer = state
+            .observe(&first, None)
+            .persist_desired
+            .expect("the opening ask is offered");
+        assert_eq!(offer.digest, first.desired().digest());
+        assert_eq!(offer.canonical_form, first.desired().canonical_form());
+
+        // Still offered while the write has not landed — a refused exchange
+        // must leave the next one asking for the same thing.
+        assert_eq!(
+            state.observe(&first, None).persist_desired,
+            Some(offer.clone()),
+            "an unacknowledged write is still outstanding"
+        );
+
+        state.record_desired_persisted(&offer.digest);
+        assert_eq!(
+            state.observe(&first, None).persist_desired,
+            None,
+            "and once it has landed, a heartbeat repeating the same ask writes nothing"
+        );
+
+        // A new ask is offered again.
+        let next = state
+            .observe(&second, None)
+            .persist_desired
+            .expect("a changed ask is offered");
+        assert_ne!(next.digest, offer.digest);
+
+        // A stale acknowledgement — the viewer moved on while the write was in
+        // flight — does not retire the current offer. Accepting it would mark
+        // the row as naming an ask it does not name.
+        state.record_desired_persisted(&offer.digest);
+        assert_eq!(
+            state.observe(&second, None).persist_desired,
+            Some(next.clone()),
+            "a write that landed for an ask the viewer has already left retires nothing"
+        );
+        state.record_desired_persisted(&next.digest);
+        assert_eq!(state.observe(&second, None).persist_desired, None);
+    }
+
     /// An ask that arrives while the slot is busy is not lost.
     ///
     /// The old gate asked "did this packet differ from the last one", which is
@@ -14858,6 +15052,73 @@ mod tests {
         assert!(prometheus().contains(
             "plurx_playback_control_actions_total{action=\"prepare\",platform=\"apple\"}"
         ));
+    }
+
+    /// The ask travels on this request twice, and the two copies must agree.
+    ///
+    /// This is the one property the optional envelope needs in order to be
+    /// worth having. `selection` and `intent.selection` are the same statement
+    /// in two shapes, so a request carrying both is either redundant or wrong,
+    /// and there is no third possibility to fall back on. Picking `selection`
+    /// would make the envelope decorative; picking the envelope would let a
+    /// client steer the recipe through a field this server's admission path
+    /// does not read yet. A 400 that names the field is the only answer a
+    /// client can act on, and the only one that cannot be wrong quietly.
+    ///
+    /// The agreement is asserted through `desired()` rather than field by
+    /// field, because that is the normalization the durable ask is built from:
+    /// two spellings that normalize the same *are* the same ask.
+    #[test]
+    fn an_envelope_that_contradicts_the_selection_beside_it_is_refused() {
+        use plurx_core::playback::{DesiredQuality, MediaIntentEnvelope};
+        let target = 60_000;
+
+        let mut agreeing = request();
+        agreeing.intent = Some(MediaIntentEnvelope {
+            lifetime_id: "lifetime-a".to_owned(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: agreeing.selection.desired(),
+        });
+        assert!(
+            agreeing.validate(None, target).is_ok(),
+            "an envelope that says what the selection says is accepted"
+        );
+
+        let mut contradicting = request();
+        let mut elsewhere = contradicting.selection.desired();
+        elsewhere.quality = DesiredQuality::Manual { height: 480 };
+        contradicting.intent = Some(MediaIntentEnvelope {
+            lifetime_id: "lifetime-a".to_owned(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: elsewhere,
+        });
+        assert_eq!(
+            contradicting.validate(None, target),
+            Err("intent.selection"),
+            "and one that says something else is refused, by name"
+        );
+
+        // An envelope that cannot mean anything is refused before its contents
+        // are compared at all — otherwise a zero revision would be reported as
+        // a selection disagreement, which is a different bug to chase.
+        let mut malformed = request();
+        malformed.intent = Some(MediaIntentEnvelope {
+            lifetime_id: String::new(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: malformed.selection.desired(),
+        });
+        assert_eq!(malformed.validate(None, target), Err("intent"));
+
+        // And the field stays optional: every deployed client sends none.
+        let mut absent = request();
+        absent.intent = None;
+        assert!(absent.validate(None, target).is_ok());
     }
 
     #[test]
@@ -16073,6 +16334,75 @@ mod tests {
     /// The expensive half — two store reads to resolve a candidate — is what
     /// this exists to skip, on an exchange that runs about once a second per
     /// client under an absolute deadline.
+    /// A seek is not a change of ask, however hard it looks like one.
+    ///
+    /// The last of §1's eleven races, and the one whose absence was easiest to
+    /// miss: every other case moves *something* about the selection, so a
+    /// scheduler keying on the wrong field would be caught by one of them. A
+    /// seek moves nothing about it. The playhead jumps, the buffer empties and
+    /// refills, the render state goes to seeking and back — and the viewer has
+    /// not asked for a different recipe, so work in flight for the recipe they
+    /// *did* ask for has to survive it.
+    ///
+    /// Same-quality on purpose. A seek that also changed the quality would
+    /// pass with the two conflated, which is exactly the bug: the rule is that
+    /// a destination change is not a recipe change, and only a seek that
+    /// leaves the recipe alone can say whether that holds.
+    ///
+    /// Asserted on the recorded ask and not only on `changed`, because those
+    /// are different claims. `changed` is what the scheduler reads this
+    /// exchange; the digest is what survives to be compared against the next
+    /// one, and a seek that quietly advanced it would refuse a successor built
+    /// moments earlier for a recipe nobody has left.
+    #[test]
+    fn a_same_quality_seek_does_not_move_the_ask() {
+        let request = request();
+        let asked_for = selection_at(QualitySelection::Manual { height: 720 });
+        let mut state = ControlState::default();
+        let started = Instant::now();
+
+        state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None).asking(&asked_for),
+            )
+            .expect("the first exchange is accepted");
+        let settled = state
+            .desired_digest_for_test()
+            .map(str::to_owned)
+            .expect("the ask the viewer arrived with");
+
+        // The seek: a later exchange carrying the very same selection.
+        state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None).asking(&asked_for),
+            )
+            .expect("the seek exchange is accepted");
+
+        assert_eq!(
+            state.desired_digest_for_test(),
+            Some(settled.as_str()),
+            "seeking is asking for a different position, not a different recipe"
+        );
+
+        // And what the scheduler reads agrees: nothing to rebuild, and no
+        // durable ask to write for a request the viewer never made.
+        let observation = state.observe(&asked_for, None);
+        assert!(
+            !observation.changed,
+            "a seek must not spend the work the gate exists to save"
+        );
+    }
+
     #[test]
     fn the_actor_reports_when_a_selection_moved() {
         let started = Instant::now();
@@ -20568,6 +20898,7 @@ mod tests {
             .await
             .expect("assign owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation.clone(),
             session_id: session.clone(),
             user_id: 7,
@@ -21823,6 +22154,7 @@ mod tests {
         now_ms: i64,
     ) -> plurx_core::domain::MediaSessionPreparation {
         plurx_core::domain::MediaSessionPreparation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),
             user_id: 7,
@@ -21995,6 +22327,7 @@ mod tests {
 
         let winner = uuid::Uuid::new_v4().to_string();
         let advance = plurx_core::domain::MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: winner.clone(),
             session_id: uuid::Uuid::new_v4().to_string(),
             user_id: 7,

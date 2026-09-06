@@ -662,6 +662,13 @@ const TABLES: &[TablePlan] = &[
             "playback_id",
             "current_incarnation_id",
             "updated_at_ms",
+            // Carried rather than recomputed. The fence triggers read a null
+            // here on a playback that has an ask as a writer from before the
+            // column, so a restore that dropped this would turn every imported
+            // pointer into one the next write cannot replace. Sources older
+            // than v49 have no such column and are handled by
+            // `value_projection`, not by leaving it out here.
+            "desired_revision",
         ],
         order_by: "user_id, playback_id",
         minimum_schema: 25,
@@ -685,6 +692,36 @@ const TABLES: &[TablePlan] = &[
         // older than v42 simply has no rows to carry and needs no arm in
         // `value_projection`.
         minimum_schema: 42,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "media_playback_desired",
+        columns: &[
+            "user_id",
+            "playback_id",
+            "revision",
+            "digest",
+            "canonical_form",
+            "updated_at_ms",
+        ],
+        order_by: "user_id, playback_id",
+        // A brand-new table, so `minimum_schema` is the whole story: a source
+        // older than this has no rows to carry and needs no arm in
+        // `value_projection`. Carried on import rather than dropped, because
+        // what a viewer asked for is the one fact about a playback that a
+        // rebuilt cluster cannot re-derive from anything else it holds.
+        //
+        // 48 is the SQLite migration that creates the table. This field is
+        // compared against the *source's* `PRAGMA user_version`, and it said
+        // 28 — the replicated AUTH version, which is a different number line
+        // entirely. A source between v28 and v47 would have been sent to
+        // count and read a table it does not have.
+        // `every_import_plan_names_the_migration_that_creates_its_table`
+        // now makes that class of mistake fail at compile-test time rather
+        // than during someone's restore.
+        minimum_schema: 48,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2109,7 +2146,20 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
         .columns
         .iter()
         .map(|column| {
-            if table.name == "cluster_fragment_index_jobs"
+            if table.name == "media_playback_pointers"
+                && *column == "desired_revision"
+                && schema_version < 49
+            {
+                // A source from before the column has no ask to attribute the
+                // pointer to, and null is the honest answer rather than a
+                // fabricated revision. The fence lets it through for exactly
+                // as long as the playback has no `media_playback_desired` row
+                // — which such a source also cannot have, because that table
+                // arrived at v48 and this one at v49. Inventing a revision
+                // here is the "never replace a missing expected token with the
+                // current revision" mistake, spelled as a restore.
+                "NULL".to_owned()
+            } else if table.name == "cluster_fragment_index_jobs"
                 && *column == "priority"
                 && schema_version < 41
             {
@@ -2517,6 +2567,52 @@ mod tests {
         );
     }
 
+    /// Every import plan must name the migration that actually creates its
+    /// table.
+    ///
+    /// `minimum_schema` is compared against the *source database's* `PRAGMA
+    /// user_version`, so it lives on the SQLite migration number line and
+    /// nothing else. `media_playback_desired` had the replicated AUTH version
+    /// there instead — a different number line that happens to contain small
+    /// integers too — which would have sent a source between those two
+    /// numbers to count and read a table it does not have. Nothing catches
+    /// that until a restore, which is the worst place to find it.
+    ///
+    /// Checked against `MIGRATIONS` rather than against a hand-kept list, so
+    /// a table added in a later migration cannot be given an earlier number
+    /// and pass. Tables created before the migration list began, or by an
+    /// `ALTER` rather than a `CREATE`, have no creating migration to find and
+    /// are exempted by name — deliberately a short list that has to be edited
+    /// deliberately.
+    #[test]
+    fn every_import_plan_names_the_migration_that_creates_its_table() {
+        // Tables whose creation predates the migration list, so there is no
+        // entry to point at. Each is present from v1.
+        const PREDATES_THE_LIST: &[&str] = &[];
+        let migrations = crate::store::sqlite::MIGRATIONS;
+        for table in TABLES {
+            if PREDATES_THE_LIST.contains(&table.name) {
+                continue;
+            }
+            let creates = |sql: &str| {
+                sql.contains(&format!("CREATE TABLE IF NOT EXISTS {}", table.name))
+                    || sql.contains(&format!("CREATE TABLE {}", table.name))
+            };
+            let Some(index) = migrations.iter().position(|sql| creates(sql)) else {
+                continue;
+            };
+            let creating_version = index as i64 + 1;
+            assert!(
+                table.minimum_schema >= creating_version,
+                "{}: minimum_schema {} is below v{creating_version}, the migration that \
+                 creates the table — a source in between would be asked to read a table \
+                 it does not have",
+                table.name,
+                table.minimum_schema,
+            );
+        }
+    }
+
     #[test]
     fn replicated_tables_exclude_node_local_and_derived_state() {
         let names = TABLES.iter().map(|table| table.name).collect::<Vec<_>>();
@@ -2546,7 +2642,37 @@ mod tests {
         assert!(names.contains(&"analysis_lifecycle_counters"));
         assert!(names.contains(&"timeline_annotation_sets"));
         assert!(names.contains(&"timeline_manual_overrides"));
-        assert_eq!(names.len(), 39, "review every imported durable table");
+        assert!(names.contains(&"media_playback_desired"));
+        assert_eq!(names.len(), 40, "review every imported durable table");
+    }
+
+    /// A source from before the pointer fence has no revision to attribute its
+    /// pointers to, and the import must say so rather than invent one.
+    ///
+    /// `NULL` is the whole point. The fence reads a null on a playback that
+    /// *has* an ask as a writer from before the column, so a restore that
+    /// filled this in with the ask that happens to be current would hand every
+    /// imported pointer a token it never earned — which is the "never replace
+    /// a missing expected token with the current revision" rule, arriving
+    /// through a restore instead of through a write. It is safe precisely
+    /// because such a source has no asks either: the ask table arrived one
+    /// version earlier and the fence only fires where an ask exists.
+    #[test]
+    fn a_pre_fence_source_projects_a_null_pointer_revision() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "media_playback_pointers")
+            .copied()
+            .expect("pointer table plan");
+        assert!(
+            value_projection(table, 48, false).ends_with("updated_at_ms, NULL"),
+            "a source from before the column carries no revision for its pointers"
+        );
+        assert!(
+            value_projection(table, SQLITE_SCHEMA_VERSION, false)
+                .ends_with("updated_at_ms, desired_revision"),
+            "and a current source carries the one its pointers were written against"
+        );
     }
 
     #[test]

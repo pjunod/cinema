@@ -451,6 +451,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "sessions.rs",
+        method: "record_desired_selection",
+        is_async: true,
+        // The write decides its own revision — the statement compares the
+        // stored digest and either advances or does not — so the transaction
+        // wraps a write and a read-back rather than a read that a branch then
+        // acts on. Reading first and writing after would let two exchanges for
+        // the same playback observe the same revision and both write its
+        // successor, which is exactly the collision a monotone revision exists
+        // to prevent.
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteUntilStable,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
         method: "activate_media_session",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -850,10 +864,13 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 66 since `put_settings_if_generation`: the generation-fenced
-        // settings write opens its own boundary, classified beside the others
-        // in SQLITE_TRANSACTION_SITES rather than counted into this number.
-        assert_eq!(methods.len(), 66);
+        // 67: main's 66 — the last of them `put_settings_if_generation`,
+        // whose generation-fenced write opens its own boundary — plus
+        // `record_desired_selection`, which this branch reintroduces along
+        // with the table it writes. Main does not carry the desired-selection
+        // work, so merging main in deleted the entry and merging this back
+        // restores it; the site is real and classified either way.
+        assert_eq!(methods.len(), 67);
     }
 
     #[test]

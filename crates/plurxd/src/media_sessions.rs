@@ -5146,6 +5146,7 @@ mod tests {
         let mut request = RemoteActivateRequest {
             target_generation: 0,
             activation: MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
                 user_id: 7,
@@ -5683,6 +5684,7 @@ mod tests {
             expected_owner_epoch: 1,
             deadline_unix_ms: unix_ms().saturating_add(4_000),
             control: crate::playback_control::ControlRequestV1 {
+                intent: None,
                 protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
                 generation,
                 control_epoch: 1,

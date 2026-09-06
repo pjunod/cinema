@@ -3548,6 +3548,22 @@ impl VodServe {
         Ok(ended)
     }
 
+    /// Record that the durable row now names this ask, if this engine owns
+    /// the session. `false` means it does not, and the caller should ask the
+    /// other one.
+    pub(crate) async fn record_desired_persisted(&self, session_id: &str, digest: &str) -> bool {
+        let sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        session
+            .control
+            .lock()
+            .expect("control lock")
+            .record_desired_persisted(digest);
+        true
+    }
+
     /// Blocked-GET admission counters for the operator surfaces.
     pub(crate) fn blocked_get_metrics_handle(&self) -> Arc<crate::waitpool::BlockedGetMetrics> {
         self.shared.pool.metrics_handle()
@@ -7641,6 +7657,7 @@ mod tests {
             .await
             .expect("assign route owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: generation.to_owned(),
             session_id: session_id.to_owned(),
             user_id: 7,

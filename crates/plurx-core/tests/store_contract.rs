@@ -486,6 +486,12 @@ const NETWORK_PRIOR_METHODS: &[&str] = &[
 ];
 const COORDINATION_METHODS: &[&str] = &["acquire_lease", "renew_lease", "release_lease"];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    "record_desired_selection",
+    "desired_selection",
+    // Test-only in intent, declared on the trait because the fence it proves
+    // has to be proved on both backends. See its doc comment.
+    "validation_playback_pointer_desired_revision",
+    "validation_write_legacy_playback_pointer",
     "claim_media_session_request",
     "assign_media_session_request_owner",
     "activate_media_session",
@@ -619,6 +625,377 @@ fn analysis_lifecycle_slot(event: &str, reason: &str) -> usize {
         .expect("analysis lifecycle metric")
 }
 
+/// Ordinary activation is the third door into the same pointer, and it had no
+/// compare at all.
+///
+/// Preparation admission and prepared commit both refuse an ask the viewer has
+/// left. Activation did not, which made the whole guard bypassable by the
+/// plainest path in the system: a viewer changes their selection while an
+/// ordinary create is in flight, and the create's own activation advances the
+/// pointer to a session built for the selection they abandoned. Nothing later
+/// notices, because the pointer is the thing everything else reads.
+///
+/// The expectation deliberately is not re-read at activation time. It is the
+/// revision the create recorded at its first step; re-reading would return the
+/// newer ask and the compare would agree with itself.
+#[tokio::test]
+async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("activation-ask", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-activation-ask";
+        let predecessor = "11111111-1111-4111-8111-111111111101";
+        let current = current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "11111111-1111-4111-8111-111111111102",
+            backend,
+        )
+        .await;
+
+        let first_ask = store
+            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record first ask: {error}"));
+        assert_eq!(
+            first_ask.revision, 1,
+            "{backend}: the first ask is revision 1"
+        );
+
+        // The viewer changes their mind while the create is in flight.
+        let second_ask = store
+            .record_desired_selection(
+                user.id,
+                playback,
+                &"b".repeat(64),
+                "v1;quality=original",
+                3_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record second ask: {error}"));
+        assert_eq!(
+            second_ask.revision, 2,
+            "{backend}: a different ask advances"
+        );
+
+        let mut stale = MediaSessionActivation {
+            expected_desired_revision: Some(first_ask.revision),
+            incarnation_id: "11111111-1111-4111-8111-111111111103".to_owned(),
+            session_id: "11111111-1111-4111-8111-111111111104".to_owned(),
+            user_id: user.id,
+            playback_id: playback.to_owned(),
+            expected_predecessor_incarnation_id: Some(predecessor.to_owned()),
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "c".repeat(64),
+            owner_node_id: "staged-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"stale"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 4_000,
+            lease_expires_at_ms: 900_000,
+        };
+        assert!(
+            store
+                .activate_media_session(&stale)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale activation: {error}"))
+                .is_none(),
+            "{backend}: an activation built for an ask the viewer has left must be refused"
+        );
+
+        // The refusal is whole. A partially applied activation would leave the
+        // pointer moved, or the predecessor reaped, or a session row behind.
+        let route = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback still points somewhere"));
+        assert_eq!(
+            route.incarnation_id, predecessor,
+            "{backend}: a refused activation leaves the pointer where it was"
+        );
+        assert_eq!(
+            route.state, "active",
+            "{backend}: and leaves the predecessor serving"
+        );
+        assert!(
+            store
+                .media_session_route(&stale.incarnation_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale route: {error}"))
+                .is_none(),
+            "{backend}: a refused activation writes no session row"
+        );
+
+        // The current ask activates, so the refusal is about the ask and not
+        // about anything else this activation carries.
+        //
+        // A fresh incarnation, because a refused activation is not a no-op on
+        // every backend and pretending otherwise is how this test first passed
+        // on one and failed on the other. The replicated transaction cannot
+        // branch: it writes the session row, finds the pointer refused, and
+        // tombstones what it wrote — so that incarnation is spent. SQLite
+        // rolls the whole thing back and leaves it reusable. Retrying with the
+        // same id therefore asks the two backends for different things, and no
+        // real caller does it: an activation attempt is one incarnation, and
+        // the retry is the next one.
+        stale.incarnation_id = "11111111-1111-4111-8111-111111111309".to_owned();
+        stale.session_id = "11111111-1111-4111-8111-111111111310".to_owned();
+        stale.expected_desired_revision = Some(second_ask.revision);
+        assert!(
+            store
+                .activate_media_session(&stale)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: current activation: {error}"))
+                .is_some(),
+            "{backend}: the same activation against the current ask must win"
+        );
+        let advanced = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback points somewhere"));
+        assert_eq!(advanced.incarnation_id, stale.incarnation_id);
+        let _ = current;
+
+        // The same refusal on a playback that has no pointer yet.
+        //
+        // Separate because it takes a different route through the statement:
+        // with a pointer present the write lands on the `ON CONFLICT` arm, and
+        // with none it lands on the insert. A predicate on only one of them
+        // passes every test above while leaving the first activation of a
+        // playback — the create that races the viewer's very first change of
+        // mind — completely unguarded.
+        let fresh_playback = "playback-activation-first";
+        let first = store
+            .record_desired_selection(
+                user.id,
+                fresh_playback,
+                &"e".repeat(64),
+                "v1;quality=auto",
+                5_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record fresh ask: {error}"));
+        store
+            .record_desired_selection(
+                user.id,
+                fresh_playback,
+                &"f".repeat(64),
+                "v1;quality=original",
+                6_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: change fresh ask: {error}"));
+        let first_activation = MediaSessionActivation {
+            expected_desired_revision: Some(first.revision),
+            incarnation_id: "11111111-1111-4111-8111-111111111107".to_owned(),
+            session_id: "11111111-1111-4111-8111-111111111108".to_owned(),
+            user_id: user.id,
+            playback_id: fresh_playback.to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "0".repeat(64),
+            owner_node_id: "staged-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"first"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 7_000,
+            lease_expires_at_ms: 900_000,
+        };
+        assert!(
+            store
+                .activate_media_session(&first_activation)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: first stale activation: {error}"))
+                .is_none(),
+            "{backend}: the first activation of a playback is guarded too"
+        );
+        assert!(
+            store
+                .media_session_route_for_playback(user.id, fresh_playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: fresh route: {error}"))
+                .is_none(),
+            "{backend}: and it leaves the playback pointing nowhere"
+        );
+    })
+    .await;
+}
+
+/// A playback nobody has recorded an ask for must still activate.
+///
+/// This is the upgrade shape, and getting it wrong would refuse the first play
+/// of every title in the library: an expectation against a missing row has to
+/// admit, because "no ask recorded" is not "a different ask".
+#[tokio::test]
+async fn an_activation_with_no_recorded_ask_is_still_admitted() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("activation-no-ask", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-activation-no-ask";
+        let activation = MediaSessionActivation {
+            expected_desired_revision: Some(7),
+            incarnation_id: "11111111-1111-4111-8111-111111111105".to_owned(),
+            session_id: "11111111-1111-4111-8111-111111111106".to_owned(),
+            user_id: user.id,
+            playback_id: playback.to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "d".repeat(64),
+            owner_node_id: "staged-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"first"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_000,
+            lease_expires_at_ms: 900_000,
+        };
+        assert!(
+            store
+                .activate_media_session(&activation)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: first activation: {error}"))
+                .is_some(),
+            "{backend}: a playback with no recorded ask must still activate"
+        );
+    })
+    .await;
+}
+
+/// A pointer write that names no ask, on a playback that has one, is refused
+/// by the database itself.
+///
+/// Every desired-revision compare up to here is application SQL: the predicate
+/// preparation admission, prepared commit and ordinary activation each carry.
+/// That fences this binary and does nothing whatever about an older one, which
+/// does not emit the predicate at all — and neither backend re-reads schema
+/// compatibility after the database is open, so a process already running when
+/// the cluster migrated keeps writing with statements from before the rule.
+///
+/// This test writes the pointer the way such a process would: directly, naming
+/// only the columns that existed before, so `desired_revision` comes out null.
+/// It has to be refused, and refused loudly — a fence an old writer cannot
+/// observe is not a fence, it is a silent divergence between what the writer
+/// believes and what the pointer says.
+#[tokio::test]
+async fn a_pointer_written_without_an_ask_is_refused_while_an_ask_exists() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("pointer-fence", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-pointer-fence";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            "11111111-1111-4111-8111-111111111201",
+            "11111111-1111-4111-8111-111111111202",
+            backend,
+        )
+        .await;
+
+        // Before any ask exists, the legacy shape is permitted. "No ask
+        // recorded" is not "a different ask", and a database that refused this
+        // would refuse every playback that predates the schema.
+        store
+            .validation_write_legacy_playback_pointer(
+                user.id,
+                playback,
+                "11111111-1111-4111-8111-111111111203",
+                3_000,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{backend}: a pointer with no ask to disagree with must be allowed: {error}")
+            });
+
+        store
+            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record ask: {error}"));
+
+        // Now there is an ask, and the same write is refused.
+        let refused = store
+            .validation_write_legacy_playback_pointer(
+                user.id,
+                playback,
+                "11111111-1111-4111-8111-111111111204",
+                4_000,
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "{backend}: a writer that cannot name the ask must not be able to move the pointer"
+        );
+
+        // And the pointer is where it was, not partly moved.
+        let route = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"));
+        assert!(
+            route
+                .is_none_or(|route| route.incarnation_id != "11111111-1111-4111-8111-111111111204"),
+            "{backend}: the refused pointer write left nothing behind"
+        );
+
+        // The same refusal on a playback that has no pointer yet.
+        //
+        // Separate because the two paths are two triggers: SQLite fires per
+        // operation, and the write above lands on the update path because the
+        // playback already points somewhere. A fence installed on only the
+        // update path passes every assertion above while leaving an old writer
+        // free to establish the *first* pointer for a playback whose viewer
+        // has already asked for something — and that pointer is then what
+        // every later reader trusts.
+        let fresh = "playback-pointer-fence-first";
+        store
+            .record_desired_selection(
+                user.id,
+                fresh,
+                &"b".repeat(64),
+                "v1;quality=original",
+                5_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record fresh ask: {error}"));
+        assert!(
+            store
+                .validation_write_legacy_playback_pointer(
+                    user.id,
+                    fresh,
+                    "11111111-1111-4111-8111-111111111205",
+                    6_000,
+                )
+                .await
+                .is_err(),
+            "{backend}: the first pointer for a playback is fenced too"
+        );
+        assert!(
+            store
+                .media_session_route_for_playback(user.id, fresh)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: fresh route: {error}"))
+                .is_none(),
+            "{backend}: and the playback still points nowhere"
+        );
+    })
+    .await;
+}
+
 async fn confirm_media_activation(
     store: &dyn Store,
     activation: &MediaSessionActivation,
@@ -648,6 +1025,7 @@ async fn current_media_session(
     backend: &str,
 ) -> MediaSessionActivation {
     let activation = MediaSessionActivation {
+        expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
         user_id,
@@ -763,6 +1141,7 @@ async fn media_activation_confirmation_recovers_a_committed_timeout() {
         .await
         .expect("create committed-timeout user");
     let activation = MediaSessionActivation {
+        expected_desired_revision: None,
         incarnation_id: "00000000-0000-4000-8000-00000000fc11".to_owned(),
         session_id: "00000000-0000-4000-8000-00000000fc12".to_owned(),
         user_id: user.id,
@@ -817,6 +1196,144 @@ async fn media_activation_confirmation_recovers_a_committed_timeout() {
     );
 }
 
+/// The other ordering: B commits first, and C reconciles against B rather than
+/// being discarded.
+///
+/// §1 asks for both, in those words, and only one had a test. "C wins first, B
+/// fails" is the refusal — a successor built for an ask the viewer has left
+/// must not be published. This is the case where nothing went wrong and the
+/// system still has to do the right thing: B's commit lands, the pointer moves
+/// to B, and the newer ask C arrives *after*. C is not stale — it is the
+/// viewer's current wish — so discarding it because the pointer moved would
+/// strand the viewer on the selection they have already replaced, with nothing
+/// anywhere recording that they asked for anything else.
+///
+/// Reconciling means C stages against the pointer as it now is, naming B as its
+/// predecessor, and is admitted. The two orderings therefore have opposite
+/// outcomes from the same pair of facts, which is why proving one says nothing
+/// about the other.
+#[tokio::test]
+async fn a_newer_ask_reconciles_against_a_commit_that_landed_first() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("commit-then-ask", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-commit-then-ask";
+        let predecessor = "11111111-1111-4111-8111-111111111301";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "11111111-1111-4111-8111-111111111302",
+            backend,
+        )
+        .await;
+
+        let first = store
+            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first ask: {error}"));
+
+        // B: staged and committed against the ask that was current.
+        let b = "11111111-1111-4111-8111-111111111303";
+        let mut staged = staged_preparation(
+            user.id,
+            playback,
+            b,
+            "11111111-1111-4111-8111-111111111304",
+            predecessor,
+        );
+        staged.expected_desired_revision = Some(first.revision);
+        store
+            .prepare_media_session(&staged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stage B: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: B stages against the current ask"));
+        let mut commit = preparation_commit_request(b, 3_000, 900_000);
+        commit.expected_desired_revision = Some(first.revision);
+        store
+            .commit_media_session_preparation(user.id, playback, &commit)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: commit B: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: B's commit lands first"));
+        let after_b = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback points somewhere"));
+        assert_eq!(after_b.incarnation_id, b, "{backend}: B committed first");
+
+        // C: the viewer's newer ask, arriving after B landed.
+        let second = store
+            .record_desired_selection(
+                user.id,
+                playback,
+                &"b".repeat(64),
+                "v1;quality=original",
+                4_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second ask: {error}"));
+        assert_eq!(second.revision, 2, "{backend}: C is a different ask");
+
+        // The stale-predecessor attempt goes first, while the slot is empty.
+        // Run the other way round it passes because the slot is occupied,
+        // which is a different rule entirely.
+        //
+        // Two guards can refuse it — the pointer no longer names that
+        // predecessor, and B's commit ended that session — and disabling
+        // either leaves the other. So this assertion pins the outcome and not
+        // a mechanism, which is the honest thing for it to claim: what must be
+        // true is that the ask cannot be staged against a pointer that has
+        // moved, not which guard happens to say so first.
+        let mut unreconciled = staged_preparation(
+            user.id,
+            playback,
+            "11111111-1111-4111-8111-111111111307",
+            "11111111-1111-4111-8111-111111111308",
+            predecessor,
+        );
+        unreconciled.expected_desired_revision = Some(second.revision);
+        unreconciled.now_ms = 5_000;
+        assert!(
+            store
+                .prepare_media_session(&unreconciled)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale-predecessor stage: {error}"))
+                .is_none(),
+            "{backend}: reconciling means naming the pointer that is there now, \
+             not the one this ask was cut from"
+        );
+
+        let mut reconciled = staged_preparation(
+            user.id,
+            playback,
+            "11111111-1111-4111-8111-111111111305",
+            "11111111-1111-4111-8111-111111111306",
+            // Against B, which is what "reconcile against B" means: the
+            // predecessor C names is the pointer as it now stands.
+            b,
+        );
+        reconciled.expected_desired_revision = Some(second.revision);
+        reconciled.now_ms = 6_000;
+        assert!(
+            store
+                .prepare_media_session(&reconciled)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stage C: {error}"))
+                .is_some(),
+            // This is the load-bearing half. The refusal above has company;
+            // this admission has none — if a commit landing first discarded
+            // the newer ask, nothing else in the suite would notice.
+            "{backend}: the viewer's current ask is not discarded because a \
+             commit landed before it"
+        );
+    })
+    .await;
+}
+
 fn staged_preparation(
     user_id: i64,
     playback_id: &str,
@@ -825,6 +1342,7 @@ fn staged_preparation(
     predecessor: &str,
 ) -> plurx_core::domain::MediaSessionPreparation {
     plurx_core::domain::MediaSessionPreparation {
+        expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
         user_id,
@@ -854,6 +1372,7 @@ fn preparation_commit_request(
         now_ms,
         lease_expires_at_ms,
         control_receipt: None,
+        expected_desired_revision: None,
     }
 }
 
@@ -893,6 +1412,231 @@ fn preparation_abort_request(
 /// it every tick. Without this refusal a preparation nobody commits holds an
 /// encoder and one of that user's admission slots for as long as the node
 /// lives, and the deadline the operator was promised never arrives.
+/// A successor is not admitted, and not committed, against an ask the viewer
+/// has left.
+///
+/// The two gaps this closes are both awaits, and both invisible to the checks
+/// that precede them. Between deciding to stage and staging there is a source
+/// file read and a height resolution; between staging and committing there is
+/// a whole client round trip — the successor is announced, the client prepares
+/// it, and only then acknowledges. A viewer can change their mind inside
+/// either, and until the store compared the ask, both ended with media the
+/// viewer had already moved off being published as though they had asked for
+/// it — the commit doing so on the authority of the client's own
+/// acknowledgement.
+///
+/// Driven against both backends, because the predicate has to mean the same
+/// thing in the replicated store and in SQLite or a single-node deployment and
+/// a cluster disagree about what a viewer asked for.
+#[tokio::test]
+async fn a_successor_is_refused_when_the_viewer_has_asked_for_something_else() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("desired-admission-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "desired-admission-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fd01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fd02",
+            backend,
+        )
+        .await;
+
+        let first_ask = store
+            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record first ask: {error}"));
+        assert_eq!(first_ask.revision, 1);
+
+        // A stale expectation is refused at admission. The viewer moved on
+        // between the decision to stage and the staging itself, which is the
+        // window the source read and the height resolution open.
+        let mut stale = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000fd03",
+            "00000000-0000-4000-8000-00000000fd04",
+            predecessor,
+        );
+        stale.expected_desired_revision = Some(first_ask.revision + 1);
+        assert!(
+            store
+                .prepare_media_session(&stale)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale prepare: {error}"))
+                .is_none(),
+            "{backend}: a successor for an ask that is not current must not be admitted"
+        );
+
+        // The current expectation is admitted.
+        let staged = "00000000-0000-4000-8000-00000000fd05";
+        let mut current = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000fd06",
+            predecessor,
+        );
+        current.expected_desired_revision = Some(first_ask.revision);
+        store
+            .prepare_media_session(&current)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the current ask must be admitted"));
+
+        // Now the viewer changes their mind while that successor is in flight.
+        let second_ask = store
+            .record_desired_selection(
+                user.id,
+                playback,
+                &"b".repeat(64),
+                "v1;quality=manual:720",
+                2_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record second ask: {error}"));
+        assert_eq!(second_ask.revision, 2);
+
+        let mut commit = preparation_commit_request(staged, 3_000, 900_000);
+        commit.expected_desired_revision = Some(first_ask.revision);
+        assert!(
+            store
+                .commit_media_session_preparation(user.id, playback, &commit)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale commit: {error}"))
+                .is_none(),
+            "{backend}: a successor built for an ask the viewer has left must not be published"
+        );
+
+        // And the pointer did not move: the refusal is a refusal, not a
+        // partially applied commit.
+        let route = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback still points somewhere"));
+        assert_eq!(
+            route.incarnation_id, predecessor,
+            "{backend}: a refused commit leaves the pointer where it was"
+        );
+        assert_eq!(route.state, "active");
+
+        // And the refusal tore the successor down rather than leaving it
+        // staged. That is the right outcome and not merely the observed one: a
+        // successor built for an ask the viewer has left can never
+        // legitimately commit — its recipe is for the old ask — so holding the
+        // playback's one preparation slot until its deadline would block the
+        // successor the viewer is actually waiting for.
+        //
+        // This is also where the two backends first disagreed. Checking the
+        // ask before the CAS and returning early left SQLite holding the row
+        // while the replicated twin tore it down; carrying the predicate
+        // inside the CAS makes a stale ask fall into the same abort branch a
+        // lost pointer race does, in both.
+        assert!(
+            store
+                .staged_media_session_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: staged read: {error}"))
+                .is_none(),
+            "{backend}: a successor refused for a stale ask is torn down, not left holding the slot"
+        );
+
+        // A fresh successor, admitted under the ask that is now current,
+        // commits — so the refusal above was about the ask and not about
+        // anything else having gone wrong with this playback.
+        let replacement = "00000000-0000-4000-8000-00000000fd07";
+        let mut fresh = staged_preparation(
+            user.id,
+            playback,
+            replacement,
+            "00000000-0000-4000-8000-00000000fd08",
+            predecessor,
+        );
+        fresh.expected_desired_revision = Some(second_ask.revision);
+        fresh.now_ms = 4_000;
+        store
+            .prepare_media_session(&fresh)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fresh prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the current ask must be admitted"));
+        let mut commit = preparation_commit_request(replacement, 5_000, 900_000);
+        commit.expected_desired_revision = Some(second_ask.revision);
+        store
+            .commit_media_session_preparation(user.id, playback, &commit)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fresh commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a current ask must commit"));
+    })
+    .await;
+}
+
+/// A playback with no recorded ask is admitted, not fenced.
+///
+/// Absent is no evidence. A playback that predates this schema, or one whose
+/// viewer has never sent an intent-changing request, has no ask to disagree
+/// with — and a node that fenced every session older than its own schema would
+/// be a worse failure than the one the predicate closes.
+#[tokio::test]
+async fn a_playback_with_no_recorded_ask_is_still_admitted() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("desired-absent-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "desired-absent-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fe01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fe02",
+            backend,
+        )
+        .await;
+        assert!(
+            store
+                .desired_selection(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                .is_none(),
+            "{backend}: the fixture must have no recorded ask"
+        );
+
+        let staged = "00000000-0000-4000-8000-00000000fe03";
+        let mut preparation = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000fe04",
+            predecessor,
+        );
+        // An expectation carried forward from a node that had one, against a
+        // row that does not exist. This is the upgrade shape.
+        preparation.expected_desired_revision = Some(7);
+        store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an absent ask must admit, not fence"));
+
+        let mut commit = preparation_commit_request(staged, 3_000, 900_000);
+        commit.expected_desired_revision = Some(7);
+        store
+            .commit_media_session_preparation(user.id, playback, &commit)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an absent ask must commit, not fence"));
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_staged_successor_cannot_renew_past_its_deadline() {
     for_each_backend(|store, backend| async move {
@@ -1682,6 +2426,7 @@ async fn media_session_rejoin_cannot_retarget_an_occupied_preparation_after_poin
 
         let current = "00000000-0000-4000-8000-00000000d365";
         let activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: current.to_owned(),
             session_id: "00000000-0000-4000-8000-00000000d366".to_owned(),
             user_id: user.id,
@@ -3340,6 +4085,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         let request_id = "activation-settle-request";
         let incarnation_id = "00000000-0000-4000-8000-0000000000e1";
         let activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e2".to_owned(),
             user_id: user.id,
@@ -3535,6 +4281,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
 
         let race_incarnation = "00000000-0000-4000-8000-0000000000e3";
         let race_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: race_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
             user_id: user.id,
@@ -3662,6 +4409,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         let finite_incarnation = "00000000-0000-4000-8000-0000000000f1";
         let finite_request_id = "activation-finite-handoff";
         let finite_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: finite_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000f2".to_owned(),
             user_id: user.id,
@@ -3902,6 +4650,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
 
         let failed_confirm_incarnation = "00000000-0000-4000-8000-0000000000e6";
         let failed_confirm_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: failed_confirm_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e7".to_owned(),
             user_id: user.id,
@@ -4563,6 +5312,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: assign request owner: {error}")));
 
         let first_activation = MediaSessionActivation {
+            expected_desired_revision: None,
                 incarnation_id: incarnation_a.to_owned(),
                 session_id: session_a.to_owned(),
                 user_id: first_user.id,
@@ -4661,6 +5411,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let session_b = "00000000-0000-4000-8000-0000000000b2";
         let incarnation_b = "00000000-0000-4000-8000-0000000000a3";
         let second_activation = MediaSessionActivation {
+            expected_desired_revision: None,
                 incarnation_id: incarnation_b.to_owned(),
                 session_id: session_b.to_owned(),
                 user_id: second_user.id,
@@ -4701,6 +5452,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let session_a2 = "00000000-0000-4000-8000-0000000000b3";
         let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
         let superseding_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_a2.to_owned(),
             session_id: session_a2.to_owned(),
             user_id: first_user.id,
@@ -4945,6 +5697,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let boundary_session = "00000000-0000-4000-8000-0000000000bb";
         store
             .activate_media_session(&MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: boundary_incarnation.to_owned(),
                 session_id: boundary_session.to_owned(),
                 user_id: second_user.id,
@@ -5026,6 +5779,7 @@ async fn media_session_contract_runs_through_dyn_store() {
 
         let stale = store
             .activate_media_session(&MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a5".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b4".to_owned(),
                 user_id: first_user.id,
@@ -5050,6 +5804,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
         let stale_legacy = store
             .activate_media_session(&MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a8".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b6".to_owned(),
                 user_id: first_user.id,
@@ -5342,6 +6097,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: assign expiring activation: {error}")));
         assert!(store
             .activate_media_session(&MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: expired_activation_incarnation.to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b5".to_owned(),
                 user_id: first_user.id,
@@ -5435,6 +6191,7 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
         let incarnation = "00000000-0000-4000-8000-00000000f001";
         let session = "00000000-0000-4000-8000-00000000f002";
         let terminal_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
             user_id: user.id,
@@ -5562,6 +6319,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
         let session = "00000000-0000-4000-8000-00000000e002";
 
         let takeover_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
             user_id: user.id,
@@ -5751,6 +6509,7 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
         for index in 0_u128..33 {
             let incarnation_id = uuid::Uuid::from_u128(0x4000 + index).to_string();
             let activation = MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id,
                 session_id: uuid::Uuid::from_u128(0x5000 + index).to_string(),
                 user_id: user.id,
@@ -5840,6 +6599,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             let session_id = uuid::Uuid::from_u128(0x2000 + index).to_string();
             let playback_id = format!("cap-playback-{index}");
             let activation = MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id,
                 user_id: user.id,
@@ -5914,6 +6674,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: own capped replacement: {error}")));
         let replacement_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: replacement.clone(),
             session_id: uuid::Uuid::from_u128(0x4000).to_string(),
             user_id: user.id,
@@ -6020,6 +6781,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     .expect("seed exhausted media lease");
     assert!(store
         .activate_media_session(&MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: max_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
             user_id: user.id,
@@ -6087,6 +6849,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     .expect("mark media owner removed");
     assert!(store
         .activate_media_session(&MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: removed_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c4".to_owned(),
             user_id: user.id,
@@ -6125,6 +6888,7 @@ async fn hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease() {
     let incarnation_id = "00000000-0000-4000-8000-0000000000d1";
     let session_id = "00000000-0000-4000-8000-0000000000d2";
     let activation = MediaSessionActivation {
+        expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
         user_id: user.id,
@@ -13276,8 +14040,17 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v45's negative fragment index, then v44's permanent
-             -- recovery-guard ledger, then v43's conversion ledger.
+             -- v49's pointer fence first: both triggers name
+             -- `media_playback_desired`, so once that table is gone every
+             -- write to `media_playback_pointers` fails with \"no such
+             -- table\" instead of anything to do with this fixture. Then
+             -- v48's desired-selection row, then v45's negative fragment
+             -- index, then v44's permanent recovery-guard ledger, then v43's
+             -- conversion ledger.
+             DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
+             DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
+             ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
+             DROP TABLE IF EXISTS media_playback_desired;
              DROP TABLE fragment_index_outcomes;
              DROP TABLE dv_recovery_guards;
              DROP TABLE dv_conversions;
@@ -13397,7 +14170,11 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 39);
+    // 40 with `media_playback_desired`. A v14 source has no rows for it —
+    // its `minimum_schema` is 28 — but the table is still reported, because
+    // the digest inventory is over what the import *plans*, not over what the
+    // source happened to hold.
+    assert_eq!(report.tables.len(), 40);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -15035,7 +15812,10 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 291, "review the Store method count");
+    // 291 on main, plus this branch's four: the two desired-selection
+    // methods it reintroduces (main carries none of that work) and the two
+    // validation-only reads the pointer fence is proved with.
+    assert_eq!(declared.len(), 295, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

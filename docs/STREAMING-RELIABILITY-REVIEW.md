@@ -1164,9 +1164,61 @@ changes while the slot is busy leave one candidate to build rather than three.
 The wake is the next exchange after the slot frees, which is a client heartbeat
 away and only matters to a client that is still sending them.
 
-**Still open** in this thread: the durable half. Desired ownership is not
-persisted, so none of the three admission points can compare it, and nothing
-survives a restart or an owner change.
+**Also corrected: the ask becomes durable before the client is told it was
+taken.** A client told its new selection was accepted, with nothing durable
+saying so, leaves every later admission decision comparing against an ask that
+never landed — and a restart or an owner change in that window loses the
+request entirely, with the session continuing to serve the old selection and
+nothing recording that anything was asked.
+
+`media_playback_desired` now carries it, written before the exchange is
+reported accepted. Only an exchange whose ask the row does not already name
+pays for the write: a heartbeat repeats the same selection, so it writes
+nothing and cannot fail on it, and the cost falls on the exchange that changed
+something. A failed write refuses that exchange rather than answering it, which
+is what "before reported accepted" means — answering anyway would report a
+request taken that nothing has recorded.
+
+The offer to persist is retired by the write landing and by nothing else. A
+state that stopped offering on the *attempt* would leave the store one ask
+behind whenever a write failed, with nothing left to notice, because the
+client's retry would then say nothing needed writing.
+
+**Also corrected: a successor is no longer admitted or committed against an ask
+the viewer has left.** Two gaps, both awaits, and both invisible to the checks
+that precede them. Between deciding to stage and staging there is a source file
+read and a height resolution; between staging and committing there is a whole
+client round trip — announce, prepare, acknowledge. A viewer can change their
+mind inside either, and until the store compared the ask, both ended with media
+the viewer had already moved off being published as though they had asked for
+it, the commit doing so on the authority of the client's own acknowledgement.
+
+The expected desired revision is now compared inside the admission transaction
+and inside the commit CAS, in both backends. It is read at each point rather
+than carried from the exchange that triggered the work, because a value
+captured before the awaits proves only that the ask had not changed before the
+work started.
+
+An absent row admits. A playback that predates the schema, or one whose viewer
+has never sent an intent-changing request, has no ask to disagree with, and a
+node that fenced every session older than its own schema would be a worse
+failure than the one this closes. The predicate is `NOT EXISTS (… revision !=
+expected)` rather than `EXISTS (… revision = expected)` for exactly that
+reason: the two differ only where the row is missing.
+
+The three-voter lane earned its runtime here. The first version checked the ask
+before the commit CAS and returned early, which left SQLite holding the stale
+successor while the replicated backend tore it down — the two backends
+disagreeing about what happens to a successor nobody wants. Carrying the
+predicate inside the CAS makes a stale ask fall into the same abort branch a
+lost pointer race does, in both, which is also the right outcome: a successor
+built for an ask the viewer has left can never legitimately commit, so holding
+the playback's one preparation slot until its deadline would block the
+successor they are actually waiting for.
+
+**Still open** in this thread: ordinary activation does not compare the ask
+yet — only preparation admission and prepared commit do — and the remaining §1
+race proofs are unwritten.
 
 **Partly corrected: a failed rendition now gives its producer back.** Reading
 the teardown paths rather than the finding turned up one leak that was
