@@ -11,7 +11,7 @@ use plurx_core::cluster::membership::{
 };
 use serde::Deserialize;
 
-use super::cluster_operations::{collect_aggregate, local_owned_media_sessions};
+use super::cluster_operations::{collect_current_aggregate, local_owned_media_sessions};
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
 use crate::state::AppState;
@@ -184,7 +184,7 @@ pub async fn enter_maintenance(
     if state.membership.local_maintenance_active() {
         return state.membership.status().await.map(Json).map_err(api_error);
     }
-    let preflight = collect_aggregate(&state).await?;
+    let preflight = collect_current_aggregate(&state).await?;
     let readiness = preflight
         .maintenance
         .iter()

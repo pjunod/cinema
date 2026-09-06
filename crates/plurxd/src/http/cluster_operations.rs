@@ -33,7 +33,7 @@ use super::extract::AdminUser;
 use super::peer_transport::{
     deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport, PeerTransportError,
 };
-use super::{evaluate_readiness, ReadinessEvaluation};
+use super::{ReadinessEvaluation, ReadinessFailure};
 use crate::state::AppState;
 
 pub(crate) const INTERNAL_PATH: &str = "/api/v1/internal/cluster/operations-status";
@@ -261,19 +261,79 @@ pub(crate) async fn aggregate(
 pub(crate) async fn collect_aggregate(
     state: &AppState,
 ) -> Result<ClusterOperationsAggregate, ApiError> {
-    let membership = state.membership.status().await.map_err(|_| {
-        ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cluster_roster_unavailable",
-            "the committed cluster roster could not be read",
-        )
-    })?;
-    let local_status = local_snapshot(state).await;
-    let remote = state.peer_status_cache.fresh().await;
+    collect_aggregate_with_cached_sources(
+        &state.node_id,
+        || state.membership_status_cache.fresh(),
+        || local_snapshot(state),
+        || state.peer_status_cache.fresh(),
+    )
+    .await
+}
+
+/// Safety-changing operations re-read committed membership instead of acting
+/// on a diagnostics cache that may be several seconds old. Peer observations
+/// remain cache-only, as before; only roster authority is refreshed here.
+pub(crate) async fn collect_current_aggregate(
+    state: &AppState,
+) -> Result<ClusterOperationsAggregate, ApiError> {
+    collect_aggregate_with_cached_sources(
+        &state.node_id,
+        || async {
+            match state.membership.status().await {
+                Ok(status) => MembershipStatusCacheRead::Fresh(Box::new(status)),
+                Err(_) => MembershipStatusCacheRead::Unavailable,
+            }
+        },
+        || local_snapshot(state),
+        || state.peer_status_cache.fresh(),
+    )
+    .await
+}
+
+async fn collect_aggregate_with_cached_sources<
+    MembershipRead,
+    MembershipFuture,
+    LocalRead,
+    LocalFuture,
+    PeerRead,
+    PeerFuture,
+>(
+    local_node_id: &str,
+    membership_read: MembershipRead,
+    local_read: LocalRead,
+    peer_read: PeerRead,
+) -> Result<ClusterOperationsAggregate, ApiError>
+where
+    MembershipRead: FnOnce() -> MembershipFuture,
+    MembershipFuture: std::future::Future<Output = MembershipStatusCacheRead>,
+    LocalRead: FnOnce() -> LocalFuture,
+    LocalFuture: std::future::Future<Output = ClusterNodeOperationsStatus>,
+    PeerRead: FnOnce() -> PeerFuture,
+    PeerFuture: std::future::Future<Output = PeerStatusCacheRead>,
+{
+    let membership = match membership_read().await {
+        MembershipStatusCacheRead::Fresh(membership) => *membership,
+        MembershipStatusCacheRead::Unavailable => {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cluster_roster_unavailable",
+                "the cached committed cluster roster is not available yet",
+            ));
+        }
+        MembershipStatusCacheRead::Stale => {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cluster_roster_stale",
+                "the cached committed cluster roster has expired",
+            ));
+        }
+    };
+    let local_status = local_read().await;
+    let remote = peer_read().await;
     let observed_at_unix_ms = unix_ms();
     let observations = join_observations(
         &membership,
-        &state.node_id,
+        local_node_id,
         local_status,
         remote,
         observed_at_unix_ms,
@@ -369,7 +429,7 @@ pub(crate) async fn prepare_restart(
             "restart preparation must be sent directly to the node named in the route",
         ));
     }
-    let preflight = collect_aggregate(&state).await?;
+    let preflight = collect_current_aggregate(&state).await?;
     if !preflight.verdict.safe_to_restart_one {
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
@@ -514,7 +574,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
         protocol_min: plurx_core::store::AUTH_PROTOCOL_MIN,
         protocol_max: plurx_core::store::AUTH_PROTOCOL_MAX,
         process: ProcessStatus { live: true },
-        serving: evaluate_readiness(state).await,
+        serving: operations_readiness(state),
         raft: RaftStatus {
             running: sample.map(|_| true),
             sample_valid: view.valid,
@@ -540,6 +600,38 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
         snapshot,
         transport: state.replication.transport_status_snapshot(),
         media: media_drain_status(active_sessions, drain),
+    }
+}
+
+/// Store-free readiness projection for operations diagnostics.
+///
+/// Replicated nodes already publish readiness through the passive serving
+/// fence. A recovery/SQLite process has no cached Store proof on this surface,
+/// so it reports unavailable rather than turning an operations request into a
+/// Store ping.
+fn operations_readiness(state: &AppState) -> ReadinessEvaluation {
+    if state.membership.local_maintenance_active() {
+        return ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::Maintenance),
+        };
+    }
+    if !state.serving.is_quorum_managed() {
+        return ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::StoreUnavailable),
+        };
+    }
+    if state.serving.is_ready() {
+        ReadinessEvaluation {
+            ready: true,
+            reason: None,
+        }
+    } else {
+        ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::QuorumUnavailable),
+        }
     }
 }
 
@@ -632,6 +724,51 @@ struct PeerStatusOutcome {
     transport: Option<SnapshotTransportStatus>,
 }
 
+/// Five-second, node-owned projection of committed membership.
+///
+/// The operations request path cannot own a Store or Raft read. A dedicated
+/// background loop refreshes this projection and an absent or expired sample
+/// fails closed instead of silently inventing a roster.
+#[derive(Clone, Default)]
+pub(crate) struct MembershipStatusCache {
+    inner: std::sync::Arc<tokio::sync::Mutex<Option<CachedMembershipStatus>>>,
+}
+
+#[derive(Clone)]
+struct CachedMembershipStatus {
+    stored_at: tokio::time::Instant,
+    status: MembershipStatus,
+}
+
+enum MembershipStatusCacheRead {
+    Fresh(Box<MembershipStatus>),
+    Unavailable,
+    Stale,
+}
+
+impl MembershipStatusCache {
+    async fn fresh(&self) -> MembershipStatusCacheRead {
+        let cache = self.inner.lock().await;
+        let Some(cached) = cache.as_ref() else {
+            return MembershipStatusCacheRead::Unavailable;
+        };
+        if tokio::time::Instant::now().saturating_duration_since(cached.stored_at)
+            < PEER_STATUS_CACHE_TTL
+        {
+            MembershipStatusCacheRead::Fresh(Box::new(cached.status.clone()))
+        } else {
+            MembershipStatusCacheRead::Stale
+        }
+    }
+
+    async fn store(&self, status: MembershipStatus) {
+        *self.inner.lock().await = Some(CachedMembershipStatus {
+            stored_at: tokio::time::Instant::now(),
+            status,
+        });
+    }
+}
+
 /// Five-second, node-owned cache for bounded peer status fan-out.
 ///
 /// It caches only authenticated read results. It never creates Store work and
@@ -707,8 +844,27 @@ where
     Ok(())
 }
 
+async fn refresh_membership_status_cache_with<Refresh, RefreshFuture>(
+    cache: &MembershipStatusCache,
+    refresh_started: tokio::time::Instant,
+    refresh: Refresh,
+) -> Result<(), String>
+where
+    Refresh: FnOnce() -> RefreshFuture,
+    RefreshFuture: std::future::Future<Output = Result<MembershipStatus, String>>,
+{
+    let deadline = refresh_started + PEER_DIRECTORY_TIMEOUT;
+    let status = tokio::time::timeout_at(deadline, refresh())
+        .await
+        .map_err(|_| "membership projection timed out".to_owned())??;
+    cache.store(status).await;
+    Ok(())
+}
+
 fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_ms: u64) {
     transport.observations.retain_mut(|observation| {
+        let source_phase = observation.phase;
+        let source_deadline_remaining_ms = observation.active_deadline_remaining_ms;
         observation.sample_age_ms = observation.sample_age_ms.saturating_add(elapsed_ms);
         for age_ms in [
             &mut observation.attempt_age_ms,
@@ -719,31 +875,60 @@ fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_m
                 *age_ms = age_ms.saturating_add(elapsed_ms);
             }
         }
-        let deadline_still_active = observation
-            .active_deadline_remaining_ms
-            .is_some_and(|remaining_ms| remaining_ms > elapsed_ms);
-        let deadline_crossed = observation
-            .active_deadline_remaining_ms
-            .is_some_and(|remaining_ms| remaining_ms <= elapsed_ms);
+        let deadline_still_active =
+            source_deadline_remaining_ms.is_some_and(|remaining_ms| remaining_ms > elapsed_ms);
+        let deadline_crossed = source_deadline_remaining_ms
+            .is_some_and(|remaining_ms| remaining_ms <= elapsed_ms)
+            && source_phase != SnapshotTransportPhase::Stalled;
+        let projected_stalled_retention = deadline_crossed
+            && source_deadline_remaining_ms.is_some_and(|remaining_ms| {
+                elapsed_ms.saturating_sub(remaining_ms) <= TRANSPORT_OBSERVATION_TTL_MS
+            });
         if let Some(remaining_ms) = observation.active_deadline_remaining_ms.as_mut() {
             *remaining_ms = remaining_ms.saturating_sub(elapsed_ms);
         }
         if deadline_crossed
             && matches!(
-                observation.phase,
+                source_phase,
                 SnapshotTransportPhase::Connecting
                     | SnapshotTransportPhase::Transferring
                     | SnapshotTransportPhase::AwaitingAcknowledgement
                     | SnapshotTransportPhase::Installing
                     | SnapshotTransportPhase::Retrying
-                    | SnapshotTransportPhase::Stalled
             )
         {
             observation.phase = SnapshotTransportPhase::Stalled;
             observation.last_error_category = Some("snapshot_stalled".to_owned());
         }
-        observation.sample_age_ms <= TRANSPORT_OBSERVATION_TTL_MS || deadline_still_active
+        observation.sample_age_ms <= TRANSPORT_OBSERVATION_TTL_MS
+            || deadline_still_active
+            || projected_stalled_retention
     });
+}
+
+/// Refresh authenticated peer observations away from page renders and
+/// Prometheus scrapes. The request path reads the five-second cache only.
+pub(crate) async fn membership_status_cache_loop(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        let refresh_started = tokio::time::Instant::now();
+        let membership = state.membership.clone();
+        if let Err(error) = refresh_membership_status_cache_with(
+            &state.membership_status_cache,
+            refresh_started,
+            move || async move { membership.status().await.map_err(|error| error.to_string()) },
+        )
+        .await
+        {
+            tracing::warn!(%error, "could not refresh bounded cluster membership cache");
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tokio::time::sleep_until(refresh_started + PEER_STATUS_REFRESH_INTERVAL) => {}
+        }
+    }
 }
 
 /// Refresh authenticated peer observations away from page renders and
@@ -1644,6 +1829,14 @@ mod tests {
         }
     }
 
+    fn fresh_membership_status(read: MembershipStatusCacheRead) -> MembershipStatus {
+        match read {
+            MembershipStatusCacheRead::Fresh(status) => *status,
+            MembershipStatusCacheRead::Unavailable => panic!("membership cache is unavailable"),
+            MembershipStatusCacheRead::Stale => panic!("membership cache is stale"),
+        }
+    }
+
     fn cached_private_transport(
         read: PeerStatusCacheRead,
         node_id: &str,
@@ -1844,6 +2037,53 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn membership_status_cache_is_fresh_for_five_seconds_then_expires() {
+        let cache = MembershipStatusCache::default();
+        cache.store(test_membership("node-1", 3)).await;
+        assert_eq!(fresh_membership_status(cache.fresh().await).nodes.len(), 3);
+
+        tokio::time::advance(PEER_STATUS_CACHE_TTL - Duration::from_millis(1)).await;
+        assert!(matches!(
+            cache.fresh().await,
+            MembershipStatusCacheRead::Fresh(_)
+        ));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            cache.fresh().await,
+            MembershipStatusCacheRead::Stale
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn membership_projection_refresh_is_bounded_and_preserves_last_good_sample() {
+        let cache = MembershipStatusCache::default();
+        let refresh_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refresh_started = tokio::time::Instant::now();
+        refresh_membership_status_cache_with(&cache, refresh_started, {
+            let refresh_calls = refresh_calls.clone();
+            move || async move {
+                refresh_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(test_membership("node-1", 3))
+            }
+        })
+        .await
+        .expect("initial membership projection");
+        assert_eq!(refresh_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        let timed_out =
+            refresh_membership_status_cache_with(&cache, tokio::time::Instant::now(), || async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(test_membership("node-1", 1))
+            })
+            .await;
+        assert_eq!(
+            timed_out.expect_err("slow membership projection must time out"),
+            "membership projection timed out"
+        );
+        assert_eq!(fresh_membership_status(cache.fresh().await).nodes.len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_source_time() {
         assert!(
             PEER_STATUS_REFRESH_INTERVAL + PEER_DIRECTORY_TIMEOUT + PEER_STATUS_TIMEOUT
@@ -1944,44 +2184,40 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cached_active_transport_observation_ages_past_five_minutes_and_deadline_counts_down() {
-        let cache = PeerStatusCache::default();
-        let source_observed_ms = 1_000_000;
-        let mut transport = test_transport_status(2, 301_000, Some(4_000));
-        transport.observed_at_unix_ms = source_observed_ms;
-        let statuses = BTreeMap::from([(
-            "node-2".to_owned(),
-            PeerStatusOutcome {
-                node_id: "node-2".to_owned(),
-                state: ObservationState::Unreachable,
-                status: None,
-                transport: Some(transport),
-            },
-        )]);
-        cache.store(&statuses).await;
+    async fn long_install_crosses_to_stalled_then_expires_after_the_post_deadline_window() {
+        let source = test_transport_status(2, 301_000, Some(4_000));
 
-        tokio::time::advance(Duration::from_millis(999)).await;
-        let fresh =
-            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 999);
-        assert_eq!(fresh.observations[0].sample_age_ms, 301_999);
+        let mut at_deadline = source.clone();
+        age_transport_observations(&mut at_deadline, 4_000);
+        let observation = &at_deadline.observations[0];
+        assert_eq!(observation.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(0));
         assert_eq!(
-            fresh.observations[0].active_deadline_remaining_ms,
-            Some(3_001)
+            observation.last_error_category.as_deref(),
+            Some("snapshot_stalled")
         );
 
-        tokio::time::advance(Duration::from_millis(3_000)).await;
-        let fresh =
-            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 3_999);
-        let observation = &fresh.observations[0];
-        assert_eq!(observation.sample_age_ms, 304_999);
-        assert_eq!(observation.active_deadline_remaining_ms, Some(1));
+        let mut just_before_expiry = source.clone();
+        age_transport_observations(
+            &mut just_before_expiry,
+            4_000 + TRANSPORT_OBSERVATION_TTL_MS - 1,
+        );
+        assert_eq!(
+            just_before_expiry.observations[0].phase,
+            SnapshotTransportPhase::Stalled
+        );
 
-        tokio::time::advance(Duration::from_millis(1)).await;
-        let fresh =
-            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 4_000);
+        let mut expired = source;
+        age_transport_observations(&mut expired, 4_000 + TRANSPORT_OBSERVATION_TTL_MS + 1);
+        assert!(expired.observations.is_empty());
+
+        let mut already_stalled =
+            test_transport_status(2, TRANSPORT_OBSERVATION_TTL_MS + 1, Some(0));
+        already_stalled.observations[0].phase = SnapshotTransportPhase::Stalled;
+        age_transport_observations(&mut already_stalled, 0);
         assert!(
-            fresh.observations.is_empty(),
-            "an already-stale observation expires at its active deadline"
+            already_stalled.observations.is_empty(),
+            "an already-stalled source sample must not receive a fresh retention window"
         );
     }
 
@@ -2067,9 +2303,15 @@ mod tests {
         replayed.observed_at_unix_ms = source_observed_ms;
         let projected = sanitize_transport(replayed, 2, source_observed_ms + 40_000)
             .expect("old source timestamp is valid but ages conservatively");
-        assert!(
-            projected.observations.is_empty(),
-            "replaying an old response cannot renew its elapsed active deadline"
+        assert_eq!(projected.observations.len(), 1);
+        assert_eq!(
+            projected.observations[0].phase,
+            SnapshotTransportPhase::Stalled,
+            "a crossed cached deadline remains visible only in its fixed post-deadline window"
+        );
+        assert_eq!(
+            projected.observations[0].active_deadline_remaining_ms,
+            Some(0)
         );
 
         let mut bounded_future = test_transport_status(2, 0, Some(1_000));
@@ -2095,19 +2337,45 @@ mod tests {
         assert!(PEER_STATUS_REFRESH_INTERVAL < PEER_STATUS_CACHE_TTL);
     }
 
-    #[test]
-    fn aggregate_request_path_reads_cache_without_peer_network_fanout() {
-        let source = include_str!("cluster_operations.rs");
-        let aggregate = source
-            .split("pub(crate) async fn collect_aggregate")
-            .nth(1)
-            .expect("aggregate function")
-            .split("pub(crate) async fn support_bundle")
-            .next()
-            .expect("aggregate body");
-        assert!(aggregate.contains("state.peer_status_cache.fresh().await"));
-        assert!(!aggregate.contains("collect_peer_statuses("));
-        assert!(!aggregate.contains("PeerTransport::new"));
+    #[tokio::test]
+    async fn aggregate_request_reads_only_node_owned_projections() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let membership_cache_reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let local_process_reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let peer_cache_reads = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let aggregate = collect_aggregate_with_cached_sources(
+            "node-1",
+            {
+                let reads = membership_cache_reads.clone();
+                move || async move {
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    MembershipStatusCacheRead::Fresh(Box::new(test_membership("node-1", 2)))
+                }
+            },
+            {
+                let reads = local_process_reads.clone();
+                move || async move {
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    test_local_status("node-1", Some(1))
+                }
+            },
+            {
+                let reads = peer_cache_reads.clone();
+                move || async move {
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    PeerStatusCacheRead::Fresh(BTreeMap::new())
+                }
+            },
+        )
+        .await
+        .expect("cached aggregate");
+
+        assert_eq!(aggregate.nodes.len(), 2);
+        assert_eq!(membership_cache_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(local_process_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(peer_cache_reads.load(Ordering::Relaxed), 1);
     }
 
     #[test]

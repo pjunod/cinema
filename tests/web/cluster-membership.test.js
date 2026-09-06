@@ -643,6 +643,47 @@ test("receiver completion outranks a split-view sender failure for one snapshot"
   assert.equal(recovered.text, "snapshot recovered");
 });
 
+test("fresh snapshot identity outranks stale failure evidence from another observer", () => {
+  const ui = sandbox();
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("stalled", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: "former-leader-snapshot",
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("installing", {
+              observing_node_id: 2,
+              peer_node_id: 1,
+              direction: "inbound",
+              snapshot_id: "current-leader-snapshot",
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "installing");
+  assert.equal(current.observation.snapshot_id, "current-leader-snapshot");
+  assert.equal(current.observation.observing_node_id, 2);
+});
+
 test("stalled transport renders its observer and sample age", () => {
   const ui = sandbox();
   const membership = status("degraded", [

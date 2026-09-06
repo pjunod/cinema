@@ -619,9 +619,24 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
 const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
 const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
-const MAX_ACTIVITY_PEERS: usize = 64;
+/// A committed roster larger than this is not a bounded operations surface.
+/// Fail closed instead of truncating identities or materializing an
+/// arbitrarily large replicated directory. This is deliberately larger than
+/// the operations probe limit: every committed identity still has to render,
+/// while only the first eight are probed.
+const MAX_COMMITTED_ROSTER_MEMBERS: usize = 64;
+const MAX_ACTIVITY_PEERS: usize = MAX_COMMITTED_ROSTER_MEMBERS;
 /// The operations page is one bounded fan-out, not a general cluster crawler.
 pub const MAX_OPERATIONS_PEERS: usize = 8;
+const OPERATIONS_PEERS_SQL: &str = "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+            http.public_http_url \
+     FROM cluster_nodes node \
+     LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+     WHERE node.node_id != $1 AND node.removed_at IS NULL \
+       AND node.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($2)) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+         WHERE removal.node_id = node.node_id) \
+     ORDER BY node.raft_id";
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
 // Exact-request proofs are accepted on the public listener. Bound the work
@@ -4882,18 +4897,12 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, _)| *raft_id)
             .collect::<BTreeSet<_>>();
+        let members_json = bounded_committed_raft_ids_json(&members)?;
         let rows = inner
             .client
             .query_map::<ActivityPeerRow, _>(
-                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
-                        http.public_http_url \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
-                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                     WHERE removal.node_id = node.node_id) \
-                 ORDER BY node.raft_id",
-                params!(inner.identity.node_id.as_str()),
+                OPERATIONS_PEERS_SQL,
+                params!(inner.identity.node_id.as_str(), members_json),
             )
             .await?;
         Ok(Self::operations_peer_directory(now, &members, rows))
@@ -5597,6 +5606,7 @@ impl MembershipManager {
             .nodes()
             .map(|(id, _)| *id)
             .collect::<BTreeSet<_>>();
+        let members_json = bounded_committed_raft_ids_json(&members)?;
         let rows = inner
             .client
             .query_map::<MembershipNodeRow, _>(
@@ -5624,8 +5634,10 @@ impl MembershipManager {
                  LEFT JOIN cluster_node_hostnames h ON h.node_id = n.node_id \
                  LEFT JOIN cluster_node_progress progress ON progress.node_id = n.node_id \
                  LEFT JOIN cluster_node_maintenance maintenance ON maintenance.node_id = n.node_id \
-                 WHERE n.removed_at IS NULL ORDER BY n.raft_id",
-                params!(now, NODE_MAINTENANCE_CAPABILITY),
+                 WHERE n.removed_at IS NULL \
+                   AND n.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($3)) \
+                 ORDER BY n.raft_id",
+                params!(now, NODE_MAINTENANCE_CAPABILITY, members_json),
             )
             .await?;
         let protocol = self.protocol_status().await?;
@@ -8112,6 +8124,18 @@ fn unix_ms() -> Result<i64, MembershipError> {
     i64::try_from(millis).map_err(|_| MembershipError::Internal("clock overflow".to_owned()))
 }
 
+fn bounded_committed_raft_ids_json(members: &BTreeSet<u64>) -> Result<String, MembershipError> {
+    if members.len() > MAX_COMMITTED_ROSTER_MEMBERS {
+        return Err(MembershipError::Internal(format!(
+            "committed cluster roster has {} members; the bounded operations limit is {}",
+            members.len(),
+            MAX_COMMITTED_ROSTER_MEMBERS
+        )));
+    }
+    serde_json::to_string(members)
+        .map_err(|error| MembershipError::Internal(format!("encoding committed roster: {error}")))
+}
+
 fn unix_seconds() -> Result<i64, MembershipError> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -8889,6 +8913,79 @@ mod tests {
         assert_eq!(peers.first().map(|peer| peer.raft_id), Some(2));
         assert_eq!(peers.last().map(|peer| peer.raft_id), Some(13));
         assert!(peers.iter().all(|peer| peer.reachable));
+    }
+
+    #[test]
+    fn operations_peer_query_materializes_only_the_committed_roster() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, \
+                   last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_http (\
+                   node_id TEXT PRIMARY KEY, public_http_url TEXT); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY);",
+            )
+            .expect("create production directory tables");
+        {
+            let mut node = connection
+                .prepare("INSERT INTO cluster_nodes VALUES (?1, ?2, 1000000, NULL)")
+                .expect("prepare node insert");
+            let mut http = connection
+                .prepare("INSERT INTO cluster_node_http VALUES (?1, ?2)")
+                .expect("prepare HTTP insert");
+            for raft_id in 1_u64..=13 {
+                let node_id = format!("node-{raft_id}");
+                node.execute(rusqlite::params![node_id, raft_id as i64])
+                    .expect("insert committed node");
+                http.execute(rusqlite::params![
+                    format!("node-{raft_id}"),
+                    format!("http://node-{raft_id}:32400")
+                ])
+                .expect("insert committed HTTP endpoint");
+            }
+            for index in 0_u64..1_000 {
+                let node_id = format!("abandoned-{index}");
+                node.execute(rusqlite::params![node_id, (10_000 + index) as i64])
+                    .expect("insert abandoned join row");
+                http.execute(rusqlite::params![
+                    format!("abandoned-{index}"),
+                    format!("http://abandoned-{index}:32400")
+                ])
+                .expect("insert abandoned HTTP endpoint");
+            }
+        }
+
+        let members = (1_u64..=13).collect::<BTreeSet<_>>();
+        let members_json =
+            bounded_committed_raft_ids_json(&members).expect("bounded committed roster");
+        let mut statement = connection
+            .prepare(OPERATIONS_PEERS_SQL)
+            .expect("prepare the production operations directory query");
+        let rows = statement
+            .query_map(rusqlite::params!["node-1", members_json], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .expect("query exact committed peers")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect exact committed peers");
+
+        assert_eq!(rows.len(), 12);
+        assert!(rows.len() > MAX_OPERATIONS_PEERS);
+        assert_eq!(rows.first(), Some(&("node-2".to_owned(), 2_i64)));
+        assert_eq!(rows.last(), Some(&("node-13".to_owned(), 13_i64)));
+        assert!(rows
+            .iter()
+            .all(|(node_id, _)| !node_id.starts_with("abandoned-")));
+    }
+
+    #[test]
+    fn committed_roster_bound_fails_closed_instead_of_truncating() {
+        let members = (0_u64..=MAX_COMMITTED_ROSTER_MEMBERS as u64).collect::<BTreeSet<_>>();
+        let error = bounded_committed_raft_ids_json(&members)
+            .expect_err("an oversized committed roster must not be truncated");
+        assert!(error.to_string().contains("bounded operations limit"));
     }
 
     // A learner refused every internal peer request — its own operations-status

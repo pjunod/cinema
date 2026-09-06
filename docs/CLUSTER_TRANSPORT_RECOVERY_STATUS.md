@@ -74,7 +74,7 @@ default is Rust 1.95.0, so every recorded Rust command uses
 | M4 compile and lint | pass · combined tree | Root all-target check and denied-warning `plurxd` Clippy pass; standalone vendored SQLite, SQLite+cache, and default-library denied-warning Clippy matrices pass; root formatting and diff checks pass |
 | M4 third-review correction | pass · integrated `0d868c32` | Rust 1.97.1 passes the 19-case status and 10-case executor modules, all 41 Raft-client tests, the three cache-aging regressions, root all-target check, root and vendored denied-warning Clippy, membership web suite, exact operations mapping, formatting, and diff checks; exact replacement review is in progress |
 | M4 observation-identity and retention corrections | pass · candidate branch | Public fallback transport requires both a matching status envelope and matching transport observer; valid private evidence remains independent of public-listener identity; the authenticated private route returns `Cache-Control: private, no-store`; exact re-review is pending |
-| M4 final review correction | pass · exact candidate pending commit | The combined recovery lane, 26-case daemon module, 21-case transport-status module, 43-case Raft-client module, 197 operations contracts, 23-point validation catalog, membership web suite, all-target compile, root and three vendored denied-warning Clippy lanes, formatting, and diff checks pass. Rendered learner/voter cards retain private transport without public status; same-snapshot receiver completion outranks split-view sender failure; final-chunk errors retain the final-install deadline; snapshot identities are bounded before retention; refreshes retain strict cache margin while aging source evidence honestly; and committed roster members beyond eight are labeled without being probed |
+| M4 final review correction | pass · exact candidate pending commit | The combined recovery lane, 28-case daemon module, 23-case transport-status module, 45-case Raft-client module, 197 operations contracts, 23-point validation catalog, membership web suite, all-target compile and denied-warning Clippy, three vendored denied-warning Clippy lanes, formatting, and diff checks pass. Request logging is bounded to operation kind and byte count; natural reconnects advance a physical socket epoch; sender offsets remain monotonic; semantic snapshot identity cannot collide with its bounded display form; fresh snapshot evidence outranks a stale different-snapshot stall; committed membership reads are query-bounded; and aggregate GET/support reads use fresh node-owned caches |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -112,6 +112,10 @@ default is Rust 1.95.0, so every recorded Rust command uses
    has materially more free memory and disk than `nuc3`, and already carries
    the pinned Rust container image. Source will be transferred with
    `git archive`; neither `.git` nor repository credentials leave the clone.
+8. **Fail closed above 64 committed Raft members on diagnostic roster reads.**
+   The product supports a much smaller operational cluster, so a corrupt or
+   unsupported oversized committed roster returns unavailable instead of
+   allocating an unbounded query/result set or silently truncating authority.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 
@@ -181,9 +185,18 @@ one server-sanitized row projection, validates every nested observer, settles
 public and private probes under independent deadlines, and checks the due log
 outside the biased result race. The 22-case daemon module, paused-time startup
 log, web suite, and exact operations mapping pass; exact combined-tree re-review
-remains. M5 replacement work includes the earlier CI receipt and exact-test
+remains. The latest adversarial pass also found regressing sender offsets,
+unbounded historical membership materialization, expired long-install evidence,
+display/semantic snapshot-ID aliasing, payload-bearing debug logs, reconnect
+epochs that did not follow physical sockets, and stale cross-snapshot UI
+precedence. Those findings are fixed on the new combined candidate with exact
+production-path regressions; three clean reviews of its committed SHA are the
+next gate. M5 replacement work includes the earlier CI receipt and exact-test
 count corrections plus the later zero-resource-growth, early archive-identity,
-and cumulative-attempt corrections; it must be rebased after M4 review closes.
+and cumulative-attempt corrections. It also refuses successful recovery or
+final qualification receipts from rerun attempts, so a failed 40-cycle
+campaign requires a new source candidate rather than a green rerun; it must be
+rebased after M4 review closes.
 No work is being done in the user's existing checkout.
 
 **How to read this page:** “pass” means the named command completed against the

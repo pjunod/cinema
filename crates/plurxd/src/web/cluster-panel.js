@@ -178,18 +178,33 @@
     });
     const priority={stalled:8,installing:7,awaiting_acknowledgement:6,retrying:5,
       transferring:4,connecting:3,failed:2,complete:1};
+    const age=observation=>Number(observation.sample_age_ms||0);
+    const identity=observation=>observation.snapshot_id
+      ?`snapshot:${observation.snapshot_id}`
+      :`attempt:${observation.observing_node_id}:${observation.boot_id||""}:`+
+        `${observation.attempt_id}:${observation.socket_epoch}`;
+    const identityFreshness=new Map();
+    candidates.forEach(observation=>{
+      const key=identity(observation);
+      identityFreshness.set(key,Math.min(identityFreshness.get(key)??Infinity,age(observation)));
+    });
     candidates.sort((left,right)=>{
+      const leftIdentity=identity(left),rightIdentity=identity(right);
+      if(leftIdentity!==rightIdentity){
+        const identityAge=identityFreshness.get(leftIdentity)-identityFreshness.get(rightIdentity);
+        if(identityAge) return identityAge;
+      }
       const leftTerminal=left.phase==="failed"||left.phase==="complete";
       const rightTerminal=right.phase==="failed"||right.phase==="complete";
       if(leftTerminal&&rightTerminal){
         const sameSnapshot=left.snapshot_id&&left.snapshot_id===right.snapshot_id;
         if((sameSnapshot||boundedReadReady)&&left.phase!==right.phase)
           return left.phase==="complete"?-1:1;
-        const freshness=Number(left.sample_age_ms||0)-Number(right.sample_age_ms||0);
+        const freshness=age(left)-age(right);
         if(freshness) return freshness;
       }
       return (priority[right.phase]||0)-(priority[left.phase]||0)||
-        Number(left.sample_age_ms||0)-Number(right.sample_age_ms||0);
+        age(left)-age(right);
     });
     return candidates[0]||null;
   }

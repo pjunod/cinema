@@ -189,7 +189,6 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
     }
 }
 
-#[derive(Debug)]
 enum RaftRequest {
     #[cfg(feature = "sqlite")]
     AppendDB(
@@ -241,6 +240,35 @@ enum RaftRequest {
 }
 
 impl RaftRequest {
+    fn kind(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::AppendDB(_) => "append_db",
+            #[cfg(feature = "sqlite")]
+            Self::VoteDB(_) => "vote_db",
+            #[cfg(feature = "sqlite")]
+            Self::SnapshotDB(_) => "snapshot_db",
+            #[cfg(feature = "cache")]
+            Self::AppendCache(_) => "append_cache",
+            #[cfg(feature = "cache")]
+            Self::VoteCache(_) => "vote_cache",
+            #[cfg(feature = "cache")]
+            Self::SnapshotCache(_) => "snapshot_cache",
+            Self::StreamResponse(_) => "stream_response",
+            Self::Shutdown => "shutdown",
+        }
+    }
+
+    fn snapshot_chunk_bytes(&self) -> Option<usize> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::SnapshotDB((_, request)) => Some(request.data.len()),
+            #[cfg(feature = "cache")]
+            Self::SnapshotCache((_, request)) => Some(request.data.len()),
+            _ => None,
+        }
+    }
+
     fn outbound_disposition(
         &self,
         socket_epoch: u64,
@@ -302,6 +330,7 @@ enum WritePayload {
 #[derive(Default)]
 struct ConnectionResetState {
     epoch: AtomicU64,
+    socket_epoch: AtomicU64,
     connection_attempt_sequence: AtomicU64,
     connected: AtomicBool,
     notify: Notify,
@@ -338,6 +367,20 @@ impl ConnectionResetState {
 
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
+    }
+
+    fn socket_epoch(&self) -> u64 {
+        self.socket_epoch.load(Ordering::Acquire)
+    }
+
+    fn begin_socket(&self) -> u64 {
+        let previous = self
+            .socket_epoch
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+                Some(epoch.saturating_add(1))
+            })
+            .expect("socket epoch update cannot be rejected");
+        previous.saturating_add(1)
     }
 
     fn begin_connection_attempt(&self) -> u64 {
@@ -574,11 +617,11 @@ impl NetworkStreaming {
                 raft_group,
                 node.id,
                 transport_connection_id,
-                reset.epoch(),
+                reset.socket_epoch(),
                 connection_attempt_sequence,
             );
             info!("Trying to open WebSocket stream");
-            let socket = {
+            let (socket, reset_epoch) = {
                 let connection = web_socket_connect::try_connect(
                     this_node,
                     &node.addr_raft,
@@ -595,8 +638,16 @@ impl NetworkStreaming {
                 match connection {
                     Ok(socket) => {
                         info!("WebSocket connected successfully");
+                        let socket_epoch = reset.begin_socket();
                         reset.mark_connected();
-                        socket
+                        snapshot_transport.connected_owned(
+                            raft_group,
+                            node.id,
+                            transport_connection_id,
+                            socket_epoch,
+                            connection_attempt_sequence,
+                        );
+                        (socket, reset.epoch())
                     }
                     Err(err) => {
                         error!("Socket connect error to node {}: {:?}", node.id, err);
@@ -652,8 +703,6 @@ impl NetworkStreaming {
                 in_flight.is_empty(),
                 "raft in flight buffer should always be empty when restoring a connection"
             );
-            let socket_epoch = reset.epoch();
-
             let (tx_write, rx_write) = flume::bounded(1);
             let (tx_read, rx_read) = flume::bounded(1);
 
@@ -678,7 +727,7 @@ impl NetworkStreaming {
             'connected: loop {
                 let res = match next_connected_event(
                     &reset,
-                    socket_epoch,
+                    reset_epoch,
                     &rx_read,
                     &rx,
                     &connection_shutdown,
@@ -733,7 +782,7 @@ impl NetworkStreaming {
                     }
                 };
 
-                match req.outbound_disposition(socket_epoch, reset.epoch()) {
+                match req.outbound_disposition(reset_epoch, reset.epoch()) {
                     Some(OutboundDisposition::DropCancelled) => {
                         debug!("Dropping cancelled Raft request before transport write");
                         continue;
@@ -804,7 +853,7 @@ impl NetworkStreaming {
                         &tx_write,
                         WritePayload::Payload(bytes),
                         &reset,
-                        socket_epoch,
+                        reset_epoch,
                         &connection_shutdown,
                         &mut rx_reader_finished,
                         &mut rx_writer_finished,
@@ -888,9 +937,9 @@ impl NetworkStreaming {
                 .read_frame(&mut |frame| async move {
                     // TODO obligated sends should be auto ping / pong / close ? -> verify!
                     debug!(
-                        "Received obligated send in stream client: OpCode: {:?}: {:?}",
-                        frame.opcode.clone(),
-                        frame.payload
+                        opcode = ?frame.opcode,
+                        payload_len = frame.payload.len(),
+                        "received obligated send in Raft stream client"
                     );
                     Ok::<(), Error>(())
                 })
@@ -1296,7 +1345,8 @@ impl NetworkConnectionStreaming {
             return Err(RPCError::Unreachable(Unreachable::new(&error)));
         }
         tracing::debug!(
-            req = debug(&req),
+            request_kind = req.kind(),
+            snapshot_chunk_bytes = ?req.snapshot_chunk_bytes(),
             "sending rpc request to {}",
             self.node.addr_raft
         );
@@ -1360,7 +1410,7 @@ where
         &transport_attempt,
         &attempt.snapshot_id,
         crate::transport_status::OutboundSnapshotSocket {
-            epoch: network.reset.epoch(),
+            epoch: network.reset.socket_epoch(),
             connected: network.reset.is_connected(),
         },
         attempt.transfer_deadline,
@@ -1761,11 +1811,58 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "sqlite")]
+    use axum::{Router, extract::State, response::IntoResponse, routing::get};
     use fastwebsockets::{Role, WebSocket};
     use openraft::error::{InstallSnapshotError, RaftError, SnapshotMismatch};
     use openraft::{SnapshotMeta, SnapshotSegmentId, Vote};
 
     use super::*;
+
+    #[cfg(feature = "sqlite")]
+    #[derive(Clone)]
+    struct ReconnectServerState {
+        accepted: flume::Sender<u64>,
+        connection_sequence: Arc<AtomicU64>,
+        release_first: Arc<Notify>,
+        release_second: Arc<Notify>,
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn reconnecting_raft_server(
+        State(state): State<ReconnectServerState>,
+        ws: fastwebsockets::upgrade::IncomingUpgrade,
+    ) -> Result<impl IntoResponse, Error> {
+        let (response, socket) = ws.upgrade()?;
+        tokio::spawn(async move {
+            let mut socket = socket.await.expect("upgrade reconnect test WebSocket");
+            socket.set_auto_close(true);
+            crate::network::handshake::HandshakeSecret::server(&mut socket, b"test-secret")
+                .await
+                .expect("authenticate reconnect test WebSocket");
+            let sequence = state
+                .connection_sequence
+                .fetch_add(1, Ordering::AcqRel)
+                .saturating_add(1);
+            state
+                .accepted
+                .send_async(sequence)
+                .await
+                .expect("report authenticated test socket");
+            if sequence == 1 {
+                state.release_first.notified().await;
+                let _ = crate::network::frame_io::write_socket_close_frame_flushed(
+                    &mut socket,
+                    Frame::close(1000, b"reconnect"),
+                )
+                .await;
+            } else {
+                state.release_second.notified().await;
+            }
+        });
+        Ok(response)
+    }
+
     fn test_node() -> Node {
         Node {
             id: 7,
@@ -1787,6 +1884,48 @@ mod tests {
             expect: SnapshotSegmentId::from(("snapshot", 0)),
             got: SnapshotSegmentId::from(("snapshot", offset)),
         }))
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn raft_transport_debug_logging_exposes_only_bounded_metadata() {
+        let (ack, _response) = oneshot::channel();
+        let request = RaftRequest::SnapshotDB((
+            ack,
+            InstallSnapshotRequest {
+                vote: Vote::new_committed(1, 1),
+                meta: test_snapshot_meta(),
+                offset: 0,
+                data: b"private snapshot and SQL parameter bytes".to_vec(),
+                done: false,
+            },
+        ));
+        assert_eq!(request.kind(), "snapshot_db");
+        assert_eq!(request.snapshot_chunk_bytes(), Some(40));
+
+        let full_request_formatter = ["debug", "(&req)"].concat();
+        let obligated_callback = ["read_frame(&mut |frame| async move ", "{"].concat();
+        for source in [
+            include_str!("raft_client.rs"),
+            include_str!("raft_server.rs"),
+        ] {
+            assert!(
+                !source.contains(&full_request_formatter),
+                "full Raft requests must never be formatted into logs"
+            );
+            for callback in source.split(&obligated_callback).skip(1) {
+                let obligated_log = callback
+                    .split("Ok::<(), Error>(())")
+                    .next()
+                    .expect("obligated WebSocket frame callback");
+                assert_eq!(
+                    obligated_log.matches("frame.payload").count(),
+                    1,
+                    "obligated-frame logs may inspect only one bounded payload field"
+                );
+                assert!(obligated_log.contains("payload_len = frame.payload.len()"));
+            }
+        }
     }
 
     #[cfg(feature = "sqlite")]
@@ -2072,7 +2211,7 @@ mod tests {
             &attempt,
             "race-snapshot",
             crate::transport_status::OutboundSnapshotSocket {
-                epoch: connection.reset.epoch(),
+                epoch: connection.reset.socket_epoch(),
                 connected: connection.reset.is_connected(),
             },
             deadline,
@@ -2092,6 +2231,109 @@ mod tests {
 
         drop(second_socket);
         drop(connection);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_natural_reconnect_advances_physical_socket_epoch_without_reset() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind authenticated reconnect server");
+        let address = listener.local_addr().expect("read reconnect endpoint");
+        let (accepted, accepted_rx) = flume::bounded(2);
+        let release_first = Arc::new(Notify::new());
+        let release_second = Arc::new(Notify::new());
+        let app = Router::new()
+            .route("/stream/sqlite", get(reconnecting_raft_server))
+            .with_state(ReconnectServerState {
+                accepted,
+                connection_sequence: Arc::new(AtomicU64::new(0)),
+                release_first: Arc::clone(&release_first),
+                release_second: Arc::clone(&release_second),
+            });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve authenticated reconnect route");
+        });
+
+        let transport =
+            crate::LocalSnapshotTransportStatus::new(1, std::collections::BTreeSet::from([2]));
+        let mut factory = NetworkStreaming {
+            node_id: 1,
+            tls_config: None,
+            secret_raft: b"test-secret".to_vec(),
+            raft_type: RaftType::Sqlite,
+            heartbeat_interval: 0,
+            is_raft_stopped: Arc::new(AtomicBool::new(false)),
+            is_startup_finished: Arc::new(AtomicBool::new(true)),
+            snapshot_budgets: test_snapshot_budgets(),
+            snapshot_transport: transport.clone(),
+        };
+        let node = Node {
+            id: 2,
+            addr_raft: address.to_string(),
+            addr_api: "127.0.0.1:1".to_owned(),
+        };
+        let connection = <NetworkStreaming as RaftNetworkFactory<TypeConfigSqlite>>::new_client(
+            &mut factory,
+            node.id,
+            &node,
+        )
+        .await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv_async())
+                .await
+                .expect("first socket must authenticate")
+                .expect("first socket report"),
+            1
+        );
+
+        let reset_epoch = connection.reset.epoch();
+        let first_socket_epoch = connection.reset.socket_epoch();
+        let mut attempt =
+            transport.next_outbound_attempt("sqlite", node.id, connection.transport_connection_id);
+        attempt.connection_attempt_sequence = connection.reset.connection_attempt_sequence();
+        transport.begin_owned_outbound_attempt(
+            &attempt,
+            "natural-reconnect",
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: first_socket_epoch,
+                connected: connection.reset.is_connected(),
+            },
+            time::Instant::now() + Duration::from_secs(120),
+        );
+
+        release_first.notify_one();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), accepted_rx.recv_async())
+                .await
+                .expect("natural disconnect must reconnect")
+                .expect("replacement socket report"),
+            2
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while connection.reset.socket_epoch() == first_socket_epoch {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client must publish replacement physical socket epoch");
+
+        let observation = transport.snapshot().observations.remove(0);
+        assert!(observation.socket_epoch > first_socket_epoch);
+        assert_eq!(observation.socket_epoch, connection.reset.socket_epoch());
+        assert_eq!(observation.reconnect_count, 1);
+        assert_eq!(
+            connection.reset.epoch(),
+            reset_epoch,
+            "natural reconnect must not mutate cancellation/reset state"
+        );
+
+        drop(connection);
+        release_second.notify_one();
+        server.abort();
+        let _ = server.await;
     }
 
     #[cfg(feature = "sqlite")]
@@ -2141,7 +2383,7 @@ mod tests {
             &attempt,
             "owned-snapshot",
             crate::transport_status::OutboundSnapshotSocket {
-                epoch: snapshot_client.reset.epoch(),
+                epoch: snapshot_client.reset.socket_epoch(),
                 connected: snapshot_client.reset.is_connected(),
             },
             deadline,
@@ -2842,7 +3084,7 @@ mod tests {
             &transport_attempt,
             "snapshot",
             crate::transport_status::OutboundSnapshotSocket {
-                epoch: network.reset.epoch(),
+                epoch: network.reset.socket_epoch(),
                 connected: network.reset.is_connected(),
             },
             attempt.transfer_deadline,
@@ -2857,7 +3099,7 @@ mod tests {
                 .expect("receive final snapshot request")
             {
                 RaftRequest::SnapshotDB(request) => request,
-                request => panic!("unexpected SQLite Raft request: {request:?}"),
+                request => panic!("unexpected SQLite Raft request: {}", request.kind()),
             };
             assert!(request.done, "one-chunk retry remains a final RPC");
             ack.send(Ok(RaftStreamResponsePayload::SnapshotDB(Err(mismatch_at(
@@ -2939,7 +3181,7 @@ mod tests {
             &transport_attempt,
             &attempt.snapshot_id,
             crate::transport_status::OutboundSnapshotSocket {
-                epoch: network.reset.epoch(),
+                epoch: network.reset.socket_epoch(),
                 connected: network.reset.is_connected(),
             },
             attempt.transfer_deadline,
@@ -2954,7 +3196,7 @@ mod tests {
                 .expect("receive final snapshot request")
             {
                 RaftRequest::SnapshotDB(request) => request,
-                request => panic!("unexpected SQLite Raft request: {request:?}"),
+                request => panic!("unexpected SQLite Raft request: {}", request.kind()),
             };
             assert!(request.done);
             drop(ack);
@@ -3009,7 +3251,7 @@ mod tests {
             &transport_attempt,
             "snapshot-higher-vote",
             crate::transport_status::OutboundSnapshotSocket {
-                epoch: network.reset.epoch(),
+                epoch: network.reset.socket_epoch(),
                 connected: network.reset.is_connected(),
             },
             tracked_attempt.transfer_deadline,
@@ -3018,7 +3260,7 @@ mod tests {
         let responder = tokio::spawn(async move {
             let (ack, request) = match receiver.recv_async().await.expect("receive request") {
                 RaftRequest::SnapshotDB(request) => request,
-                request => panic!("unexpected SQLite Raft request: {request:?}"),
+                request => panic!("unexpected SQLite Raft request: {}", request.kind()),
             };
             ack.send(Ok(RaftStreamResponsePayload::SnapshotDB(Ok(
                 InstallSnapshotResponse {
@@ -3435,7 +3677,7 @@ mod tests {
                     .expect("receive SQLite snapshot request")
                 {
                     RaftRequest::SnapshotDB(request) => request,
-                    request => panic!("unexpected SQLite Raft request: {request:?}"),
+                    request => panic!("unexpected SQLite Raft request: {}", request.kind()),
                 };
                 assert_eq!(request.offset, expected_offset);
                 let response = if expected_offset == 4 {
@@ -3529,7 +3771,7 @@ mod tests {
                     .expect("receive cache snapshot request")
                 {
                     RaftRequest::SnapshotCache(request) => request,
-                    request => panic!("unexpected cache Raft request: {request:?}"),
+                    request => panic!("unexpected cache Raft request: {}", request.kind()),
                 };
                 assert_eq!(request.offset, expected_offset);
                 let response = if expected_offset == 4 {

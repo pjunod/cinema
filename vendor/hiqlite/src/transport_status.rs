@@ -38,6 +38,10 @@ pub(crate) fn retained_snapshot_id(snapshot_id: &str) -> String {
     }
 }
 
+fn snapshot_identity_fingerprint(snapshot_id: &str) -> [u8; 32] {
+    Sha256::digest(snapshot_id.as_bytes()).into()
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotTransportPhase {
@@ -143,6 +147,7 @@ pub(crate) struct InboundSnapshotAttempt {
     peer_node_id: u64,
     attempt_id: u64,
     snapshot_id: String,
+    snapshot_identity_fingerprint: [u8; 32],
     socket_epoch: u64,
     attempted_offset: u64,
     total_bytes: Option<u64>,
@@ -169,6 +174,7 @@ struct ObservationKey {
 struct Observation {
     attempt_id: u64,
     snapshot_id: Option<String>,
+    snapshot_identity_fingerprint: Option<[u8; 32]>,
     socket_epoch: u64,
     attempted_offset: Option<u64>,
     acknowledged_offset: Option<u64>,
@@ -334,9 +340,6 @@ impl LocalSnapshotTransportStatus {
             .iter_mut()
             .filter_map(|(key, observation)| {
                 let sample_age = now.saturating_duration_since(observation.last_update);
-                if observation_expired(observation, now) {
-                    return None;
-                }
                 let stalled = observation.phase.can_stall()
                     && observation
                         .deadline
@@ -345,8 +348,17 @@ impl LocalSnapshotTransportStatus {
                     let previous = observation.phase;
                     observation.phase = SnapshotTransportPhase::Stalled;
                     observation.last_error_category = Some("snapshot_stalled");
+                    // Crossing the stall boundary is a diagnostic event in its
+                    // own right. Retain that newly observed evidence for one
+                    // complete freshness window, but update only on the phase
+                    // transition so repeated reads cannot renew it forever.
+                    observation.last_update = now;
                     log_transition(self.inner.observing_node_id, key, previous, observation);
                 }
+                if observation_expired(observation, now) {
+                    return None;
+                }
+                let sample_age = now.saturating_duration_since(observation.last_update);
                 Some(SnapshotTransportObservation {
                     observing_node_id: self.inner.observing_node_id,
                     peer_node_id: key.peer_node_id,
@@ -424,6 +436,33 @@ impl LocalSnapshotTransportStatus {
         );
     }
 
+    pub(crate) fn connected_owned(
+        &self,
+        raft_group: &'static str,
+        peer_node_id: u64,
+        connection_id: u64,
+        socket_epoch: u64,
+        connection_attempt_sequence: u64,
+    ) {
+        self.update_existing(
+            raft_group,
+            peer_node_id,
+            SnapshotTransportDirection::Outbound,
+            |observation, now| {
+                if !observation.operation_owns_work
+                    || observation.outbound_connection_id != Some(connection_id)
+                    || connection_attempt_sequence
+                        != observation.outbound_connection_attempt_sequence
+                    || socket_epoch <= observation.socket_epoch
+                {
+                    return;
+                }
+                observation.socket_epoch = socket_epoch;
+                observation.last_update = now;
+            },
+        );
+    }
+
     pub(crate) fn begin_owned_outbound_attempt(
         &self,
         attempt: &OutboundSnapshotAttempt,
@@ -478,9 +517,18 @@ impl LocalSnapshotTransportStatus {
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
             let end_offset = offset.saturating_add(len as u64);
-            observation.attempted_offset = Some(end_offset);
+            let attempted_offset = observation
+                .attempted_offset
+                .unwrap_or_default()
+                .max(end_offset);
+            observation.attempted_offset = Some(attempted_offset);
             if done {
-                observation.total_bytes = Some(end_offset);
+                observation.total_bytes = Some(
+                    observation
+                        .total_bytes
+                        .unwrap_or_default()
+                        .max(attempted_offset),
+                );
             }
             observation.deadline = Some(deadline);
             observation.phase = if done {
@@ -715,10 +763,12 @@ impl LocalSnapshotTransportStatus {
         if !self.make_room(&mut state, now, &key) {
             return None;
         }
+        let snapshot_identity_fingerprint = snapshot_identity_fingerprint(snapshot_id);
         let snapshot_id = retained_snapshot_id(snapshot_id);
         let existing = state.observations.get(&key);
-        let changed_snapshot = existing.and_then(|observation| observation.snapshot_id.as_deref())
-            != Some(snapshot_id.as_str());
+        let changed_snapshot = existing
+            .and_then(|observation| observation.snapshot_identity_fingerprint.as_ref())
+            != Some(&snapshot_identity_fingerprint);
         let existing_attempt_id = existing.map(|observation| observation.attempt_id);
         let existing_end = existing.and_then(|observation| observation.attempted_offset);
         let existing_started = existing.and_then(|observation| observation.attempt_started);
@@ -742,6 +792,7 @@ impl LocalSnapshotTransportStatus {
             peer_node_id,
             attempt_id,
             snapshot_id,
+            snapshot_identity_fingerprint,
             socket_epoch,
             attempted_offset,
             total_bytes: done.then_some(attempted_offset),
@@ -1074,6 +1125,7 @@ fn empty_observation(now: Instant) -> Observation {
     Observation {
         attempt_id: 0,
         snapshot_id: None,
+        snapshot_identity_fingerprint: None,
         socket_epoch: 0,
         attempted_offset: None,
         acknowledged_offset: None,
@@ -1102,6 +1154,7 @@ fn reset_from_inbound_attempt(
     *observation = empty_observation(now);
     observation.attempt_id = attempt.attempt_id;
     observation.snapshot_id = Some(attempt.snapshot_id.clone());
+    observation.snapshot_identity_fingerprint = Some(attempt.snapshot_identity_fingerprint);
     observation.socket_epoch = attempt.socket_epoch;
     observation.attempted_offset = Some(attempt.attempted_offset);
     observation.total_bytes = attempt.total_bytes;
@@ -1274,6 +1327,36 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn outbound_attempted_offset_never_rolls_back_within_one_snapshot_attempt() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            7,
+            "rollback",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        status.outbound_chunk("sqlite", 2, 4_096, 1_024, false, deadline);
+        assert_eq!(
+            status.snapshot().observations[0].attempted_offset,
+            Some(5_120)
+        );
+
+        status.outbound_retry("sqlite", 2, "snapshot_mismatch", Some(deadline));
+        status.outbound_chunk("sqlite", 2, 0, 512, false, deadline);
+        let retried = &status.snapshot().observations[0];
+        assert_eq!(retried.snapshot_id.as_deref(), Some("rollback"));
+        assert_eq!(retried.attempt_id, 7);
+        assert_eq!(retried.attempted_offset, Some(5_120));
+        assert_eq!(retried.retry_count, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn outbound_snapshot_identity_is_bounded_before_retention() {
         let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -1362,6 +1445,65 @@ mod tests {
             normal.snapshot().observations[0].snapshot_id.as_deref(),
             Some("ordinary-snapshot-id")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_inbound_display_id_cannot_alias_semantic_snapshot_identity() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let oversized = "authenticated-peer-input".repeat(64);
+        let colliding_display = retained_snapshot_id(&oversized);
+        assert!(colliding_display.len() <= MAX_RETAINED_SNAPSHOT_ID_BYTES);
+
+        let status = LocalSnapshotTransportStatus::new(2, BTreeSet::from([1]));
+        let oversized_attempt = status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: &oversized,
+                offset: 0,
+                len: 64,
+                done: false,
+                socket_epoch: 1,
+                deadline,
+            })
+            .expect("track oversized identity");
+        status.inbound_admitted(&oversized_attempt, false, deadline);
+        status.inbound_finished(
+            &oversized_attempt,
+            64,
+            false,
+            Some(deadline),
+            InboundSnapshotDisposition::Succeeded,
+        );
+
+        let literal_attempt = status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: &colliding_display,
+                offset: 0,
+                len: 8,
+                done: false,
+                socket_epoch: 2,
+                deadline,
+            })
+            .expect("track literal identity with colliding display");
+        assert_eq!(literal_attempt.snapshot_id, oversized_attempt.snapshot_id);
+        assert_ne!(
+            literal_attempt.snapshot_identity_fingerprint,
+            oversized_attempt.snapshot_identity_fingerprint
+        );
+        assert!(literal_attempt.attempt_id > oversized_attempt.attempt_id);
+
+        status.inbound_admitted(&literal_attempt, false, deadline);
+        let literal = &status.snapshot().observations[0];
+        assert_eq!(
+            literal.snapshot_id.as_deref(),
+            Some(colliding_display.as_str())
+        );
+        assert_eq!(literal.attempt_id, literal_attempt.attempt_id);
+        assert_eq!(literal.attempted_offset, Some(8));
+        assert_eq!(literal.retry_count, 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2009,7 +2151,7 @@ mod tests {
             stalled.last_error_category.as_deref(),
             Some("snapshot_stalled")
         );
-        assert_eq!(stalled.sample_age_ms, duration_ms(Duration::from_secs(120)));
+        assert_eq!(stalled.sample_age_ms, 0);
 
         tokio::time::advance(EXPIRE_AFTER + Duration::from_millis(1)).await;
         assert!(status.snapshot().observations.is_empty());
@@ -2038,11 +2180,15 @@ mod tests {
         assert_eq!(live.active_deadline_remaining_ms, Some(3_299_000));
 
         tokio::time::advance(Duration::from_secs(3_299)).await;
-        assert_eq!(
-            status.snapshot().observations[0].phase,
-            SnapshotTransportPhase::Stalled
-        );
-        tokio::time::advance(EXPIRE_AFTER + Duration::from_millis(1)).await;
+        let crossed = &status.snapshot().observations[0];
+        assert_eq!(crossed.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(crossed.sample_age_ms, 0);
+
+        tokio::time::advance(EXPIRE_AFTER - Duration::from_secs(1)).await;
+        let retained = &status.snapshot().observations[0];
+        assert_eq!(retained.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(retained.sample_age_ms, 299_000);
+        tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
         assert!(status.snapshot().observations.is_empty());
     }
 

@@ -206,9 +206,9 @@ async fn handle_socket(
                 .read_frame(&mut |frame| async move {
                     // TODO obligated sends should be auto ping / pong / close ? -> verify!
                     debug!(
-                        "Received obligated send in stream client: OpCode: {:?}: {:?}",
-                        frame.opcode.clone(),
-                        frame.payload
+                        opcode = ?frame.opcode,
+                        payload_len = frame.payload.len(),
+                        "received obligated send in Raft stream server"
                     );
                     Ok::<(), Error>(())
                 })

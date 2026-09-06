@@ -1784,21 +1784,29 @@ progress yet and must be rendered as unavailable.
 
 The Cluster panel joins each node's authenticated operations status with the
 roster using at most eight concurrent peer refreshes, a one-second deadline
-per peer, and a five-second process-local cache. It refreshes every three
-seconds and bounds the directory lookup to 500 milliseconds, leaving a strict
-500-millisecond completion margin even when a public probe consumes its full
-deadline. Cache availability begins when that refresh completes; embedded
-status and transport ages still advance from their node-owned source
-timestamps. Each refresh probes the public and private listeners concurrently,
-so up to sixteen bounded HTTP requests may be in flight. Roster members beyond
-the eight-probe bound remain visible as `peer_limit` instead of disappearing.
-A healthy sender can therefore report outbound evidence for a learner whose
-public listener is still closed.
+per peer, and five-second process-local peer and membership caches. Separate
+background refreshes run every three seconds; the page, support bundle, and
+metrics request paths read those node-owned projections and perform no Store
+call or peer network request. An absent or expired membership projection fails
+closed instead of rendering a guessed roster. Directory and membership SQL
+receive the exact committed Raft IDs as a bounded parameter, so abandoned join
+rows are never materialized; a committed roster above the explicit 64-member
+diagnostics bound is unavailable rather than truncated. The directory lookup
+is bounded to 500 milliseconds, leaving a strict 500-millisecond completion
+margin even when a public probe consumes its full deadline. Cache availability
+begins when that refresh completes; embedded status and transport ages still
+advance from their node-owned source timestamps. Each peer refresh probes the
+public and private listeners concurrently, so up to sixteen bounded HTTP
+requests may be in flight. Roster members beyond the eight-probe bound remain
+visible as `peer_limit` instead of disappearing. A healthy sender can therefore
+report outbound evidence for a learner whose public listener is still closed.
 Inactive status older than five minutes expires instead of continuing to claim
 work. An observation with an active monotonic deadline remains visible past
-five minutes through that deadline; the five-second cache decreases its
-reported deadline remainder rather than granting more time. The panel reports
-observer and sample age and keeps
+five minutes through that deadline and for the producer's five-minute stalled
+diagnostic window. A cached pre-stall sample projects that one transition
+without resetting an already-stalled sample's age; the five-second cache
+decreases its reported deadline remainder rather than granting more time. The
+panel reports observer and sample age and keeps
 `bounded_read_ready` separate: receiving, waiting for acknowledgement,
 installing, retrying, or stalled transport never grants reads. While port
 32400 is still closed, the daemon also emits one bounded startup-wait record

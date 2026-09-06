@@ -619,6 +619,9 @@ pub struct AppState {
     /// Five-second cache for authenticated, bounded cluster-status fan-out.
     /// This is process-local diagnostics state and never writes to Store.
     pub(crate) peer_status_cache: crate::http::cluster_operations::PeerStatusCache,
+    /// Five-second, background-refreshed committed-membership projection for
+    /// operations requests. Request handlers cannot reach Store through it.
+    pub(crate) membership_status_cache: crate::http::cluster_operations::MembershipStatusCache,
     /// Fresh, authenticated media-capability snapshots and diagnostics-only
     /// placement offers. P4 observes candidates; it never starts a session.
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
@@ -862,6 +865,7 @@ impl AppState {
                 membership.clone(),
             ),
             peer_status_cache: Default::default(),
+            membership_status_cache: Default::default(),
             serving,
             membership,
             media_pool,
