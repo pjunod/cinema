@@ -548,38 +548,35 @@ const REQUIRE_CACHE_ADMIN_LEASE_DELETE_INTENT_SQL: &str =
      WHEN NOT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_lease_intents intent \
        WHERE intent.claim_id = OLD.claim_id) \
      BEGIN SELECT RAISE(IGNORE); END";
-// A v3 capability row is a permanent activation witness: retired-capability
-// triggers prevent a rolled-back heartbeat from replacing it. Once witnessed,
-// every authority-changing users/tokens statement must carry the singleton
-// marker that current Store code creates and consumes in the same transaction.
-// This closes the polling interval between a legacy heartbeat and other
+// Full-roster activation is a permanent witness. A single upgraded voter must
+// not break credential writes on the older voters during a rolling upgrade;
+// the singleton is published only after the exact committed roster proves v3.
+// Once published, every authority-changing users/tokens statement must carry
+// the transaction-local marker that current Store code creates and consumes.
+// This closes the polling interval between a rollback heartbeat and other
 // processes refreshing their in-memory cache-only admission state.
 const REQUIRE_CURRENT_CREDENTIAL_USER_UPDATE_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_credential_user_update_guard \
      BEFORE UPDATE OF password_hash, is_admin ON users \
-     WHEN EXISTS (SELECT 1 FROM cluster_node_capabilities \
-       WHERE capability = 'cache_admin_revocation_v3') \
+     WHEN EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
        AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
      BEGIN SELECT RAISE(ABORT, 'credential mutation requires current binary'); END";
 const REQUIRE_CURRENT_CREDENTIAL_USER_DELETE_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_credential_user_delete_guard \
      BEFORE DELETE ON users \
-     WHEN EXISTS (SELECT 1 FROM cluster_node_capabilities \
-       WHERE capability = 'cache_admin_revocation_v3') \
+     WHEN EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
        AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
      BEGIN SELECT RAISE(ABORT, 'credential mutation requires current binary'); END";
 const REQUIRE_CURRENT_CREDENTIAL_TOKEN_INSERT_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_credential_token_insert_guard \
      BEFORE INSERT ON tokens \
-     WHEN EXISTS (SELECT 1 FROM cluster_node_capabilities \
-       WHERE capability = 'cache_admin_revocation_v3') \
+     WHEN EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
        AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
      BEGIN SELECT RAISE(ABORT, 'credential mutation requires current binary'); END";
 const REQUIRE_CURRENT_CREDENTIAL_TOKEN_DELETE_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_credential_token_delete_guard \
      BEFORE DELETE ON tokens \
-     WHEN EXISTS (SELECT 1 FROM cluster_node_capabilities \
-       WHERE capability = 'cache_admin_revocation_v3') \
+     WHEN EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
        AND NOT EXISTS (SELECT 1 FROM cluster_credential_mutation_intents) \
      BEGIN SELECT RAISE(ABORT, 'credential mutation requires current binary'); END";
 // Once the v3 local-apply acknowledgement has landed, a binary rollback must
@@ -750,6 +747,11 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     // the fresh auth schema; repeating it here upgrades existing clusters
     // before the first v3 heartbeat can activate the guards below.
     "CREATE TABLE IF NOT EXISTS cluster_credential_mutation_intents (\
+         singleton INTEGER PRIMARY KEY CHECK (singleton = 1)) STRICT",
+    // A permanent protocol transition, separate from individual capability
+    // rows. It is set only while the exact committed roster is current and
+    // every member's v3 capability matches that member's heartbeat.
+    "CREATE TABLE IF NOT EXISTS cluster_credential_guard_activation (\
          singleton INTEGER PRIMARY KEY CHECK (singleton = 1)) STRICT",
     // Transaction-local proof for the maintenance-aware heartbeat. Once a
     // maintenance row exists, the trigger below makes a rollback to a binary
@@ -2083,6 +2085,7 @@ fn committed_capability_unready_nodes_sql(capability: &str) -> String {
 /// Whether every exact committed Raft member has a current capability proof.
 /// Starting from `json_each` is intentional: a configuration member whose SQL
 /// identity row has not applied yet is unready, not silently absent.
+#[cfg(test)]
 fn committed_capability_ready_sql(capability: &str) -> String {
     format!(
         "SELECT COUNT(*) AS count FROM json_each($1) AS committed \
@@ -2096,6 +2099,45 @@ fn committed_capability_ready_sql(capability: &str) -> String {
     )
 }
 
+/// Permanently activate the credential guards only while a replicated
+/// cache-admin exclusion freezes membership and every exact committed member
+/// concurrently carries a current v3 heartbeat proof.
+fn activate_credential_guard_sql() -> String {
+    format!(
+        "INSERT INTO cluster_credential_guard_activation (singleton) \
+         SELECT 1 WHERE EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases) \
+           AND EXISTS (SELECT 1 FROM json_each($1)) \
+           AND NOT EXISTS (SELECT 1 FROM json_each($1) AS committed \
+             WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+               JOIN cluster_node_capabilities AS capability \
+                 ON capability.node_id = active.node_id \
+              WHERE active.raft_id = CAST(committed.value AS INTEGER) \
+                AND active.removed_at IS NULL \
+                AND capability.capability = '{CACHE_ADMIN_REVOCATION_CAPABILITY}' \
+                AND capability.last_seen_at = active.last_seen_at)) \
+         ON CONFLICT(singleton) DO NOTHING"
+    )
+}
+
+/// A credential mutation may fan out only after the permanent transition and
+/// while the exact current roster still proves v3. The latter check keeps a
+/// post-activation rollback fail-closed even though the witness never clears.
+fn committed_credential_guard_ready_sql() -> String {
+    format!(
+        "SELECT (\
+           NOT EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+           OR EXISTS (SELECT 1 FROM json_each($1) AS committed \
+             WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+               JOIN cluster_node_capabilities AS capability \
+                 ON capability.node_id = active.node_id \
+              WHERE active.raft_id = CAST(committed.value AS INTEGER) \
+                AND active.removed_at IS NULL \
+                AND capability.capability = '{CACHE_ADMIN_REVOCATION_CAPABILITY}' \
+                AND capability.last_seen_at = active.last_seen_at))\
+         ) AS count"
+    )
+}
+
 /// Whether cache-only admin recovery is safe on this local applied view.
 ///
 /// Capability equality proves that every committed member runs the revocation
@@ -2106,7 +2148,8 @@ fn committed_capability_ready_sql(capability: &str) -> String {
 fn committed_cache_admin_revocation_ready_sql() -> String {
     format!(
         "SELECT (\
-           EXISTS (SELECT 1 FROM json_each($1) AS committed \
+           NOT EXISTS (SELECT 1 FROM cluster_credential_guard_activation) \
+           OR EXISTS (SELECT 1 FROM json_each($1) AS committed \
              WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
                JOIN cluster_node_capabilities AS capability \
                  ON capability.node_id = active.node_id \
@@ -5758,10 +5801,23 @@ impl MembershipManager {
             .map(|(raft_id, _)| *raft_id)
             .collect::<BTreeSet<_>>();
         let members_json = bounded_committed_raft_ids_json(&members)?;
+        // The caller commits the singleton cache-admin exclusion before this
+        // method. That replicated lease freezes join/removal/promotion while
+        // this conditional Raft write proves the exact roster in one SQLite
+        // statement. A partial rollout changes zero rows and leaves legacy
+        // credential mutations usable; the first full-roster proof is
+        // permanent so a later binary rollback cannot reopen them.
+        inner
+            .client
+            .execute(
+                activate_credential_guard_sql(),
+                params!(members_json.clone()),
+            )
+            .await?;
         let capability = inner
             .client
             .query_consistent_map::<CountRow, _>(
-                committed_capability_ready_sql(CACHE_ADMIN_REVOCATION_CAPABILITY),
+                committed_credential_guard_ready_sql(),
                 params!(members_json.clone()),
             )
             .await?;
@@ -12148,6 +12204,8 @@ mod tests {
                    node_id TEXT NOT NULL, claim_id TEXT NOT NULL UNIQUE, \
                    expires_at INTEGER NOT NULL, \
                    retain_release_receipt INTEGER NOT NULL); \
+                 CREATE TABLE cluster_credential_guard_activation (\
+                   singleton INTEGER PRIMARY KEY CHECK (singleton = 1)); \
                  INSERT INTO cluster_meta VALUES (1, 11, 4, 4, 0); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 1, 100, NULL, 'voter'); \
                  INSERT INTO cluster_nodes VALUES ('node-b', 2, 200, NULL, NULL); \
@@ -13156,6 +13214,12 @@ mod tests {
                 )
                 .expect("write cache revocation capability with the heartbeat");
         }
+        connection
+            .execute(
+                "INSERT INTO cluster_credential_guard_activation VALUES (1)",
+                [],
+            )
+            .expect("activate the fully upgraded roster");
         let ready = || {
             connection
                 .query_row(
@@ -13328,6 +13392,8 @@ mod tests {
                    last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability)); \
                  CREATE TABLE cluster_credential_mutation_intents (\
                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1)); \
+                 CREATE TABLE cluster_credential_guard_activation (\
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1)); \
                  CREATE TABLE users (\
                    id INTEGER PRIMARY KEY, password_hash TEXT NOT NULL, \
                    is_admin INTEGER NOT NULL); \
@@ -13337,6 +13403,7 @@ mod tests {
                  INSERT INTO cluster_nodes VALUES ('node-a', 100); \
                  INSERT INTO cluster_node_capabilities VALUES \
                    ('node-a', 'cache_admin_revocation_v3', 100); \
+                 INSERT INTO cluster_credential_guard_activation VALUES (1); \
                  INSERT INTO users VALUES (1, 'old-hash', 1); \
                  INSERT INTO tokens VALUES ('old-token', 1);",
             )
@@ -13440,6 +13507,133 @@ mod tests {
                 .expect("count transaction intents"),
             0
         );
+    }
+
+    #[test]
+    fn three_voter_rolling_upgrade_activates_credential_guard_only_after_full_roster() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON; \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL UNIQUE, \
+                   last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT NOT NULL, capability TEXT NOT NULL, \
+                   last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_cache_admin_revocation_leases (\
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1)); \
+                 CREATE TABLE cluster_credential_mutation_intents (\
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1)); \
+                 CREATE TABLE cluster_credential_guard_activation (\
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1)); \
+                 CREATE TABLE users (\
+                   id INTEGER PRIMARY KEY, password_hash TEXT NOT NULL, \
+                   is_admin INTEGER NOT NULL); \
+                 CREATE TABLE tokens (\
+                   token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL \
+                     REFERENCES users(id) ON DELETE CASCADE); \
+                 INSERT INTO cluster_nodes VALUES \
+                   ('node-a', 1, 100, NULL), \
+                   ('node-b', 2, 100, NULL), \
+                   ('node-c', 3, 100, NULL); \
+                 INSERT INTO cluster_cache_admin_revocation_leases VALUES (1); \
+                 INSERT INTO users VALUES (1, 'old-hash', 1);",
+            )
+            .expect("construct three-voter rolling-upgrade state");
+        for trigger in [
+            REQUIRE_CURRENT_CREDENTIAL_USER_UPDATE_SQL,
+            REQUIRE_CURRENT_CREDENTIAL_USER_DELETE_SQL,
+            REQUIRE_CURRENT_CREDENTIAL_TOKEN_INSERT_SQL,
+            REQUIRE_CURRENT_CREDENTIAL_TOKEN_DELETE_SQL,
+        ] {
+            connection
+                .execute_batch(trigger)
+                .expect("install credential guard");
+        }
+
+        let publish_capability = |node_id: &str| {
+            connection
+                .execute(
+                    "INSERT INTO cluster_node_capabilities \
+                     SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
+                    rusqlite::params![node_id, CACHE_ADMIN_REVOCATION_CAPABILITY],
+                )
+                .expect("publish current v3 heartbeat capability");
+        };
+        let activate = || {
+            connection
+                .execute(
+                    &activate_credential_guard_sql(),
+                    rusqlite::params!["[1,2,3]"],
+                )
+                .expect("attempt exact-roster guard activation")
+        };
+        let activation_count = || {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_credential_guard_activation",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count guard activation")
+        };
+
+        publish_capability("node-a");
+        assert_eq!(activate(), 0);
+        assert_eq!(activation_count(), 0);
+        assert_eq!(
+            connection
+                .execute("INSERT INTO tokens VALUES ('legacy-token', 1)", [])
+                .expect("partial rollout keeps legacy login usable"),
+            1
+        );
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE users SET password_hash = 'legacy-reset' WHERE id = 1",
+                    [],
+                )
+                .expect("partial rollout keeps legacy password reset usable"),
+            1
+        );
+
+        publish_capability("node-b");
+        assert_eq!(activate(), 0);
+        publish_capability("node-c");
+        assert_eq!(activate(), 1);
+        assert_eq!(activation_count(), 1);
+
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 101 WHERE node_id = 'node-b'",
+                [],
+            )
+            .expect("roll voter b back to a legacy heartbeat");
+        assert_eq!(activate(), 0, "activation is permanent and idempotent");
+        for (sql, label) in [
+            (
+                "UPDATE users SET password_hash = 'rollback-reset' WHERE id = 1",
+                "password reset",
+            ),
+            (
+                "INSERT INTO tokens VALUES ('rollback-token', 1)",
+                "login token creation",
+            ),
+            (
+                "DELETE FROM tokens WHERE token_hash = 'legacy-token'",
+                "logout token deletion",
+            ),
+        ] {
+            let error = connection
+                .execute(sql, [])
+                .expect_err("post-activation rollback mutation must fail closed");
+            assert!(
+                error.to_string().contains("requires current binary"),
+                "unexpected {label} rejection: {error}"
+            );
+        }
+        assert_eq!(activation_count(), 1);
     }
 
     /// A binary old enough to predate heartbeat intents is caught one step

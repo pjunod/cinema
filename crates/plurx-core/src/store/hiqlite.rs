@@ -181,6 +181,12 @@ CREATE TABLE IF NOT EXISTS cluster_credential_mutation_intents (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
 ) STRICT;
 
+-- Permanent only after the exact committed roster concurrently proves the
+-- credential-revocation protocol. Membership owns publication of this row.
+CREATE TABLE IF NOT EXISTS cluster_credential_guard_activation (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS api_keys (
     id           INTEGER PRIMARY KEY,
     name         TEXT NOT NULL,

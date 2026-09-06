@@ -30,8 +30,8 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | exact candidate `bb84e9df` passed the complete focused lane but was rejected by interval-order review; correction `ea7b8476` and its six-permutation regression are green, and replacement exact-SHA review is next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
-| M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | exact candidate `198482b0` passed its complete lane; two adversarial reviews were clean and one rejected its too-early credential-guard activation. The full-roster activation correction and three-voter mixed-version regression are green; replacement qualification and three fresh reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
+| M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | the reviewed campaign implementation has been rebuilt in an independent clone on the latest M4 line and passes pinned workspace check and denied-warning Clippy; it will move to the replacement M4 commit before qualification | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
@@ -186,6 +186,16 @@ were stopped. Correction `ea7b8476` now builds successive non-dominated
 interval frontiers; all six permutations of the bridge counterexample select
 the newest installing attempt. Mapping checkpoint `58c1b00a` ties this and the
 two preceding runtime corrections to their persistent focused evidence.
+Replacement `198482b0` passed the complete cluster/WAL lane, 197 operations
+contracts, validation and history audits, and two of its three frozen-SHA
+reviews. The third found that the credential rollback triggers activated after
+one voter advertised v3, which could reject still-supported legacy mutations
+during a one-node-at-a-time rollout. The correction publishes a permanent
+activation singleton only while the replicated cache-admin exclusion freezes
+membership and every member of the exact committed roster concurrently proves
+v3. Before that transition legacy mutations remain usable; after it, a rolled-
+back heartbeat cannot reopen them. A three-voter mixed-version regression pins
+both sides of that boundary. Candidate `198482b0` remains rejected.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
