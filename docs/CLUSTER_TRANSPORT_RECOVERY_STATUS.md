@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | exact candidate `195fd781` was rejected; its four transport and credential findings are fixed in `c9ae845f` and `a76860d2`, focused regressions are green, and the replacement exact-SHA fast lane/reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | exact candidate `bb84e9df` passed the complete focused lane but was rejected by interval-order review; correction `ea7b8476` and its six-permutation regression are green, and replacement exact-SHA review is next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -176,6 +176,16 @@ v3 has ever been witnessed. The focused browser, paused-time collector,
 rollback-trigger, and three-voter Store regressions pass, as do workspace
 all-target check and denied-warning Clippy. Complete exact-tree focused
 qualification and three fresh reviews remain.
+Exact candidate `bb84e9df` then passed the complete cluster/WAL lane, 197
+operations contracts, validation catalog, workspace and vendored denied-warning
+Clippy, formatting, and diff hygiene. Its first adversarial review found that a
+broad uncertainty interval could connect two intervals that were themselves
+provably ordered, placing a definitely older stalled attempt in the same
+newest cohort. The candidate was rejected immediately and the other reviews
+were stopped. Correction `ea7b8476` now builds successive non-dominated
+interval frontiers; all six permutations of the bridge counterexample select
+the newest installing attempt. Mapping checkpoint `58c1b00a` ties this and the
+two preceding runtime corrections to their persistent focused evidence.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -227,6 +237,7 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 fifteenth-review corrections | pass · committed `c0725954`, exact review pending | Completion authority is freshness-bounded; deadline-less active state publishes and projects the producer's 30-second fallback; cache-admin revocation covers up to 63 remote committed members with concurrency eight; and a three-voter contract proves missing/wrong/exact claims plus atomic rollback on token deletion failure. Exact regressions, web, 197 operations contracts, workspace and vendored denied-warning Clippy, validation lint, history audit, formatting, and the complete cluster/WAL lane pass; three exact-SHA reviews restart from zero. |
 | M4 chronology total-order correction | pass · committed `794a4d30` and `b54f5c2c`, exact review pending | The selector orders all non-expired attempts before applying fingerprint-local completion authority, uses one clock basis for a mixed-version cohort, handles explicit null attempt ages as absent, and preserves retry chronology across different fingerprints. Per-response monotonic receipts normalize independently sampled ages before selection. Both input-order and all six mixed-cohort permutations plus the delayed-peer collector regression pass. |
 | M4 sixteenth-review corrections | pass · committed `c9ae845f` and `a76860d2`, exact-tree qualification pending | Request-to-receipt transit is retained as an explicit age interval; predecessor completion cannot bypass a newer receiver attempt; token creation is bound to the password hash that login authenticated; and durable replicated transaction-intent triggers close the rollback/readiness-poll interval for credential mutations. Focused browser, Rust, and three-voter Store regressions plus workspace check and denied-warning Clippy pass. |
+| M4 interval-frontier correction | pass · committed `ea7b8476`, exact review pending | Successive non-dominated frontiers preserve every provable interval ordering even when a third uncertainty interval overlaps both endpoints. All six input permutations of the adversarial bridge case pass, and `58c1b00a` records the current-check mappings. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
