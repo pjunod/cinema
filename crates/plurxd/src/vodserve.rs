@@ -7605,7 +7605,10 @@ mod tests {
     }
 
     async fn serve_on(base: &Path) -> (Arc<VodServe>, MediaFile) {
-        let file = fixture_file();
+        serve_on_file(base, fixture_file()).await
+    }
+
+    async fn serve_on_file(base: &Path, file: MediaFile) -> (Arc<VodServe>, MediaFile) {
         let (store, _) = store_with_index(&file).await;
         (VodServe::new(base.to_path_buf(), store), file)
     }
@@ -10550,7 +10553,16 @@ mod tests {
         use crate::playback_control::ProducerDecisionReason as Reason;
 
         let base = crate::test_tempdir().expect("base");
-        let (serve, file) = serve_on(base.path()).await;
+        let mut file = fixture_file();
+        let shared_fixture = file.path.clone();
+        let shared_before = tokio::fs::metadata(&shared_fixture)
+            .await
+            .expect("shared fixture metadata");
+        file.path = base.path().join("source.mkv");
+        tokio::fs::copy(&shared_fixture, &file.path)
+            .await
+            .expect("copy source fence fixture");
+        let (serve, file) = serve_on_file(base.path(), file).await;
         create(&serve, &file, "sess-a", "play-a", &settings()).await;
 
         // Move the source under the fence the rendition took at create.
@@ -10559,6 +10571,14 @@ mod tests {
         tokio::fs::write(&file.path, &bytes)
             .await
             .expect("rewrite the source");
+        let shared_after = tokio::fs::metadata(&shared_fixture)
+            .await
+            .expect("shared fixture metadata after private rewrite");
+        assert_eq!(
+            (shared_before.len(), shared_before.modified().ok()),
+            (shared_after.len(), shared_after.modified().ok()),
+            "a source-change test must not rewrite the shared media fixture"
+        );
 
         let answer = serve.segment("sess-a", "seg00000.m4s").await;
         assert!(
