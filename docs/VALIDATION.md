@@ -465,12 +465,18 @@ cleanup deadline covers discovery, termination, direct-shell reap, and output
 EOF. The runner immediately stops the root process group, discovers both the
 launch session and retained-parent child sessions, stops newly observed groups
 until the same complete stopped closure is seen twice, and sends `SIGKILL`
-deepest-first without resuming the tree. It reaps only its owned shell; it does
-not claim to reap grandchildren. Exit 124 is recorded only when the closure,
-kill, reap, and output drain all succeed. Census, convergence, signal, reap, or
-EOF failure aborts validation as an infrastructure error. Windows uses bounded
-`taskkill /T /F`, and every nonzero, timed-out, or incomplete result likewise
-aborts instead of producing a timeout verdict.
+deepest-first without resuming the tree. A bounded post-kill census then proves
+that every recorded live process identity disappeared; zombies are accepted as
+non-executable and left to their owning system reaper. The runner reaps only
+its owned shell and does not claim to reap grandchildren. Exit 124 is recorded
+only when the closure, kill, live-identity proof, reap, and output drain all
+succeed. Census, convergence, signal, reap, identity, or EOF failure aborts
+validation as an infrastructure error. Linux obtains parent, group, session,
+state, and start identity atomically from one bounded `ps` inventory. Darwin
+accepts a row only when the complete bounded inventory row and independent
+group/session observations remain identical across two censuses. Windows uses
+bounded `taskkill /T /F`, and every nonzero, timed-out, or incomplete result
+likewise aborts instead of producing a timeout verdict.
 
 This is ownership for trusted validation checks, not containment for hostile
 code. A check may create process groups and sessions, but every live child
