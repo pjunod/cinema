@@ -313,10 +313,12 @@ the replicated write but before the local marker rewrite replays only the
 marker write on the next boot. Do not restart a v5, v6, v7, or v8 binary after v9
 commits: its strict compatibility check correctly refuses the newer schema. If
 a node fails during the maintenance window, leave the v9 quorum authoritative
-and roll that node forward with the same v9-or-newer binary. `reset-password`,
-`refresh-metadata`, and other maintenance clients do not own migration and
-will refuse until the running daemon has completed it. Replicated v4 has no
-supported direct path to v9 and remains refused.
+and roll that node forward with the same v9-or-newer binary. `refresh-metadata`
+and other Store-backed maintenance clients do not own migration and will refuse
+until the running daemon has completed it. `reset-password` is stricter: it
+currently refuses before connecting to any activated Store because a sidecar
+writer cannot invalidate process-local admin recovery proofs. Replicated v4 has
+no supported direct path to v9 and remains refused.
 
 Every Ansible redeploy stops the Plurx Compose stack long enough to copy the
 closed SQLite database. The three newest copies stay on each node under
@@ -1820,22 +1822,39 @@ expiry. Recovery reads do not renew it, at most 64 proofs are retained, and a
 miss, expiry, non-admin result, or cache failure returns `401` without falling
 back to Store. Store-backed authentication captures the cache revocation
 generation before its read and publishes proof only if that generation is
-unchanged. Logout, demotion, password reset, and user deletion invalidate proof
-and advance the generation both before and after their Store mutation, including
-commit-unknown outcomes; an in-flight stale read therefore cannot republish a
-revoked credential. These mutations also bracket the Store write with signed
+unchanged. On replicated nodes, publication and cache-only authentication start
+disabled. A background projection enables them only after every member in the
+exact committed Raft configuration carries a `cache_admin_revocation_v1` row
+whose timestamp equals that node's current heartbeat. A joining member, missing
+row, refresh failure, or heartbeat from a rolled-back binary closes the gate and
+clears every proof; reopening requires a new ordinary authentication. Logout,
+demotion, password reset, and user deletion invalidate proof and advance the
+generation both before and after their Store mutation; an in-flight stale read
+therefore cannot republish a revoked credential. These mutations also bracket
+the Store write with signed
 begin/end messages to every committed peer under one two-second fanout bound.
 The peer wire contains only a random operation UUID and phase, never a token
 digest or user ID. A peer clears its bounded proof cache and refuses all
 cache-only recovery authorization while any fence is active; at most 128
 remote fences are retained, and an end that is lost or whose commit outcome is
 unknown expires no later than the existing non-sliding five-minute proof TTL.
+The origin retains the same global five-minute fence when a Store mutation or
+peer end returns ambiguously; dropping a request future cannot reopen recovery
+authorization while a delayed Raft write may still commit.
 An unreachable peer, missing HTTP claim, oversized roster, non-204 response,
 or invalid signature fails the caller closed with a typed `503`; success is
 reported only after all begin and end acknowledgements. A cold process
 therefore needs one successful ordinary authentication
 before these public recovery reads; the private authenticated cluster-listener
 transport route remains the pre-listener/startup path.
+
+There is currently no safe forgotten-last-admin console recovery command.
+`plurxd reset-password` refuses before Store connection or mutation because a
+separate process cannot participate in the daemon-owned begin/end proof
+invalidation protocol. Do not work around that refusal with direct Hiqlite or
+SQLite writes: use a still-authenticated admin session to create or reset
+another admin. A daemon-owned authenticated local control path is required
+before unattended last-admin recovery can be re-enabled.
 
 Directory and membership SQL
 receive the exact committed Raft IDs as a bounded parameter, so abandoned join

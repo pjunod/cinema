@@ -861,9 +861,11 @@ impl AppState {
             membership.clone(),
             Arc::clone(&store),
         );
+        let cache_only_admin_proofs =
+            crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
         AppState {
             store,
-            cache_only_admin_proofs: Default::default(),
+            cache_only_admin_proofs,
             catalogue,
             replication,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(

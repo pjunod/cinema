@@ -166,6 +166,27 @@ async fn login_status(port: u16, username: &str, password: &str) -> reqwest::Sta
         .status()
 }
 
+async fn login_token(port: u16, username: &str, password: &str) -> String {
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "username": username,
+            "password": password,
+        }))
+        .send()
+        .await
+        .expect("login request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response
+        .json::<serde_json::Value>()
+        .await
+        .expect("login response")
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .expect("login token")
+        .to_owned()
+}
+
 #[test]
 fn migration_quiescence_precedes_directory_cleanup_probes_and_http_bind() {
     let _process_test = process_test_guard();
@@ -379,7 +400,8 @@ fn m2_ignores_explicit_non_loopback_cluster_listener_hosts() {
     );
 }
 
-/// The maintenance commands must reach TLS through the real binary.
+/// Store-backed maintenance must reach TLS through the real binary, while the
+/// unsafe console reset is refused before it can become a second writer.
 ///
 /// `rustls` panics rather than erroring when a process reaches TLS with no
 /// process-level provider, and `plurxd run` only ever got one as a side effect
@@ -388,10 +410,10 @@ fn m2_ignores_explicit_non_loopback_cluster_listener_hosts() {
 /// that harness installs a provider of its own. Only the shipped binary can tell
 /// the two apart, which is why this drives `CARGO_BIN_EXE_plurxd`.
 ///
-/// Asserting on the *absence* of the panic rather than on success keeps the test
-/// about the regression: reaching a reported error means TLS was negotiated.
+/// Asserting on the *absence* of the panic for metadata keeps that half about
+/// the regression: reaching a reported error means TLS was negotiated.
 #[test]
-fn maintenance_commands_reach_tls_on_an_activated_node() {
+fn maintenance_commands_obey_their_activated_store_boundaries() {
     let _process_test = process_test_guard();
     let root = canonical_tempdir().expect("maintenance TLS fixture");
     let data = root.path().join("data");
@@ -434,31 +456,43 @@ fn maintenance_commands_reach_tls_on_an_activated_node() {
     wait_for_bind(&mut daemon, server_port);
     assert!(data.join("hiqlite/activation.json").is_file());
 
-    for args in [
-        vec!["reset-password", "owner", "--password", "a-new-password"],
-        vec!["refresh-metadata"],
-    ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_plurxd"));
-        command.args(["--config", config_path.to_str().expect("config path")]);
-        command.args(&args);
-        let output = command.output().expect("run maintenance command");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !stderr.contains("CryptoProvider"),
-            "{args:?} aborted before TLS instead of using the activated voter: {stderr}"
-        );
-        assert!(
-            !stderr.contains("panicked"),
-            "{args:?} panicked against an activated node: {stderr}"
-        );
-        // The directory *is* activated, so nothing may tell the operator to
-        // migrate it. `owner` does not exist, so a reported miss proves the
-        // command read through the replicated store rather than failing earlier.
-        assert!(
-            !stderr.contains("is not activated"),
-            "{args:?} refused an activated directory: {stderr}"
-        );
-    }
+    let reset = Command::new(env!("CARGO_BIN_EXE_plurxd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path"),
+            "reset-password",
+            "owner",
+            "--password",
+            "a-new-password",
+        ])
+        .output()
+        .expect("run reset refusal");
+    let reset_stderr = String::from_utf8_lossy(&reset.stderr);
+    assert!(!reset.status.success());
+    assert!(
+        reset_stderr.contains("direct replicated Store write cannot invalidate"),
+        "unsafe reset did not explain its refusal: {reset_stderr}"
+    );
+    assert!(!reset_stderr.contains("CryptoProvider"), "{reset_stderr}");
+
+    let refresh = Command::new(env!("CARGO_BIN_EXE_plurxd"))
+        .args([
+            "--config",
+            config_path.to_str().expect("config path"),
+            "refresh-metadata",
+        ])
+        .output()
+        .expect("run metadata maintenance command");
+    let refresh_stderr = String::from_utf8_lossy(&refresh.stderr);
+    assert!(
+        !refresh_stderr.contains("CryptoProvider"),
+        "refresh-metadata aborted before TLS: {refresh_stderr}"
+    );
+    assert!(!refresh_stderr.contains("panicked"), "{refresh_stderr}");
+    assert!(
+        !refresh_stderr.contains("is not activated"),
+        "refresh-metadata refused an activated directory: {refresh_stderr}"
+    );
 
     daemon.stop();
 }
@@ -581,7 +615,7 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).expect("data directory");
     let source = SqliteStore::open(&data.join("plurx.db")).expect("legacy SQLite source");
-    source
+    let user = source
         .create_user(
             "recovery-owner",
             &hash_password("password-before-kill").expect("initial password hash"),
@@ -589,6 +623,7 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
         )
         .await
         .expect("seed recovery user");
+    let user_id = user.id;
     drop(source);
 
     let config_path = root.path().join("plurx.toml");
@@ -629,27 +664,17 @@ async fn sigkill_recovery_preserves_acknowledged_writes(advertise_host: &str) {
 
     let mut first = start();
     wait_for_bind(&mut first, server_port);
-    assert_eq!(
-        login_status(server_port, "recovery-owner", "password-before-kill").await,
-        reqwest::StatusCode::OK
-    );
-
-    let update = Command::new(env!("CARGO_BIN_EXE_plurxd"))
-        .args([
-            "--config",
-            config_path.to_str().expect("config path"),
-            "reset-password",
-            "recovery-owner",
-            "--password",
-            "password-after-kill",
-        ])
-        .output()
-        .expect("acknowledged post-activation password update");
-    assert!(
-        update.status.success(),
-        "password update failed: {}",
-        String::from_utf8_lossy(&update.stderr)
-    );
+    let token = login_token(server_port, "recovery-owner", "password-before-kill").await;
+    let update = reqwest::Client::new()
+        .put(format!(
+            "http://127.0.0.1:{server_port}/api/v1/users/{user_id}"
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "password": "password-after-kill" }))
+        .send()
+        .await
+        .expect("acknowledged daemon-owned password update");
+    assert_eq!(update.status(), reqwest::StatusCode::OK);
     assert_eq!(
         login_status(server_port, "recovery-owner", "password-after-kill").await,
         reqwest::StatusCode::OK

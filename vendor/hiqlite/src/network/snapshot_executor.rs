@@ -1012,7 +1012,7 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
-    async fn production_shared_executor_drops_abandoned_other_peer_without_phantom_status() {
+    async fn production_shared_executor_retains_abandoned_other_peer_terminal_status() {
         use crate::store::state_machine::sqlite::TypeConfigSqlite;
         use crate::transport_status::{
             InboundSnapshotAttempt, InboundSnapshotChunk, InboundSnapshotDisposition,
@@ -1127,10 +1127,25 @@ mod tests {
             None,
             InboundSnapshotDisposition::Retrying("snapshot_connection_closed"),
         );
-        let only_running = status.snapshot();
-        assert_eq!(only_running.observations.len(), 1);
-        assert_eq!(only_running.observations[0].peer_node_id, 1);
-        assert!(only_running.observations[0].operation_owns_work);
+        let running_and_terminal = status.snapshot();
+        assert_eq!(running_and_terminal.observations.len(), 2);
+        let running_status = &running_and_terminal.observations[0];
+        let abandoned_status = &running_and_terminal.observations[1];
+        assert_eq!(running_status.peer_node_id, 1);
+        assert!(running_status.operation_owns_work);
+        assert_eq!(abandoned_status.peer_node_id, 3);
+        assert_eq!(abandoned_status.snapshot_id.as_deref(), Some("abandoned"));
+        assert_eq!(
+            abandoned_status.phase,
+            crate::SnapshotTransportPhase::Retrying
+        );
+        assert_eq!(
+            abandoned_status.last_error_category.as_deref(),
+            Some("snapshot_connection_closed")
+        );
+        assert_eq!(abandoned_status.retry_count, 1);
+        assert!(!abandoned_status.operation_owns_work);
+        assert!(abandoned_status.attempt_id > running_status.attempt_id);
 
         gate.add_permits(1);
         assert!(
@@ -1145,12 +1160,13 @@ mod tests {
         }
         assert_eq!(started.lock().await.as_slice(), ["running"]);
         let completed = status.snapshot();
-        assert_eq!(completed.observations.len(), 1);
+        assert_eq!(completed.observations.len(), 2);
         assert_eq!(completed.observations[0].peer_node_id, 1);
         assert_eq!(
             completed.observations[0].phase,
             crate::SnapshotTransportPhase::Complete
         );
+        assert_eq!(&completed.observations[1], abandoned_status);
         assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
     }
 

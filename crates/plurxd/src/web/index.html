@@ -3882,9 +3882,9 @@ function authShell(title, sub, fields, btn, onsubmit){
 }
 // The first account, and the one place a typo is unrecoverable from inside the
 // product: there is no other admin to reset it and no email to recover to. A
-// mistyped password here locks the owner out of their own server, and the only
-// way back is `plurxd reset-password` on the console — which someone who just
-// installed this has no reason to know exists. Hence the confirm field, and
+// mistyped password here locks the owner out of their own server; the legacy
+// direct-store console reset is deliberately refused because it cannot revoke
+// daemon-local recovery proofs. Hence the confirm field, and
 // hence the length check running here rather than only at the server: the
 // server's "at least 8 characters" arrives as a red line under a form whose
 // contents are already gone.
@@ -12122,7 +12122,7 @@ function cacheTrakt(value){
 function settingsCurrent(generation,tab){
   return generation===PAGE_RENDER_GENERATION&&isSettingsRoute(location.hash)&&settingsTab()===tab;
 }
-function loadSettingsKey(key,generation){
+function loadSettingsKey(key,generation,cacheResult=true){
   if(SETTINGS_LOADED.has(key)) return Promise.resolve(SETTINGS_DATA[key]);
   const active=SETTINGS_LOADS.get(key);
   let transport=active&&active.promise;
@@ -12135,7 +12135,7 @@ function loadSettingsKey(key,generation){
     }).catch(()=>{});
   }
   return transport.then(value=>{
-    if(generation!==PAGE_RENDER_GENERATION) return value;
+    if(generation!==PAGE_RENDER_GENERATION||!cacheResult) return value;
     SETTINGS_DATA[key]=value; SETTINGS_LOADED.add(key);
     if(key==="dvConversions") DV_SETTINGS_POLL_AT=Date.now()+DV_PROGRESS_POLL_MS;
     if(key==="settings") cacheSettings(value);
@@ -12173,7 +12173,7 @@ function settingsTabAside(id,d){
 function settingsShell(tab){
   return `<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div></div>`;
 }
-function patchSettingsSecondary(tab,key){
+function patchSettingsSecondary(tab,key,value){
   if(tab==="metadata"&&key==="libs"){
     const mount=document.getElementById("metadata-libraries");
     if(mount) mount.innerHTML=keyBackfillHtml(SETTINGS_DATA.libs||[]);
@@ -12183,7 +12183,16 @@ function patchSettingsSecondary(tab,key){
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
   if(tab==="cluster"&&key==="clusterOps"){
-    renderSettings();
+    // The roster is already interactive while this secondary request is in
+    // flight. Hold a result that arrives under an election decision rather
+    // than storing data the page did not paint; the next gated collection will
+    // pay the update after the dialog closes.
+    if(clusterRepaintDeferred()){
+      patchClusterReadingAge();
+      return;
+    }
+    SETTINGS_DATA.clusterOps=value; SETTINGS_LOADED.add("clusterOps");
+    repaintClusterPreserving(renderSettings);
   }
 }
 function patchSettingsSecondaryError(tab,key,error){
@@ -12217,15 +12226,21 @@ async function loadSettingsTab(generation,tab){
   if(!settingsCurrent(generation,tab)) return false;
   renderSettings();
   setPageFailure(route,generation,null); setPagePhase(route,generation,"content");
-  const secondary=manifest.secondary.map(key=>loadSettingsKey(key,generation).then(()=>{
-    if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key);
-  }).catch(error=>{
-    if(error&&error.status===401) throw error;
-    if(settingsCurrent(generation,tab)){
-      patchSettingsSecondaryError(tab,key,error);
-      setPageFailure(route,generation,`${key}_error`);
-    }
-  }));
+  const secondary=manifest.secondary.map(key=>{
+    // Cluster status owns an atomic store-and-paint boundary because the
+    // already-rendered roster can open a decision dialog before this secondary
+    // response arrives. Other secondary data can keep the ordinary eager cache.
+    const staged=tab==="cluster"&&key==="clusterOps";
+    return loadSettingsKey(key,generation,!staged).then(value=>{
+      if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key,value);
+    }).catch(error=>{
+      if(error&&error.status===401) throw error;
+      if(settingsCurrent(generation,tab)){
+        patchSettingsSecondaryError(tab,key,error);
+        setPageFailure(route,generation,`${key}_error`);
+      }
+    });
+  });
   if(tab==="system") secondary.push(refreshLogs());
   if(tab==="cluster") secondary.push(refreshClusterLogs());
   await Promise.allSettled(secondary);
@@ -12767,7 +12782,7 @@ function playbackPanel(settings){
 // them a stream.
 function developerPanel(settings){
   const transportRecovery=setCard(`${cardHead("Enable cluster transport recovery","The corrected transport is compiled in and activates automatically on clustered nodes; there is no hidden production feature flag.",`<span class="pill" style="color:var(--good);border-color:var(--good)">automatic</span>`)}
-      <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network.</div>
+      <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network. Cache-only recovery authorization stays disabled until every current committed node has heartbeat-proven the cache revocation capability; a rollback closes it again.</div>
       <h2 class="section">What must be true first</h2>
       <div class="tog"><span>Recovery budgets fit the deployment<small>Keep chunk, whole-transfer, final-install, startup, and container health allowances aligned. The defaults are 30 s, 1,200 s, and 120 s; the rollout may use a longer final-install allowance when measured state size requires it.</small></span></div>
       <div class="tog"><span>Authenticated diagnostics are reachable<small>Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet. Port 32400 may remain closed while a learner catches up.</small></span></div>
@@ -13417,10 +13432,9 @@ function clusterOperationsCard(ops){
       <div class="clopsfact"><span class="muted">Owned media</span><b>${sessions} active session${sessions===1?"":"s"}</b></div>
       <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(PlurxClusterPanel.clusterOperationAge(oldest))}</b></div></div></div>`;
 }
-// The manual refresh has no deferral, deliberately: the election dialog is
-// modal, so the button that reaches this code cannot be clicked while one is
-// open. It still obeys the invariant the other three paths obey — it paints
-// exactly what it stores.
+// An election dialog blocks a new click, but it can open after this request has
+// started. The response stays staged until the await completes so a late
+// success or failure cannot repaint over that newer decision.
 async function refreshClusterOperations(btn){
   const generation=PAGE_RENDER_GENERATION;
   if(btn) btn.disabled=true;
@@ -13428,9 +13442,16 @@ async function refreshClusterOperations(btn){
   const mount=document.getElementById("cluster-operations");
   if(mount) mount.innerHTML=clusterOperationsCard(null);
   try{
-    const ops=await loadSettingsKey("clusterOps",generation);
+    // The request may outlive the click that started it. Keep its response
+    // staged until we know an election dialog has not opened in the meantime.
+    const ops=await loadSettingsKey("clusterOps",generation,false);
     if(settingsCurrent(generation,"cluster")){
+      if(clusterRepaintDeferred()){
+        patchClusterReadingAge();
+        return;
+      }
       SETTINGS_DATA.clusterOps=ops;
+      SETTINGS_LOADED.add("clusterOps");
       repaintClusterPreserving(renderSettings);
     }
   }catch(error){
@@ -13438,7 +13459,8 @@ async function refreshClusterOperations(btn){
       // The retained node evidence has a client-local clock of its own. Repaint
       // it before mounting the request failure so a manual refresh cannot leave
       // an expired install rendered as active until the next 15-second gate.
-      repaintClusterPreserving(renderSettings);
+      if(clusterRepaintDeferred()) patchClusterReadingAge();
+      else repaintClusterPreserving(renderSettings);
       const current=document.getElementById("cluster-operations");
       if(current) current.innerHTML=clusterOperationsUnavailable(esc(error&&error.message||"request failed"));
     }

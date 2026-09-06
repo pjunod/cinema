@@ -50,8 +50,24 @@ refresh left node transport DOM stale, snapshot status initialization could
 lose to a ready reader EOF, local revocation generations did not block
 cache-only authorization throughout the mutation, peer processes retained
 stale recovery proofs, and an aborted planned-outage request could strand its
-exact lease. Those corrections are committed after green focused
-requalification; three new exact-candidate reviews remain.
+exact lease. Those corrections were committed after green focused
+requalification, but the three exact-candidate reviews of `95247348` rejected
+it. They found that queued or first-identity snapshot teardown could disappear,
+cancellation could orphan a replicated outage claim or leave its local serving
+fence armed, commit-ambiguous credential mutations could release their cache
+fence, console and mixed-version writers could bypass peer revocation, and
+asynchronous UI updates could replace an operator decision or retain obsolete
+sender progress. All findings are implemented. The replacement passed web,
+operations, validation, formatting, diff, and its new exact Rust regressions;
+the complete cluster/WAL lane then exposed an obsolete abandoned-snapshot
+expectation: the new contract correctly retained a first-identity terminal row.
+That regression now proves the active and terminal rows, exact error and retry
+count, monotonic attempt identity, and persistence after the active install.
+The complete lane passes from the beginning, as do workspace all-target compile,
+root denied-warning Clippy, validation, operations, formatting, and diff checks.
+All four standalone vendored compile and denied-warning Clippy matrices also
+pass. The replacement commit and its three exact-SHA reviews from zero are
+next; the tree will not be pushed or opened beforehand.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -92,7 +108,8 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 fourth-review corrections | fail · `d1472a55` rejected after green pre-review lane | Public attempt ownership follows actual executor worker start; cancelled admission retention is bounded to two waiters and overflow is explicit; UI evidence selection uses a deterministic two-stage total order; read-only GET/support collectors are cache-only while mutation preflights use fresh bounded evidence; and the no-I/O proof executes both production handlers. Exact review still found retained browser evidence that did not age, acknowledged completion losing to predecessor phases, Store-backed authentication before cache-only handlers, an unclustered refresh warning loop, and outer Raft socket cancellation bypassing inbound-status cleanup. |
 | M4 fifth-review corrections | fail · `660e0794` rejected by three fresh tracks | Retained browser evidence aged in the model but failed refreshes did not repaint it in the DOM; old cross-observer completion could hide a demonstrably newer same-fingerprint attempt; the status page was stale; restart and maintenance proved safety before claiming their lifecycle fence; an authentication already reading Store could republish revoked admin proof; and a late first status read renewed producer evidence past its original expiry. This exact tree is not a release candidate. |
 | M4 sixth-review corrections | fail · `b7914f69` rejected after a green lane | Failed automatic refreshes repaint projected transport state without replacing an open decision dialog; cross-observer completion authority is bounded to the five-second freshness cohort; planned outages claim the replicated lifecycle lease before fresh evidence and release it on rejection; Store-backed authentication publishes only across an unchanged revocation generation; and producer stalls retain their real deadline-derived boundary. Three fresh exact-SHA tracks still found seven UI, snapshot-lifecycle, cluster-revocation, and cancellation findings. |
-| M4 seventh-review corrections | pass · fresh exact-candidate review pending | Browser evidence now ages from a local monotonic receipt and failed manual refreshes preserving-repaint retained transport state. Incoming snapshot receipt/status ownership is established synchronously at dequeue before reader EOF can win. Local and signed peer begin/end fences block and invalidate cache-only admin proof across logout and user mutations; the peer wire contains only an operation UUID and phase. Planned-outage lease RAII now spans preflight through drain and commit, releasing the exact claim on errors and task aborts. The complete focused cluster/WAL lane, 197 operations contracts, web suite, 23-point/28-check/1,376-file validation catalog, exact all-target check and denied-warning Clippy, three vendored Clippy matrices, formatting, and diff checks pass. Three fresh exact-candidate reviews are next. |
+| M4 seventh-review corrections | fail · `95247348` rejected after green focused requalification | The three exact-SHA tracks found first-select and first-identity snapshot teardown gaps, cancellation windows around both the replicated outage claim and local serving fence, cache authorization gaps on ambiguous writes plus console and mixed-version writers, a manual-refresh/modal race, and stale sender phases outranking durable receiver completion. All findings are assigned to bounded implementation tracks; the corrected tree must repeat focused qualification and three reviews from zero. |
+| M4 eighth-review corrections | pass · committed replacement | Every finding against `95247348` is implemented with deterministic coverage. The complete cluster/WAL lane passes from the beginning, including the strengthened retained-terminal regression; web, operations, validation, workspace compile, root denied-warning Clippy, all four standalone vendored check/Clippy matrices, formatting, and diff checks pass. Three exact-SHA reviews are in progress. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -150,6 +167,13 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
     non-sliding five-minute proof TTL. This trades a short cluster-wide
     diagnostic refusal for avoiding credential-derived or user-identifying
     egress.
+11. **Fail the legacy console password reset closed.** The command had no
+    daemon-owned authenticated control path and wrote the replicated Store
+    directly, bypassing every peer's cache-revocation fence. Rather than invent
+    a rushed privileged IPC protocol in this recovery effort, it now refuses
+    before reading a secret or opening Store. Administrators must use the
+    authenticated daemon API; a future console recovery design requires its own
+    threat model and review.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 

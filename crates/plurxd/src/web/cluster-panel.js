@@ -278,15 +278,17 @@
         representatives.push(acknowledged[0]);
         return;
       }
-      // A receiver that durably completed this exact fingerprint disproves a
-      // sender's failure to observe its reply. Apply that exception once at
-      // the group boundary; it does not cover inbound failures, unrelated
-      // fingerprints, or Complete-vs-Complete evidence.
+      // A receiver that durably completed this exact fingerprint disproves
+      // every unacknowledged sender-side predecessor: the sender may still say
+      // installing, waiting, retrying, stalled, or failed because the reply did
+      // not reach it. An acknowledged sender Complete is causally stronger and
+      // already returned above. Apply this exception once at the group boundary;
+      // it does not cover inbound failures or unrelated fingerprints.
       const receiverComplete=current.some(observation=>
         observation.phase==="complete"&&observation.direction==="inbound");
       if(group.fingerprint&&receiverComplete)
         current=current.filter(observation=>
-          !(observation.phase==="failed"&&observation.direction==="outbound"));
+          observation.direction!=="outbound"||acknowledgedComplete(observation));
       current.sort(withinIdentity);
       representatives.push(current[0]);
     });

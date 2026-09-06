@@ -1595,7 +1595,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "production_snapshot_executor_worker_records_status_around_injected_installer",
             "production_snapshot_executor_fifo_status_ignores_later_admission_waiter",
             "production_snapshot_executor_ticket_order_survives_reverse_waiter_polling",
-            "production_shared_executor_drops_abandoned_other_peer_without_phantom_status",
+            "production_shared_executor_retains_abandoned_other_peer_terminal_status",
             "inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
             "replacement_socket_drops_cancelled_request_after_consuming_reset",

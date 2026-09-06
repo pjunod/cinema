@@ -12,7 +12,8 @@ use plurx_core::cluster::membership::{
 use serde::Deserialize;
 
 use super::cluster_operations::{
-    acquire_planned_outage_preflight, local_owned_media_sessions, PlannedOutageOperation,
+    acquire_planned_outage_preflight, local_owned_media_sessions, run_planned_outage_task,
+    PlannedOutageOperation,
 };
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
@@ -186,7 +187,7 @@ pub async fn enter_maintenance(
     if state.membership.local_maintenance_active() {
         return state.membership.status().await.map(Json).map_err(api_error);
     }
-    let (lease, preflight) = acquire_planned_outage_preflight(
+    let (mut lease, preflight) = acquire_planned_outage_preflight(
         &state,
         &node_id,
         MAINTENANCE_PREPARATION_DURATION,
@@ -236,40 +237,53 @@ pub async fn enter_maintenance(
             "maintenance preparation expired while the replicated lease was being committed; run preflight again",
         ));
     }
+    lease.arm_local_fence();
     state.serving.wait_for_restart_admissions().await;
     let active_sessions = local_owned_media_sessions(&state).await;
     let drain = state.serving.restart_drain_status(active_sessions).await;
     if !drain.new_admissions_blocked {
         lease.release().await;
-        state
-            .serving
-            .cancel_restart_preparation(active_sessions)
-            .await;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "maintenance_preparation_expired",
             "maintenance preparation expired before pre-existing admissions settled; run preflight again",
         ));
     }
-    match state
-        .membership
-        .enter_maintenance(&node_id, lease.claim())
-        .await
-    {
-        Ok(status) => {
-            lease.disarm();
-            Ok(Json(status))
+    let membership = state.membership.clone();
+    let status = run_planned_outage_task(async move {
+        match membership.enter_maintenance(&node_id, lease.claim()).await {
+            Ok(status) => {
+                lease.disarm();
+                Ok(status)
+            }
+            Err(error) => {
+                let error = api_error(error);
+                match membership.reconcile_local_maintenance_commit().await {
+                    Ok(true) => {
+                        // The response path failed after the transaction became
+                        // durable. Keep the local drain and let the replicated
+                        // maintenance row remain the lifecycle owner.
+                        lease.disarm();
+                    }
+                    Ok(false) => lease.release().await,
+                    Err(reconcile_error) => {
+                        tracing::warn!(
+                            %reconcile_error,
+                            "maintenance commit outcome is unknown; retaining local and replicated fences until expiry"
+                        );
+                        // A failed linearizable read cannot authorize unfencing.
+                        // Both fences are already bounded by the committed lease
+                        // deadline and heartbeat reconciliation will repair the
+                        // local maintenance projection when quorum returns.
+                        lease.disarm();
+                    }
+                }
+                Err(error)
+            }
         }
-        Err(error) => {
-            let active_sessions = local_owned_media_sessions(&state).await;
-            state
-                .serving
-                .cancel_restart_preparation(active_sessions)
-                .await;
-            lease.release().await;
-            Err(api_error(error))
-        }
-    }
+    })
+    .await?;
+    Ok(Json(status))
 }
 
 pub async fn exit_maintenance(

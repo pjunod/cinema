@@ -1,8 +1,9 @@
 //! User management (admin only). The rules exist to make lockouts
 //! impossible: the last admin can be neither deleted nor demoted, and you
 //! cannot delete yourself. Password resets revoke the target's sessions.
-//! (A forgotten *admin* password is handled by `plurxd reset-password` on
-//! the server console, not by HTTP.)
+//! A forgotten last-admin password currently has no safe console reset path:
+//! the legacy direct-store command is refused because it cannot invalidate
+//! daemon-local recovery proofs. Admins can still reset other users here.
 
 use axum::extract::{Path, State};
 use axum::Json;

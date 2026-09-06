@@ -331,14 +331,33 @@ pub(crate) enum PlannedOutageOperation {
 pub(crate) struct PlannedOutageLeaseGuard {
     lease: Option<ClusterOperationLease>,
     membership: MembershipManager,
+    serving: crate::serving_fence::ServingFence,
+    local_fence_armed: bool,
     release_runtime: tokio::runtime::Handle,
 }
 
 impl PlannedOutageLeaseGuard {
-    fn new(lease: ClusterOperationLease, membership: MembershipManager) -> Self {
+    fn new(
+        lease: ClusterOperationLease,
+        membership: MembershipManager,
+        serving: crate::serving_fence::ServingFence,
+    ) -> Self {
         Self {
             lease: Some(lease),
             membership,
+            serving,
+            local_fence_armed: false,
+            release_runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    #[cfg(test)]
+    fn local_fence_only_for_test(serving: crate::serving_fence::ServingFence) -> Self {
+        Self {
+            lease: None,
+            membership: MembershipManager::unavailable(),
+            serving,
+            local_fence_armed: true,
             release_runtime: tokio::runtime::Handle::current(),
         }
     }
@@ -347,7 +366,15 @@ impl PlannedOutageLeaseGuard {
         self.lease.as_ref().expect("armed planned-outage lease")
     }
 
+    pub(crate) fn arm_local_fence(&mut self) {
+        self.local_fence_armed = true;
+    }
+
     pub(crate) async fn release(mut self) {
+        if self.local_fence_armed {
+            self.serving.cancel_restart_preparation(0).await;
+            self.local_fence_armed = false;
+        }
         let Some(lease) = self.lease.as_ref() else {
             return;
         };
@@ -362,22 +389,57 @@ impl PlannedOutageLeaseGuard {
     }
 
     pub(crate) fn disarm(mut self) {
+        self.local_fence_armed = false;
         self.lease.take();
     }
 }
 
 impl Drop for PlannedOutageLeaseGuard {
     fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
+        let lease = self.lease.take();
+        let cancel_local_fence = std::mem::take(&mut self.local_fence_armed);
+        if lease.is_none() && !cancel_local_fence {
             return;
-        };
+        }
         let membership = self.membership.clone();
+        let serving = self.serving.clone();
         self.release_runtime.spawn(async move {
-            if let Err(error) = membership.release_cluster_operation_lease(&lease).await {
-                tracing::warn!(%error, "failed to release cancelled planned-outage lease; expiry remains authoritative");
+            // Remove the process-local admission fence first. Releasing the
+            // replicated singleton before this point would let another caller
+            // acquire the global slot while fresh preflight still sees this
+            // node as preparing for an outage.
+            if cancel_local_fence {
+                serving.cancel_restart_preparation(0).await;
+            }
+            if let Some(lease) = lease {
+                if let Err(error) = membership.release_cluster_operation_lease(&lease).await {
+                    tracing::warn!(%error, "failed to release cancelled planned-outage lease; expiry remains authoritative");
+                }
             }
         });
     }
+}
+
+/// Keep ownership-bearing planned-outage work alive when an HTTP request is
+/// cancelled. Values sent after the receiver disappears are dropped in the
+/// spawned task, so their RAII cleanup still runs after the replicated outcome
+/// is known instead of racing an in-flight consensus write.
+pub(crate) async fn run_planned_outage_task<T, Work>(work: Work) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    Work: std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
+{
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = result_tx.send(work.await);
+    });
+    result_rx.await.unwrap_or_else(|_| {
+        Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "planned_outage_owner_failed",
+            "the planned-outage ownership task ended before reporting its replicated outcome",
+        ))
+    })
 }
 
 /// Claim the replicated membership-lifecycle exclusion before collecting the
@@ -390,22 +452,32 @@ pub(crate) async fn acquire_planned_outage_preflight(
     duration: Duration,
     operation: PlannedOutageOperation,
 ) -> Result<(PlannedOutageLeaseGuard, ClusterOperationsAggregate), ApiError> {
-    let lease = match operation {
+    let prepared_lease = match operation {
         PlannedOutageOperation::Restart => {
-            state
-                .membership
-                .acquire_restart_preparation(node_id, duration)
-                .await
+            MembershipManager::prepare_restart_preparation_claim(node_id, duration)
         }
         PlannedOutageOperation::Maintenance => {
-            state
-                .membership
-                .acquire_maintenance_preparation(node_id, duration)
-                .await
+            MembershipManager::prepare_maintenance_preparation_claim(node_id, duration)
         }
     }
     .map_err(api_error)?;
-    let lease = PlannedOutageLeaseGuard::new(lease, state.membership.clone());
+    // Own the exact intended claim before the replicated write is first
+    // polled. If the HTTP waiter disappears, the detached task still resolves
+    // the commit attempt before this guard can perform an exact release.
+    let lease = PlannedOutageLeaseGuard::new(
+        prepared_lease,
+        state.membership.clone(),
+        state.serving.clone(),
+    );
+    let membership = state.membership.clone();
+    let lease = run_planned_outage_task(async move {
+        membership
+            .commit_cluster_operation_lease(lease.claim())
+            .await
+            .map_err(api_error)?;
+        Ok(lease)
+    })
+    .await?;
     let evidence = collect_current_aggregate(state).await?;
     Ok((lease, evidence))
 }
@@ -742,7 +814,7 @@ pub(crate) async fn prepare_restart(
         ));
     }
     let duration = Duration::from_secs(request.expires_in_seconds.unwrap_or(900).clamp(60, 3_600));
-    let (lease, preflight) = acquire_planned_outage_preflight(
+    let (mut lease, preflight) = acquire_planned_outage_preflight(
         &state,
         &node_id,
         duration,
@@ -779,6 +851,7 @@ pub(crate) async fn prepare_restart(
             "restart preparation expired while the replicated lease was being committed; run preflight again",
         ));
     }
+    lease.arm_local_fence();
     state.serving.wait_for_restart_admissions().await;
     let active_sessions = local_owned_media_sessions(&state).await;
     let drain = state.serving.restart_drain_status(active_sessions).await;
@@ -1165,6 +1238,33 @@ where
     Ok(())
 }
 
+async fn refresh_cache_admin_revocation_capability_with<Refresh, RefreshFuture>(
+    cache: &super::extract::CacheOnlyAdminProofCache,
+    refresh_started: tokio::time::Instant,
+    refresh: Refresh,
+) -> Result<bool, String>
+where
+    Refresh: FnOnce() -> RefreshFuture,
+    RefreshFuture: std::future::Future<Output = Result<bool, String>>,
+{
+    let deadline = refresh_started + PEER_DIRECTORY_TIMEOUT;
+    let result = tokio::time::timeout_at(deadline, refresh()).await;
+    match result {
+        Ok(Ok(ready)) => {
+            cache.set_cluster_revocation_capability_ready(ready);
+            Ok(ready)
+        }
+        Ok(Err(error)) => {
+            cache.set_cluster_revocation_capability_ready(false);
+            Err(error)
+        }
+        Err(_) => {
+            cache.set_cluster_revocation_capability_ready(false);
+            Err("cache admin revocation capability projection timed out".to_owned())
+        }
+    }
+}
+
 fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_ms: u64) {
     transport.observations.retain_mut(|observation| {
         let source_phase = observation.phase;
@@ -1221,15 +1321,35 @@ pub(crate) async fn membership_status_cache_loop(
     }
     loop {
         let refresh_started = tokio::time::Instant::now();
-        let membership = state.membership.clone();
-        if let Err(error) = refresh_membership_status_cache_with(
-            &state.membership_status_cache,
-            refresh_started,
-            move || async move { membership.status().await.map_err(|error| error.to_string()) },
-        )
-        .await
-        {
+        let status_membership = state.membership.clone();
+        let capability_membership = state.membership.clone();
+        let (status_result, capability_result) = tokio::join!(
+            refresh_membership_status_cache_with(
+                &state.membership_status_cache,
+                refresh_started,
+                move || async move {
+                    status_membership
+                        .status()
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            ),
+            refresh_cache_admin_revocation_capability_with(
+                &state.cache_only_admin_proofs,
+                refresh_started,
+                move || async move {
+                    capability_membership
+                        .cache_admin_revocation_ready()
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            ),
+        );
+        if let Err(error) = status_result {
             tracing::warn!(%error, "could not refresh bounded cluster membership cache");
+        }
+        if let Err(error) = capability_result {
+            tracing::warn!(%error, "could not refresh cache admin revocation capability");
         }
         tokio::select! {
             () = shutdown.cancelled() => break,
@@ -2409,6 +2529,65 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn capability_refresh_error_and_rollback_clear_cache_only_admin_authority() {
+        let cache = crate::http::extract::CacheOnlyAdminProofCache::new(true);
+        let digest = plurx_core::auth::hash_token("capability-refresh-admin");
+        let admin = plurx_core::domain::User {
+            id: 77,
+            username: "owner".to_owned(),
+            password_hash: String::new(),
+            is_admin: true,
+            created_at: 1,
+        };
+
+        refresh_cache_admin_revocation_capability_with(
+            &cache,
+            tokio::time::Instant::now(),
+            || async { Ok(true) },
+        )
+        .await
+        .expect("all committed heartbeat proofs");
+        let ticket = cache.authentication_ticket();
+        cache.record_authenticated(ticket, digest.clone(), &admin);
+        assert!(cache.authenticate(&digest));
+
+        let ready = refresh_cache_admin_revocation_capability_with(
+            &cache,
+            tokio::time::Instant::now(),
+            || async { Ok(false) },
+        )
+        .await
+        .expect("an old-binary heartbeat is a valid closed verdict");
+        assert!(!ready);
+        assert!(!cache.authenticate(&digest));
+
+        refresh_cache_admin_revocation_capability_with(
+            &cache,
+            tokio::time::Instant::now(),
+            || async { Ok(true) },
+        )
+        .await
+        .expect("roll forward");
+        let ticket = cache.authentication_ticket();
+        cache.record_authenticated(ticket, digest.clone(), &admin);
+        assert!(cache.authenticate(&digest));
+
+        let timeout = refresh_cache_admin_revocation_capability_with(
+            &cache,
+            tokio::time::Instant::now(),
+            || async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(true)
+            },
+        )
+        .await
+        .expect_err("a stale capability projection must close authority");
+        assert!(timeout.contains("timed out"), "{timeout}");
+        assert!(!cache.authenticate(&digest));
+        assert!(cache.authentication_ticket().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_source_time() {
         assert!(
             PEER_STATUS_REFRESH_INTERVAL + PEER_DIRECTORY_TIMEOUT + PEER_STATUS_TIMEOUT
@@ -2954,6 +3133,28 @@ mod tests {
         );
 
         let source = include_str!("cluster_operations.rs");
+        let acquisition = source
+            .split_once("pub(crate) async fn acquire_planned_outage_preflight(")
+            .expect("planned-outage acquisition")
+            .1
+            .split_once("#[cfg(test)]\nasync fn acquire_then_collect_preflight")
+            .expect("planned-outage acquisition end")
+            .0;
+        let prepared_claim = acquisition
+            .find("prepare_restart_preparation_claim")
+            .expect("prepare exact claim before commit");
+        let guard = acquisition
+            .find("PlannedOutageLeaseGuard::new")
+            .expect("guard exact prepared claim");
+        let detached_owner = acquisition
+            .find("run_planned_outage_task(async move")
+            .expect("detach replicated acquisition owner");
+        let replicated_commit = acquisition
+            .find("commit_cluster_operation_lease(lease.claim())")
+            .expect("commit the guard-owned exact claim");
+        assert!(
+            prepared_claim < guard && guard < detached_owner && detached_owner < replicated_commit
+        );
         let current_collector = source
             .split_once("pub(crate) async fn collect_current_aggregate(")
             .expect("current preflight collector")
@@ -2976,6 +3177,7 @@ mod tests {
             .0;
         assert!(restart.contains("acquire_planned_outage_preflight("));
         assert!(restart.contains("PlannedOutageOperation::Restart"));
+        assert!(restart.contains("lease.arm_local_fence()"));
         assert!(restart.contains("lease.release().await"));
         assert!(restart.contains("lease.disarm()"));
         let maintenance_source = include_str!("cluster.rs");
@@ -2988,8 +3190,122 @@ mod tests {
             .0;
         assert!(maintenance.contains("acquire_planned_outage_preflight("));
         assert!(maintenance.contains("PlannedOutageOperation::Maintenance"));
+        assert!(maintenance.contains("lease.arm_local_fence()"));
+        assert!(maintenance.contains("run_planned_outage_task(async move"));
+        assert!(maintenance.contains("reconcile_local_maintenance_commit()"));
         assert!(maintenance.contains("lease.release().await"));
         assert!(maintenance.contains("lease.disarm()"));
+    }
+
+    async fn wait_for_local_planned_outage_cleanup(serving: &crate::serving_fence::ServingFence) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !serving.restart_drain_status(0).await.new_admissions_blocked {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("planned-outage Drop cleanup must clear the local fence");
+    }
+
+    #[tokio::test]
+    async fn cancelled_acquisition_waiter_releases_only_after_ambiguous_outcome_is_known() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let serving =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        assert!(
+            serving
+                .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+                .await
+        );
+        let acquisition_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let publish_outcome = std::sync::Arc::new(tokio::sync::Notify::new());
+        let waiter = tokio::spawn(run_planned_outage_task({
+            let serving = serving.clone();
+            let acquisition_started = acquisition_started.clone();
+            let publish_outcome = publish_outcome.clone();
+            async move {
+                acquisition_started.notify_one();
+                publish_outcome.notified().await;
+                Ok(PlannedOutageLeaseGuard::local_fence_only_for_test(serving))
+            }
+        }));
+        acquisition_started.notified().await;
+
+        waiter.abort();
+        assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
+        assert!(
+            serving.restart_drain_status(0).await.new_admissions_blocked,
+            "cancellation must not guess the outcome or clean up before acquisition returns"
+        );
+
+        publish_outcome.notify_one();
+        wait_for_local_planned_outage_cleanup(&serving).await;
+    }
+
+    #[tokio::test]
+    async fn abort_during_drain_cancels_the_guard_owned_local_fence() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let serving =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        assert!(
+            serving
+                .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+                .await
+        );
+        let drain_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let drain = tokio::spawn({
+            let serving = serving.clone();
+            let drain_started = drain_started.clone();
+            async move {
+                let _guard = PlannedOutageLeaseGuard::local_fence_only_for_test(serving);
+                drain_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        drain_started.notified().await;
+
+        drain.abort();
+        assert!(drain.await.expect_err("drain is cancelled").is_cancelled());
+        wait_for_local_planned_outage_cleanup(&serving).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_maintenance_waiter_does_not_cancel_the_owned_commit() {
+        let commit_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let finish_commit = std::sync::Arc::new(tokio::sync::Notify::new());
+        let committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter = tokio::spawn(run_planned_outage_task({
+            let commit_started = commit_started.clone();
+            let finish_commit = finish_commit.clone();
+            let committed = committed.clone();
+            async move {
+                commit_started.notify_one();
+                finish_commit.notified().await;
+                committed.store(true, std::sync::atomic::Ordering::Release);
+                Ok::<_, ApiError>(())
+            }
+        }));
+        commit_started.notified().await;
+
+        waiter.abort();
+        assert!(waiter
+            .await
+            .expect_err("waiter is cancelled")
+            .is_cancelled());
+        assert!(!committed.load(std::sync::atomic::Ordering::Acquire));
+        finish_commit.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !committed.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached maintenance owner must finish after HTTP cancellation");
     }
 
     #[tokio::test]

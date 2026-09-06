@@ -40,7 +40,7 @@ struct Request {
 /// Cancellation leaves remote fences active until their bounded TTL because
 /// clearing them while the Store commit outcome is unknown would be unsafe.
 pub(crate) struct ClusterCacheRevocation {
-    _local: CacheOnlyAdminRevocation,
+    local: Option<CacheOnlyAdminRevocation>,
     operation_id: String,
     peers: Vec<ActivityPeer>,
     transport: PeerTransport,
@@ -59,7 +59,10 @@ impl ClusterCacheRevocation {
         Self::begin(state, local).await
     }
 
-    async fn begin(state: &AppState, local: CacheOnlyAdminRevocation) -> Result<Self, ApiError> {
+    async fn begin(
+        state: &AppState,
+        mut local: CacheOnlyAdminRevocation,
+    ) -> Result<Self, ApiError> {
         let peers = peer_directory(state).await?;
         let transport = PeerTransport::new(state.membership.clone());
         let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
@@ -76,8 +79,12 @@ impl ClusterCacheRevocation {
             let _ = fanout(&transport, &peers, &cleanup).await;
             return Err(error);
         }
+        // No Store mutation can start before every peer has acknowledged the
+        // begin phase. Once this object reaches the handler, however, any
+        // cancellation or error may hide a committed Raft write.
+        local.arm_ambiguity();
         Ok(Self {
-            _local: local,
+            local: Some(local),
             operation_id,
             peers,
             transport,
@@ -87,7 +94,7 @@ impl ClusterCacheRevocation {
     /// End only after the caller's durable Store mutation. Unioning a fresh
     /// roster with the begin roster gives concurrently added members the final
     /// global invalidation before the API reports success.
-    pub(crate) async fn finish(self, state: &AppState) -> Result<(), ApiError> {
+    pub(crate) async fn finish(mut self, state: &AppState) -> Result<(), ApiError> {
         let current = match peer_directory(state).await {
             Ok(peers) => peers,
             Err(error) => {
@@ -107,7 +114,12 @@ impl ClusterCacheRevocation {
             let _ = fanout(&self.transport, &self.peers, &self.request(Phase::End)).await;
             return Err(propagation_error());
         }
-        fanout(&self.transport, &peers, &self.request(Phase::End)).await
+        fanout(&self.transport, &peers, &self.request(Phase::End)).await?;
+        self.local
+            .take()
+            .expect("cluster cache revocation owns its local fence")
+            .complete();
+        Ok(())
     }
 
     fn request(&self, phase: Phase) -> Request {

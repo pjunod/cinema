@@ -696,53 +696,83 @@ test("client-local receipt time ignores browser clocks ahead or behind the daemo
   }
 });
 
-test("receiver completion outranks a split-view sender failure for one snapshot", () => {
+test("receiver completion outranks every unacknowledged sender predecessor", () => {
   const ui = sandbox();
   const snapshotId = "snapshot-split-view";
   const snapshotFingerprint = "1".repeat(64);
-  const operations = {
-    nodes: [
-      {
-        transport: {
-          observing_node_id: 1,
-          observations: [
-            transportObservation("failed", {
-              observing_node_id: 1,
-              peer_node_id: 2,
-              direction: "outbound",
-              snapshot_id: snapshotId,
-              snapshot_fingerprint: snapshotFingerprint,
-            }),
-          ],
-        },
-      },
-      {
-        transport: {
-          observing_node_id: 2,
-          observations: [
-            transportObservation("complete", {
-              observing_node_id: 2,
-              peer_node_id: 1,
-              direction: "inbound",
-              snapshot_id: snapshotId,
-              snapshot_fingerprint: snapshotFingerprint,
-              acknowledged_offset: null,
-            }),
-          ],
-        },
-      },
-    ],
-  };
+  const receiverComplete = transportObservation("complete", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+    snapshot_id: snapshotId,
+    snapshot_fingerprint: snapshotFingerprint,
+    acknowledged_offset: null,
+  });
+  const node = (observation) => ({
+    transport: {
+      observing_node_id: observation.observing_node_id,
+      observations: [observation],
+    },
+  });
 
-  const waitingForAck = ui.clusterTransportExplanation(operations, 2, false);
-  assert.equal(waitingForAck.observation.phase, "complete");
-  assert.equal(
-    waitingForAck.text,
-    "snapshot received; sender acknowledgement unconfirmed",
-  );
-  const recovered = ui.clusterTransportExplanation(operations, 2, true);
-  assert.equal(recovered.observation.phase, "complete");
-  assert.equal(recovered.text, "snapshot recovered");
+  for (const phase of [
+    "failed",
+    "retrying",
+    "stalled",
+    "installing",
+    "awaiting_acknowledgement",
+  ]) {
+    const senderPredecessor = transportObservation(phase, {
+      observing_node_id: 1,
+      peer_node_id: 2,
+      direction: "outbound",
+      snapshot_id: snapshotId,
+      snapshot_fingerprint: snapshotFingerprint,
+      acknowledged_offset: null,
+    });
+    for (const observations of [
+      [senderPredecessor, receiverComplete],
+      [receiverComplete, senderPredecessor],
+    ]) {
+      const operations = { nodes: observations.map(node) };
+      const waitingForAck = ui.clusterTransportExplanation(operations, 2, false);
+      assert.equal(waitingForAck.observation.phase, "complete", `${phase}: phase`);
+      assert.equal(waitingForAck.observation.direction, "inbound", `${phase}: direction`);
+      assert.equal(
+        waitingForAck.text,
+        "snapshot received; sender acknowledgement unconfirmed",
+        phase,
+      );
+      const recovered = ui.clusterTransportExplanation(operations, 2, true);
+      assert.equal(recovered.observation.phase, "complete", `${phase}: recovered phase`);
+      assert.equal(recovered.text, "snapshot recovered", `${phase}: recovered text`);
+    }
+  }
+
+  // A sender Complete carrying the flushed acknowledgement remains causally
+  // stronger than the receiver's local completion in either row order.
+  const senderAcknowledged = transportObservation("complete", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: snapshotId,
+    snapshot_fingerprint: snapshotFingerprint,
+    acknowledged_offset: 4096,
+  });
+  for (const observations of [
+    [senderAcknowledged, receiverComplete],
+    [receiverComplete, senderAcknowledged],
+  ]) {
+    const acknowledged = ui.clusterTransportExplanation(
+      { nodes: observations.map(node) },
+      2,
+      false,
+    );
+    assert.equal(acknowledged.observation.phase, "complete");
+    assert.equal(acknowledged.observation.direction, "outbound");
+    assert.equal(acknowledged.observation.acknowledged_offset, 4096);
+    assert.equal(acknowledged.text, "waiting for startup watermark");
+  }
 });
 
 test("fresh snapshot identity outranks stale failure evidence from another observer", () => {
@@ -3837,21 +3867,106 @@ test("the restart poll holds its sample under a dialog, and still reads it", asy
   assert.deepEqual(state.clusterOps, drained, "and it stored exactly what it painted");
 });
 
-test("the manual refresh always paints what it stores", () => {
-  // The fourth repaint path deliberately has no deferral: the election dialog is
-  // modal, so the button that reaches this code cannot be clicked while one is
-  // open. What it must never do is store without painting.
-  const refresh = shippedSource("refreshClusterOperations");
-  const stored = refresh.indexOf("SETTINGS_DATA.clusterOps=ops;");
-  const paints = refresh.indexOf("repaintClusterPreserving(renderSettings)");
-  assert.notEqual(stored, -1);
-  assert.notEqual(paints, -1);
-  assert.ok(paints > stored, "the store is not followed by a repaint");
-  assert.doesNotMatch(refresh, /clusterRepaintDeferred/);
+test("initial secondary status hydration holds its staged result under a force-election decision", () => {
+  const loader = shippedSource("loadSettingsTab");
+  assert.match(loader, /const staged=tab==="cluster"&&key==="clusterOps"/);
+  assert.match(loader, /loadSettingsKey\(key,generation,!staged\)/);
+  assert.match(loader, /patchSettingsSecondary\(tab,key,value\)/);
+  let dialogOpen = true;
+  let readingAgePatches = 0;
+  const loaded = new Set();
+  const painted = [];
+  const next = { sample: "new" };
+  const harness = new Function(
+    "clusterRepaintDeferred", "patchClusterReadingAge", "repaintClusterPreserving",
+    "loaded", "record",
+    `let SETTINGS_DATA={};
+     const SETTINGS_LOADED=loaded;
+     const renderSettings=()=>record("render");
+     ${shippedSource("patchSettingsSecondary")}
+     return {patch:patchSettingsSecondary,ops:()=>SETTINGS_DATA.clusterOps};`,
+  )(
+    () => dialogOpen,
+    () => { readingAgePatches += 1; },
+    (paint) => paint(),
+    loaded,
+    (value) => painted.push(value),
+  );
+
+  harness.patch("cluster", "clusterOps", next);
+  assert.equal(harness.ops(), undefined, "the held initial sample was cached without a paint");
+  assert.equal(loaded.has("clusterOps"), false);
+  assert.deepEqual(painted, []);
+  assert.equal(readingAgePatches, 1);
+
+  dialogOpen = false;
+  harness.patch("cluster", "clusterOps", next);
+  assert.equal(harness.ops(), next);
+  assert.equal(loaded.has("clusterOps"), true);
+  assert.deepEqual(painted, ["render"]);
 });
 
-test("a failed manual refresh repaints retained transport through stall and expiry", async () => {
-  const run = async (elapsed, expected) => {
+test("a manual refresh holds a success if force election opens after the request starts", async () => {
+  let resolveRequest;
+  let dialogOpen = false;
+  let readingAgePatches = 0;
+  let requestStarted = false;
+  const previous = { sample: "painted" };
+  const next = { sample: "new" };
+  const loaded = new Set(["clusterOps"]);
+  const painted = [];
+  const mount = { innerHTML: "previous" };
+  const request = new Promise((resolve) => {
+    resolveRequest = resolve;
+  });
+  const harness = new Function(
+    "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
+    "clusterOperationsCard", "clusterOperationsUnavailable", "esc",
+    "clusterRepaintDeferred", "patchClusterReadingAge", "initialOps", "loaded", "record",
+    `let PAGE_RENDER_GENERATION=1;
+     let SETTINGS_DATA={clusterOps:initialOps};
+     const SETTINGS_LOADED=loaded;
+     const renderSettings=()=>record("render");
+     ${shippedSource("refreshClusterOperations")}
+     return {refresh:refreshClusterOperations,ops:()=>SETTINGS_DATA.clusterOps};`,
+  )(
+    { getElementById: () => mount },
+    (_key, _generation, cacheResult) => {
+      assert.equal(cacheResult, false, "the response was stored before the modal check");
+      requestStarted = true;
+      return request;
+    },
+    () => true,
+    (paint) => paint(),
+    () => "collecting",
+    (message) => `UNAVAILABLE:${message}`,
+    (value) => value,
+    () => dialogOpen,
+    () => { readingAgePatches += 1; },
+    previous,
+    loaded,
+    (value) => painted.push(value),
+  );
+
+  const pending = harness.refresh(null);
+  assert.equal(requestStarted, true);
+  dialogOpen = true;
+  resolveRequest(next);
+  await pending;
+  assert.deepEqual(painted, [], "the late success repainted over the decision");
+  assert.equal(harness.ops(), previous, "the held success was stored without being painted");
+  assert.equal(loaded.has("clusterOps"), false);
+  assert.equal(readingAgePatches, 1);
+
+  dialogOpen = false;
+  await harness.refresh(null);
+  assert.deepEqual(painted, ["render"], "the retry after the dialog closed did not repaint");
+  assert.equal(harness.ops(), next);
+  assert.equal(loaded.has("clusterOps"), true);
+});
+
+test("a failed manual refresh ages transport unless force election opens after request start", async () => {
+  const run = async (elapsed, expected, openAfterStart = false) => {
     const operations = transportOps([
       transportObservation("installing", {
         active_deadline_remaining_ms: 1_000,
@@ -3859,12 +3974,19 @@ test("a failed manual refresh repaints retained transport through stall and expi
       }),
     ]);
     let monotonicNow = 100;
+    let dialogOpen = false;
+    let rejectRequest;
+    let readingAgePatches = 0;
     const mount = { innerHTML: "previous" };
     const painted = [];
+    const request = new Promise((_resolve, reject) => {
+      rejectRequest = reject;
+    });
     const refresh = new Function(
       "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
       "clusterOperationsCard", "clusterOperationsUnavailable", "esc", "record",
-      "PlurxClusterPanel", "performance", "initialOps",
+      "PlurxClusterPanel", "performance", "initialOps", "clusterRepaintDeferred",
+      "patchClusterReadingAge",
       `let PAGE_RENDER_GENERATION=1;
        let SETTINGS_DATA={clusterOps:initialOps};
        const SETTINGS_LOADED=new Set(["clusterOps"]);
@@ -3878,7 +4000,10 @@ test("a failed manual refresh repaints retained transport through stall and expi
        return refreshClusterOperations;`,
     )(
       { getElementById: () => mount },
-      async () => { throw new Error("gateway"); },
+      (_key, _generation, cacheResult) => {
+        assert.equal(cacheResult, false, "the response was stored before the modal check");
+        return request;
+      },
       () => true,
       (paint) => paint(),
       () => "collecting",
@@ -3888,16 +4013,23 @@ test("a failed manual refresh repaints retained transport through stall and expi
       PANEL,
       { now: () => monotonicNow },
       operations,
+      () => dialogOpen,
+      () => { readingAgePatches += 1; },
     );
 
     monotonicNow += elapsed;
-    await refresh(null);
-    assert.deepEqual(painted, [expected]);
+    const pending = refresh(null);
+    dialogOpen = openAfterStart;
+    rejectRequest(new Error("gateway"));
+    await pending;
+    assert.deepEqual(painted, openAfterStart ? [] : [expected]);
+    assert.equal(readingAgePatches, openAfterStart ? 1 : 0);
     assert.equal(mount.innerHTML, "UNAVAILABLE:gateway");
   };
 
   await run(1_000, "stalled");
   await run(301_001, "unavailable");
+  await run(1_000, null, true);
 });
 
 test("every cluster status success receives a client-local monotonic baseline", () => {
@@ -4008,11 +4140,12 @@ test("a fetch is not a repaint, and the freshness row still ages", async () => {
 });
 
 test("every repaint on this tab preserves what the operator was looking at", () => {
-  // Three paths repaint the Cluster tab and all three must behave the same,
+  // Every asynchronous status path repaints the Cluster tab the same way,
   // because a 15s cadence turns "the scroll jumps" from a papercut into an
   // unusable panel. Pin the call sites: a helper nothing calls is the failure
   // mode this suite has already caught once.
   assert.match(shippedSource("settingsTick"), /repaintClusterPreserving\(renderSettings\)/);
+  assert.match(shippedSource("patchSettingsSecondary"), /repaintClusterPreserving\(renderSettings\)/);
   assert.match(shippedSource("refreshClusterOperations"), /repaintClusterPreserving\(renderSettings\)/);
   assert.match(shippedSource("pollLocalRestart"), /repaintClusterPreserving\(renderSettings\)/);
   // …and the restart poll stamps the same clock, so the two never probe at once.
@@ -4103,8 +4236,8 @@ test("the ledger's freshness cell is addressable, and the clock is stamped where
 test("every path that rewrites this tab goes through the preserving repaint", () => {
   // A bare renderSettings() on the Cluster tab throws away the roster scroll,
   // the open drill-downs, and the half-filled token form. Both branches of the
-  // tick, the manual refresh, the restart poll, and the three controls that
-  // repaint from inside the rail all use the helper.
+  // tick, initial secondary hydration, the manual refresh, the restart poll,
+  // and the three controls that repaint from inside the rail all use the helper.
   const tick = shippedSource("settingsTick");
   assert.equal(
     (tick.match(/repaintClusterPreserving\(renderSettings\)/g) || []).length,
@@ -4112,6 +4245,7 @@ test("every path that rewrites this tab goes through the preserving repaint", ()
     "the roster and both successful and failed direct-status branches preserve",
   );
   for (const handler of [
+    "patchSettingsSecondary",
     "refreshClusterOperations",
     "pollLocalRestart",
     "toggleClusterRailPanel",

@@ -109,6 +109,11 @@ const LEARNER_PROTOCOL_CAPABILITY: &str = "learner_protocol_v5";
 /// Proof that every active member understands readiness-gated routing and the
 /// promotion/removal intent rows introduced by the complete worker lifecycle.
 const LEARNER_LIFECYCLE_CAPABILITY: &str = "learner_lifecycle_v1";
+/// Proof that the running daemon participates in the begin/end invalidation
+/// protocol for process-local cache-only admin authorization. Unlike an
+/// activated Raft protocol this remains a rolling capability: consumers must
+/// stop using the cache whenever any committed member no longer proves it.
+const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v1";
 /// Minimum unreserved capacity required before a learner may be promoted.
 /// This is deliberately independent of media-cache headroom: a voter must
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
@@ -1822,6 +1827,22 @@ fn committed_capability_unready_nodes_sql(capability: &str) -> String {
     )
 }
 
+/// Whether every exact committed Raft member has a current capability proof.
+/// Starting from `json_each` is intentional: a configuration member whose SQL
+/// identity row has not applied yet is unready, not silently absent.
+fn committed_capability_ready_sql(capability: &str) -> String {
+    format!(
+        "SELECT COUNT(*) AS count FROM json_each($1) AS committed \
+         WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+           JOIN cluster_node_capabilities AS capability \
+             ON capability.node_id = active.node_id \
+          WHERE active.raft_id = CAST(committed.value AS INTEGER) \
+            AND active.removed_at IS NULL \
+            AND capability.capability = '{capability}' \
+            AND capability.last_seen_at = active.last_seen_at)"
+    )
+}
+
 /// Which copy of replicated state a read may answer from.
 ///
 /// The roster route has to keep answering during quorum loss — that is when an
@@ -2010,8 +2031,11 @@ pub struct ArtworkPeerAuth {
     pub signature: String,
 }
 
-/// Exact ownership proof for the one cluster-wide planned-outage slot.
-/// Callers cannot construct one; the replicated compare-and-swap does.
+/// Exact claim identity for the one cluster-wide planned-outage slot.
+///
+/// Callers cannot construct one directly. A prepared value does not by itself
+/// prove that the replicated compare-and-swap committed; it lets the caller
+/// retain the exact cleanup identity across that asynchronous commit attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClusterOperationLease {
     node_id: String,
@@ -3582,13 +3606,12 @@ impl MembershipManager {
                 ),
             ),
         ];
-        // Same transaction, same timestamp, same coupling: a protocol-5
-        // capability row can only carry this heartbeat's `last_seen_at` if this
-        // binary wrote this heartbeat. A rollback to an older build advances
-        // `cluster_nodes.last_seen_at` without touching this row, and the
-        // equality that activation requires breaks. That is the whole contract,
-        // so the only way to omit the statement is to be the emulated old
-        // binary the validation harness starts.
+        // Same transaction, same timestamp, same coupling: a rolling
+        // capability row can carry this heartbeat's `last_seen_at` only if
+        // this binary wrote both. A rollback to an older build advances
+        // `cluster_nodes.last_seen_at` without touching these rows, and their
+        // readiness equality breaks. The validation harness omits all three
+        // current rolling capabilities when it emulates the older binary.
         if !emulate_pre_learner_protocol_heartbeat() {
             statements.push((
                 "INSERT INTO cluster_node_capabilities \
@@ -3611,6 +3634,18 @@ impl MembershipManager {
                 params!(
                     inner.identity.node_id.as_str(),
                     LEARNER_LIFECYCLE_CAPABILITY,
+                    now
+                ),
+            ));
+            statements.push((
+                "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    CACHE_ADMIN_REVOCATION_CAPABILITY,
                     now
                 ),
             ));
@@ -4202,6 +4237,25 @@ impl MembershipManager {
             .is_some_and(|inner| inner.local_maintenance.load(Ordering::Acquire))
     }
 
+    /// Resolve an ambiguous maintenance commit with a linearizable read before
+    /// a caller removes its process-local drain or replicated claim. A failed
+    /// reconciliation publishes the conservative local maintenance fence; a
+    /// successful read publishes the durable row's exact state.
+    pub async fn reconcile_local_maintenance_commit(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let publication = LocalMaintenancePublication::new(&inner.local_maintenance);
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_node_maintenance WHERE node_id = $1",
+                params!(inner.identity.node_id.as_str()),
+            )
+            .await?;
+        let committed = rows.first().is_some_and(|row| row.count == 1);
+        publication.commit(committed);
+        Ok(committed)
+    }
+
     pub async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
@@ -4275,56 +4329,70 @@ impl MembershipManager {
         trigger_election(&inner.local.api_address, &inner.secrets.api).await
     }
 
-    /// Acquire the one replicated planned-outage slot before this process
-    /// fences any local restart admissions.
-    pub async fn acquire_restart_preparation(
-        &self,
+    /// Prepare the exact restart claim identity before any cancellable
+    /// replicated work begins. The claim must subsequently be passed to
+    /// [`Self::commit_cluster_operation_lease`].
+    pub fn prepare_restart_preparation_claim(
         node_id: &str,
         duration: Duration,
     ) -> Result<ClusterOperationLease, MembershipError> {
-        self.acquire_cluster_operation_lease(node_id, "restart", duration)
-            .await
+        Self::prepare_cluster_operation_lease(node_id, "restart", duration)
     }
 
-    /// Acquire the same slot for maintenance. The returned proof must be
-    /// consumed by `enter_maintenance`; it cannot authorize any other node.
-    pub async fn acquire_maintenance_preparation(
-        &self,
+    /// Prepare the exact maintenance claim identity before any cancellable
+    /// replicated work begins. The claim must subsequently be passed to
+    /// [`Self::commit_cluster_operation_lease`].
+    pub fn prepare_maintenance_preparation_claim(
         node_id: &str,
         duration: Duration,
     ) -> Result<ClusterOperationLease, MembershipError> {
-        self.acquire_cluster_operation_lease(node_id, "maintenance", duration)
-            .await
+        Self::prepare_cluster_operation_lease(node_id, "maintenance", duration)
     }
 
-    async fn acquire_cluster_operation_lease(
-        &self,
+    fn prepare_cluster_operation_lease(
         node_id: &str,
         operation: &'static str,
         duration: Duration,
     ) -> Result<ClusterOperationLease, MembershipError> {
-        let inner = self.replicated_inner()?;
         let now = unix_ms()?;
         let lease_duration = duration.saturating_add(CLUSTER_OPERATION_LEASE_EXPIRY_GRACE);
         let duration_ms = i64::try_from(lease_duration.as_millis()).unwrap_or(i64::MAX);
         let expires_at = now.saturating_add(duration_ms);
         let claim_id = uuid::Uuid::new_v4().to_string();
-        let changed = inner
-            .client
-            .execute(
-                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
-                params!(node_id, operation, claim_id.as_str(), expires_at, now),
-            )
-            .await?;
-        if changed != 1 {
-            return Err(MembershipError::ClusterOperationPending);
-        }
         Ok(ClusterOperationLease {
             node_id: node_id.to_owned(),
             operation,
             claim_id,
             expires_at_unix_ms: expires_at,
         })
+    }
+
+    /// Commit one prepared exact claim. Keeping the value owned by a guard
+    /// across this await lets a cancelled caller release only this attempt
+    /// after the write has returned, including when its response is ambiguous.
+    pub async fn commit_cluster_operation_lease(
+        &self,
+        lease: &ClusterOperationLease,
+    ) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        let changed = inner
+            .client
+            .execute(
+                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                params!(
+                    lease.node_id.as_str(),
+                    lease.operation,
+                    lease.claim_id.as_str(),
+                    lease.expires_at_unix_ms,
+                    now
+                ),
+            )
+            .await?;
+        if changed != 1 {
+            return Err(MembershipError::ClusterOperationPending);
+        }
+        Ok(())
     }
 
     /// Release one exact failed claim. A successor claim, even for the same
@@ -5759,6 +5827,35 @@ impl MembershipManager {
                 permanent_majority_loss_supported: false,
             },
         })
+    }
+
+    /// Store-free recovery auth is safe only while every member in the exact
+    /// committed Raft configuration proves that its currently heartbeating
+    /// binary propagates cache revocations. This reads local applied SQL so it
+    /// remains usable during quorum loss; a missing identity row, stale proof,
+    /// oversized roster, or empty configuration all fail closed.
+    pub async fn cache_admin_revocation_ready(&self) -> Result<bool, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(true);
+        };
+        let metrics = inner.client.metrics_db().await?;
+        let members = metrics
+            .membership_config
+            .nodes()
+            .map(|(raft_id, _)| *raft_id)
+            .collect::<BTreeSet<_>>();
+        if members.is_empty() {
+            return Ok(false);
+        }
+        let members_json = bounded_committed_raft_ids_json(&members)?;
+        let rows = inner
+            .client
+            .query_map::<CountRow, _>(
+                committed_capability_ready_sql(CACHE_ADMIN_REVOCATION_CAPABILITY),
+                params!(members_json),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count == 0))
     }
 
     /// Promote one ready learner into the committed voter set.
@@ -11130,6 +11227,52 @@ mod tests {
         assert_eq!(active_range(&connection), (4, 4));
     }
 
+    #[test]
+    fn cache_revocation_capability_covers_the_exact_committed_roster_and_rollback() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        for node_id in ["node-a", "node-b", "node-c"] {
+            connection
+                .execute(
+                    "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                     SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
+                    rusqlite::params![node_id, CACHE_ADMIN_REVOCATION_CAPABILITY],
+                )
+                .expect("write cache revocation capability with the heartbeat");
+        }
+        let ready = |members: &str| {
+            connection
+                .query_row(
+                    &committed_capability_ready_sql(CACHE_ADMIN_REVOCATION_CAPABILITY),
+                    rusqlite::params![members],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read exact committed capability verdict")
+                == 0
+        };
+
+        assert!(ready("[1,2,3]"));
+        assert!(
+            !ready("[1,2,3,4]"),
+            "a committed member with no applied identity row is not silently omitted"
+        );
+
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = last_seen_at + 1 \
+                 WHERE node_id = 'node-b'",
+                [],
+            )
+            .expect("rolled-back binary heartbeat");
+        assert!(
+            !ready("[1,2,3]"),
+            "an older binary advancing its heartbeat invalidates the proof"
+        );
+        assert!(
+            ready("[1,3]"),
+            "a member no longer in the committed Raft configuration cannot hold the gate closed"
+        );
+    }
+
     /// A binary old enough to predate heartbeat intents is caught one step
     /// earlier: the replicated trigger drops every capability that node holds,
     /// including the protocol-5 one, the moment it writes a heartbeat.
@@ -11403,6 +11546,10 @@ mod tests {
         assert!(
             commit_heartbeat.contains("LEARNER_PROTOCOL_CAPABILITY"),
             "the learner capability must be written by the heartbeat itself"
+        );
+        assert!(
+            commit_heartbeat.contains("CACHE_ADMIN_REVOCATION_CAPABILITY"),
+            "cache revocation capability must be written by the heartbeat itself"
         );
         // One statement list, submitted once. The heartbeat builds its
         // statements before it submits them so the capability write can be

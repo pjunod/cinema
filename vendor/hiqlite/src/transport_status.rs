@@ -172,6 +172,13 @@ pub(crate) enum InboundSnapshotDisposition {
     Failed(&'static str),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InboundSnapshotUpdate {
+    Admit,
+    Complete,
+    EndUnadmitted,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ObservationKey {
     raft_group: &'static str,
@@ -861,7 +868,7 @@ impl LocalSnapshotTransportStatus {
         done: bool,
         deadline: Instant,
     ) {
-        self.update_inbound_attempt(attempt, true, |observation, now| {
+        self.update_inbound_attempt(attempt, InboundSnapshotUpdate::Admit, |observation, now| {
             observation.deadline = Some(deadline);
             observation.phase = if done {
                 SnapshotTransportPhase::Installing
@@ -882,48 +889,52 @@ impl LocalSnapshotTransportStatus {
         next_chunk_deadline: Option<Instant>,
         disposition: InboundSnapshotDisposition,
     ) {
-        self.update_inbound_attempt(attempt, false, |observation, now| {
-            observation.operation_owns_work = false;
-            observation.last_update = now;
-            match disposition {
-                InboundSnapshotDisposition::Succeeded => {
-                    // Finishing the node-owned install only means bytes are
-                    // durable locally. The response still has to cross and flush
-                    // the WebSocket before the sender can call it acknowledged.
-                    observation.deadline = (!done).then_some(next_chunk_deadline).flatten();
-                    let previous = observation.locally_received_bytes.unwrap_or_default();
-                    if locally_received_offset > previous {
-                        observation.locally_received_bytes = Some(locally_received_offset);
-                        observation.last_local_receive = Some(now);
+        self.update_inbound_attempt(
+            attempt,
+            InboundSnapshotUpdate::Complete,
+            |observation, now| {
+                observation.operation_owns_work = false;
+                observation.last_update = now;
+                match disposition {
+                    InboundSnapshotDisposition::Succeeded => {
+                        // Finishing the node-owned install only means bytes are
+                        // durable locally. The response still has to cross and flush
+                        // the WebSocket before the sender can call it acknowledged.
+                        observation.deadline = (!done).then_some(next_chunk_deadline).flatten();
+                        let previous = observation.locally_received_bytes.unwrap_or_default();
+                        if locally_received_offset > previous {
+                            observation.locally_received_bytes = Some(locally_received_offset);
+                            observation.last_local_receive = Some(now);
+                        }
+                        if done {
+                            observation.total_bytes = Some(
+                                observation
+                                    .total_bytes
+                                    .unwrap_or_default()
+                                    .max(locally_received_offset),
+                            );
+                        }
+                        observation.phase = if done {
+                            SnapshotTransportPhase::Complete
+                        } else {
+                            SnapshotTransportPhase::Transferring
+                        };
+                        observation.last_error_category = None;
                     }
-                    if done {
-                        observation.total_bytes = Some(
-                            observation
-                                .total_bytes
-                                .unwrap_or_default()
-                                .max(locally_received_offset),
-                        );
+                    InboundSnapshotDisposition::Retrying(category) => {
+                        observation.phase = SnapshotTransportPhase::Retrying;
+                        observation.deadline = (!done).then_some(next_chunk_deadline).flatten();
+                        observation.last_error_category = Some(category);
+                        observation.retry_count = observation.retry_count.saturating_add(1);
                     }
-                    observation.phase = if done {
-                        SnapshotTransportPhase::Complete
-                    } else {
-                        SnapshotTransportPhase::Transferring
-                    };
-                    observation.last_error_category = None;
+                    InboundSnapshotDisposition::Failed(category) => {
+                        observation.phase = SnapshotTransportPhase::Failed;
+                        observation.deadline = None;
+                        observation.last_error_category = Some(category);
+                    }
                 }
-                InboundSnapshotDisposition::Retrying(category) => {
-                    observation.phase = SnapshotTransportPhase::Retrying;
-                    observation.deadline = (!done).then_some(next_chunk_deadline).flatten();
-                    observation.last_error_category = Some(category);
-                    observation.retry_count = observation.retry_count.saturating_add(1);
-                }
-                InboundSnapshotDisposition::Failed(category) => {
-                    observation.phase = SnapshotTransportPhase::Failed;
-                    observation.deadline = None;
-                    observation.last_error_category = Some(category);
-                }
-            }
-        });
+            },
+        );
     }
 
     pub(crate) fn inbound_request_ended(
@@ -932,37 +943,41 @@ impl LocalSnapshotTransportStatus {
         next_chunk_deadline: Option<Instant>,
         disposition: InboundSnapshotDisposition,
     ) {
-        self.update_inbound_attempt(attempt, false, |observation, now| {
-            // A worker may win the race with socket teardown. Never replace
-            // its running or already-published result with an admission error.
-            if observation.operation_owns_work
-                || observation.phase == SnapshotTransportPhase::Complete
-                || observation.last_error_category.is_some()
-            {
-                return;
-            }
-            observation.last_update = now;
-            match disposition {
-                InboundSnapshotDisposition::Succeeded => {}
-                InboundSnapshotDisposition::Retrying(category) => {
-                    observation.phase = SnapshotTransportPhase::Retrying;
-                    observation.deadline = next_chunk_deadline;
-                    observation.last_error_category = Some(category);
-                    observation.retry_count = observation.retry_count.saturating_add(1);
+        self.update_inbound_attempt(
+            attempt,
+            InboundSnapshotUpdate::EndUnadmitted,
+            |observation, now| {
+                // A worker may win the race with socket teardown. Never replace
+                // its running or already-published result with an admission error.
+                if observation.operation_owns_work
+                    || observation.phase == SnapshotTransportPhase::Complete
+                    || observation.last_error_category.is_some()
+                {
+                    return;
                 }
-                InboundSnapshotDisposition::Failed(category) => {
-                    observation.phase = SnapshotTransportPhase::Failed;
-                    observation.deadline = None;
-                    observation.last_error_category = Some(category);
+                observation.last_update = now;
+                match disposition {
+                    InboundSnapshotDisposition::Succeeded => {}
+                    InboundSnapshotDisposition::Retrying(category) => {
+                        observation.phase = SnapshotTransportPhase::Retrying;
+                        observation.deadline = next_chunk_deadline;
+                        observation.last_error_category = Some(category);
+                        observation.retry_count = observation.retry_count.saturating_add(1);
+                    }
+                    InboundSnapshotDisposition::Failed(category) => {
+                        observation.phase = SnapshotTransportPhase::Failed;
+                        observation.deadline = None;
+                        observation.last_error_category = Some(category);
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     fn update_inbound_attempt(
         &self,
         attempt: &InboundSnapshotAttempt,
-        admit: bool,
+        mode: InboundSnapshotUpdate,
         mutate: impl FnOnce(&mut Observation, Instant),
     ) {
         let now = Instant::now();
@@ -979,52 +994,91 @@ impl LocalSnapshotTransportStatus {
         if !self.make_room(&mut state, now, &key) {
             return;
         }
+        let assigned_attempt_id = attempt.status_attempt_id.load(Ordering::Acquire);
+        let mut status_attempt_id = assigned_attempt_id.max(attempt.observed_attempt_id);
+        let same_snapshot = state.observations.get(&key).is_some_and(|observation| {
+            observation.attempt_id != 0
+                && observation.snapshot_identity_fingerprint
+                    == Some(attempt.snapshot_identity_fingerprint)
+        });
+        match mode {
+            InboundSnapshotUpdate::Admit => {
+                if assigned_attempt_id == 0 {
+                    if state.observations.get(&key).is_some_and(|observation| {
+                        observation.operation_owns_work && !same_snapshot
+                    }) {
+                        return;
+                    }
+                    // Receipt's observed generation may have been superseded
+                    // by a terminally published changed identity while this
+                    // request waited. Worker start is a new publication in
+                    // that case and therefore receives the next ID rather
+                    // than moving status backwards to the receipt's old ID.
+                    status_attempt_id = if same_snapshot {
+                        state
+                            .observations
+                            .get(&key)
+                            .map_or(0, |observation| observation.attempt_id)
+                    } else {
+                        state.next_inbound_attempt = state.next_inbound_attempt.saturating_add(1);
+                        state.next_inbound_attempt
+                    };
+                    attempt
+                        .status_attempt_id
+                        .store(status_attempt_id, Ordering::Release);
+                }
+            }
+            InboundSnapshotUpdate::Complete => {
+                // Completion never invents or registers an attempt. Only the
+                // worker-start path above owns that authority.
+                if status_attempt_id == 0 || !state.observations.contains_key(&key) {
+                    return;
+                }
+            }
+            InboundSnapshotUpdate::EndUnadmitted => {
+                if status_attempt_id == 0 {
+                    if state.observations.get(&key).is_some_and(|observation| {
+                        observation.operation_owns_work && !same_snapshot
+                    }) {
+                        return;
+                    }
+                    status_attempt_id = if same_snapshot {
+                        state
+                            .observations
+                            .get(&key)
+                            .map_or(0, |observation| observation.attempt_id)
+                    } else {
+                        // A first or changed identity that never reached the
+                        // worker gets its attempt number at terminal
+                        // publication, so receipt scheduling cannot make IDs
+                        // regress relative to later worker starts.
+                        state.next_inbound_attempt = state.next_inbound_attempt.saturating_add(1);
+                        state.next_inbound_attempt
+                    };
+                    attempt
+                        .status_attempt_id
+                        .store(status_attempt_id, Ordering::Release);
+                }
+            }
+        }
         if !state.observations.contains_key(&key) {
-            if !admit {
+            if mode == InboundSnapshotUpdate::Complete {
                 return;
             }
             state
                 .observations
                 .insert(key.clone(), empty_observation(now));
         }
-        let status_attempt_id = if admit {
-            let assigned = attempt.status_attempt_id.load(Ordering::Acquire);
-            if assigned != 0 {
-                assigned
-            } else {
-                let same_snapshot = state.observations.get(&key).is_some_and(|observation| {
-                    observation.attempt_id != 0
-                        && observation.snapshot_identity_fingerprint
-                            == Some(attempt.snapshot_identity_fingerprint)
-                });
-                let assigned = if same_snapshot {
-                    state
-                        .observations
-                        .get(&key)
-                        .map_or(0, |observation| observation.attempt_id)
-                } else {
-                    state.next_inbound_attempt = state.next_inbound_attempt.saturating_add(1);
-                    state.next_inbound_attempt
-                };
-                attempt.status_attempt_id.store(assigned, Ordering::Release);
-                assigned
-            }
-        } else {
-            let assigned = attempt
-                .status_attempt_id
-                .load(Ordering::Acquire)
-                .max(attempt.observed_attempt_id);
-            if assigned == 0 {
-                return;
-            }
-            assigned
-        };
         let Some(observation) = state.observations.get_mut(&key) else {
             return;
         };
         if observation.attempt_id != status_attempt_id {
-            if !admit
-                || observation.operation_owns_work
+            // Worker admission is the ownership linearization point and may
+            // supersede a newer receipt-only terminal observation. Receipt or
+            // completion cleanup may replace only an idle older generation;
+            // it can never displace active worker authority.
+            if observation.operation_owns_work
+                || mode == InboundSnapshotUpdate::Complete
                 || status_attempt_id < observation.attempt_id
             {
                 return;
@@ -2068,6 +2122,76 @@ mod tests {
             status.snapshot().observations[0].snapshot_id.as_deref(),
             Some("worker-owned")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_receipt_before_earlier_worker_start_keeps_attempt_ids_monotonic() {
+        let status = LocalSnapshotTransportStatus::new(2, BTreeSet::from([1]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let queued_b = status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: "snapshot-b",
+                offset: 0,
+                len: 64,
+                done: true,
+                socket_epoch: 1,
+                deadline,
+            })
+            .expect("queue snapshot B");
+        let terminal_c = status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: "snapshot-c",
+                offset: 0,
+                len: 32,
+                done: false,
+                socket_epoch: 2,
+                deadline,
+            })
+            .expect("receive snapshot C");
+
+        status.inbound_request_ended(
+            &terminal_c,
+            Some(deadline),
+            InboundSnapshotDisposition::Retrying("snapshot_connection_closed"),
+        );
+        let c_attempt_id = status.snapshot().observations[0].attempt_id;
+        assert_ne!(c_attempt_id, 0);
+
+        status.inbound_admitted(&queued_b, true, deadline);
+        let b_attempt_id = queued_b.status_attempt_id.load(Ordering::Acquire);
+        let installing = &status.snapshot().observations[0];
+        assert!(b_attempt_id > c_attempt_id);
+        assert_eq!(installing.attempt_id, b_attempt_id);
+        assert_eq!(installing.snapshot_id.as_deref(), Some("snapshot-b"));
+        assert_eq!(installing.phase, SnapshotTransportPhase::Installing);
+        assert!(installing.operation_owns_work);
+
+        status.inbound_request_ended(
+            &terminal_c,
+            Some(deadline),
+            InboundSnapshotDisposition::Retrying("snapshot_connection_closed"),
+        );
+        assert_eq!(status.snapshot().observations[0].attempt_id, b_attempt_id);
+        status.inbound_finished(
+            &queued_b,
+            64,
+            true,
+            None,
+            InboundSnapshotDisposition::Succeeded,
+        );
+        status.inbound_request_ended(
+            &terminal_c,
+            Some(deadline),
+            InboundSnapshotDisposition::Retrying("snapshot_connection_closed"),
+        );
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.attempt_id, b_attempt_id);
+        assert_eq!(completed.phase, SnapshotTransportPhase::Complete);
+        assert!(!completed.operation_owns_work);
     }
 
     #[tokio::test(start_paused = true)]

@@ -106,6 +106,25 @@ enum RaftWorkSelection<T> {
     Work(T),
 }
 
+enum RaftRequestTermination {
+    WriterFinished(Result<Result<(), String>, oneshot::error::RecvError>),
+    ReaderFinished(Result<Result<(), String>, oneshot::error::RecvError>),
+    RequestChannelClosed,
+}
+
+async fn select_raft_request(
+    writer_finished: &mut oneshot::Receiver<Result<(), String>>,
+    reader_finished: &mut oneshot::Receiver<Result<(), String>>,
+    requests: &flume::Receiver<PreparedRaftRequest>,
+) -> Result<PreparedRaftRequest, RaftRequestTermination> {
+    tokio::select! {
+        biased;
+        writer = writer_finished => Err(RaftRequestTermination::WriterFinished(writer)),
+        reader = reader_finished => Err(RaftRequestTermination::ReaderFinished(reader)),
+        request = requests.recv_async() => request.map_err(|_| RaftRequestTermination::RequestChannelClosed),
+    }
+}
+
 async fn select_raft_work<T, Work>(
     writer_finished: &mut oneshot::Receiver<Result<(), String>>,
     reader_finished: &mut oneshot::Receiver<Result<(), String>>,
@@ -226,6 +245,8 @@ async fn handle_socket(
     let (tx_read, rx_read) = flume::bounded(1);
     let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
     let reader_connection_closed = tx_connection_closed.clone();
+    let reader_snapshot_transport = state.snapshot_transport.clone();
+    let reader_admission_budgets = SnapshotAdmissionBudgets::from_state(&state);
     let handle_read = task::spawn(async move {
         let outcome = loop {
             let frame = match read
@@ -243,7 +264,7 @@ async fn handle_socket(
                 Ok(frame) => frame,
                 Err(err) => break Err(err.to_string()),
             };
-            let req = match frame.opcode {
+            let request = match frame.opcode {
                 OpCode::Close => {
                     debug!("received Close frame in server stream");
                     break Ok(());
@@ -257,6 +278,17 @@ async fn handle_socket(
                 }
                 _ => break Err("non-binary Raft stream payload".to_owned()),
             };
+            // Preparation is synchronous and precedes both ownership transfer
+            // to the bounded queue and publication of reader completion. The
+            // queued value therefore owns status cleanup even when the biased
+            // socket supervisor observes EOF before dequeuing it.
+            let req = PreparedRaftRequest::new(
+                &reader_snapshot_transport,
+                reader_admission_budgets,
+                peer_node_id,
+                socket_epoch,
+                request,
+            );
 
             tokio::select! {
                 _ = rx_connection_closed.changed() => break Ok(()),
@@ -273,37 +305,30 @@ async fn handle_socket(
 
     let mut writer_failed = false;
     loop {
-        let req = tokio::select! {
-            biased;
-            writer = &mut rx_writer_finished => {
-                match writer {
-                    Ok(Ok(())) => error!("Raft server WebSocket writer exited while connected"),
-                    Ok(Err(err)) => error!("Raft server WebSocket writer failed: {err}"),
-                    Err(_) => error!("Raft server WebSocket writer panicked or was cancelled"),
+        let req =
+            match select_raft_request(&mut rx_writer_finished, &mut rx_reader_finished, &rx_read)
+                .await
+            {
+                Err(RaftRequestTermination::WriterFinished(writer)) => {
+                    match writer {
+                        Ok(Ok(())) => error!("Raft server WebSocket writer exited while connected"),
+                        Ok(Err(err)) => error!("Raft server WebSocket writer failed: {err}"),
+                        Err(_) => error!("Raft server WebSocket writer panicked or was cancelled"),
+                    }
+                    writer_failed = true;
+                    break;
                 }
-                writer_failed = true;
-                break;
-            }
-            reader = &mut rx_reader_finished => {
-                match reader {
-                    Ok(Ok(())) => debug!("Raft server WebSocket reader exited"),
-                    Ok(Err(err)) => error!("Raft server WebSocket reader failed: {err}"),
-                    Err(_) => error!("Raft server WebSocket reader panicked or was cancelled"),
+                Err(RaftRequestTermination::ReaderFinished(reader)) => {
+                    match reader {
+                        Ok(Ok(())) => debug!("Raft server WebSocket reader exited"),
+                        Ok(Err(err)) => error!("Raft server WebSocket reader failed: {err}"),
+                        Err(_) => error!("Raft server WebSocket reader panicked or was cancelled"),
+                    }
+                    break;
                 }
-                break;
-            }
-            req = rx_read.recv_async() => match req {
+                Err(RaftRequestTermination::RequestChannelClosed) => break,
                 Ok(req) => req,
-                Err(_) => break,
-            },
-        };
-        let req = PreparedRaftRequest::new(
-            &state.snapshot_transport,
-            SnapshotAdmissionBudgets::from_state(&state),
-            peer_node_id,
-            socket_epoch,
-            req,
-        );
+            };
 
         #[cfg(feature = "validation-test-helpers")]
         if crate::network::raft_client::validation_raft_partitioned() {
@@ -810,6 +835,138 @@ mod tests {
                 deadline: time::Instant::now() + Duration::from_secs(30),
             })
             .expect("track inbound snapshot")
+    }
+
+    #[cfg(feature = "sqlite")]
+    async fn drop_queued_snapshot_after_biased_reader_eof(
+        status: &crate::LocalSnapshotTransportStatus,
+        snapshot_id: &str,
+        offset: u64,
+    ) {
+        let prepared_request = PreparedRaftRequest::new(
+            status,
+            SnapshotAdmissionBudgets::uniform(
+                time::Instant::now() + Duration::from_secs(30),
+                Duration::from_secs(1),
+            ),
+            1,
+            1,
+            RaftStreamRequest::SnapshotDB((
+                7,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: openraft::SnapshotMeta {
+                        last_log_id: None,
+                        last_membership: Default::default(),
+                        snapshot_id: snapshot_id.to_owned(),
+                    },
+                    offset,
+                    data: vec![0; 64],
+                    done: false,
+                },
+            )),
+        );
+        let (requests, queued_requests) = flume::bounded(1);
+        assert!(requests.send(prepared_request).is_ok());
+        drop(requests);
+        let (keep_writer_open, mut writer_finished) = oneshot::channel();
+        let (reader_done, mut reader_finished) = oneshot::channel();
+        reader_done.send(Ok(())).expect("signal reader close");
+
+        let selected =
+            select_raft_request(&mut writer_finished, &mut reader_finished, &queued_requests).await;
+        assert!(matches!(
+            selected,
+            Err(RaftRequestTermination::ReaderFinished(Ok(Ok(()))))
+        ));
+        drop(keep_writer_open);
+        drop(queued_requests);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn first_snapshot_identity_reports_terminal_status_when_reader_eof_wins() {
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        drop_queued_snapshot_after_biased_reader_eof(&status, "first-socket-close", 0).await;
+
+        let observation = &status.snapshot().observations[0];
+        assert_ne!(observation.attempt_id, 0);
+        assert_eq!(
+            observation.snapshot_id.as_deref(),
+            Some("first-socket-close")
+        );
+        assert_eq!(observation.phase, crate::SnapshotTransportPhase::Retrying);
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("snapshot_connection_closed")
+        );
+        assert_eq!(observation.retry_count, 1);
+        assert!(!observation.operation_owns_work);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn changed_snapshot_identity_reports_terminal_status_when_reader_eof_wins() {
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        let old = track_inbound_attempt(&status, "old-snapshot", 0, 64, true, 1);
+        status.inbound_admitted(&old, true, time::Instant::now() + Duration::from_secs(30));
+        status.inbound_finished(
+            &old,
+            64,
+            true,
+            None,
+            crate::transport_status::InboundSnapshotDisposition::Succeeded,
+        );
+        let old_attempt_id = status.snapshot().observations[0].attempt_id;
+
+        drop_queued_snapshot_after_biased_reader_eof(&status, "replacement-snapshot", 0).await;
+
+        let observation = &status.snapshot().observations[0];
+        assert!(observation.attempt_id > old_attempt_id);
+        assert_eq!(
+            observation.snapshot_id.as_deref(),
+            Some("replacement-snapshot")
+        );
+        assert_eq!(observation.phase, crate::SnapshotTransportPhase::Retrying);
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("snapshot_connection_closed")
+        );
+        assert_eq!(observation.retry_count, 1);
+        assert!(!observation.operation_owns_work);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn queued_snapshot_status_is_prepared_before_biased_reader_eof() {
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        let first = track_inbound_attempt(&status, "queued-socket-close", 0, 64, false, 1);
+        status.inbound_admitted(
+            &first,
+            false,
+            time::Instant::now() + Duration::from_secs(30),
+        );
+        status.inbound_finished(
+            &first,
+            64,
+            false,
+            Some(time::Instant::now() + Duration::from_secs(30)),
+            crate::transport_status::InboundSnapshotDisposition::Succeeded,
+        );
+
+        drop_queued_snapshot_after_biased_reader_eof(&status, "queued-socket-close", 64).await;
+
+        let observation = &status.snapshot().observations[0];
+        assert_eq!(observation.phase, crate::SnapshotTransportPhase::Retrying);
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("snapshot_connection_closed")
+        );
+        assert_eq!(observation.retry_count, 1);
+        assert!(!observation.operation_owns_work);
     }
 
     #[cfg(feature = "sqlite")]

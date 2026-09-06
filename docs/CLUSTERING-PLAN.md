@@ -427,9 +427,11 @@ non-zero, and names the rollback command. File-copy rollback is supported only
 before a second member joins. After membership, restore is a quorum-aware
 cluster operation specified and drilled in M6.
 
-Only `plurxd run` may perform this import. After M2, `reset-password` and
-`refresh-metadata` refuse an unmigrated data directory instead of starting an
-import from a second process beside the server.
+Only `plurxd run` may perform this import. `refresh-metadata` refuses an
+unmigrated data directory instead of starting an import from a second process
+beside the server. `reset-password` now refuses before Store connection on all
+activated targets: a sidecar write cannot invalidate daemon-local cache-only
+admin proofs, and no authenticated daemon-owned console control path exists.
 
 ## 5. Requirement traceability — every HA promise has an owner
 
@@ -712,10 +714,11 @@ content-addressed backup remain unchanged.
 Four process-exit failpoints cover quiescence, incoming startup, marker
 publication, and rename. Before rename, the next boot removes partial incoming
 state and consumes one SQLite recovery boot; after rename, the completed marker
-makes the replicated target authoritative. `reset-password` and
-`refresh-metadata` never import: they refuse an unmigrated directory and use an
-authenticated client to the running voter after activation, so both require a
-running daemon rather than opening a second store beside it.
+makes the replicated target authoritative. `refresh-metadata` never imports: it
+refuses an unmigrated directory and uses an authenticated client to the running
+voter after activation. `reset-password` is disabled before Store connection
+until a daemon-owned authenticated control path can propagate cache-proof
+revocation safely.
 
 An ambiguous active target fails closed rather than reverting to SQLite: a
 missing, malformed, unsupported, or identity-mismatched marker, or a `hiqlite`

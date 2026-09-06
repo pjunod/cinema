@@ -36,7 +36,6 @@ pub(crate) struct CacheOnlyAdminProofCache {
     inner: Arc<Mutex<CachedAdminProofState>>,
 }
 
-#[derive(Default)]
 struct CachedAdminProofState {
     /// Changes before and after every explicit revocation. Store-backed
     /// authentication captures this before its first read and may publish only
@@ -47,8 +46,30 @@ struct CachedAdminProofState {
     /// cache is tiny and refusing unrelated recovery reads for the short
     /// mutation window is safer than allowing a target-matching mistake.
     local_active_revocations: usize,
+    /// A Store write that returned without a definite outcome may still be
+    /// committed by Raft after the request future is gone. Keep the whole
+    /// cache closed for one proof lifetime instead of treating guard drop as
+    /// proof that the mutation did not commit.
+    local_ambiguity_expires_at: Option<tokio::time::Instant>,
+    /// Replicated nodes start closed and are opened only by a fresh committed-
+    /// roster proof that every running member implements peer revocation.
+    /// Standalone SQLite has no peer writer and initializes this to true.
+    cluster_revocation_capability_ready: bool,
     remote_revocations: BTreeMap<String, RemoteCacheOnlyAdminRevocation>,
     proofs: BTreeMap<String, CachedAdminProof>,
+}
+
+impl Default for CachedAdminProofState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            local_active_revocations: 0,
+            local_ambiguity_expires_at: None,
+            cluster_revocation_capability_ready: true,
+            remote_revocations: BTreeMap::new(),
+            proofs: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -80,15 +101,40 @@ const REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL: Duration = CACHE_ONLY_ADMIN_PROOF_
 pub(crate) struct CacheOnlyAdminRevocation {
     cache: CacheOnlyAdminProofCache,
     target: CacheOnlyAdminRevocationTarget,
+    retain_ambiguity_on_drop: bool,
 }
 
 impl Drop for CacheOnlyAdminRevocation {
     fn drop(&mut self) {
         if let Ok(mut state) = self.cache.inner.lock() {
+            let now = tokio::time::Instant::now();
             state.generation = state.generation.wrapping_add(1);
             state.local_active_revocations = state.local_active_revocations.saturating_sub(1);
+            if self.retain_ambiguity_on_drop {
+                let expires_at = now + CACHE_ONLY_ADMIN_PROOF_TTL;
+                state.local_ambiguity_expires_at = Some(
+                    state
+                        .local_ambiguity_expires_at
+                        .map_or(expires_at, |current| current.max(expires_at)),
+                );
+            }
             state.invalidate_target(&self.target);
         }
+    }
+}
+
+impl CacheOnlyAdminRevocation {
+    /// The peer begin phase completed, so the caller can now issue the Store
+    /// mutation. From this point cancellation or an error is commit-ambiguous
+    /// and guard drop must retain a bounded fail-closed fence.
+    pub(crate) fn arm_ambiguity(&mut self) {
+        self.retain_ambiguity_on_drop = true;
+    }
+
+    /// Release normally only after both the Store result and peer end fanout
+    /// are definite successes.
+    pub(crate) fn complete(mut self) {
+        self.retain_ambiguity_on_drop = false;
     }
 }
 
@@ -104,14 +150,20 @@ impl CachedAdminProofState {
         }
     }
 
-    fn prune_remote_revocations(&mut self, now: tokio::time::Instant) {
+    fn prune_revocations(&mut self, now: tokio::time::Instant) {
+        let local_ambiguity_expired = self
+            .local_ambiguity_expires_at
+            .is_some_and(|expires_at| expires_at <= now);
+        if local_ambiguity_expired {
+            self.local_ambiguity_expires_at = None;
+        }
         let expired = self
             .remote_revocations
             .iter()
             .filter(|(_, revocation)| revocation.expires_at <= now)
             .map(|(operation_id, _)| operation_id.clone())
             .collect::<Vec<_>>();
-        if !expired.is_empty() {
+        if local_ambiguity_expired || !expired.is_empty() {
             self.generation = self.generation.wrapping_add(1);
             self.proofs.clear();
         }
@@ -121,16 +173,39 @@ impl CachedAdminProofState {
     }
 
     fn revocation_active(&self) -> bool {
-        self.local_active_revocations != 0 || !self.remote_revocations.is_empty()
+        !self.cluster_revocation_capability_ready
+            || self.local_active_revocations != 0
+            || self.local_ambiguity_expires_at.is_some()
+            || !self.remote_revocations.is_empty()
     }
 }
 
 impl CacheOnlyAdminProofCache {
+    pub(crate) fn new(replicated: bool) -> Self {
+        let cache = Self::default();
+        cache.set_cluster_revocation_capability_ready(!replicated);
+        cache
+    }
+
+    /// Publish the latest heartbeat-coupled committed-roster verdict. Every
+    /// closed edge clears proofs and changes the generation, including a
+    /// refresh error after a previous success; a later recovery therefore
+    /// requires a new ordinary Store-backed authentication.
+    pub(crate) fn set_cluster_revocation_capability_ready(&self, ready: bool) {
+        if let Ok(mut state) = self.inner.lock() {
+            if state.cluster_revocation_capability_ready != ready || !ready {
+                state.generation = state.generation.wrapping_add(1);
+                state.proofs.clear();
+            }
+            state.cluster_revocation_capability_ready = ready;
+        }
+    }
+
     /// Capture the cache generation before beginning Store authentication.
     /// A poisoned cache refuses publication and cache-only authorization.
     pub(crate) fn authentication_ticket(&self) -> Option<CacheOnlyAdminAuthenticationTicket> {
         let mut state = self.inner.lock().ok()?;
-        state.prune_remote_revocations(tokio::time::Instant::now());
+        state.prune_revocations(tokio::time::Instant::now());
         (!state.revocation_active()).then_some(CacheOnlyAdminAuthenticationTicket(state.generation))
     }
 
@@ -150,7 +225,7 @@ impl CacheOnlyAdminProofCache {
             return;
         };
         let now = tokio::time::Instant::now();
-        state.prune_remote_revocations(now);
+        state.prune_revocations(now);
         if state.revocation_active() || state.generation != ticket.0 {
             return;
         }
@@ -186,6 +261,7 @@ impl CacheOnlyAdminProofCache {
         CacheOnlyAdminRevocation {
             cache: self.clone(),
             target,
+            retain_ambiguity_on_drop: false,
         }
     }
 
@@ -195,12 +271,13 @@ impl CacheOnlyAdminProofCache {
         CacheOnlyAdminRevocation {
             cache: self.clone(),
             target,
+            retain_ambiguity_on_drop: false,
         }
     }
 
     fn begin_local_revocation(&self, target: &CacheOnlyAdminRevocationTarget) {
         if let Ok(mut state) = self.inner.lock() {
-            state.prune_remote_revocations(tokio::time::Instant::now());
+            state.prune_revocations(tokio::time::Instant::now());
             state.generation = state.generation.wrapping_add(1);
             state.local_active_revocations = state.local_active_revocations.saturating_add(1);
             state.invalidate_target(target);
@@ -214,7 +291,7 @@ impl CacheOnlyAdminProofCache {
     pub(crate) fn begin_remote_revocation(&self, operation_id: &str) -> Result<(), &'static str> {
         let mut state = self.inner.lock().map_err(|_| "cache unavailable")?;
         let now = tokio::time::Instant::now();
-        state.prune_remote_revocations(now);
+        state.prune_revocations(now);
         if state.remote_revocations.contains_key(operation_id) {
             return Ok(());
         }
@@ -234,7 +311,7 @@ impl CacheOnlyAdminProofCache {
 
     pub(crate) fn end_remote_revocation(&self, operation_id: &str) -> Result<(), &'static str> {
         let mut state = self.inner.lock().map_err(|_| "cache unavailable")?;
-        state.prune_remote_revocations(tokio::time::Instant::now());
+        state.prune_revocations(tokio::time::Instant::now());
         state.remote_revocations.remove(operation_id);
         state.generation = state.generation.wrapping_add(1);
         state.proofs.clear();
@@ -243,7 +320,7 @@ impl CacheOnlyAdminProofCache {
 
     pub(crate) fn invalidate_digest(&self, token_digest: &str) {
         if let Ok(mut state) = self.inner.lock() {
-            state.prune_remote_revocations(tokio::time::Instant::now());
+            state.prune_revocations(tokio::time::Instant::now());
             state.generation = state.generation.wrapping_add(1);
             state.proofs.remove(token_digest);
         }
@@ -252,7 +329,7 @@ impl CacheOnlyAdminProofCache {
     #[cfg(test)]
     pub(crate) fn invalidate_user(&self, user_id: i64) {
         if let Ok(mut state) = self.inner.lock() {
-            state.prune_remote_revocations(tokio::time::Instant::now());
+            state.prune_revocations(tokio::time::Instant::now());
             state.generation = state.generation.wrapping_add(1);
             state.proofs.retain(|_, proof| proof.user_id != user_id);
         }
@@ -263,7 +340,7 @@ impl CacheOnlyAdminProofCache {
             return false;
         };
         let now = tokio::time::Instant::now();
-        state.prune_remote_revocations(now);
+        state.prune_revocations(now);
         if state.revocation_active() {
             return false;
         }
@@ -503,6 +580,7 @@ mod tests {
     };
     use plurx_core::auth;
     use plurx_core::domain::{scopes, ApiKey, User};
+    use std::time::Duration;
 
     fn key(scopes: &[&str], disabled: bool) -> ApiKey {
         ApiKey {
@@ -618,6 +696,60 @@ mod tests {
         tokio::time::advance(super::REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL).await;
         assert!(cache.authentication_ticket().is_some());
         assert!(!cache.authenticate(&digest));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn commit_ambiguous_local_mutation_retains_one_bounded_fail_closed_fence() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let digest = auth::hash_token("ambiguous-admin-token");
+        let admin = user(9, true);
+        record(&cache, digest.clone(), &admin);
+
+        let mut revocation = cache.begin_user_revocation(admin.id);
+        // This is the exact transition performed only after the cluster begin
+        // fanout succeeds and immediately before the handler can call Store.
+        revocation.arm_ambiguity();
+        drop(revocation);
+
+        assert!(!cache.authenticate(&digest));
+        assert!(cache.authentication_ticket().is_none());
+        tokio::time::advance(CACHE_ONLY_ADMIN_PROOF_TTL - Duration::from_millis(1)).await;
+        assert!(cache.authentication_ticket().is_none());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(cache.authentication_ticket().is_some());
+        assert!(
+            !cache.authenticate(&digest),
+            "fence expiry must not resurrect the invalidated credential"
+        );
+    }
+
+    #[test]
+    fn replicated_capability_loss_clears_proofs_and_invalidates_in_flight_publication() {
+        let cache = CacheOnlyAdminProofCache::new(true);
+        let digest = auth::hash_token("rolling-admin-token");
+        let admin = user(10, true);
+        assert!(cache.authentication_ticket().is_none());
+
+        cache.set_cluster_revocation_capability_ready(true);
+        let before_rollback = cache
+            .authentication_ticket()
+            .expect("all committed members proved the capability");
+        cache.record_authenticated(Some(before_rollback), digest.clone(), &admin);
+        assert!(cache.authenticate(&digest));
+
+        let racing = cache
+            .authentication_ticket()
+            .expect("ticket before a peer rollback heartbeat");
+        cache.set_cluster_revocation_capability_ready(false);
+        cache.record_authenticated(Some(racing), digest.clone(), &admin);
+        assert!(!cache.authenticate(&digest));
+        assert!(cache.authentication_ticket().is_none());
+
+        cache.set_cluster_revocation_capability_ready(true);
+        assert!(
+            !cache.authenticate(&digest),
+            "roll-forward requires a new ordinary authentication"
+        );
     }
 
     #[test]

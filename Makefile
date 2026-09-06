@@ -191,6 +191,18 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::first_snapshot_identity_reports_terminal_status_when_reader_eof_wins \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::changed_snapshot_identity_reports_terminal_status_when_reader_eof_wins \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::queued_snapshot_status_is_prepared_before_biased_reader_eof \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_server::tests::inbound_snapshot_status_guard_preserves_worker_owned_and_completed_results \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -315,7 +327,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
-	  network::snapshot_executor::tests::production_shared_executor_drops_abandoned_other_peer_without_phantom_status \
+	  network::snapshot_executor::tests::production_shared_executor_retains_abandoned_other_peer_terminal_status \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -543,6 +555,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::terminal_receipt_before_earlier_worker_start_keeps_attempt_ids_monotonic \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  transport_status::tests::inbound_socket_epoch_and_reconnect_count_are_attempt_local \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -665,8 +681,20 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::aborted_fresh_preflight_releases_the_exact_planned_outage_claim \
 	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cancelled_acquisition_waiter_releases_only_after_ambiguous_outcome_is_known \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::abort_during_drain_cancels_the_guard_owned_local_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cancelled_maintenance_waiter_does_not_cancel_the_owned_commit \
+	  -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
 	  cluster::membership::tests::planned_outage_lease_excludes_a_concurrent_production_removal_attempt \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
+	  cluster::membership::tests::cache_revocation_capability_covers_the_exact_committed_roster_and_rollback \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
@@ -676,6 +704,18 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::active_revocation_blocks_ticket_publication_until_guard_drop \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::commit_ambiguous_local_mutation_retains_one_bounded_fail_closed_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::replicated_capability_loss_clears_proofs_and_invalidates_in_flight_publication \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::capability_refresh_error_and_rollback_clear_cache_only_admin_authority \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  startup_tests::console_password_reset_fails_closed_before_any_store_mutation \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::remote_revocation_fence_expires_bounded_and_reinvalidates \
