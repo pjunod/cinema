@@ -190,25 +190,74 @@ serial long-film/cold-storage benchmarks. Do not trade continuity for speed.
 
 ### 3. Truthful delivery, failure, capacity and recovery
 
-- `DeliveryView::from_status` still drops VOD producer failure and delivered
-  bitrate. Carry bounded typed failure reasons through serialized control
-  actions; measure completed delivery over monotonic time. Unknown is not
-  encoder target bitrate or unlimited headroom.
-- Distinguish contiguous runway from scattered cached segments and transport
-  delivery from displayed progress. Preparation currently refuses VOD because
-  its required delivered-rate evidence is absent.
-- Finish bounded `NoRoom` behavior, total GET admission, session-close cleanup
-  and multi-viewer fairness/resource ownership. Preserve PR #10's independent
-  demand deadlines, read pins and atomic accepted-demand publication.
-- Finish VOD owner-loss hydration/rebuild under the same immutable identity
-  and fenced handoff. Preserve existing exact-owner EOF/finalizer boundaries.
-- Complete Original resolver semantics: the wire enum **already exists**.
-  `candidate_request` still retains transcode for every quality value when
-  already transcoding. Test Original → 720p → Original, source-height Manual,
-  audio-only conversion, burn and incompatible HDR without destructive fallback.
-- Verify the strongest playback/nightly cases actually execute with the
-  installed browser, retain failure evidence across restarts, and inspect
-  deployed health/encoder capability rather than inferring it from source CI.
+**Audited against the code 2026-09-06. Verdicts are recorded per bullet with
+the evidence, because three of these had already been done and were still
+being read as open — which is how two sessions came to investigate the same
+fixture defect on the same day.**
+
+- **DONE.** ~~`DeliveryView::from_status` still drops VOD producer failure and
+  delivered bitrate.~~ The VOD arm carries `delivered_bps`, `delivered_idle_ms`
+  and `producer_decision` (`playback_control.rs:933-967`), measured over
+  monotonic time by `meter.rs` and never substituted from the encoder's
+  configured target. Reasons are bounded on the wire (`:698-704`), parsed from
+  a closed set, and a relayed verdict that disagrees with delivery is refused
+  (`:730-747`).
+- **PARTIAL.** The second sentence is no longer true: preparation reaches VOD,
+  because `headroom_refusal` now has the delivered rate it needed
+  (`playback_control.rs:1280-1293`, regression at `:13504`). The first is
+  open — `client_runway_ms` is still `buffered_through_ms - anchor`
+  (`:897-901`, `:3004-3008`) and consults `buffered_from_ms` nowhere, so a
+  scattered buffer and a contiguous one produce the same runway. Transport and
+  displayed progress are held apart only inside the starvation predicate
+  (`:2012-2035`).
+- **PARTIAL — capping exists, fairness does not.** Session-close cleanup is
+  done (`waitpool.rs` `retire_session`, wired at `vodserve.rs:2825`), and both
+  caps with typed refusal classes are done. Still open, and each for a stated
+  reason:
+  - *Fair service at the global limit.* Admission is first-come-first-served
+    under a per-session ceiling. `waitpool.rs`'s own
+    `the_two_caps_bound_a_viewer_and_the_node_but_do_not_share_fairly` says so
+    by name rather than implying otherwise.
+  - *Total GET admission.* The pool admits **blocked** GETs only. A GET served
+    from materialized bytes is admitted against nothing.
+  - *Bounded `NoRoom`.* Still an indefinite advisory `Hold` with no deadline,
+    no escalation and no terminal (`playback_control.rs:1722-1740`,
+    `vodserve.rs:3702-3730`). **This needs a protocol decision before it can be
+    implemented**: `ProducerDecisionReason` has no capacity variant and adding
+    one would be a category error — node capacity is not a producer decision —
+    so bounding it means either a new action or a bound on `Hold` itself.
+    Whichever it is, escalating to a *terminal* would tell a client to tear
+    down a player over a server working as designed, which is the failure this
+    action exists to prevent.
+- **OPEN, and currently the opposite.** VOD owner loss is classified
+  `Unrecoverable` by design (`media_sessions.rs:2580-2605`), pinned by
+  `a_route_the_takeover_path_can_never_accept_is_unrecoverable`. The only
+  hydration machinery that exists is for fragment-index blobs, not for
+  rendition ownership. The peer-hydration-versus-local-rebuild question is
+  still open in the review.
+- **PARTIAL — the named defect is present verbatim.**
+  `playback_control.rs:1111-1115` still matches `(SessionKind::Transcode {..}, _)`
+  and retains transcode for every quality value, Original included. The copy
+  side is done and tested; the transcode side is not, and no test does
+  Original → 720p → Original against a transcode predecessor.
+  **Read `d4770238` before attempting this again.** An implementation was
+  written and withdrawn, and the reasons are recorded rather than the attempt:
+  `candidate_request` cannot reconstruct a copy recipe from a transcode
+  predecessor, so it would invent `aac`/`preserve_dolby_vision`/
+  `convert_dolby_vision` — and for a converting-copy Profile 7 title the
+  invented answer is raw dual-layer P7, the one delivery nothing plays. The
+  recorded real fix is to plumb `review_client_plan`/`apply_plan_review` into
+  `process_preparation_candidate`, which belongs with §4's client work rather
+  than ahead of it.
+- **PARTIAL.** Browser resolution is done and the run is proved terminal: the
+  Playwright action exports `PLURX_PLAYBACK_CHROME`, `playback-lab` honours it,
+  the nightly point is `missing = "fail"` rather than skip, and
+  `enforceCaseResult` turns any non-terminal status into a failure. Still open:
+  the strongest cases (steady, seek-storm, stall-recovery) are deliberately
+  excluded from the PR gate (`ci.yml:545-555`); evidence retention is 3-14 days
+  and CI-scoped; there is no durable action/outcome ledger, so no failure
+  evidence survives a daemon restart; and nothing inspects a deployed node's
+  health or encoder capability — `scripts/ship` has no status probe at all.
 
 ### 4. Executable prepared transaction and three client adapters
 
