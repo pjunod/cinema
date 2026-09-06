@@ -1622,7 +1622,12 @@ mod tests {
         tokio::time::advance(Duration::from_millis(999)).await;
         let fresh = cache.fresh().await.expect("cache itself is still fresh");
         assert_eq!(
-            fresh["node-2"].transport.as_ref().unwrap().observations[0].sample_age_ms,
+            fresh["node-2"]
+                .transport
+                .as_ref()
+                .expect("cached private transport evidence")
+                .observations[0]
+                .sample_age_ms,
             299_999
         );
 
@@ -1634,7 +1639,7 @@ mod tests {
         assert!(fresh["node-2"]
             .transport
             .as_ref()
-            .unwrap()
+            .expect("cached private transport evidence")
             .observations
             .is_empty());
     }
