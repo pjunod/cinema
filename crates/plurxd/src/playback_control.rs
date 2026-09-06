@@ -24,6 +24,16 @@ pub(crate) const MAX_RELAY_BYTES: usize = 20 * 1024;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub(crate) const EXCHANGE_DEADLINE: Duration = Duration::from_secs(4);
 pub(crate) const NEXT_EXCHANGE_MS: u32 = 5_000;
+
+/// How long a `no_room` hold asks to be left alone.
+///
+/// Four ordinary exchanges. Node capacity is cleared by something outside the
+/// rendition a client is waiting on — another title completing, an eviction, a
+/// producer finishing — so a client that asks again at the ordinary cadence is
+/// spending exchanges on a node that has already said it has nothing to give.
+/// Long enough that the waiting is cheap; short enough that a viewer whose
+/// room appears is not left sitting on a stale answer.
+pub(crate) const NO_ROOM_REVISIT_MS: u32 = 4 * NEXT_EXCHANGE_MS;
 pub(crate) const ROLLING_LEASE_TIMEOUT_MS: u32 = 60_000;
 pub(crate) const ROLLING_EXPLICIT_LEASE_TIMEOUT_MS: u32 = 30_000;
 pub(crate) const VOD_LEASE_TIMEOUT_MS: u32 = 300_000;
@@ -727,7 +737,7 @@ impl ControlResponseV1 {
         declared
             && match &self.action {
                 ControlAction::None => true,
-                ControlAction::Hold { reason } => {
+                ControlAction::Hold { reason, .. } => {
                     self.delivery.hold_reason.as_deref() == Some(reason.as_delivery_str())
                 }
                 // Both verdicts must agree with the decision the same response
@@ -1691,6 +1701,21 @@ pub(crate) enum HoldReason {
 }
 
 impl HoldReason {
+    /// How long before this hold is worth asking about again.
+    ///
+    /// Every reason but one lifts on its own as the client consumes what it
+    /// already has, so the ordinary exchange cadence is exactly right: the
+    /// answer changes because the client changed it. `NoRoom` is the exception
+    /// and the reason this method exists — nothing the client does clears it,
+    /// so asking at the same rate is work spent on a node that is already out
+    /// of room, and the honest interval is longer.
+    pub(crate) fn revisit_after_ms(self) -> u32 {
+        match self {
+            Self::NoRoom => NO_ROOM_REVISIT_MS,
+            _ => NEXT_EXCHANGE_MS,
+        }
+    }
+
     pub(crate) fn from_delivery(reason: &str) -> Option<Self> {
         Some(match reason {
             "demand" => Self::Demand,
@@ -1736,6 +1761,25 @@ pub(crate) enum ControlAction {
     /// lifted must not be replayed as though it were still in force.
     Hold {
         reason: HoldReason,
+        /// When the server expects to be worth asking again.
+        ///
+        /// A hold without one is an instruction to wait with no end, and
+        /// `no_room` made that concrete: node capacity is cleared by something
+        /// outside this rendition, so a client told to hold could sit
+        /// indefinitely with nothing to act on and no idea whether the server
+        /// still knew about it.
+        ///
+        /// This is a revisit contract and deliberately not an expiry. The hold
+        /// does not become a failure when the interval passes; the client asks
+        /// again, exactly as it would have, and the server answers with what is
+        /// true then. Escalating to a terminal instead would tell a client to
+        /// tear down a player over a server working precisely as designed —
+        /// the response this action exists to prevent.
+        ///
+        /// Relative rather than absolute, because the two clocks are not
+        /// synchronised and an absolute instant from the server is a value the
+        /// client cannot safely compare against its own.
+        revisit_after_ms: u32,
     },
     /// Production stopped for a reason that trying again cannot change.
     ///
@@ -1940,7 +1984,7 @@ pub(crate) fn action_metrics(
     transaction_suppressed: bool,
 ) -> ActionMetrics {
     match action {
-        ControlAction::Hold { reason } => ActionMetrics {
+        ControlAction::Hold { reason, .. } => ActionMetrics {
             action: ActionKind::Hold,
             hold_reason: Some(*reason),
             suppressed: false,
@@ -2094,7 +2138,10 @@ pub(crate) fn resolve_action(
         .hold_reason
         .as_deref()
         .and_then(HoldReason::from_delivery)
-        .map_or(ControlAction::None, |reason| ControlAction::Hold { reason })
+        .map_or(ControlAction::None, |reason| ControlAction::Hold {
+            reason,
+            revisit_after_ms: reason.revisit_after_ms(),
+        })
 }
 
 /// A bounded explanation for a terminal verdict.
@@ -13624,6 +13671,7 @@ mod tests {
             resolve_action(&ControlAction::None, &unknown, &request),
             ControlAction::Hold {
                 reason: HoldReason::WorkingSet,
+                revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
             },
         );
     }
@@ -13657,8 +13705,12 @@ mod tests {
             let held = delivery_with_hold(Some(reason));
             assert_eq!(
                 resolve_action(&ControlAction::None, &held, &healthy),
-                ControlAction::Hold {
-                    reason: HoldReason::from_delivery(reason).expect("named reason"),
+                {
+                    let reason = HoldReason::from_delivery(reason).expect("named reason");
+                    ControlAction::Hold {
+                        reason,
+                        revisit_after_ms: reason.revisit_after_ms(),
+                    }
                 },
                 "{reason} must still be sent to a healthy client",
             );
@@ -13705,6 +13757,7 @@ mod tests {
                 resolve_action(&ControlAction::None, &delivery, &request),
                 ControlAction::Hold {
                     reason: HoldReason::Time,
+                    revisit_after_ms: HoldReason::Time.revisit_after_ms(),
                 },
                 "{name} alone must leave the hold in force",
             );
@@ -14171,7 +14224,10 @@ mod tests {
                     &delivery_with_hold(Some(delivery_reason)),
                     &accepting,
                 ),
-                ControlAction::Hold { reason: expected },
+                ControlAction::Hold {
+                    reason: expected,
+                    revisit_after_ms: expected.revisit_after_ms(),
+                },
                 "delivery reported {delivery_reason}",
             );
         }
@@ -14206,12 +14262,14 @@ mod tests {
             resolve_action(
                 &ControlAction::Hold {
                     reason: HoldReason::Demand,
+                    revisit_after_ms: HoldReason::Demand.revisit_after_ms(),
                 },
                 &delivery_with_hold(Some("bytes")),
                 &accepting,
             ),
             ControlAction::Hold {
                 reason: HoldReason::Demand,
+                revisit_after_ms: HoldReason::Demand.revisit_after_ms(),
             },
         );
     }
@@ -14239,14 +14297,79 @@ mod tests {
         assert_eq!(HoldReason::from_delivery("unheard_of"), None);
     }
 
+    /// A hold says when it is worth asking again, and `no_room` says a longer
+    /// number than the rest.
+    ///
+    /// Without an interval, `hold` is an instruction to wait with no end.
+    /// That is survivable for the reasons a client clears itself — it is
+    /// consuming buffer, so the answer changes because it changed it — and it
+    /// is not survivable for `no_room`, which only something outside this
+    /// rendition can clear. A client told to hold for that reason could sit
+    /// indefinitely with nothing to act on.
+    ///
+    /// The longer interval is the point rather than a detail. Asking again at
+    /// the ordinary cadence spends exchanges on a node that has already said
+    /// it has nothing to give, and the ask cannot change the answer.
+    ///
+    /// It is a revisit contract, not an expiry: nothing fails when the
+    /// interval passes. That distinction is why this is not a terminal, which
+    /// would tell a client to tear down a player over a server working
+    /// exactly as designed.
+    #[test]
+    fn a_hold_says_when_to_ask_again_and_no_room_says_later() {
+        for reason in [
+            HoldReason::Demand,
+            HoldReason::Time,
+            HoldReason::Bytes,
+            HoldReason::Global,
+            HoldReason::Ahead,
+            HoldReason::WorkingSet,
+        ] {
+            assert_eq!(
+                reason.revisit_after_ms(),
+                NEXT_EXCHANGE_MS,
+                "{reason:?} lifts as the client consumes, so the ordinary \
+                 cadence is the honest interval",
+            );
+        }
+        assert!(
+            HoldReason::NoRoom.revisit_after_ms() > NEXT_EXCHANGE_MS,
+            "nothing the client does clears no_room, so asking at the ordinary \
+             cadence is work spent on a node already out of room",
+        );
+
+        // And the resolved action carries it, so a client reads the interval
+        // from the action it was given rather than inferring one.
+        let delivery = delivery_with_hold(Some("no_room"));
+        let mut client = request();
+        client.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        let resolved = resolve_action(&ControlAction::None, &delivery, &client);
+        assert_eq!(
+            resolved,
+            ControlAction::Hold {
+                reason: HoldReason::NoRoom,
+                revisit_after_ms: NO_ROOM_REVISIT_MS,
+            },
+            "the hold a client receives says when to come back",
+        );
+    }
+
     #[test]
     fn the_action_is_tagged_on_the_wire() {
         assert_eq!(
             serde_json::to_value(ControlAction::Hold {
                 reason: HoldReason::WorkingSet,
+                revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
             })
             .expect("action json"),
-            serde_json::json!({"type": "hold", "reason": "working_set"}),
+            // Additive: a client that predates the field ignores it and holds
+            // exactly as it did, which is why this is a bound on the existing
+            // action rather than a new one every client has to learn.
+            serde_json::json!({
+                "type": "hold",
+                "reason": "working_set",
+                "revisit_after_ms": NEXT_EXCHANGE_MS,
+            }),
         );
         assert_eq!(
             serde_json::to_value(ControlAction::None).expect("action json"),
@@ -20396,6 +20519,7 @@ mod tests {
         held.delivery.hold_reason = Some("working_set".to_owned());
         held.action = ControlAction::Hold {
             reason: HoldReason::WorkingSet,
+            revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
         };
         assert!(held.is_valid_for(&accepting));
 
