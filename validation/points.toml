@@ -782,6 +782,7 @@ paths = [
   "scripts/history-audit",
   "scripts/prove-fix",
   "scripts/prove-tombstone-offline-fence",
+  "scripts/require-test-count",
   "scripts/validate",
   "tests/client-fixes.toml",
   "tests/validation/**",
