@@ -472,12 +472,18 @@ non-executable and left to their owning system reaper. The runner reaps only
 its owned shell and does not claim to reap grandchildren. Exit 124 is recorded
 only when the closure, kill, live-identity proof, reap, and output drain all
 succeed. Census, convergence, signal, reap, identity, or EOF failure aborts
-validation as an infrastructure error. Linux obtains parent, group, session,
-state, and start identity atomically from one bounded `ps` inventory. Darwin
-accepts a row only when the complete bounded inventory row and independent
-group/session observations remain identical across two censuses. Windows uses
-bounded `taskkill /T /F`, and every nonzero, timed-out, or incomplete result
-likewise aborts instead of producing a timeout verdict.
+validation as an infrastructure error. Linux uses a bounded `ps` enumeration,
+then binds each candidate to the parent, group, session, state, and
+boot-relative start ticks read atomically from `/proc/<pid>/stat`. It stops and
+kills exact identities through pidfds, never through a reusable numeric group
+at final teardown. Darwin preserves a stable PID/start identity across ordinary
+parent or state changes, retries relevant group/session ambiguity, commits a
+numeric group only after a matching stopped identity is observed, and refuses
+to signal a final group containing an unowned identity. Its unavoidable
+census-to-signal interval is accepted only under this trusted-host contract;
+it is not pidfd-grade containment against hostile PID churn. Windows uses
+bounded `taskkill /T /F`, and every launch error, nonzero, timed-out, or
+incomplete result likewise aborts instead of producing a timeout verdict.
 
 This is ownership for trusted validation checks, not containment for hostile
 code. A check may create process groups and sessions, but every live child

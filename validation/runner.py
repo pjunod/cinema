@@ -98,7 +98,7 @@ class CheckResult:
 
 @dataclasses.dataclass(frozen=True, order=True)
 class _ProcessIdentity:
-    """A process identity that cannot silently follow PID reuse."""
+    """A PID plus the strongest process-start identity exposed by the host."""
 
     pid: int
     started: str
@@ -636,6 +636,9 @@ def _terminate_process_tree(
         except subprocess.TimeoutExpired as error:
             _kill_and_reap_owned_process(process, cleanup_deadline)
             raise RuntimeError("timed out terminating validation process tree") from error
+        except OSError as error:
+            _kill_and_reap_owned_process(process, cleanup_deadline)
+            raise RuntimeError("could not launch Windows process-tree cleanup") from error
         if completed.returncode != 0:
             _kill_and_reap_owned_process(process, cleanup_deadline)
             raise RuntimeError(
@@ -672,15 +675,9 @@ def _terminate_process_tree(
     except Exception as error:  # fallback still kills every group observed so far
         cleanup_error = error
 
-    if process.poll() is None:
-        try:
-            current_root_group = os.getpgid(process.pid)
-        except ProcessLookupError:
-            pass
-        else:
-            if current_root_group > 1:
-                frozen_groups.setdefault(current_root_group, 0)
-    signal_errors = _kill_frozen_groups(frozen_groups, cleanup_deadline)
+    signal_errors = _kill_frozen_groups(
+        root_group, frozen_groups, frozen_identities, cleanup_deadline
+    )
     if signal_errors and process.poll() is None:
         try:
             process.kill()
@@ -724,9 +721,12 @@ def _reap_owned_process(
 
 
 def _kill_frozen_groups(
-    frozen_groups: dict[int, int], deadline: float
+    root_pid: int,
+    frozen_groups: dict[int, int],
+    frozen_identities: set[_ProcessIdentity],
+    deadline: float,
 ) -> list[str]:
-    """Force-kill groups deepest-first and the owned root group last."""
+    """Force-kill revalidated owners deepest-first and the root group last."""
 
     errors: list[str] = []
     ordered_groups = sorted(
@@ -741,11 +741,94 @@ def _kill_frozen_groups(
             errors.append(f"unsafe pgid {process_group}")
             continue
         try:
+            snapshot = _process_snapshot(
+                deadline,
+                root_pid=root_pid,
+                required_identities=frozen_identities,
+            )
+        except Exception as error:
+            errors.append(f"pgid {process_group} revalidation: {error}")
+            continue
+        members = tuple(
+            record
+            for record in snapshot.values()
+            if record.process_group == process_group
+            and not record.state.startswith("Z")
+        )
+        unexpected = tuple(
+            record.identity
+            for record in members
+            if record.identity not in frozen_identities
+        )
+        if unexpected:
+            rendered = ", ".join(str(identity.pid) for identity in unexpected)
+            errors.append(
+                f"pgid {process_group} acquired unowned identities: {rendered}"
+            )
+            continue
+        if any(not record.state.startswith("T") for record in members):
+            errors.append(f"pgid {process_group} was not fully stopped at teardown")
+            continue
+        owned_members = tuple(
+            record for record in members if record.identity in frozen_identities
+        )
+        if not owned_members:
+            continue
+        if sys.platform.startswith("linux"):
+            errors.extend(
+                _kill_linux_identities(
+                    root_pid, process_group, owned_members, frozen_identities, deadline
+                )
+            )
+            continue
+        try:
             os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:
             pass
         except OSError as error:
             errors.append(f"pgid {process_group}: {error}")
+    return errors
+
+
+def _kill_linux_identities(
+    root_pid: int,
+    process_group: int,
+    records: tuple[_ProcessRecord, ...],
+    frozen_identities: set[_ProcessIdentity],
+    deadline: float,
+) -> list[str]:
+    errors: list[str] = []
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        return ["Linux cleanup requires pidfd_open and pidfd_send_signal"]
+    for record in records:
+        try:
+            _remaining_cleanup_time(deadline)
+            pidfd = os.pidfd_open(record.identity.pid, 0)
+        except ProcessLookupError:
+            continue
+        except OSError as error:
+            errors.append(f"pid {record.identity.pid} pidfd: {error}")
+            continue
+        try:
+            current = _process_snapshot(
+                deadline,
+                root_pid=root_pid,
+                required_identities=frozen_identities,
+            ).get(record.identity.pid)
+            if (
+                current is None
+                or current.identity != record.identity
+                or current.process_group != process_group
+                or not current.state.startswith("T")
+            ):
+                continue
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            errors.append(f"pid {record.identity.pid} pidfd kill: {error}")
+        finally:
+            os.close(pidfd)
     return errors
 
 
@@ -766,7 +849,7 @@ def _freeze_process_tree(
             raise RuntimeError(
                 "validation descendant tree did not reach a frozen fixed point"
             ) from error
-        snapshot = _process_snapshot(deadline)
+        snapshot = _process_snapshot(deadline, root_pid=root_pid)
         discovered = _owned_processes(root_pid, snapshot)
         closure = frozenset(record for record, _ in discovered)
         frozen_identities.update(record.identity for record, _ in discovered)
@@ -790,8 +873,15 @@ def _freeze_process_tree(
             raise RuntimeError("validation descendant group census exceeded its limit")
 
         for process_group, depth in sorted(new_groups.items(), key=lambda item: item[1]):
-            os.killpg(process_group, signal.SIGSTOP)
-            frozen_groups[process_group] = depth
+            expected = {
+                record.identity
+                for record, _ in discovered
+                if record.process_group == process_group
+            }
+            if _stop_and_confirm_group(
+                root_pid, process_group, expected, deadline
+            ):
+                frozen_groups[process_group] = depth
 
         all_stopped = all(
             record.state.startswith(("T", "Z")) for record, _ in discovered
@@ -811,20 +901,110 @@ def _freeze_process_tree(
             ) from error
 
 
+def _stop_and_confirm_group(
+    root_pid: int,
+    process_group: int,
+    expected: set[_ProcessIdentity],
+    deadline: float,
+) -> bool:
+    """Stop a numeric group only when an observed owner confirms the signal."""
+
+    if sys.platform.startswith("linux"):
+        snapshot = _process_snapshot(
+            deadline, root_pid=root_pid, required_identities=expected
+        )
+        records = tuple(
+            record
+            for record in snapshot.values()
+            if record.process_group == process_group
+            and record.identity in expected
+            and not record.state.startswith("Z")
+        )
+        if not records:
+            return False
+        errors = _signal_linux_identities(records, signal.SIGSTOP, deadline)
+        if errors:
+            errors.extend(_signal_linux_identities(records, signal.SIGKILL, deadline))
+            raise RuntimeError("; ".join(errors))
+    else:
+        os.killpg(process_group, signal.SIGSTOP)
+    while True:
+        snapshot = _process_snapshot(
+            deadline, root_pid=root_pid, required_identities=expected
+        )
+        matching = tuple(
+            record
+            for record in snapshot.values()
+            if record.process_group == process_group and record.identity in expected
+        )
+        live_matching = tuple(
+            record for record in matching if not record.state.startswith("Z")
+        )
+        if not live_matching:
+            return False
+        if all(record.state.startswith("T") for record in live_matching):
+            return True
+        time.sleep(min(0.01, _remaining_cleanup_time(deadline)))
+
+
+def _signal_linux_identities(
+    records: tuple[_ProcessRecord, ...], signal_number: int, deadline: float
+) -> list[str]:
+    errors: list[str] = []
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        return ["Linux cleanup requires pidfd_open and pidfd_send_signal"]
+    for record in records:
+        try:
+            _remaining_cleanup_time(deadline)
+            pidfd = os.pidfd_open(record.identity.pid, 0)
+        except ProcessLookupError:
+            continue
+        except OSError as error:
+            errors.append(f"pid {record.identity.pid} pidfd: {error}")
+            continue
+        try:
+            current = _read_linux_process_record(record.identity.pid)
+            if (
+                current is None
+                or current.identity != record.identity
+                or current.process_group != record.process_group
+                or current.session_id != record.session_id
+            ):
+                continue
+            signal.pidfd_send_signal(pidfd, signal_number)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            errors.append(f"pid {record.identity.pid} pidfd signal: {error}")
+        finally:
+            os.close(pidfd)
+    return errors
+
+
 def _verify_processes_gone(
     identities: set[_ProcessIdentity], deadline: float
 ) -> None:
     """Require every recorded identity to disappear before accepting timeout 124."""
 
     while True:
-        snapshot = _process_snapshot(deadline)
-        survivors = [
-            identity
-            for identity in identities
-            if (record := snapshot.get(identity.pid)) is not None
-            and record.identity == identity
-            and not record.state.startswith("Z")
-        ]
+        if sys.platform.startswith("linux"):
+            first_snapshot = _process_snapshot(deadline)
+            second_snapshot = _process_snapshot(deadline)
+            survivors = [
+                identity
+                for identity in identities
+                if not _linux_identity_is_gone_or_zombie(
+                    identity, first_snapshot, second_snapshot
+                )
+            ]
+        else:
+            first_rows = _read_process_rows(deadline, include_session=False)
+            second_rows = _read_process_rows(deadline, include_session=False)
+            survivors = [
+                identity
+                for identity in identities
+                if not _identity_is_gone_or_zombie(identity, first_rows, second_rows)
+            ]
         if not survivors:
             return
         try:
@@ -834,6 +1014,36 @@ def _verify_processes_gone(
             raise RuntimeError(
                 f"killed validation identities remained observable: {rendered}"
             ) from error
+
+
+def _identity_is_gone_or_zombie(
+    identity: _ProcessIdentity,
+    first_rows: dict[int, _RawProcessRecord],
+    second_rows: dict[int, _RawProcessRecord],
+) -> bool:
+    matching_rows = tuple(
+        row
+        for row in (first_rows.get(identity.pid), second_rows.get(identity.pid))
+        if row is not None and row.started == identity.started
+    )
+    if not matching_rows:
+        return True
+    return all(row.state.startswith("Z") for row in matching_rows)
+
+
+def _linux_identity_is_gone_or_zombie(
+    identity: _ProcessIdentity,
+    first_snapshot: dict[int, _ProcessRecord],
+    second_snapshot: dict[int, _ProcessRecord],
+) -> bool:
+    matching_records = tuple(
+        record
+        for record in (first_snapshot.get(identity.pid), second_snapshot.get(identity.pid))
+        if record is not None and record.identity == identity
+    )
+    if not matching_records:
+        return True
+    return all(record.state.startswith("Z") for record in matching_records)
 
 
 def _read_process_rows(
@@ -887,63 +1097,151 @@ def _read_process_rows(
     return rows
 
 
-def _process_snapshot(deadline: float) -> dict[int, _ProcessRecord]:
+def _process_snapshot(
+    deadline: float,
+    *,
+    root_pid: int | None = None,
+    required_identities: set[_ProcessIdentity] | None = None,
+) -> dict[int, _ProcessRecord]:
     if sys.platform.startswith("linux"):
         rows = _read_process_rows(deadline, include_session=True)
-        return {
-            pid: _ProcessRecord(
+        snapshot: dict[int, _ProcessRecord] = {}
+        for index, (pid, row) in enumerate(rows.items()):
+            if index % 128 == 0:
+                _remaining_cleanup_time(deadline)
+            if (
+                row.process_group <= 1
+                or row.session_id is None
+                or row.session_id <= 1
+            ):
+                continue
+            record = _read_linux_process_record(pid)
+            if record is not None and record.process_group > 1 and record.session_id > 1:
+                snapshot[pid] = record
+        return snapshot
+
+    while True:
+        first_rows = _read_process_rows(deadline, include_session=False)
+        first_observations: dict[int, tuple[int, int]] = {}
+        ambiguous: list[tuple[_ProcessIdentity, int, int]] = []
+        for index, (pid, row) in enumerate(first_rows.items()):
+            if index % 128 == 0:
+                _remaining_cleanup_time(deadline)
+            if row.process_group <= 1:
+                continue
+            try:
+                current_group = os.getpgid(pid)
+                session_id = os.getsid(pid)
+            except ProcessLookupError:
+                continue
+            if current_group != row.process_group or session_id <= 1:
+                ambiguous.append(
+                    (_ProcessIdentity(pid, row.started), row.parent_pid, session_id)
+                )
+                continue
+            first_observations[pid] = (current_group, session_id)
+
+        second_rows = _read_process_rows(deadline, include_session=False)
+        snapshot: dict[int, _ProcessRecord] = {}
+        for index, (pid, observation) in enumerate(first_observations.items()):
+            if index % 128 == 0:
+                _remaining_cleanup_time(deadline)
+            first_row = first_rows[pid]
+            row = second_rows.get(pid)
+            if row is None or row.started != first_row.started:
+                continue
+            try:
+                current_group = os.getpgid(pid)
+                session_id = os.getsid(pid)
+            except ProcessLookupError:
+                ambiguous.append(
+                    (_ProcessIdentity(pid, row.started), row.parent_pid, observation[1])
+                )
+                continue
+            if (
+                (current_group, session_id) != observation
+                or current_group != row.process_group
+            ):
+                ambiguous.append(
+                    (_ProcessIdentity(pid, row.started), row.parent_pid, session_id)
+                )
+                continue
+            snapshot[pid] = _ProcessRecord(
                 identity=_ProcessIdentity(pid, row.started),
                 parent_pid=row.parent_pid,
-                process_group=row.process_group,
-                session_id=row.session_id,
+                process_group=current_group,
+                session_id=session_id,
                 state=row.state,
             )
-            for pid, row in rows.items()
-            if row.process_group > 1
-            and row.session_id is not None
-            and row.session_id > 1
-        }
 
-    first_rows = _read_process_rows(deadline, include_session=False)
-    first_observations: dict[int, tuple[int, int]] = {}
-    for index, (pid, row) in enumerate(first_rows.items()):
-        if index % 128 == 0:
-            _remaining_cleanup_time(deadline)
-        if row.process_group <= 1:
-            continue
-        try:
-            current_group = os.getpgid(pid)
-            session_id = os.getsid(pid)
-        except ProcessLookupError:
-            continue
-        if current_group != row.process_group or session_id <= 1:
-            continue
-
-        first_observations[pid] = (current_group, session_id)
-
-    second_rows = _read_process_rows(deadline, include_session=False)
-    snapshot: dict[int, _ProcessRecord] = {}
-    for index, (pid, observation) in enumerate(first_observations.items()):
-        if index % 128 == 0:
-            _remaining_cleanup_time(deadline)
-        row = first_rows[pid]
-        if second_rows.get(pid) != row:
-            continue
-        try:
-            current_group = os.getpgid(pid)
-            session_id = os.getsid(pid)
-        except ProcessLookupError:
-            continue
-        if (current_group, session_id) != observation:
-            continue
-        snapshot[pid] = _ProcessRecord(
-            identity=_ProcessIdentity(pid, row.started),
-            parent_pid=row.parent_pid,
-            process_group=current_group,
-            session_id=session_id,
-            state=row.state,
+        for pid, row in second_rows.items():
+            first_row = first_rows.get(pid)
+            if (
+                first_row is not None
+                and first_row.started == row.started
+                and row.process_group > 1
+                and pid not in first_observations
+            ):
+                ambiguous.append(
+                    (_ProcessIdentity(pid, row.started), row.parent_pid, 0)
+                )
+                break
+        required = required_identities or set()
+        owned_pids = (
+            {
+                record.identity.pid
+                for record, _ in _owned_processes(root_pid, snapshot)
+            }
+            if root_pid is not None
+            else set()
         )
-    return snapshot
+        relevant_ambiguity = any(
+            identity in required
+            or (root_pid is not None and session_id == root_pid)
+            or parent_pid in owned_pids
+            for identity, parent_pid, session_id in ambiguous
+        )
+        if not relevant_ambiguity:
+            return snapshot
+        try:
+            time.sleep(min(0.01, _remaining_cleanup_time(deadline)))
+        except RuntimeError as error:
+            raise RuntimeError(
+                "Darwin process inventory did not reach an unambiguous snapshot"
+            ) from error
+
+
+def _read_linux_process_record(pid: int) -> _ProcessRecord | None:
+    """Read one kernel process record with a boot-relative start-tick identity."""
+
+    try:
+        payload = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    if len(payload) > 4_096:
+        raise RuntimeError(f"Linux process record {pid} exceeded its byte limit")
+    close_paren = payload.rfind(")")
+    if close_paren <= 0:
+        raise RuntimeError(f"malformed Linux process record for pid {pid}")
+    try:
+        recorded_pid = int(payload[: payload.index(" ")])
+        fields = payload[close_paren + 2 :].split()
+        state = fields[0]
+        parent_pid = int(fields[1])
+        process_group = int(fields[2])
+        session_id = int(fields[3])
+        start_ticks = int(fields[19])
+    except (ValueError, IndexError) as error:
+        raise RuntimeError(f"malformed Linux process record for pid {pid}") from error
+    if recorded_pid != pid or not state or start_ticks < 0:
+        raise RuntimeError(f"invalid Linux process record for pid {pid}")
+    return _ProcessRecord(
+        identity=_ProcessIdentity(pid, f"linux-start-ticks:{start_ticks}"),
+        parent_pid=parent_pid,
+        process_group=process_group,
+        session_id=session_id,
+        state=state,
+    )
 
 
 def _owned_processes(

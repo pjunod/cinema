@@ -901,6 +901,7 @@ time.sleep(30)
 
         def growing_snapshot(
             _deadline: float,
+            **_options: object,
         ) -> dict[int, validation_runner._ProcessRecord]:
             nonlocal calls
             calls += 1
@@ -931,7 +932,9 @@ time.sleep(30)
                 "_process_snapshot",
                 side_effect=growing_snapshot,
             ),
-            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(
+                validation_runner, "_stop_and_confirm_group", return_value=True
+            ),
             self.assertRaisesRegex(RuntimeError, "did not reach a frozen fixed point"),
         ):
             validation_runner._freeze_process_tree(
@@ -965,7 +968,9 @@ time.sleep(30)
                 "_process_snapshot",
                 side_effect=snapshots,
             ),
-            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(
+                validation_runner, "_stop_and_confirm_group", return_value=True
+            ) as stop_group,
             mock.patch.object(validation_runner.time, "sleep"),
         ):
             validation_runner._freeze_process_tree(
@@ -980,13 +985,36 @@ time.sleep(30)
                 validation_runner._ProcessIdentity(201, "child"),
             },
         )
-        killpg.assert_called_once_with(201, signal.SIGSTOP)
+        self.assertEqual(
+            stop_group.call_args.args[:3],
+            (100, 201, {child_running.identity}),
+        )
 
     @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
     def test_frozen_groups_are_killed_deepest_first_without_resume(self):
-        with mock.patch.object(validation_runner.os, "killpg") as killpg:
+        records = {
+            pid: validation_runner._ProcessRecord(
+                validation_runner._ProcessIdentity(pid, f"start-{pid}"),
+                1,
+                pid,
+                100,
+                "T",
+            )
+            for pid in (100, 200, 300)
+        }
+        identities = {record.identity for record in records.values()}
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner, "_process_snapshot", return_value=records
+            ),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+        ):
             errors = validation_runner._kill_frozen_groups(
-                {100: 0, 200: 1, 300: 2}, time.monotonic() + 1
+                100,
+                {100: 0, 200: 1, 300: 2},
+                identities,
+                time.monotonic() + 1,
             )
 
         self.assertEqual(errors, [])
@@ -1028,7 +1056,7 @@ time.sleep(30)
 
         self.assertEqual(snapshot, {})
 
-    def test_linux_process_snapshot_uses_one_atomic_inventory(self):
+    def test_linux_process_snapshot_uses_kernel_start_ticks(self):
         completed = subprocess.CompletedProcess(
             args=["ps"],
             returncode=0,
@@ -1040,6 +1068,19 @@ time.sleep(30)
                 validation_runner.subprocess, "run", return_value=completed
             ) as run,
             mock.patch.object(validation_runner.sys, "platform", "linux"),
+            mock.patch.object(
+                validation_runner,
+                "_read_linux_process_record",
+                return_value=validation_runner._ProcessRecord(
+                    validation_runner._ProcessIdentity(
+                        200, "linux-start-ticks:123"
+                    ),
+                    100,
+                    200,
+                    100,
+                    "T",
+                ),
+            ),
             mock.patch.object(validation_runner.os, "getpgid") as getpgid,
             mock.patch.object(validation_runner.os, "getsid") as getsid,
         ):
@@ -1047,21 +1088,73 @@ time.sleep(30)
 
         self.assertEqual(snapshot[200].process_group, 200)
         self.assertEqual(snapshot[200].session_id, 100)
+        self.assertEqual(snapshot[200].identity.started, "linux-start-ticks:123")
         self.assertIn("sid=", run.call_args.args[0][2])
         getpgid.assert_not_called()
         getsid.assert_not_called()
 
-    def test_darwin_process_snapshot_rejects_a_changed_raw_identity(self):
+    def test_linux_process_record_uses_proc_start_ticks(self):
+        payload = (
+            "200 (worker with spaces) S 100 200 100 0 -1 0 0 0 0 0 0 0 0 "
+            "0 20 0 1 0 12345 0\n"
+        )
+        with mock.patch.object(Path, "read_text", return_value=payload):
+            record = validation_runner._read_linux_process_record(200)
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.identity.started, "linux-start-ticks:12345")
+        self.assertEqual(record.parent_pid, 100)
+        self.assertEqual(record.process_group, 200)
+        self.assertEqual(record.session_id, 100)
+
+    def test_linux_pidfd_signal_refuses_a_reused_identity(self):
+        original = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(200, "linux-start-ticks:10"),
+            100,
+            200,
+            100,
+            "T",
+        )
+        replacement = dataclasses.replace(
+            original,
+            identity=validation_runner._ProcessIdentity(
+                200, "linux-start-ticks:11"
+            ),
+        )
+        with (
+            mock.patch.object(
+                validation_runner.os, "pidfd_open", return_value=9, create=True
+            ),
+            mock.patch.object(validation_runner.os, "close") as close,
+            mock.patch.object(
+                validation_runner.signal, "pidfd_send_signal", create=True
+            ) as pidfd_signal,
+            mock.patch.object(
+                validation_runner,
+                "_read_linux_process_record",
+                return_value=replacement,
+            ),
+        ):
+            errors = validation_runner._signal_linux_identities(
+                (original,), signal.SIGKILL, time.monotonic() + 1
+            )
+
+        self.assertEqual(errors, [])
+        pidfd_signal.assert_not_called()
+        close.assert_called_once_with(9)
+
+    def test_darwin_process_snapshot_preserves_identity_across_state_and_parent_change(self):
         first = subprocess.CompletedProcess(
             args=["ps"],
             returncode=0,
-            stdout="200 100 200 T Tue Aug 25 13:05:11 2026\n",
+            stdout="200 100 200 R Tue Aug 25 13:05:11 2026\n",
             stderr="",
         )
         changed = subprocess.CompletedProcess(
             args=["ps"],
             returncode=0,
-            stdout="200 100 200 T Tue Aug 25 13:05:12 2026\n",
+            stdout="200 1 200 S Tue Aug 25 13:05:11 2026\n",
             stderr="",
         )
         with (
@@ -1074,9 +1167,36 @@ time.sleep(30)
         ):
             snapshot = validation_runner._process_snapshot(time.monotonic() + 1)
 
-        self.assertEqual(snapshot, {})
+        self.assertEqual(snapshot[200].parent_pid, 1)
+        self.assertEqual(snapshot[200].state, "S")
+        self.assertEqual(snapshot[200].identity.started, "Tue Aug 25 13:05:11 2026")
         self.assertEqual(run.call_count, 2)
         self.assertNotIn("sid=", run.call_args.args[0][2])
+
+    def test_darwin_process_snapshot_retries_unresolved_group_identity(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout="200 100 200 S Tue Aug 25 13:05:11 2026\n",
+            stderr="",
+        )
+        groups = iter((201, 200) * 100)
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner.os, "getpgid", side_effect=lambda _pid: next(groups)
+            ),
+            mock.patch.object(validation_runner.os, "getsid", return_value=100),
+            self.assertRaisesRegex(
+                RuntimeError, "unambiguous snapshot|cleanup exceeded"
+            ),
+        ):
+            validation_runner._process_snapshot(
+                time.monotonic() + 0.03, root_pid=100
+            )
 
     def test_process_snapshot_rejects_an_oversized_inventory(self):
         completed = subprocess.CompletedProcess(
@@ -1096,32 +1216,136 @@ time.sleep(30)
 
     def test_post_kill_verification_waits_for_recorded_identities_to_disappear(self):
         identity = validation_runner._ProcessIdentity(200, "start")
-        survivor = validation_runner._ProcessRecord(identity, 1, 200, 200, "R")
+        running = validation_runner._RawProcessRecord(100, 200, None, "R", "start")
+        sleeping = validation_runner._RawProcessRecord(1, 200, None, "S", "start")
         with (
             mock.patch.object(
                 validation_runner,
-                "_process_snapshot",
-                side_effect=[{200: survivor}, {}],
-            ) as snapshot,
+                "_read_process_rows",
+                side_effect=[{200: running}, {200: sleeping}, {}, {}],
+            ) as census,
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
             mock.patch.object(validation_runner.time, "sleep"),
         ):
             validation_runner._verify_processes_gone(
                 {identity}, time.monotonic() + 1
             )
 
-        self.assertEqual(snapshot.call_count, 2)
+        self.assertEqual(census.call_count, 4)
 
     def test_post_kill_verification_accepts_a_zombie_as_non_executable(self):
         identity = validation_runner._ProcessIdentity(200, "start")
-        zombie = validation_runner._ProcessRecord(identity, 1, 200, 200, "Z")
+        zombie = validation_runner._RawProcessRecord(1, 200, None, "Z", "start")
         with mock.patch.object(
-            validation_runner, "_process_snapshot", return_value={200: zombie}
-        ) as snapshot:
+            validation_runner,
+            "_read_process_rows",
+            side_effect=[{200: zombie}, {200: zombie}],
+        ) as census, mock.patch.object(validation_runner.sys, "platform", "darwin"):
             validation_runner._verify_processes_gone(
                 {identity}, time.monotonic() + 1
             )
 
-        snapshot.assert_called_once()
+        self.assertEqual(census.call_count, 2)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_timeout_termination_invokes_recorded_identity_verification(self):
+        process = mock.Mock()
+        process.pid = 100
+        process.poll.return_value = 0
+        identity = validation_runner._ProcessIdentity(200, "start")
+
+        def freeze(
+            _root_pid: int,
+            _groups: dict[int, int],
+            identities: set[validation_runner._ProcessIdentity],
+            _deadline: float,
+        ) -> None:
+            identities.add(identity)
+
+        with (
+            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(validation_runner, "_freeze_process_tree", side_effect=freeze),
+            mock.patch.object(validation_runner, "_kill_frozen_groups", return_value=[]),
+            mock.patch.object(validation_runner, "_reap_owned_process", return_value=None),
+            mock.patch.object(validation_runner, "_verify_processes_gone") as verify,
+        ):
+            validation_runner._terminate_process_tree(process, time.monotonic() + 1)
+
+        self.assertEqual(verify.call_args.args[0], {identity})
+
+    def test_reused_process_group_is_not_killed(self):
+        original = validation_runner._ProcessIdentity(200, "start-old")
+        replacement = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(201, "start-new"),
+            1,
+            200,
+            200,
+            "T",
+        )
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                return_value={201: replacement},
+            ),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+        ):
+            errors = validation_runner._kill_frozen_groups(
+                100, {200: 1}, {original}, time.monotonic() + 1
+            )
+
+        self.assertRegex(errors[0], "acquired unowned identities")
+        killpg.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_reused_group_after_stop_is_never_committed_or_killed(self):
+        root = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(100, "root"), 1, 100, 100, "T"
+        )
+        child = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(200, "child-old"),
+            100,
+            200,
+            100,
+            "R",
+        )
+        replacement = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(201, "child-new"),
+            1,
+            200,
+            200,
+            "T",
+        )
+        snapshots = [
+            {100: root, 200: child},
+            {100: root, 201: replacement},
+            {100: root},
+            {100: root},
+            {100: root},
+            {100: root},
+        ]
+        frozen_groups = {100: 0}
+        frozen_identities: set[validation_runner._ProcessIdentity] = set()
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner, "_process_snapshot", side_effect=snapshots
+            ),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(validation_runner.time, "sleep"),
+        ):
+            validation_runner._freeze_process_tree(
+                100, frozen_groups, frozen_identities, time.monotonic() + 1
+            )
+            errors = validation_runner._kill_frozen_groups(
+                100, frozen_groups, frozen_identities, time.monotonic() + 1
+            )
+
+        self.assertEqual(errors, [])
+        self.assertNotIn(200, frozen_groups)
+        self.assertIn(mock.call(200, signal.SIGSTOP), killpg.call_args_list)
+        self.assertNotIn(mock.call(200, signal.SIGKILL), killpg.call_args_list)
 
     def test_windows_tree_kill_nonzero_is_always_fatal(self):
         process = mock.Mock()
@@ -1156,6 +1380,26 @@ time.sleep(30)
                 validation_runner.subprocess, "run", side_effect=timeout
             ),
             self.assertRaisesRegex(RuntimeError, "timed out terminating"),
+        ):
+            validation_runner._terminate_process_tree(process)
+
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
+
+    def test_windows_tree_kill_launch_error_is_fatal_and_reaps_shell(self):
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(validation_runner.os, "name", "nt"),
+            mock.patch.object(
+                validation_runner.subprocess,
+                "run",
+                side_effect=FileNotFoundError("taskkill missing"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "could not launch Windows"),
         ):
             validation_runner._terminate_process_tree(process)
 
