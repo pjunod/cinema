@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e26161a5"]
+points = ["persistence.upgrades", "core.media"]
+checks = ["rust-gate"]
+reason = "media_playback_desired's import TablePlan carried minimum_schema 28, the replicated AUTH schema version, where the field is compared against the source database's SQLite PRAGMA user_version; the table is created by SQLite migration 48. A source between v28 and v47 would pass the import floor and then be asked to count and read a table it does not have, surfacing only during a restore. The constant is corrected to 48 and every_import_plan_names_the_migration_that_creates_its_table now checks every plan against MIGRATIONS, so a plan naming a version earlier than the migration that creates its table fails by name; reverting the constant to 28 fails it."
