@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -534,25 +535,68 @@ def _run_shell(
     environment = os.environ.copy()
     environment["PLURX_VALIDATION"] = "1"
     environment.update(environment_overrides or {})
+    group_options: dict[str, object]
+    if os.name == "nt":
+        group_options = {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        }
+    else:
+        group_options = {"start_new_session": True}
+
+    process = subprocess.Popen(
+        command,
+        cwd=repo_root,
+        env=environment,
+        shell=True,
+        executable="/bin/sh" if os.name != "nt" else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        **group_options,
+    )
     try:
-        completed = subprocess.run(
-            command,
-            cwd=repo_root,
-            env=environment,
-            shell=True,
-            executable="/bin/sh" if os.name != "nt" else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout_seconds,
-        )
-        return completed.returncode, completed.stdout, time.monotonic() - started
-    except subprocess.TimeoutExpired as exc:
-        output = exc.stdout or ""
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", errors="replace")
+        output, _ = process.communicate(timeout=timeout_seconds)
+        return process.returncode, output, time.monotonic() - started
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        output, _ = process.communicate()
         output += f"\nvalidation timed out after {timeout_seconds}s\n"
         return 124, output, time.monotonic() - started
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Terminate a timed-out check and every process in its owned tree."""
+
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait()
+        return
+
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        process.kill()
+    process.wait()
 
 
 def execute_checks(

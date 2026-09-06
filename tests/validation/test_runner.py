@@ -4,9 +4,13 @@ import contextlib
 import dataclasses
 import io
 import json
+import os
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -96,7 +100,7 @@ class CatalogCase(unittest.TestCase):
             check for check in catalog.checks if check.id == "cluster-auth"
         )
 
-        self.assertGreaterEqual(cluster_auth.timeout_seconds, 3600)
+        self.assertEqual(cluster_auth.timeout_seconds, 3600)
 
     def test_provider_change_expands_consumers_and_deduplicates_checks(self):
         catalog = self.load()
@@ -584,6 +588,48 @@ checks = ["baseline"]
         self.assertEqual(results[0].status, "failed")
         self.assertEqual(results[0].returncode, 124)
         self.assertIn("timed out", results[0].output)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group contract")
+    def test_timeout_terminates_and_reaps_descendants(self):
+        catalog = self.load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "survived"
+            parent = root / "parent.py"
+            parent.write_text(
+                """\
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+marker = sys.argv[1]
+subprocess.Popen([
+    sys.executable,
+    "-c",
+    "from pathlib import Path; import signal, sys, time; "
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(1.5); "
+    "Path(sys.argv[1]).write_text('survived', encoding='utf-8')",
+    marker,
+])
+time.sleep(30)
+""",
+                encoding="utf-8",
+            )
+            timed_tree = dataclasses.replace(
+                catalog.check_map["baseline"],
+                command=f"{shlex.quote(sys.executable)} {shlex.quote(str(parent))} "
+                f"{shlex.quote(str(marker))}",
+                timeout_seconds=1,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = execute_checks(
+                    (timed_tree,), root, root / "artifacts", strict=True, fail_fast=True
+                )
+            time.sleep(1.0)
+
+            self.assertEqual(results[0].returncode, 124)
+            self.assertFalse(marker.exists())
 
     def test_reports_preserve_point_status_and_parse_as_junit(self):
         catalog = self.load()

@@ -459,6 +459,10 @@ outer budget was too small on a loaded development host: the durable-store and
 topology contracts completed successfully, but the runner terminated the
 following activation suite partway through. The activation suite then passed
 7/7 in isolation in 73.83 seconds on the same candidate.
+Every check runs in an owned process session. If this outer budget expires, the
+runner terminates, force-kills, and reaps that complete process group before it
+records exit 124 or starts another check, so Cargo, voter, and daemon children
+cannot contaminate later evidence.
 
 **What a timeout there means.** `Database("replicated store operation timed out")`
 is the host reporting that it could not finish an operation in three seconds.

@@ -19,7 +19,8 @@ FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M1_EFFORT_BASE = "a8bbe574"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
-M1_RECEIPT_HEAD = "bc3c3bee"
+M1_RECEIPT_HEAD = "f9e02558"
+M1_RUNTIME_RECEIPT_HEAD = "bc3c3bee"
 M1_REPAIR_HEAD = "07c8f905"
 
 
@@ -175,8 +176,24 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_m1_review_repair_distinguishes_exact_and_working_tree_evidence(self) -> None:
         self.assertIn(
-            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact mapped history audit 1,378, "
-            "catalog 24/30/1,443",
+            f"Exact receipt | `{M1_RECEIPT_HEAD}`: effort hook passed mapped history "
+            "1,379, operations 211/211, formatting, and the pinned all-target "
+            "workspace compile; a clean exact-tree catalog audit reports 24 points / "
+            "30 checks / 1,443 audited files",
+            self.status,
+        )
+        self.assertIn(
+            f"Runtime repair receipt `{M1_RUNTIME_RECEIPT_HEAD}` remains the exact "
+            "1,378-history mutation-proof receipt",
+            self.status,
+        )
+        self.assertIn(
+            "M1 head `22ab9c8d` completed 22 checks, failed only `cluster-auth`, "
+            "and declared 2 skips",
+            self.status,
+        )
+        self.assertIn(
+            "`f9e02558` raises only that outer validation ceiling to 3,600 seconds",
             self.status,
         )
         self.assertIn("sealed, self-contained Linux FFprobe artifact", self.status)

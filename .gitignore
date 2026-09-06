@@ -2,6 +2,7 @@
 /fuzz/artifacts
 /fuzz/target
 /spikes/hiqlite-m0/target
+/vendor/*/target/
 /data
 *.db
 *.db-shm
