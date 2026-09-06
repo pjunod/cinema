@@ -29,15 +29,16 @@ change.
 |---|---|---|---|---|
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
-| M3 · recovery budgets | `codex/cluster-transport-m3` | awaiting submission | exact candidate `f7671683` passed three adversarial reviews and the focused fast lane; ready for its effort PR | Virtual-time exact bounds · config/env/Compose precedence |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | awaiting submission | code tip `f7671683` passed three adversarial reviews and the focused fast lane; its documentation-only successor is under exact-SHA review before the effort PR | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | `codex/cluster-transport-m4` | not opened | combined candidate is undergoing review-finding fixes before exact-SHA re-review | Authenticated pre-HTTP status · zero store calls · stale samples expire |
 | M5 · recovery campaign | isolated review-fix branch | not opened | campaign harness and resource evidence are undergoing review-finding fixes before final integration | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
 
-The independent clone is based on remote `main` commit `3d847b58`. The local
-Homebrew default is Rust 1.95.0, so every recorded Rust command uses
+The M3 candidate's exact merge-base with the effort is `5f96469a94`. Current
+`main` will be merged into the frozen effort before final qualification. The
+local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
 | Check | Result | Detail |
@@ -65,16 +66,16 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 
 ## Decisions to review — autonomous choices
 
-1. **Work only in independent clones.** Ongoing milestone work lives at
-   `/private/tmp/plurx-cluster-recovery-agent`; isolated M1 review fixes live at
-   `/private/tmp/plurx-m1-review-fix`. A mistakenly created worktree and its
-   two branches in the shared repository were removed after a byte-for-byte
-   patch comparison; no pre-existing shared changes were reset or deleted.
-2. **Use runtime activation, never compile-time feature gating.** The finished
-   capability will have an enablement section in Settings → Dev that explains
-   prerequisites and refuses unsafe activation. Validation-only fault
-   injection remains test-only because exposing a production fault switch
-   would itself be unsafe; production transport behavior is always compiled.
+1. **Work only in independent clones.** M3 and the isolated M4/M5 review-fix
+   streams live under `/private/tmp`; no implementation or review edits occur
+   in the user's checkout. A mistakenly created worktree and its two branches
+   in the shared repository were removed after a byte-for-byte patch comparison;
+   no pre-existing shared changes were reset or deleted.
+2. **Keep recovery always on; add no production feature gate.** Settings → Dev
+   explains safe rollout prerequisites and current support state but does not
+   activate or disable the corrected transport. Readiness and deployment
+   checks remain fail-closed. Validation-only fault injection remains test-only
+   because exposing a production fault switch would itself be unsafe.
 3. **Keep protocol compatibility.** New budgets and observations stay local;
    serialized Raft and binary API variants do not change during the rolling
    update.
