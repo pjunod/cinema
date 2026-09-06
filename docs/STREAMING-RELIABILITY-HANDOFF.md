@@ -282,8 +282,15 @@ fixture defect on the same day.**
   `enforceCaseResult` turns any non-terminal status into a failure. Still open:
   the strongest cases (steady, seek-storm, stall-recovery) are deliberately
   excluded from the PR gate (`ci.yml:545-555`); evidence retention is 3-14 days
-  and CI-scoped; and there is no durable action/outcome ledger, so no failure
-  evidence survives a daemon restart.
+  and CI-scoped.
+
+  The durable action/outcome ledger exists now. `durable_outcome` writes a
+  terminal, a retry backoff, a withheld recovery and a suppressed action into
+  the node-local `playback_events` table, so a refusal outlives the process
+  that made it. Deliberately not every exchange — one happens every few
+  seconds per viewer, and a ledger recording the healthy path is one nobody
+  reads. Evidence retention for browser runs is still CI-scoped and the
+  strongest cases are still outside the PR gate.
 
   `scripts/ship --status` closes the last of those. It asks every node in the
   inventory for `/readyz` and `/metrics` and prints build, readiness,
