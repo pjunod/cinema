@@ -202,14 +202,25 @@ fixture defect on the same day.**
   configured target. Reasons are bounded on the wire (`:698-704`), parsed from
   a closed set, and a relayed verdict that disagrees with delivery is refused
   (`:730-747`).
-- **PARTIAL.** The second sentence is no longer true: preparation reaches VOD,
-  because `headroom_refusal` now has the delivered rate it needed
-  (`playback_control.rs:1280-1293`, regression at `:13504`). The first is
-  open — `client_runway_ms` is still `buffered_through_ms - anchor`
-  (`:897-901`, `:3004-3008`) and consults `buffered_from_ms` nowhere, so a
-  scattered buffer and a contiguous one produce the same runway. Transport and
-  displayed progress are held apart only inside the starvation predicate
-  (`:2012-2035`).
+- **DONE.** Preparation reaches VOD: `headroom_refusal` has the delivered rate
+  it needed (`playback_control.rs:1280-1293`, regression at `:13504`).
+  Contiguity is now read rather than discarded — `contiguous_runway_ms` credits
+  runway only when the client's reported region reaches the playhead, and an
+  absent `buffered_from_ms` keeps the old reading because a missing field is no
+  evidence rather than a hole
+  (`runway_counts_only_a_buffer_that_reaches_the_playhead`).
+
+  Transport versus displayed progress needed no change, and that is worth
+  stating rather than leaving as a suspicion. The two facts arrive from two
+  sources — the server's own `fetched_through_ms` and the client's
+  `position_ms`/`render_state` — and no consumer substitutes one for the other.
+  Both places that resume from a frontier pull it back by a whole segment
+  precisely *because* fetched runs ahead of seen (`media_sessions.rs:2626`
+  `owner_loss_resume`, `:4902` `takeover_resume`, with the reasoning at
+  `:2555-2565` and `:4898-4901`), and `recovery_outranks_hold` takes the
+  request and the delivery view separately and reads each for what it is. A
+  rendered-progress field on `DeliveryView` would duplicate what the request
+  already carries.
 - **PARTIAL — capping exists, fairness does not.** Session-close cleanup is
   done (`waitpool.rs` `retire_session`, wired at `vodserve.rs:2825`), and both
   caps with typed refusal classes are done. Still open, and each for a stated

@@ -24,6 +24,16 @@ pub(crate) const MAX_RELAY_BYTES: usize = 20 * 1024;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub(crate) const EXCHANGE_DEADLINE: Duration = Duration::from_secs(4);
 pub(crate) const NEXT_EXCHANGE_MS: u32 = 5_000;
+
+/// How long a `no_room` hold asks to be left alone.
+///
+/// Four ordinary exchanges. Node capacity is cleared by something outside the
+/// rendition a client is waiting on — another title completing, an eviction, a
+/// producer finishing — so a client that asks again at the ordinary cadence is
+/// spending exchanges on a node that has already said it has nothing to give.
+/// Long enough that the waiting is cheap; short enough that a viewer whose
+/// room appears is not left sitting on a stale answer.
+pub(crate) const NO_ROOM_REVISIT_MS: u32 = 4 * NEXT_EXCHANGE_MS;
 pub(crate) const ROLLING_LEASE_TIMEOUT_MS: u32 = 60_000;
 pub(crate) const ROLLING_EXPLICIT_LEASE_TIMEOUT_MS: u32 = 30_000;
 pub(crate) const VOD_LEASE_TIMEOUT_MS: u32 = 300_000;
@@ -727,7 +737,7 @@ impl ControlResponseV1 {
         declared
             && match &self.action {
                 ControlAction::None => true,
-                ControlAction::Hold { reason } => {
+                ControlAction::Hold { reason, .. } => {
                     self.delivery.hold_reason.as_deref() == Some(reason.as_delivery_str())
                 }
                 // Both verdicts must agree with the decision the same response
@@ -885,6 +895,42 @@ pub(crate) fn subtitle_readiness_value(
     )
 }
 
+/// How much of the client's buffer is actually ahead of where it is playing.
+///
+/// `buffered_through_ms` on its own does not say that. A client reports the
+/// end of a buffered region; whether that region *contains* the playhead is a
+/// separate fact, and `buffered_from_ms` is the one that carries it. Reading
+/// only the end credits a client with runway measured across a hole it cannot
+/// play through.
+///
+/// The case this exists for is an ordinary seek. The anchor becomes the seek
+/// target, and the region the client is describing is the one around where it
+/// *was* — so the difference between the two is not buffer, it is the gap the
+/// client is seeking across. Crediting it as runway tells the server the
+/// viewer is comfortable at exactly the moment they have nothing, and the
+/// server holds production on the strength of it.
+///
+/// A region that starts at or before the anchor is contiguous from the
+/// playhead and its end is the honest runway — which is every steady-state
+/// exchange, so nothing changes for the common case.
+///
+/// An absent `buffered_from_ms` means no contiguity evidence, not a hole. That
+/// is the shape a client sends when it could not identify a region containing
+/// the playhead, and it is also the shape every client that predates the field
+/// sends. Both keep the old reading rather than being told they have nothing:
+/// inventing a starvation signal from a missing field would stall production
+/// for clients that are fine.
+fn contiguous_runway_ms(request: &ControlRequestV1, buffer_anchor_ms: i64) -> i64 {
+    let start = request.buffered_from_ms.unwrap_or(buffer_anchor_ms);
+    if start > buffer_anchor_ms {
+        return 0;
+    }
+    request
+        .buffered_through_ms
+        .saturating_sub(buffer_anchor_ms)
+        .max(0)
+}
+
 impl DeliveryView {
     pub(crate) fn from_status(
         status: &HlsSessionInfo,
@@ -895,10 +941,7 @@ impl DeliveryView {
         subtitle_readiness: Option<String>,
     ) -> Self {
         let buffer_anchor_ms = request.seek_target_ms.unwrap_or(request.position_ms);
-        let client_runway_ms = request
-            .buffered_through_ms
-            .saturating_sub(buffer_anchor_ms)
-            .max(0);
+        let client_runway_ms = contiguous_runway_ms(request, buffer_anchor_ms);
         match status {
             HlsSessionInfo::Live(info) => Self {
                 presentation: info.presentation.to_owned(),
@@ -1691,6 +1734,21 @@ pub(crate) enum HoldReason {
 }
 
 impl HoldReason {
+    /// How long before this hold is worth asking about again.
+    ///
+    /// Every reason but one lifts on its own as the client consumes what it
+    /// already has, so the ordinary exchange cadence is exactly right: the
+    /// answer changes because the client changed it. `NoRoom` is the exception
+    /// and the reason this method exists — nothing the client does clears it,
+    /// so asking at the same rate is work spent on a node that is already out
+    /// of room, and the honest interval is longer.
+    pub(crate) fn revisit_after_ms(self) -> u32 {
+        match self {
+            Self::NoRoom => NO_ROOM_REVISIT_MS,
+            _ => NEXT_EXCHANGE_MS,
+        }
+    }
+
     pub(crate) fn from_delivery(reason: &str) -> Option<Self> {
         Some(match reason {
             "demand" => Self::Demand,
@@ -1736,6 +1794,25 @@ pub(crate) enum ControlAction {
     /// lifted must not be replayed as though it were still in force.
     Hold {
         reason: HoldReason,
+        /// When the server expects to be worth asking again.
+        ///
+        /// A hold without one is an instruction to wait with no end, and
+        /// `no_room` made that concrete: node capacity is cleared by something
+        /// outside this rendition, so a client told to hold could sit
+        /// indefinitely with nothing to act on and no idea whether the server
+        /// still knew about it.
+        ///
+        /// This is a revisit contract and deliberately not an expiry. The hold
+        /// does not become a failure when the interval passes; the client asks
+        /// again, exactly as it would have, and the server answers with what is
+        /// true then. Escalating to a terminal instead would tell a client to
+        /// tear down a player over a server working precisely as designed —
+        /// the response this action exists to prevent.
+        ///
+        /// Relative rather than absolute, because the two clocks are not
+        /// synchronised and an absolute instant from the server is a value the
+        /// client cannot safely compare against its own.
+        revisit_after_ms: u32,
     },
     /// Production stopped for a reason that trying again cannot change.
     ///
@@ -1940,7 +2017,7 @@ pub(crate) fn action_metrics(
     transaction_suppressed: bool,
 ) -> ActionMetrics {
     match action {
-        ControlAction::Hold { reason } => ActionMetrics {
+        ControlAction::Hold { reason, .. } => ActionMetrics {
             action: ActionKind::Hold,
             hold_reason: Some(*reason),
             suppressed: false,
@@ -2094,7 +2171,10 @@ pub(crate) fn resolve_action(
         .hold_reason
         .as_deref()
         .and_then(HoldReason::from_delivery)
-        .map_or(ControlAction::None, |reason| ControlAction::Hold { reason })
+        .map_or(ControlAction::None, |reason| ControlAction::Hold {
+            reason,
+            revisit_after_ms: reason.revisit_after_ms(),
+        })
 }
 
 /// A bounded explanation for a terminal verdict.
@@ -13624,6 +13704,7 @@ mod tests {
             resolve_action(&ControlAction::None, &unknown, &request),
             ControlAction::Hold {
                 reason: HoldReason::WorkingSet,
+                revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
             },
         );
     }
@@ -13657,8 +13738,12 @@ mod tests {
             let held = delivery_with_hold(Some(reason));
             assert_eq!(
                 resolve_action(&ControlAction::None, &held, &healthy),
-                ControlAction::Hold {
-                    reason: HoldReason::from_delivery(reason).expect("named reason"),
+                {
+                    let reason = HoldReason::from_delivery(reason).expect("named reason");
+                    ControlAction::Hold {
+                        reason,
+                        revisit_after_ms: reason.revisit_after_ms(),
+                    }
                 },
                 "{reason} must still be sent to a healthy client",
             );
@@ -13705,6 +13790,7 @@ mod tests {
                 resolve_action(&ControlAction::None, &delivery, &request),
                 ControlAction::Hold {
                     reason: HoldReason::Time,
+                    revisit_after_ms: HoldReason::Time.revisit_after_ms(),
                 },
                 "{name} alone must leave the hold in force",
             );
@@ -14171,7 +14257,10 @@ mod tests {
                     &delivery_with_hold(Some(delivery_reason)),
                     &accepting,
                 ),
-                ControlAction::Hold { reason: expected },
+                ControlAction::Hold {
+                    reason: expected,
+                    revisit_after_ms: expected.revisit_after_ms(),
+                },
                 "delivery reported {delivery_reason}",
             );
         }
@@ -14206,12 +14295,14 @@ mod tests {
             resolve_action(
                 &ControlAction::Hold {
                     reason: HoldReason::Demand,
+                    revisit_after_ms: HoldReason::Demand.revisit_after_ms(),
                 },
                 &delivery_with_hold(Some("bytes")),
                 &accepting,
             ),
             ControlAction::Hold {
                 reason: HoldReason::Demand,
+                revisit_after_ms: HoldReason::Demand.revisit_after_ms(),
             },
         );
     }
@@ -14239,14 +14330,153 @@ mod tests {
         assert_eq!(HoldReason::from_delivery("unheard_of"), None);
     }
 
+    /// A hold says when it is worth asking again, and `no_room` says a longer
+    /// number than the rest.
+    ///
+    /// Without an interval, `hold` is an instruction to wait with no end.
+    /// That is survivable for the reasons a client clears itself — it is
+    /// consuming buffer, so the answer changes because it changed it — and it
+    /// is not survivable for `no_room`, which only something outside this
+    /// rendition can clear. A client told to hold for that reason could sit
+    /// indefinitely with nothing to act on.
+    ///
+    /// The longer interval is the point rather than a detail. Asking again at
+    /// the ordinary cadence spends exchanges on a node that has already said
+    /// it has nothing to give, and the ask cannot change the answer.
+    ///
+    /// It is a revisit contract, not an expiry: nothing fails when the
+    /// interval passes. That distinction is why this is not a terminal, which
+    /// would tell a client to tear down a player over a server working
+    /// exactly as designed.
+    /// A buffer that does not reach the playhead is not runway.
+    ///
+    /// `buffered_through_ms` alone cannot tell a comfortable client from one
+    /// about to starve: it is the end of *a* buffered region, and whether that
+    /// region contains the playhead is a different fact. The case that matters
+    /// is an ordinary seek — the anchor moves to the target while the region
+    /// the client is describing is the one around where it was, so the
+    /// difference between them is the gap being seeked across, not buffer.
+    /// Counting it tells the server the viewer is fine at precisely the moment
+    /// they have nothing, and the server holds production on that.
+    ///
+    /// The two shapes below report an identical `buffered_through_ms` and must
+    /// not report identical runway. That is the whole property; everything
+    /// else here is making sure the honest cases are left alone.
+    #[test]
+    fn runway_counts_only_a_buffer_that_reaches_the_playhead() {
+        let contiguous = ControlRequestV1 {
+            position_ms: 10_000,
+            buffered_from_ms: Some(9_000),
+            buffered_through_ms: 40_000,
+            ..request()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&contiguous, 10_000),
+            30_000,
+            "a region containing the playhead is runway to its end",
+        );
+
+        let scattered = ControlRequestV1 {
+            buffered_from_ms: Some(25_000),
+            ..contiguous.clone()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&scattered, 10_000),
+            0,
+            "the same end, with a hole at the playhead, is not 30 seconds of \
+             comfort — it is nothing to play",
+        );
+
+        // A seek whose buffer is entirely behind the target is *not* tested
+        // here, and the reason is worth writing down: it cannot reach this
+        // function. `validate` refuses a request whose `buffered_through_ms`
+        // is below the anchor, and during a seek the anchor is the target — so
+        // a client holding 9s-20s while seeking to 600s is rejected at the
+        // door rather than arriving with a misleading runway. Asserting it
+        // anyway would be asserting a shape the wire forbids, which proves
+        // nothing about the system and quietly rots when the validator moves.
+        //
+        // What does reach here is the case above: a request that passes
+        // validation because its region ends past the anchor, while starting
+        // after it.
+
+        // No contiguity evidence is not a hole. Every client that predates the
+        // field sends this, and so does one that could not identify a region
+        // containing its playhead; telling either that it has nothing would
+        // stall production for clients that are fine.
+        let silent = ControlRequestV1 {
+            buffered_from_ms: None,
+            ..contiguous.clone()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&silent, 10_000),
+            30_000,
+            "a client that says nothing about contiguity keeps the old reading",
+        );
+
+        // And a region starting exactly at the playhead is contiguous.
+        let exact = ControlRequestV1 {
+            buffered_from_ms: Some(10_000),
+            ..contiguous
+        };
+        assert_eq!(contiguous_runway_ms(&exact, 10_000), 30_000);
+    }
+
+    #[test]
+    fn a_hold_says_when_to_ask_again_and_no_room_says_later() {
+        for reason in [
+            HoldReason::Demand,
+            HoldReason::Time,
+            HoldReason::Bytes,
+            HoldReason::Global,
+            HoldReason::Ahead,
+            HoldReason::WorkingSet,
+        ] {
+            assert_eq!(
+                reason.revisit_after_ms(),
+                NEXT_EXCHANGE_MS,
+                "{reason:?} lifts as the client consumes, so the ordinary \
+                 cadence is the honest interval",
+            );
+        }
+        assert!(
+            HoldReason::NoRoom.revisit_after_ms() > NEXT_EXCHANGE_MS,
+            "nothing the client does clears no_room, so asking at the ordinary \
+             cadence is work spent on a node already out of room",
+        );
+
+        // And the resolved action carries it, so a client reads the interval
+        // from the action it was given rather than inferring one.
+        let delivery = delivery_with_hold(Some("no_room"));
+        let mut client = request();
+        client.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        let resolved = resolve_action(&ControlAction::None, &delivery, &client);
+        assert_eq!(
+            resolved,
+            ControlAction::Hold {
+                reason: HoldReason::NoRoom,
+                revisit_after_ms: NO_ROOM_REVISIT_MS,
+            },
+            "the hold a client receives says when to come back",
+        );
+    }
+
     #[test]
     fn the_action_is_tagged_on_the_wire() {
         assert_eq!(
             serde_json::to_value(ControlAction::Hold {
                 reason: HoldReason::WorkingSet,
+                revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
             })
             .expect("action json"),
-            serde_json::json!({"type": "hold", "reason": "working_set"}),
+            // Additive: a client that predates the field ignores it and holds
+            // exactly as it did, which is why this is a bound on the existing
+            // action rather than a new one every client has to learn.
+            serde_json::json!({
+                "type": "hold",
+                "reason": "working_set",
+                "revisit_after_ms": NEXT_EXCHANGE_MS,
+            }),
         );
         assert_eq!(
             serde_json::to_value(ControlAction::None).expect("action json"),
@@ -20396,6 +20626,7 @@ mod tests {
         held.delivery.hold_reason = Some("working_set".to_owned());
         held.action = ControlAction::Hold {
             reason: HoldReason::WorkingSet,
+            revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
         };
         assert!(held.is_valid_for(&accepting));
 

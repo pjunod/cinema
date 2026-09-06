@@ -26452,6 +26452,7 @@ pub(crate) mod tests {
             ),
             crate::playback_control::ControlAction::Hold {
                 reason: crate::playback_control::HoldReason::Time,
+                revisit_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
             },
         );
     }

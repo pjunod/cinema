@@ -326,6 +326,13 @@ struct ControlAction: Codable, Equatable {
     var reason: String? = nil
     /// `retry_resource` only: when the server wants to be asked again.
     var afterMs: Int? = nil
+    /// `hold` only: when the server expects to be worth asking again.
+    ///
+    /// A revisit contract, not an expiry — nothing fails when it passes. It
+    /// exists because `no_room` is cleared by something outside this session,
+    /// so a client told to hold for that reason has no way of its own to know
+    /// when asking again is worth the exchange.
+    var revisitAfterMs: Int? = nil
     /// `terminal` only: which producer decision ended this session, and a
     /// bounded sentence explaining it.
     var code: String? = nil

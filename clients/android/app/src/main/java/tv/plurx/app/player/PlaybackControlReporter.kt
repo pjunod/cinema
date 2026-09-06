@@ -370,6 +370,15 @@ data class ControlAction(
     val reason: String? = null,
     /** `retry_resource` only: when the server wants to be asked again. */
     @SerialName("after_ms") val afterMs: Long? = null,
+    /**
+     * `hold` only: when the server expects to be worth asking again.
+     *
+     * A revisit contract, not an expiry — nothing fails when it passes. It
+     * exists because `no_room` is cleared by something outside this session,
+     * so a client told to hold for that reason has no way of its own to know
+     * when asking again is worth the exchange.
+     */
+    @SerialName("revisit_after_ms") val revisitAfterMs: Long? = null,
     /** `terminal` only: which producer decision ended this session. */
     val code: String? = null,
     val message: String? = null,

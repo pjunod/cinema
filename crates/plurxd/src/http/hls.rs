@@ -20376,23 +20376,39 @@ mod tests {
             .expect("read back")
             .expect("the file row is there");
 
-        // The index the VOD path refuses without.
-        let runtime = crate::test_tempdir().expect("runtime cache dir");
-        let outcome = crate::fragindex::build(
-            &file,
-            plurx_core::transcode::CopyVideoOptions::new(
-                crate::ffmpeg::has_dovi_rpu().await,
-                false,
-            ),
-            runtime.path(),
-            Duration::from_secs(120),
-        )
-        .await;
-        let crate::fragindex::IndexOutcome::Built(index) = outcome else {
-            panic!("the fixture must index: {outcome:?}");
-        };
+        // The index the VOD path refuses without, built once for the whole
+        // test binary.
+        //
+        // Not a micro-optimisation. Indexing runs ffmpeg over the fixture, and
+        // doing that once per test put enough CPU into this binary to tip two
+        // timing-sensitive `seek_coalescing` tests over on the coverage runner,
+        // where instrumentation makes everything slower — they passed before
+        // this fixture existed and failed after. The index is the same bytes
+        // every time, so building it three times was only ever cost, and the
+        // cost landed on someone else's test.
+        static INDEX: tokio::sync::OnceCell<plurx_core::segplan::FragmentIndex> =
+            tokio::sync::OnceCell::const_new();
+        let index = INDEX
+            .get_or_init(|| async {
+                let runtime = crate::test_tempdir().expect("runtime cache dir");
+                let outcome = crate::fragindex::build(
+                    &file,
+                    plurx_core::transcode::CopyVideoOptions::new(
+                        crate::ffmpeg::has_dovi_rpu().await,
+                        false,
+                    ),
+                    runtime.path(),
+                    Duration::from_secs(120),
+                )
+                .await;
+                let crate::fragindex::IndexOutcome::Built(index) = outcome else {
+                    panic!("the fixture must index: {outcome:?}");
+                };
+                *index
+            })
+            .await;
         store
-            .put_fragment_index(file_id, &index)
+            .put_fragment_index(file_id, index)
             .await
             .expect("store the index");
 
