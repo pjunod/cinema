@@ -85,10 +85,11 @@ Current focused code evidence on M1 code head `cc464663`:
 - `cargo clippy -p plurxd --all-targets -- -D warnings`: passed.
 - `cargo fmt --all -- --check` and the working-tree whitespace diff pass.
 
-Exact validation receipt `8cc77fa6` adds:
+Post-repair validation receipt `006d832d` retains production and test behavior
+from `cc464663` and adds:
 
-- `make validation-lint`: 24 points, 30 checks, and 1,431 audited files pass.
-- `make history-check`: 1,353 corrective commits pass.
+- `make validation-lint`: 24 points, 30 checks, and 1,434 audited files pass.
+- `make history-check`: 1,356 corrective commits pass.
 - `make operations-check`: 211 passed.
 - `cargo check --workspace --locked --all-targets` on Rust 1.97.1: passed.
 
