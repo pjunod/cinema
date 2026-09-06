@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 locally qualified; final-head review and publication pending · **Updated:** 2026-09-05 ·
+**Status:** M0 locally qualified and reviewed; publication pending · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -26,7 +26,7 @@ An unchecked item is not implied by a nearby passing check.
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Locally qualified; final-head review and publication pending | [PR #915](https://github.com/pjunod/plurx/pull/915); focused gates and corrected-head full suite pass |
+| M0 · baseline and diagnostic qualification | Locally qualified and reviewed; publication pending | [PR #915](https://github.com/pjunod/plurx/pull/915); focused gates, corrected-head full suite, and two final adversarial reviews pass |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -268,6 +268,9 @@ both reviewers approved the repaired tree at `7649ccdd` with no remaining
 actionable findings.
 GitHub had deleted the temporary effort base and closed #914; the same effort
 and task refs were restored, and #915 is the active review record.
+Both independent reviewers then approved exact receipt head `2c266dce` with no
+actionable findings after independently matching the retained full-suite JSON
+and JUnit evidence to this ledger.
 
 | Finding | Resolution on working tree |
 |---|---|
@@ -392,6 +395,7 @@ lane and focused tests provide earlier feedback.
 | Working tree | `make unit` with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · 2,785 tests; 3 declared ignores |
 | Working tree | `make playback-smoke` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Pass · 11/11 Chrome cases, including HDR tone-map, copy-HLS, no-MSE, seek, audio switch, and subtitle toggle |
 | `01368ce1` | `make validate-full` with full FFmpeg 8.1.2, retained x265 ABI 216, Playwright 1.62.0, and anonymous pinned Android container preflight | Pass · 23 runnable checks; Android-device was the sole declared skip because `adb` is unavailable; cluster-auth passed in 1,638.3 s |
+| `2c266dce` | Independent diagnostic-safety and milestone-scope adversarial reviews | Pass · both reviewers approved with no actionable findings after checking the retained full-suite JSON and JUnit evidence |
 
 ## Remaining evidence before release
 
