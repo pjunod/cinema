@@ -1810,9 +1810,12 @@ pub fn resolve_transcode(
 fn effective_output_geometry(facts: &DecodeFacts, requested_max_height: u32) -> Option<(u32, u32)> {
     let source_width = u64::from(facts.width?);
     let source_height = u64::from(facts.height?);
-    let height = u64::from(requested_max_height).min(source_height).max(2) & !1;
+    let raw_height = u64::from(requested_max_height).min(source_height).max(2);
+    // Preserve the shipping builder's order: derive aspect width from the raw
+    // capped height, then round both output dimensions down for yuv420p.
     let width =
-        ((source_width.checked_mul(height)? + source_height / 2) / source_height).max(2) & !1;
+        ((source_width.checked_mul(raw_height)? + source_height / 2) / source_height).max(2) & !1;
+    let height = raw_height & !1;
     Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
 }
 

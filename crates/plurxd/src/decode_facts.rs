@@ -70,20 +70,36 @@ enum ProbeLaunchMode {
     #[cfg(test)]
     Fixture,
     #[cfg(all(test, target_os = "linux"))]
-    FixturePidfdOpenFailure,
+    ProductionPidfdOpenFailure,
     #[cfg(all(test, target_os = "linux"))]
-    FixturePidfdReadFailure,
+    ProductionPidfdReadFailure,
+    #[cfg(all(test, target_os = "linux"))]
+    ProductionSupervisorDelay,
+    #[cfg(all(test, target_os = "linux"))]
+    ProductionSupervisorReceiveFailure,
+    #[cfg(all(test, target_os = "linux"))]
+    ProductionFdExport(std::os::fd::RawFd),
 }
 
 impl ProbeLaunchMode {
     fn is_production(self) -> bool {
-        self == Self::Production
+        match self {
+            Self::Production => true,
+            #[cfg(test)]
+            Self::Fixture => false,
+            #[cfg(all(test, target_os = "linux"))]
+            Self::ProductionPidfdOpenFailure
+            | Self::ProductionPidfdReadFailure
+            | Self::ProductionSupervisorDelay
+            | Self::ProductionSupervisorReceiveFailure
+            | Self::ProductionFdExport(_) => true,
+        }
     }
 
     #[cfg(target_os = "linux")]
     fn inject_pidfd_open_failure(self) -> bool {
         #[cfg(test)]
-        if self == Self::FixturePidfdOpenFailure {
+        if self == Self::ProductionPidfdOpenFailure {
             return true;
         }
         false
@@ -91,7 +107,7 @@ impl ProbeLaunchMode {
 
     #[cfg(all(test, target_os = "linux"))]
     fn inject_pidfd_read_failure(self) -> bool {
-        if self == Self::FixturePidfdReadFailure {
+        if self == Self::ProductionPidfdReadFailure {
             return true;
         }
         false
@@ -101,8 +117,37 @@ impl ProbeLaunchMode {
     fn inject_slow_reap(self) -> bool {
         matches!(
             self,
-            Self::FixturePidfdOpenFailure | Self::FixturePidfdReadFailure
+            Self::ProductionPidfdOpenFailure | Self::ProductionPidfdReadFailure
         )
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn inject_supervisor_delay(self) -> bool {
+        self == Self::ProductionSupervisorDelay
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn inject_supervisor_receive_failure(self) -> bool {
+        self == Self::ProductionSupervisorReceiveFailure
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn export_socket_fd(self) -> Option<std::os::fd::RawFd> {
+        match self {
+            Self::ProductionFdExport(fd) => Some(fd),
+            _ => None,
+        }
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn supervisor_test_counter(self) -> Option<&'static std::sync::atomic::AtomicUsize> {
+        match self {
+            Self::ProductionPidfdOpenFailure => Some(&PIDFD_OPEN_SUPERVISOR_OWNERS),
+            Self::ProductionPidfdReadFailure => Some(&PIDFD_READ_SUPERVISOR_OWNERS),
+            Self::ProductionSupervisorDelay => Some(&DELAYED_SUPERVISOR_OWNERS),
+            Self::ProductionSupervisorReceiveFailure => Some(&FAILED_SUPERVISOR_OWNERS),
+            _ => None,
+        }
     }
 }
 
@@ -112,6 +157,8 @@ impl ProbeLaunchMode {
 pub(crate) struct DecodeFactSource {
     handle: Arc<std::fs::File>,
     offset_gate: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    identity_delay: Duration,
 }
 
 impl DecodeFactSource {
@@ -122,12 +169,29 @@ impl DecodeFactSource {
         Self {
             handle,
             offset_gate,
+            #[cfg(test)]
+            identity_delay: Duration::ZERO,
         }
     }
 
     #[cfg(test)]
     fn isolated(handle: Arc<std::fs::File>) -> Self {
         Self::new(handle, Arc::new(tokio::sync::Semaphore::new(1)))
+    }
+
+    #[cfg(test)]
+    fn with_identity_delay(mut self, delay: Duration) -> Self {
+        self.identity_delay = delay;
+        self
+    }
+
+    fn identity_delay(&self) -> Duration {
+        #[cfg(test)]
+        {
+            return self.identity_delay;
+        }
+        #[cfg(not(test))]
+        Duration::ZERO
     }
 }
 
@@ -197,7 +261,7 @@ impl DecodeProbeIdentity {
     }
 
     #[cfg(test)]
-    async fn discover_fixture(bin: &str) -> Result<Self, DecodeFactError> {
+    pub(crate) async fn discover_fixture(bin: &str) -> Result<Self, DecodeFactError> {
         Self::discover_with_mode(bin, ProbeLaunchMode::Fixture).await
     }
 
@@ -508,8 +572,8 @@ struct LandlockRulesetAttr {
 
 /// Deny execution from every path-backed filesystem. The first parser exec is
 /// performed directly from the sealed anonymous descriptor, which Landlock
-/// deliberately does not mediate. A separate seccomp layer makes that one
-/// descriptor the only possible target of every later exec.
+/// deliberately does not mediate. A separate one-shot seccomp supervisor
+/// admits that exact exec and denies every later exec attempt.
 #[cfg(target_os = "linux")]
 fn install_linux_filesystem_execute_denial() -> std::io::Result<()> {
     let abi = unsafe {
@@ -572,6 +636,11 @@ const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
 const LINUX_AUDIT_ARCH: u32 = 0xc000_003e;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const LINUX_AUDIT_ARCH: u32 = 0xc000_00b7;
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+const LINUX_AUDIT_ARCH: u32 = 0;
 
 #[cfg(target_os = "linux")]
 fn seccomp_statement(code: u16, value: u32) -> libc::sock_filter {
@@ -602,6 +671,26 @@ struct LinuxProbeSeccomp {
 
 #[cfg(target_os = "linux")]
 impl LinuxProbeSeccomp {
+    fn install(&self) -> std::io::Result<()> {
+        let program = libc::sock_fprog {
+            len: self.filter_len,
+            filter: self.filter.as_ptr().cast_mut(),
+        };
+        if unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER,
+                0,
+                &raw const program,
+            )
+        } == -1
+        {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
     fn install_listener(&self) -> std::io::Result<std::os::fd::OwnedFd> {
         use std::os::fd::FromRawFd;
 
@@ -662,6 +751,7 @@ fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
         libc::SYS_execve,
         libc::SYS_recvmsg,
         libc::SYS_recvmmsg,
+        libc::SYS_sendmmsg,
         libc::SYS_pidfd_getfd,
         libc::SYS_io_uring_setup,
         libc::SYS_io_uring_enter,
@@ -713,6 +803,56 @@ fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
         )
     })?;
     Ok(LinuxProbeSeccomp { filter, filter_len })
+}
+
+/// The bootstrap filter must allow one `sendmsg` so the child can transfer
+/// its listener. Stack this filter immediately afterwards; the installed
+/// parser and every descendant then fail closed if they try to export a held
+/// descriptor with SCM_RIGHTS.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn build_linux_probe_post_transfer_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
+    const LOAD_WORD_ABSOLUTE: u16 = 0x20;
+    const JUMP_EQUAL: u16 = 0x15;
+    const RETURN_CONSTANT: u16 = 0x06;
+    const DENIED: u32 = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+
+    let mut filter = vec![
+        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARCH_OFFSET),
+        seccomp_jump(JUMP_EQUAL, LINUX_AUDIT_ARCH, 1, 0),
+        seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_KILL_PROCESS),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, 0),
+    ];
+    #[cfg(target_arch = "x86_64")]
+    filter.extend([
+        seccomp_jump(0x45, 0x4000_0000, 0, 1),
+        seccomp_statement(RETURN_CONSTANT, DENIED),
+    ]);
+    for syscall in [libc::SYS_sendmsg, libc::SYS_sendmmsg] {
+        filter.push(seccomp_jump(JUMP_EQUAL, syscall as u32, 0, 1));
+        filter.push(seccomp_statement(RETURN_CONSTANT, DENIED));
+    }
+    filter.push(seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_ALLOW));
+    let filter_len = u16::try_from(filter.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "post-transfer seccomp program exceeded the kernel length field",
+        )
+    })?;
+    Ok(LinuxProbeSeccomp { filter, filter_len })
+}
+
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+fn build_linux_probe_post_transfer_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "qualified FFprobe post-transfer seccomp is unsupported on this architecture",
+    ))
 }
 
 #[cfg(all(
@@ -847,7 +987,7 @@ fn send_linux_seccomp_listener(
         std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>(), listener);
         message.msg_controllen = (*header).cmsg_len;
     }
-    if unsafe { libc::sendmsg(socket, &raw const message, 0) } == 1 {
+    if unsafe { libc::sendmsg(socket, &raw const message, libc::MSG_NOSIGNAL) } == 1 {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
@@ -857,6 +997,7 @@ fn send_linux_seccomp_listener(
 #[cfg(target_os = "linux")]
 fn receive_linux_seccomp_listener(
     socket: std::os::fd::RawFd,
+    deadline: std::time::Instant,
 ) -> std::io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
 
@@ -872,7 +1013,18 @@ fn receive_linux_seccomp_listener(
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
     message.msg_controllen = std::mem::size_of_val(&control);
-    let received = unsafe { libc::recvmsg(socket, &raw mut message, libc::MSG_CMSG_CLOEXEC) };
+    wait_for_linux_fd(socket, libc::POLLIN, deadline)?;
+    let received = loop {
+        let received = unsafe { libc::recvmsg(socket, &raw mut message, libc::MSG_CMSG_CLOEXEC) };
+        if received != -1 {
+            break received;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+        wait_for_linux_fd(socket, libc::POLLIN, deadline)?;
+    };
     if received != 1 {
         return Err(if received == -1 {
             std::io::Error::last_os_error()
@@ -882,6 +1034,12 @@ fn receive_linux_seccomp_listener(
                 "probe exited before transferring its seccomp listener",
             )
         });
+    }
+    if message.msg_flags & libc::MSG_CTRUNC != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "probe seccomp listener control message was truncated",
+        ));
     }
     let header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
     if header.is_null()
@@ -907,14 +1065,97 @@ fn receive_linux_seccomp_listener(
 }
 
 #[cfg(target_os = "linux")]
+fn wait_for_linux_fd(
+    fd: std::os::fd::RawFd,
+    events: libc::c_short,
+    deadline: std::time::Instant,
+) -> std::io::Result<()> {
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "probe supervisor launch handshake timed out",
+            ));
+        }
+        let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+        let mut descriptor = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&raw mut descriptor, 1, timeout_ms) };
+        if ready > 0 && descriptor.revents & events != 0 {
+            return Ok(());
+        }
+        if ready == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "probe supervisor launch handshake timed out",
+            ));
+        }
+        if ready == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "probe supervisor launch channel closed",
+        ));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn receive_linux_seccomp_notification_before(
+    listener: std::os::fd::RawFd,
+    deadline: std::time::Instant,
+) -> std::io::Result<LinuxSeccompNotification> {
+    loop {
+        wait_for_linux_fd(listener, libc::POLLIN, deadline)?;
+        match receive_linux_seccomp_notification(listener) {
+            Ok(notification) => return Ok(notification),
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn supervise_linux_probe_execs(
-    receiver: std::os::fd::OwnedFd,
+    receiver: Arc<std::os::fd::OwnedFd>,
     stop: Arc<AtomicBool>,
+    launch_mode: ProbeLaunchMode,
+    launch_deadline: std::time::Instant,
 ) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
-    let listener = receive_linux_seccomp_listener(receiver.as_raw_fd())?;
-    let first = receive_linux_seccomp_notification(listener.as_raw_fd())?;
+    struct ShutdownReceiver(std::os::fd::RawFd);
+    impl Drop for ShutdownReceiver {
+        fn drop(&mut self) {
+            unsafe {
+                libc::shutdown(self.0, libc::SHUT_RDWR);
+            }
+        }
+    }
+    let _shutdown_receiver = ShutdownReceiver(receiver.as_raw_fd());
+    #[cfg(test)]
+    if launch_mode.inject_supervisor_delay() {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    #[cfg(test)]
+    if launch_mode.inject_supervisor_receive_failure() {
+        return Err(std::io::Error::other(
+            "injected seccomp listener receive failure",
+        ));
+    }
+    let listener = receive_linux_seccomp_listener(receiver.as_raw_fd(), launch_deadline)?;
+    unsafe {
+        libc::shutdown(receiver.as_raw_fd(), libc::SHUT_RDWR);
+    }
+    let first = receive_linux_seccomp_notification_before(listener.as_raw_fd(), launch_deadline)?;
     if first.flags != 0
         || first.data.arch != LINUX_AUDIT_ARCH
         || first.data.nr != libc::SYS_execveat as libc::c_int
@@ -988,15 +1229,20 @@ fn supervise_linux_probe_execs(
 #[cfg(target_os = "linux")]
 struct LinuxProbeExecSupervisor {
     child_sender: Option<std::os::fd::OwnedFd>,
+    receiver: Option<Arc<std::os::fd::OwnedFd>>,
     child_sender_fd: std::os::fd::RawFd,
-    child_receiver_fd: std::os::fd::RawFd,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    #[cfg(test)]
+    test_counter: Option<&'static std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(target_os = "linux")]
 impl LinuxProbeExecSupervisor {
-    fn start() -> std::io::Result<Self> {
+    fn start(
+        launch_mode: ProbeLaunchMode,
+        launch_deadline: std::time::Instant,
+    ) -> std::io::Result<Self> {
         use std::os::fd::{AsRawFd, FromRawFd};
 
         let mut sockets = [-1; 2];
@@ -1026,21 +1272,36 @@ impl LinuxProbeExecSupervisor {
             }
             return Err(std::io::Error::last_os_error());
         }
-        let receiver = unsafe { std::os::fd::OwnedFd::from_raw_fd(receiver_fd) };
+        let receiver = Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(receiver_fd) });
         let child_sender = unsafe { std::os::fd::OwnedFd::from_raw_fd(sender_fd) };
-        let child_receiver_fd = receiver.as_raw_fd();
         let child_sender_fd = child_sender.as_raw_fd();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let worker_receiver = Arc::clone(&receiver);
         let worker = std::thread::Builder::new()
             .name("plurx-probe-exec".to_owned())
-            .spawn(move || supervise_linux_probe_execs(receiver, worker_stop))?;
+            .spawn(move || {
+                supervise_linux_probe_execs(
+                    worker_receiver,
+                    worker_stop,
+                    launch_mode,
+                    launch_deadline,
+                )
+            })?;
+        #[cfg(test)]
+        let test_counter = launch_mode.supervisor_test_counter();
+        #[cfg(test)]
+        if let Some(counter) = test_counter {
+            counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         Ok(Self {
             child_sender: Some(child_sender),
+            receiver: Some(receiver),
             child_sender_fd,
-            child_receiver_fd,
             stop,
             worker: Some(worker),
+            #[cfg(test)]
+            test_counter,
         })
     }
 
@@ -1049,11 +1310,16 @@ impl LinuxProbeExecSupervisor {
     }
 
     fn child_receiver_fd(&self) -> std::os::fd::RawFd {
-        self.child_receiver_fd
+        use std::os::fd::AsRawFd;
+        self.receiver
+            .as_ref()
+            .expect("receiver exists through spawn")
+            .as_raw_fd()
     }
 
     fn parent_after_spawn(&mut self) {
         self.child_sender.take();
+        self.receiver.take();
     }
 
     fn finish(&mut self) -> std::io::Result<()> {
@@ -1073,8 +1339,25 @@ impl Drop for LinuxProbeExecSupervisor {
     fn drop(&mut self) {
         self.parent_after_spawn();
         self.stop.store(true, Ordering::Release);
+        #[cfg(test)]
+        if let Some(counter) = self.test_counter.take() {
+            counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+static PIDFD_OPEN_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, target_os = "linux"))]
+static PIDFD_READ_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, target_os = "linux"))]
+static DELAYED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, target_os = "linux"))]
+static FAILED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(unix)]
 struct ProbeExecutionSupervisor {
@@ -1114,6 +1397,26 @@ impl ProbeExecutionSupervisor {
         }
         Ok(())
     }
+}
+
+#[cfg(unix)]
+async fn spawn_configured_probe(
+    mut command: tokio::process::Command,
+    mut supervisor: ProbeExecutionSupervisor,
+) -> Result<(tokio::process::Child, ProbeExecutionSupervisor), DecodeFactError> {
+    tokio::task::spawn_blocking(move || {
+        let spawned = command.spawn();
+        supervisor.parent_after_spawn();
+        match spawned {
+            Ok(child) => Ok((child, supervisor)),
+            Err(error) => {
+                let _ = supervisor.finish();
+                Err(DecodeFactError::Spawn(error.to_string()))
+            }
+        }
+    })
+    .await
+    .map_err(|error| DecodeFactError::Spawn(error.to_string()))?
 }
 
 #[cfg(target_os = "linux")]
@@ -1200,11 +1503,14 @@ impl LinuxExecveArguments {
 fn configure_probe_execution(
     command: &mut tokio::process::Command,
     launch_mode: ProbeLaunchMode,
+    launch_deadline: std::time::Instant,
     executable_fd: std::os::fd::RawFd,
     source_fd: Option<std::os::fd::RawFd>,
     arg0: &Path,
     arguments: &[OsString],
 ) -> Result<ProbeExecutionSupervisor, DecodeFactError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = launch_deadline;
     #[cfg(target_os = "linux")]
     let production_arguments = if launch_mode.is_production() {
         Some(
@@ -1223,12 +1529,21 @@ fn configure_probe_execution(
     } else {
         None
     };
+    #[cfg(target_os = "linux")]
+    let production_post_transfer_seccomp = if launch_mode.is_production() {
+        Some(
+            build_linux_probe_post_transfer_seccomp()
+                .map_err(|error| DecodeFactError::Spawn(error.to_string()))?,
+        )
+    } else {
+        None
+    };
     #[cfg(not(target_os = "linux"))]
     let _ = (arg0, arguments);
     #[cfg(target_os = "linux")]
     let production_supervisor = if launch_mode.is_production() {
         Some(
-            LinuxProbeExecSupervisor::start()
+            LinuxProbeExecSupervisor::start(launch_mode, launch_deadline)
                 .map_err(|error| DecodeFactError::Spawn(error.to_string()))?,
         )
     } else {
@@ -1259,6 +1574,10 @@ fn configure_probe_execution(
                 };
                 libc::close(receiver_fd);
                 mark_unrelated_fds_close_on_exec()?;
+                #[cfg(test)]
+                if let Some(export_socket) = launch_mode.export_socket_fd() {
+                    install_child_fd(export_socket, 5)?;
+                }
                 install_linux_filesystem_execute_denial()?;
                 let Some(seccomp) = production_seccomp.as_ref() else {
                     return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
@@ -1272,6 +1591,10 @@ fn configure_probe_execution(
                 let listener = seccomp.install_listener()?;
                 use std::os::fd::AsRawFd;
                 send_linux_seccomp_listener(sender_fd, listener.as_raw_fd())?;
+                let Some(post_transfer_seccomp) = production_post_transfer_seccomp.as_ref() else {
+                    return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                };
+                post_transfer_seccomp.install()?;
                 drop(listener);
                 arguments.execute_held_probe()
             }
@@ -1426,6 +1749,7 @@ impl ProbeSessionGuard {
         }
     }
 
+    #[cfg(test)]
     fn terminator(&self) -> ProbeSessionTerminator {
         self.terminator.clone()
     }
@@ -1693,7 +2017,7 @@ fn probe_file_identity_from_file(
 
 #[cfg(unix)]
 async fn probe_version(
-    executable: &ExecutableSnapshot,
+    executable: &Arc<ExecutableSnapshot>,
     configured_path: &Path,
     launch_mode: ProbeLaunchMode,
 ) -> Result<Vec<u8>, DecodeFactError> {
@@ -1702,7 +2026,7 @@ async fn probe_version(
 
 #[cfg(unix)]
 async fn probe_version_with_deadline(
-    executable: &ExecutableSnapshot,
+    executable: &Arc<ExecutableSnapshot>,
     configured_path: &Path,
     launch_mode: ProbeLaunchMode,
     deadline: Duration,
@@ -1719,16 +2043,14 @@ async fn probe_version_with_deadline(
 
 #[cfg(unix)]
 async fn probe_version_with_deadline_on(
-    executable: &ExecutableSnapshot,
+    executable: &Arc<ExecutableSnapshot>,
     configured_path: &Path,
     launch_mode: ProbeLaunchMode,
     deadline: Duration,
     gate: Arc<tokio::sync::Semaphore>,
 ) -> Result<Vec<u8>, DecodeFactError> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-
     let started = std::time::Instant::now();
+    let launch_deadline = started + deadline;
     let version_permit = tokio::time::timeout(deadline, gate.acquire_owned())
         .await
         .map_err(|_| DecodeFactError::Deadline)?
@@ -1737,38 +2059,35 @@ async fn probe_version_with_deadline_on(
     if remaining.is_zero() {
         return Err(DecodeFactError::Deadline);
     }
-    let executable_fd = executable.as_file().as_raw_fd();
-    let arguments = vec![OsString::from("-version")];
-    let mut command = tokio::process::Command::new(snapshot_execution_path(executable));
-    command.as_std_mut().arg0(configured_path);
-    command
-        .args(&arguments)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let mut supervisor = configure_probe_execution(
-        &mut command,
-        launch_mode,
-        executable_fd,
-        None,
-        configured_path,
-        &arguments,
-    )?;
-    let spawned = command.spawn();
-    supervisor.parent_after_spawn();
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = supervisor.finish();
-            return Err(DecodeFactError::Spawn(error.to_string()));
-        }
-    };
-    let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
-    let session = ProbeSessionGuard::new(process_group);
-    let terminator = session.terminator();
+    let executable = Arc::clone(executable);
+    let configured_path = configured_path.to_owned();
     let mut task = tokio::spawn(async move {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+
         let _version_permit = version_permit;
+        let executable_fd = executable.as_file().as_raw_fd();
+        let arguments = vec![OsString::from("-version")];
+        let mut command = tokio::process::Command::new(snapshot_execution_path(&executable));
+        command.as_std_mut().arg0(&configured_path);
+        command
+            .args(&arguments)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let supervisor = configure_probe_execution(
+            &mut command,
+            launch_mode,
+            launch_deadline,
+            executable_fd,
+            None,
+            &configured_path,
+            &arguments,
+        )?;
+        let (mut child, mut supervisor) = spawn_configured_probe(command, supervisor).await?;
+        let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
+        let session = ProbeSessionGuard::new(process_group);
         #[cfg(target_os = "linux")]
         let exit_anchor = match ProbeExitAnchor::open(process_group, launch_mode) {
             Ok(anchor) => anchor,
@@ -1786,33 +2105,50 @@ async fn probe_version_with_deadline_on(
                 return Err(DecodeFactError::MissingPipe);
             }
         };
-        #[cfg(target_os = "linux")]
-        let (stdout, exited) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), async {
-            let exited = exit_anchor.wait_until_exit().await;
-            // Kill descendants as soon as the leader exits so inherited
-            // pipe writers cannot hold the drain open.
+        let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            terminate_probe_session(&mut child, &session, &mut supervisor, launch_mode).await;
+            return Err(DecodeFactError::Deadline);
+        }
+        let outcome = tokio::time::timeout(remaining, async {
+            #[cfg(target_os = "linux")]
+            let (stdout, exited) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), async {
+                let exited = exit_anchor.wait_until_exit().await;
+                // Kill descendants as soon as the leader exits so inherited
+                // pipe writers cannot hold the drain open.
+                session.kill_once();
+                exited
+            });
+            #[cfg(target_os = "linux")]
+            let (status, exit_error) = {
+                // pidfd readiness proves exit without reaping. The zombie anchors
+                // the PID/PGID until descendants are killed and only then is the
+                // leader reaped.
+                let exit_error = exited
+                    .err()
+                    .map(|error| DecodeFactError::Read(error.to_string()));
+                (
+                    wait_for_probe_reap(&mut child, launch_mode).await,
+                    exit_error,
+                )
+            };
+            #[cfg(not(target_os = "linux"))]
+            let (stdout, status) =
+                tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait());
+            #[cfg(not(target_os = "linux"))]
             session.kill_once();
-            exited
-        });
-        #[cfg(target_os = "linux")]
-        let (status, exit_error) = {
-            // pidfd readiness proves exit without reaping. The zombie anchors
-            // the PID/PGID until descendants are killed and only then is the
-            // leader reaped.
-            let exit_error = exited
-                .err()
-                .map(|error| DecodeFactError::Read(error.to_string()));
-            (
-                wait_for_probe_reap(&mut child, launch_mode).await,
-                exit_error,
-            )
+            #[cfg(not(target_os = "linux"))]
+            let exit_error: Option<DecodeFactError> = None;
+            (stdout, status, exit_error)
+        })
+        .await;
+        let (stdout, status, exit_error) = match outcome {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                terminate_probe_session(&mut child, &session, &mut supervisor, launch_mode).await;
+                return Err(DecodeFactError::Deadline);
+            }
         };
-        #[cfg(not(target_os = "linux"))]
-        let (stdout, status) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait());
-        #[cfg(not(target_os = "linux"))]
-        session.kill_once();
-        #[cfg(not(target_os = "linux"))]
-        let exit_error: Option<DecodeFactError> = None;
         let supervisor_result = supervisor.finish();
         if let Some(error) = exit_error {
             return Err(error);
@@ -1838,7 +2174,6 @@ async fn probe_version_with_deadline_on(
             result.map_err(|error| DecodeFactError::Read(error.to_string()))?
         }
         _ = tokio::time::sleep(remaining) => {
-            terminator.kill_once();
             Err(DecodeFactError::Deadline)
         }
     }
@@ -1846,7 +2181,7 @@ async fn probe_version_with_deadline_on(
 
 #[cfg(not(unix))]
 async fn probe_version(
-    _executable: &ExecutableSnapshot,
+    _executable: &Arc<ExecutableSnapshot>,
     _configured_path: &Path,
     _launch_mode: ProbeLaunchMode,
 ) -> Result<Vec<u8>, DecodeFactError> {
@@ -1904,7 +2239,16 @@ impl DecodeFactCache {
         };
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
         probe.validate_current(remaining, cancelled).await?;
-        let bound_identity = source_identity(&source.handle)?;
+        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let (bound_source, gate) = source_observation_with_probe_gate(
+            Arc::clone(&source.handle),
+            gate,
+            remaining,
+            cancelled,
+            source.identity_delay(),
+        )
+        .await?;
+        let bound_identity = bound_source.identity.clone();
         let key = CacheKey {
             source: bound_identity.clone(),
             ffprobe_build_digest: probe.build_digest().to_owned(),
@@ -1944,8 +2288,10 @@ impl DecodeFactCache {
             let _source_offset_permit = source_offset_permit;
             let result = collect(
                 &owned_probe,
-                &source.handle,
+                Arc::clone(&source.handle),
                 bound_identity,
+                bound_source.executable,
+                source.identity_delay(),
                 owned_catalog.as_ref(),
                 selected_stream,
                 remaining,
@@ -1959,7 +2305,16 @@ impl DecodeFactCache {
         let facts = facts?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
         probe.validate_current(remaining, cancelled).await?;
-        if source_identity(&source.handle)? != key.source {
+        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        let (after_source, gate) = source_observation_with_probe_gate(
+            Arc::clone(&source.handle),
+            gate,
+            remaining,
+            cancelled,
+            source.identity_delay(),
+        )
+        .await?;
+        if after_source.identity != key.source {
             return Err(DecodeFactError::SourceChanged);
         }
         let mut entries = self.entries.lock().await;
@@ -2067,9 +2422,17 @@ impl std::fmt::Display for DecodeFactError {
 
 impl std::error::Error for DecodeFactError {}
 
+#[derive(Debug)]
+struct DecodeSourceObservation {
+    identity: DecodeSourceIdentity,
+    executable: bool,
+}
+
 #[cfg(unix)]
-fn source_identity(source: &std::fs::File) -> Result<DecodeSourceIdentity, DecodeFactError> {
+fn source_observation(source: &std::fs::File) -> Result<DecodeSourceObservation, DecodeFactError> {
     use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
     let metadata = source
         .metadata()
         .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?;
@@ -2087,8 +2450,97 @@ fn source_identity(source: &std::fs::File) -> Result<DecodeSourceIdentity, Decod
         "device": metadata.dev(),
         "inode": metadata.ino(),
     });
-    DecodeSourceIdentity::from_sha256(hex::encode(Sha256::digest(body.to_string().as_bytes())))
-        .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))
+    let identity =
+        DecodeSourceIdentity::from_sha256(hex::encode(Sha256::digest(body.to_string().as_bytes())))
+            .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?;
+    Ok(DecodeSourceObservation {
+        identity,
+        executable: metadata.permissions().mode() & 0o111 != 0,
+    })
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+fn source_identity(source: &std::fs::File) -> Result<DecodeSourceIdentity, DecodeFactError> {
+    Ok(source_observation(source)?.identity)
+}
+
+#[cfg(unix)]
+async fn source_observation_with_probe_gate(
+    source: Arc<std::fs::File>,
+    probe_gate: tokio::sync::OwnedSemaphorePermit,
+    budget: Duration,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+    delay: Duration,
+) -> Result<(DecodeSourceObservation, tokio::sync::OwnedSemaphorePermit), DecodeFactError> {
+    if budget.is_zero() {
+        return Err(DecodeFactError::Deadline);
+    }
+    let started = std::time::Instant::now();
+    let identity_permit = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => return Err(DecodeFactError::Cancelled),
+        permit = tokio::time::timeout(budget, identity_gate().acquire_owned()) => {
+            permit
+                .map_err(|_| DecodeFactError::Deadline)?
+                .map_err(|_| DecodeFactError::CacheInvariant)?
+        }
+    };
+    let remaining = budget.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(DecodeFactError::Deadline);
+    }
+    // Both admissions move into the blocking owner. A timed-out caller can
+    // detach, but another probe or metadata syscall cannot enter until this
+    // one actually returns.
+    let mut task = tokio::task::spawn_blocking(move || {
+        let _identity_permit = identity_permit;
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+        (source_observation(&source), probe_gate)
+    });
+    let (observation, probe_gate) = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => return Err(DecodeFactError::Cancelled),
+        result = tokio::time::timeout(remaining, &mut task) => {
+            result
+                .map_err(|_| DecodeFactError::Deadline)?
+                .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?
+        }
+    };
+    Ok((observation?, probe_gate))
+}
+
+#[cfg(unix)]
+async fn source_observation_owned(
+    source: Arc<std::fs::File>,
+    delay: Duration,
+) -> Result<DecodeSourceObservation, DecodeFactError> {
+    let permit = identity_gate()
+        .acquire_owned()
+        .await
+        .map_err(|_| DecodeFactError::CacheInvariant)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+        source_observation(&source)
+    })
+    .await
+    .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?
+}
+
+#[cfg(not(unix))]
+async fn source_observation_with_probe_gate(
+    _source: Arc<std::fs::File>,
+    _probe_gate: tokio::sync::OwnedSemaphorePermit,
+    _budget: Duration,
+    _cancelled: Option<&tokio_util::sync::CancellationToken>,
+    _delay: Duration,
+) -> Result<(DecodeSourceObservation, tokio::sync::OwnedSemaphorePermit), DecodeFactError> {
+    Err(DecodeFactError::UnsupportedPlatform)
 }
 
 #[cfg(not(unix))]
@@ -2121,27 +2573,22 @@ where
 #[cfg(unix)]
 async fn collect(
     probe: &DecodeProbeIdentity,
-    source: &std::fs::File,
+    source: Arc<std::fs::File>,
     before: DecodeSourceIdentity,
+    source_executable: bool,
+    source_identity_delay: Duration,
     catalog: Option<&DecodeCatalogMetadata>,
     selected_stream: ProbeStreamSelection,
     budget: Duration,
     cancelled: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<DecodeFacts, DecodeFactError> {
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
 
+    let started = std::time::Instant::now();
+    let launch_deadline = started + budget.min(PROBE_DEADLINE);
     let source_fd = source.as_raw_fd();
-    if probe.launch_mode.is_production()
-        && source
-            .metadata()
-            .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?
-            .permissions()
-            .mode()
-            & 0o111
-            != 0
-    {
+    if probe.launch_mode.is_production() && source_executable {
         return Err(DecodeFactError::SourceMetadata(
             "bound media source must not have executable mode bits".to_owned(),
         ));
@@ -2188,28 +2635,21 @@ async fn collect(
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
     command.args(&arguments);
-    let mut supervisor = configure_probe_execution(
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let supervisor = configure_probe_execution(
         &mut command,
         probe.launch_mode,
+        launch_deadline,
         executable_fd,
         Some(source_fd),
         probe.executable(),
         &arguments,
     )?;
-    let spawned = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
-    supervisor.parent_after_spawn();
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = supervisor.finish();
-            return Err(DecodeFactError::Spawn(error.to_string()));
-        }
-    };
+    let (mut child, mut supervisor) = spawn_configured_probe(command, supervisor).await?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
     #[cfg(target_os = "linux")]
@@ -2236,6 +2676,11 @@ async fn collect(
             return Err(DecodeFactError::MissingPipe);
         }
     };
+    let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
+        return Err(DecodeFactError::Deadline);
+    }
     let outcome = tokio::select! {
         biased;
         _ = wait_for_cancellation(cancelled) => {
@@ -2247,7 +2692,7 @@ async fn collect(
             ).await;
             return Err(DecodeFactError::Cancelled);
         }
-        outcome = tokio::time::timeout(budget.min(PROBE_DEADLINE), async {
+        outcome = tokio::time::timeout(remaining, async {
             #[cfg(target_os = "linux")]
             let (stdout, stderr, exited) = tokio::join!(
                 read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
@@ -2316,7 +2761,11 @@ async fn collect(
             .collect();
         return Err(DecodeFactError::Failed(status.code(), reason));
     }
-    if source_identity(source)? != before {
+    if source_observation_owned(Arc::clone(&source), source_identity_delay)
+        .await?
+        .identity
+        != before
+    {
         return Err(DecodeFactError::SourceChanged);
     }
     let json: serde_json::Value = serde_json::from_slice(&stdout.0)
@@ -2382,8 +2831,10 @@ fn first_playable_video_index(json: &serde_json::Value) -> Option<u32> {
 #[cfg(not(unix))]
 async fn collect(
     _probe: &DecodeProbeIdentity,
-    _source: &std::fs::File,
+    _source: Arc<std::fs::File>,
     _before: DecodeSourceIdentity,
+    _source_executable: bool,
+    _source_identity_delay: Duration,
     _catalog: Option<&DecodeCatalogMetadata>,
     _selected_stream: ProbeStreamSelection,
     _budget: Duration,
@@ -2425,7 +2876,9 @@ mod tests {
 #define NR_EXECVE 59
 #define NR_FCHMOD 91
 #define NR_FCNTL 72
+#define NR_SETPGID 109
 #define NR_SETSID 112
+#define NR_SENDMSG 46
 #define NR_EXIT 60
 #define NR_MEMFD_CREATE 319
 #define NR_EXECVEAT 322
@@ -2439,7 +2892,9 @@ mod tests {
 #undef NR_EXECVE
 #undef NR_FCHMOD
 #undef NR_FCNTL
+#undef NR_SETPGID
 #undef NR_SETSID
+#undef NR_SENDMSG
 #undef NR_EXIT
 #undef NR_MEMFD_CREATE
 #undef NR_EXECVEAT
@@ -2452,7 +2907,9 @@ mod tests {
 #define NR_EXECVE 221
 #define NR_FCHMOD 52
 #define NR_FCNTL 25
+#define NR_SETPGID 154
 #define NR_SETSID 157
+#define NR_SENDMSG 211
 #define NR_EXIT 93
 #define NR_MEMFD_CREATE 279
 #define NR_EXECVEAT 281
@@ -2462,6 +2919,21 @@ mod tests {
 #define F_DUPFD 0
 #define F_SETFD 2
 #define SIGCHLD 17
+#define SOL_SOCKET 1
+#define SCM_RIGHTS 1
+
+struct probe_iovec { void *base; unsigned long length; };
+struct probe_msghdr {
+    void *name;
+    unsigned name_length;
+    struct probe_iovec *iov;
+    unsigned long iov_length;
+    void *control;
+    unsigned long control_length;
+    int flags;
+};
+struct probe_cmsghdr { unsigned long length; int level; int type; };
+struct probe_control { struct probe_cmsghdr header; int fd; int padding; };
 
 #if defined(__x86_64__)
 static long syscall6(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
@@ -2585,11 +3057,32 @@ void probe_main(unsigned long *stack) {
 #endif
     if (child < 0) finish(89);
     if (child == 0) {
-        long escaped = syscall6(NR_SETSID, 0, 0, 0, 0, 0, 0);
+        long escaped_session = syscall6(NR_SETSID, 0, 0, 0, 0, 0, 0);
+        long escaped_group = syscall6(NR_SETPGID, 0, 0, 0, 0, 0, 0);
         unsigned long delay[2] = { 0, 500000000 };
         syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
-        if (escaped >= 0) write_text(1, "escaped-session\n");
+        if (escaped_session >= 0 || escaped_group >= 0) write_text(1, "escaped-session\n");
         finish(0);
+    }
+#elif PROBE_MODE == 5
+    if (argc > 1 && same(argv[1], "-version")) {
+        write_text(1, facts);
+        finish(0);
+    }
+    char byte = 'x';
+    struct probe_iovec io = { &byte, 1 };
+    struct probe_control control = {
+        { sizeof(struct probe_cmsghdr) + sizeof(int), SOL_SOCKET, SCM_RIGHTS },
+        3,
+        0
+    };
+    struct probe_msghdr message = { 0, 0, &io, 1, &control, sizeof(control), 0 };
+    if (syscall6(NR_SENDMSG, 5, (long)&message, 0, 0, 0, 0) >= 0) finish(95);
+#elif PROBE_MODE == 6
+    write_text(1, facts);
+    if (!(argc > 1 && same(argv[1], "-version"))) {
+        unsigned long delay[2] = { 5, 0 };
+        syscall6(NR_NANOSLEEP, (long)delay, 0, 0, 0, 0, 0);
     }
 #endif
     write_text(1, facts);
@@ -2799,23 +3292,69 @@ void probe_main(unsigned long *stack) {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn production_probe_cannot_export_the_bound_source_descriptor() {
+        use std::os::fd::{AsRawFd, FromRawFd as _};
+
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("fd-export-probe");
+        build_static_probe(&probe, 5);
+        let mut identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production probe identity");
+        let (exporter, receiver) = std::os::unix::net::UnixDatagram::pair().expect("socket pair");
+        let exporter_fd = unsafe { libc::fcntl(exporter.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+        assert!(
+            exporter_fd >= 10,
+            "reserve a collision-free export descriptor"
+        );
+        let exporter_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(exporter_fd) };
+        identity.launch_mode = ProbeLaunchMode::ProductionFdExport(exporter_fd.as_raw_fd());
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"source").expect("media");
+        let source = Arc::new(std::fs::File::open(media).expect("open media"));
+        DecodeFactCache::new()
+            .get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(source),
+                None,
+                ProbeStreamSelection::Absolute(4),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .expect("post-bootstrap sendmsg is denied");
+        receiver
+            .set_nonblocking(true)
+            .expect("nonblocking receiver");
+        let mut byte = [0_u8; 1];
+        assert!(
+            receiver.recv(&mut byte).is_err_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+            }),
+            "the external process must receive neither payload nor SCM_RIGHTS"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn pidfd_open_failure_detaches_bounded_version_cleanup() {
         let root = crate::test_tempdir().expect("tempdir");
-        let probe = root.path().join("ffprobe-test");
-        executable(
-            &probe,
-            "#!/bin/sh\nprintf '%s\\n' 'ffprobe version pidfd-open'\n",
-        );
-        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+        let probe = root.path().join("static-ffprobe");
+        build_static_probe(&probe, 0);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
             .await
-            .expect("fixture identity");
+            .expect("production identity");
+        assert_eq!(PIDFD_OPEN_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
         let ownership = Arc::new(tokio::sync::Semaphore::new(1));
         let started = std::time::Instant::now();
         assert_eq!(
             probe_version_with_deadline_on(
                 &identity.executable_snapshot,
                 identity.executable(),
-                ProbeLaunchMode::FixturePidfdOpenFailure,
+                ProbeLaunchMode::ProductionPidfdOpenFailure,
                 Duration::from_millis(100),
                 Arc::clone(&ownership),
             )
@@ -2830,10 +3369,82 @@ void probe_main(unsigned long *stack) {
             Arc::clone(&ownership).try_acquire_owned().is_err(),
             "version ownership remains held until explicit reap"
         );
+        assert!(
+            PIDFD_OPEN_SUPERVISOR_OWNERS.load(Ordering::Acquire) == 1,
+            "production supervisor ownership remains attached through reap"
+        );
         let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
             .await
             .expect("detached pidfd-open cleanup finishes")
             .expect("version ownership returns after reap");
+        assert_eq!(PIDFD_OPEN_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn delayed_supervisor_handshake_obeys_the_version_deadline() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("static-ffprobe");
+        build_static_probe(&probe, 0);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production identity");
+        assert_eq!(DELAYED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+        let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_version_with_deadline_on(
+                &identity.executable_snapshot,
+                identity.executable(),
+                ProbeLaunchMode::ProductionSupervisorDelay,
+                Duration::from_millis(100),
+                Arc::clone(&ownership),
+            )
+            .await,
+            Err(DecodeFactError::Deadline)
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the caller must not block in the pre-exec notification handshake"
+        );
+        assert!(Arc::clone(&ownership).try_acquire_owned().is_err());
+        assert_eq!(DELAYED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 1);
+        let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
+            .await
+            .expect("detached launch owner finishes")
+            .expect("version ownership returns after launch cleanup");
+        assert_eq!(DELAYED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_listener_receive_cannot_leak_or_deadlock_spawn() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("static-ffprobe");
+        build_static_probe(&probe, 0);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production identity");
+        assert_eq!(FAILED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+        let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+        let started = std::time::Instant::now();
+        let result = probe_version_with_deadline_on(
+            &identity.executable_snapshot,
+            identity.executable(),
+            ProbeLaunchMode::ProductionSupervisorReceiveFailure,
+            Duration::from_secs(1),
+            Arc::clone(&ownership),
+        )
+        .await;
+        assert!(
+            !matches!(result, Err(DecodeFactError::Deadline)),
+            "the injected receiver failure must actively unblock spawn"
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let _ownership = ownership
+            .try_acquire_owned()
+            .expect("failed launch returns version ownership");
+        assert_eq!(FAILED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     }
 
     #[cfg(target_os = "linux")]
@@ -2842,20 +3453,13 @@ void probe_main(unsigned long *stack) {
         use std::io::{Seek, SeekFrom};
 
         let root = crate::test_tempdir().expect("tempdir");
-        let probe = root.path().join("ffprobe-test");
-        executable(
-            &probe,
-            r###"#!/bin/sh
-if test "$1" = "-version"; then printf '%s\n' 'ffprobe version pidfd-read'; exit 0; fi
-printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","disposition":{"attached_pic":0}}]}'
-sleep 5
-"###,
-        );
-        let mut identity =
-            DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
-                .await
-                .expect("fixture identity");
-        identity.launch_mode = ProbeLaunchMode::FixturePidfdReadFailure;
+        let probe = root.path().join("static-ffprobe");
+        build_static_probe(&probe, 6);
+        let mut identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production identity");
+        identity.launch_mode = ProbeLaunchMode::ProductionPidfdReadFailure;
+        assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
         let media = root.path().join("media.bin");
         std::fs::write(&media, b"0123456789").expect("media");
         let mut opened = std::fs::File::open(media).expect("open media");
@@ -2884,10 +3488,15 @@ sleep 5
             Arc::clone(&ownership).try_acquire_owned().is_err(),
             "source ownership remains held until explicit reap"
         );
+        assert!(
+            PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire) == 1,
+            "production supervisor ownership remains attached through reap"
+        );
         let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
             .await
             .expect("detached pidfd-read cleanup finishes")
             .expect("source ownership returns after reap");
+        assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
         assert_eq!(
             source
                 .try_clone()
@@ -2896,6 +3505,50 @@ sleep 5
                 .expect("restored source offset"),
             3
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blocked_source_identity_returns_deadline_without_releasing_probe_ownership() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            "#!/bin/sh\nprintf '%s\\n' 'ffprobe version source-identity'\n",
+        );
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("fixture identity");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"source").expect("media");
+        let source =
+            DecodeFactSource::isolated(Arc::new(std::fs::File::open(media).expect("open media")))
+                .with_identity_delay(Duration::from_secs(1));
+        let cache = DecodeFactCache::new();
+        let ownership = Arc::clone(&cache.probe_gate);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            cache
+                .get_or_probe(
+                    &identity,
+                    source,
+                    None,
+                    ProbeStreamSelection::FirstPlayable,
+                    Duration::from_millis(100),
+                    None,
+                )
+                .await,
+            Err(DecodeFactError::Deadline)
+        );
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(
+            Arc::clone(&ownership).try_acquire_owned().is_err(),
+            "the blocked source syscall must retain the single probe lane"
+        );
+        let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
+            .await
+            .expect("detached source observation finishes")
+            .expect("probe ownership returns after the syscall owner exits");
     }
 
     #[cfg(target_os = "linux")]
@@ -3158,8 +3811,10 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
         let before = source_identity(&source).expect("source identity");
         let facts = collect(
             &identity,
-            &source,
+            Arc::new(source),
             before,
+            false,
+            Duration::ZERO,
             None,
             ProbeStreamSelection::FirstPlayable,
             Duration::from_secs(2),
@@ -3205,8 +3860,10 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
         let before = source_identity(&source).expect("source identity");
         let facts = collect(
             &identity,
-            &source,
+            Arc::new(source),
             before,
+            false,
+            Duration::ZERO,
             None,
             ProbeStreamSelection::FirstPlayable,
             Duration::from_secs(2),

@@ -21712,6 +21712,101 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn neutral_probe_timeout_still_runs_the_legacy_producer_with_its_full_budget() {
+        use plurx_core::store::SqliteStore;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        super::require_ffmpeg();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source_path = media.path().join("neutral-probe-timeout.mkv");
+        write_real_video(&source_path, 2);
+        let file_id = seed_real_file(&store, &source_path).await;
+        let mut file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+        let source_metadata = std::fs::metadata(&source_path).expect("source metadata");
+        file.size = source_metadata.len() as i64;
+        file.mtime = source_metadata
+            .modified()
+            .expect("source modified time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("source after epoch")
+            .as_secs() as i64;
+
+        let probe = media.path().join("slow-ffprobe");
+        std::fs::write(
+            &probe,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  printf '%s\\n' 'ffprobe version neutral-timeout'\n  exit 0\nfi\nsleep 5\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n",
+        )
+        .expect("write slow probe");
+        let mut permissions = std::fs::metadata(&probe)
+            .expect("probe metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&probe, permissions).expect("executable probe");
+        let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+            probe.to_str().expect("probe path"),
+        )
+        .await
+        .expect("fixture probe identity");
+
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = manager.with_decode_probe(Some(probe));
+        let output = crate::test_tempdir().expect("output");
+        let output = plurx_core::fs_secure::SecureDirectory::open(output.path())
+            .await
+            .expect("secure output");
+        let bound_source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()])
+            .await
+            .expect("bound source");
+        let options = manager.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            120,
+            0.0,
+            None,
+            None,
+            Some(1),
+            ToneMap::None,
+            OutputGrade::Sdr,
+        );
+        let production_budget = Duration::from_secs(2);
+        let started = Instant::now();
+        let produced = manager
+            .produce_into(
+                &output,
+                "neutral-probe-timeout",
+                &PortableProduction {
+                    file: &file,
+                    opts: &options,
+                    encoder: Encoder::Software,
+                    deadline: started + production_budget,
+                    yield_to_offline: false,
+                    cancelled: None,
+                    offline_package_id: None,
+                    publication_fence: None,
+                    pretranscode_fence: None,
+                    expected_policy_generation: None,
+                    expected_source_snapshot: None,
+                    bound_source: Some(Arc::new(bound_source)),
+                },
+                None,
+            )
+            .await
+            .expect("legacy producer after neutral observation")
+            .expect("legacy FFmpeg completed inside its retained budget");
+        assert!(
+            started.elapsed() >= NEUTRAL_DECODE_FACT_PROBE_BUDGET,
+            "the slow collector did not exercise the production timeout"
+        );
+        assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
+    }
+
     #[tokio::test]
     async fn orphan_sweep_never_enters_the_live_tv_owned_namespace() {
         use plurx_core::store::SqliteStore;

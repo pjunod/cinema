@@ -1533,6 +1533,33 @@ fn presentation_geometry_records_the_no_upscale_even_output() {
 }
 
 #[test]
+fn presentation_geometry_matches_shipping_rounding_for_an_odd_height() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        4,
+        3,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let mut media = options(Pipeline::Cpu);
+    media.target_height = 3;
+    let plan = resolve_transcode(
+        &TranscodeRequest::new(Encoder::Software, media),
+        &input,
+        &capabilities(vec![]),
+        &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        &AttemptRestrictions::none(),
+    )
+    .expect("odd shipping geometry resolves");
+    assert_eq!(plan.output_contract().effective_width(), Some(4));
+    assert_eq!(plan.output_contract().effective_height(), Some(2));
+}
+
+#[test]
 fn presentation_height_outside_the_command_builders_domain_is_refused() {
     let input = facts(video(
         0,
