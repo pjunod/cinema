@@ -19,7 +19,7 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | History, 11-case playback, 60-capture UI, reader-browser, warmed cluster, and final unit suites pass |
-| Full PR validation | Corrected head `01368ce1` passed 23/23 runnable checks; Android-device was the sole declared skip because `adb` is unavailable |
+| Full PR validation | Pre-rebase code head `01368ce1` passed 23/23 runnable checks; authoritative Forgejo requalification is in progress after rebasing the same changes onto current `main` |
 | Blocker | Publishing the reviewed head requires renewed external-transfer approval from the execution sandbox; local qualification continues |
 
 ## Milestones
@@ -260,15 +260,15 @@ explicitly; they do not silently run an unqualified automatic replacement.
 Two independent agents reviewed the first M0 PR head before the full suite.
 Their initial verdict was request changes; those repairs were committed before
 both agents performed a second pass. Both second passes also requested changes;
-their repairs were committed at `f9d68467`. Both third passes requested the
-additional repairs committed at `195b7574`; both fourth passes approved
-`6009367b` with no actionable findings. The fifth pass found missing direct
-probe-normalization test coverage. That repair is committed at `a16db3da`;
-both reviewers approved the repaired tree at `7649ccdd` with no remaining
+their repairs were committed at `2e368f42`. Both third passes requested the
+additional repairs committed at `e88216f6`; both fourth passes approved
+`bbc60457` with no actionable findings. The fifth pass found missing direct
+probe-normalization test coverage. That repair is committed at `9d2a0c35`;
+both reviewers approved the repaired tree at `7e1b6a0a` with no remaining
 actionable findings.
 GitHub had deleted the temporary effort base and closed #914; the same effort
 and task refs were restored, and #915 is the active review record.
-Both independent reviewers then approved exact receipt head `2c266dce` with no
+Both independent reviewers then approved pre-rebase receipt head `2c266dce` with no
 actionable findings after independently matching the retained full-suite JSON
 and JUnit evidence to this ledger.
 
@@ -339,53 +339,53 @@ lane and focused tests provide earlier feedback.
 
 | Commit/tree | Command | Result |
 |---|---|---|
-| `a9cb879b` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 6 tests |
-| `a9cb879b` | `make operations-check` | Pass · 192 tests; rerun outside restricted socket sandbox |
-| `a9cb879b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,376 files |
-| `a9cb879b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `a9cb879b` | `git diff --check` | Pass |
-| `2d4900e1` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 14 tests |
-| `2d4900e1` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
-| `2d4900e1` | `make operations-check` | Pass · 200 tests; run outside restricted socket sandbox |
-| `2d4900e1` | `make validation-lint` | Pass · 23 points, 28 checks, 1,381 files |
-| `2d4900e1` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `2d4900e1` | `git diff --check` | Pass |
-| `6c23d17a` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 15 tests, including exact 16 KiB and bounded repeat-count edges |
-| `6c23d17a` | `git diff --check` | Pass |
-| `f9d68467` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 21 tests |
-| `f9d68467` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
-| `f9d68467` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test; hostile environment cannot alter fixture output |
-| `f9d68467` | `make operations-check` | Pass · 207 tests; run outside restricted socket sandbox |
-| `f9d68467` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files after mapping the media baseline |
-| `f9d68467` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `f9d68467` | `sh -n scripts/decoder-media-baseline` | Pass |
-| `f9d68467` | `git diff --check` | Pass |
-| `195b7574` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 22 tests, including contract provenance and media-verifier mutation controls |
-| `195b7574` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 16 argument cases |
-| `195b7574` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_compatibility_override_values_are_stable -- --exact` | Pass · all four legacy false spellings and non-matches |
-| `195b7574` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · hostile environment cannot alter fixture output |
-| `195b7574` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
-| `195b7574` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
-| `195b7574` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `195b7574` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
-| `195b7574` | `git diff --check` | Pass |
-| `a16db3da` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 23 tests, including direct single/duplicate/empty/conflicting probe-row coverage |
-| `a16db3da` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
-| `a16db3da` | `/tmp/codex-decoder-m0-review5/decoder-media-baseline --verify /tmp/codex-decoder-m0-review5/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review8` on `nynuc` | Pass · `"verified": true` |
-| `7649ccdd` | Fifth diagnostic and scope adversarial re-reviews | Pass · both approve; no actionable findings |
-| `7649ccdd` | `make operations-check` | Pass · 209 tests; run outside restricted socket sandbox |
-| `7649ccdd` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
-| `7649ccdd` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `4ec13f3b` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
-| `4ec13f3b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
-| `4ec13f3b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `4ec13f3b` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
-| `4ec13f3b` | two fresh `scripts/decoder-media-baseline` generations on `nynuc` | Pass · every retained artifact digest matches byte-for-byte |
-| `4ec13f3b` | `/tmp/codex-decoder-m0-review4/decoder-media-baseline --verify /tmp/codex-decoder-m0-review4/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review7` on `nynuc` | Pass · `"verified": true` |
-| `4ec13f3b` | `git diff --check` | Pass |
-| `3fe6a6ca` | `CARGO='rustup run 1.97.1 cargo' make unit` | Invalid environment run · 143 FFmpeg-backed tests failed because Homebrew FFmpeg could not load retained `libx265.216.dylib`; no non-loader failure observed |
-| `3fe6a6ca` | `PLURX_FFMPEG=/private/tmp/codex-ffmpeg-abi216 PLURX_FFPROBE=/private/tmp/codex-ffprobe-abi216 CARGO='rustup run 1.97.1 cargo' make unit` | Pass · 2,785 tests; 3 declared ignores; task-scoped wrappers use the retained installed x265 ABI 216 library without modifying the host |
-| `ac456b44` | `make validate-full` with the initial task-scoped FFmpeg wrapper | Diagnostic pass · 18 passed, 3 failed, 3 skipped; history lacked five review-doc mappings, playback selected an FFmpeg without `zscale`, cold cluster work exceeded 1,800 s, Playwright was not on `PATH`, and `adb` was unavailable |
+| `ab478314` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 6 tests |
+| `ab478314` | `make operations-check` | Pass · 192 tests; rerun outside restricted socket sandbox |
+| `ab478314` | `make validation-lint` | Pass · 23 points, 28 checks, 1,376 files |
+| `ab478314` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `ab478314` | `git diff --check` | Pass |
+| `886ab400` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 14 tests |
+| `886ab400` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
+| `886ab400` | `make operations-check` | Pass · 200 tests; run outside restricted socket sandbox |
+| `886ab400` | `make validation-lint` | Pass · 23 points, 28 checks, 1,381 files |
+| `886ab400` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `886ab400` | `git diff --check` | Pass |
+| `a3a2094b` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 15 tests, including exact 16 KiB and bounded repeat-count edges |
+| `a3a2094b` | `git diff --check` | Pass |
+| `2e368f42` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 21 tests |
+| `2e368f42` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
+| `2e368f42` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test; hostile environment cannot alter fixture output |
+| `2e368f42` | `make operations-check` | Pass · 207 tests; run outside restricted socket sandbox |
+| `2e368f42` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files after mapping the media baseline |
+| `2e368f42` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `2e368f42` | `sh -n scripts/decoder-media-baseline` | Pass |
+| `2e368f42` | `git diff --check` | Pass |
+| `e88216f6` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 22 tests, including contract provenance and media-verifier mutation controls |
+| `e88216f6` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 16 argument cases |
+| `e88216f6` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_compatibility_override_values_are_stable -- --exact` | Pass · all four legacy false spellings and non-matches |
+| `e88216f6` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · hostile environment cannot alter fixture output |
+| `e88216f6` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
+| `e88216f6` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
+| `e88216f6` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `e88216f6` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
+| `e88216f6` | `git diff --check` | Pass |
+| `9d2a0c35` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 23 tests, including direct single/duplicate/empty/conflicting probe-row coverage |
+| `9d2a0c35` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
+| `9d2a0c35` | `/tmp/codex-decoder-m0-review5/decoder-media-baseline --verify /tmp/codex-decoder-m0-review5/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review8` on `nynuc` | Pass · `"verified": true` |
+| `7e1b6a0a` | Fifth diagnostic and scope adversarial re-reviews | Pass · both approve; no actionable findings |
+| `7e1b6a0a` | `make operations-check` | Pass · 209 tests; run outside restricted socket sandbox |
+| `7e1b6a0a` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
+| `7e1b6a0a` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `14e62d70` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
+| `14e62d70` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
+| `14e62d70` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| `14e62d70` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
+| `14e62d70` | two fresh `scripts/decoder-media-baseline` generations on `nynuc` | Pass · every retained artifact digest matches byte-for-byte |
+| `14e62d70` | `/tmp/codex-decoder-m0-review4/decoder-media-baseline --verify /tmp/codex-decoder-m0-review4/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review7` on `nynuc` | Pass · `"verified": true` |
+| `14e62d70` | `git diff --check` | Pass |
+| `ab33874b` | `CARGO='rustup run 1.97.1 cargo' make unit` | Invalid environment run · 143 FFmpeg-backed tests failed because Homebrew FFmpeg could not load retained `libx265.216.dylib`; no non-loader failure observed |
+| `ab33874b` | `PLURX_FFMPEG=/private/tmp/codex-ffmpeg-abi216 PLURX_FFPROBE=/private/tmp/codex-ffprobe-abi216 CARGO='rustup run 1.97.1 cargo' make unit` | Pass · 2,785 tests; 3 declared ignores; task-scoped wrappers use the retained installed x265 ABI 216 library without modifying the host |
+| `c4433a41` | `make validate-full` with the initial task-scoped FFmpeg wrapper | Diagnostic pass · 18 passed, 3 failed, 3 skipped; history lacked five review-doc mappings, playback selected an FFmpeg without `zscale`, cold cluster work exceeded 1,800 s, Playwright was not on `PATH`, and `adb` was unavailable |
 | Working tree | `make history-check` | Pass · 1,322 corrective commits have current evidence; review-only M0 documentation maps to `catalog-contract` and is not ignored |
 | Working tree | `make ui-check` through the existing `plurx-ui` Playwright 1.62.0 environment | Pass · 60 captures and 5,464 structural facts match the golden; no console or page errors |
 | Working tree | `scripts/reader-browser` through the existing `plurx-ui` environment | Pass · online/native/offline handoff, profile isolation, force-relaunch restore, style, TOC, search, finish, stale revision, and hostile-content checks |
@@ -394,8 +394,8 @@ lane and focused tests provide earlier feedback.
 | Working tree | the two failed FFmpeg-sensitive tests with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · copy-segment decode equivalence and mid-film generation identity |
 | Working tree | `make unit` with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · 2,785 tests; 3 declared ignores |
 | Working tree | `make playback-smoke` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Pass · 11/11 Chrome cases, including HDR tone-map, copy-HLS, no-MSE, seek, audio switch, and subtitle toggle |
-| `01368ce1` | `make validate-full` with full FFmpeg 8.1.2, retained x265 ABI 216, Playwright 1.62.0, and anonymous pinned Android container preflight | Pass · 23 runnable checks; Android-device was the sole declared skip because `adb` is unavailable; cluster-auth passed in 1,638.3 s |
-| `2c266dce` | Independent diagnostic-safety and milestone-scope adversarial reviews | Pass · both reviewers approved with no actionable findings after checking the retained full-suite JSON and JUnit evidence |
+| `d528794b` | `make validate-full` with full FFmpeg 8.1.2, retained x265 ABI 216, Playwright 1.62.0, and anonymous pinned Android container preflight | Pass · 23 runnable checks; Android-device was the sole declared skip because `adb` is unavailable; cluster-auth passed in 1,638.3 s |
+| `1ad59932` | Independent diagnostic-safety and milestone-scope adversarial reviews | Pass · both reviewers approved with no actionable findings after checking the retained full-suite JSON and JUnit evidence |
 
 ## Remaining evidence before release
 
