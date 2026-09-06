@@ -95,6 +95,14 @@ pub struct SnapshotTransportObservation {
     pub locally_received_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
     pub attempt_age_ms: Option<u64>,
+    /// Maximum process-local sampling uncertainty for every serialized age.
+    ///
+    /// A direct producer emits zero. An aggregator replaces it with the
+    /// bounded request-to-receipt interval and projects each age to the older
+    /// edge of that interval, allowing consumers to compare only disjoint
+    /// attempt ranges.
+    #[serde(default)]
+    pub age_uncertainty_ms: u64,
     pub last_acknowledgement_age_ms: Option<u64>,
     pub last_local_receive_age_ms: Option<u64>,
     pub active_deadline_remaining_ms: Option<u64>,
@@ -118,6 +126,9 @@ pub struct SnapshotTransportStatus {
     /// age independently completed peer responses to one local monotonic
     /// selection instant instead of pretending every response was sampled at
     /// the beginning of the fanout.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub local_request_started_at: Option<Instant>,
     #[serde(skip)]
     #[doc(hidden)]
     pub local_receipt_at: Option<Instant>,
@@ -411,6 +422,7 @@ impl LocalSnapshotTransportStatus {
                     attempt_age_ms: observation
                         .attempt_started
                         .map(|started| duration_ms(now.saturating_duration_since(started))),
+                    age_uncertainty_ms: 0,
                     last_acknowledgement_age_ms: observation
                         .last_acknowledgement
                         .map(|at| duration_ms(now.saturating_duration_since(at))),
@@ -438,6 +450,7 @@ impl LocalSnapshotTransportStatus {
             observing_node_id: self.inner.observing_node_id,
             observed_at_unix_ms,
             observations,
+            local_request_started_at: None,
             local_receipt_at: None,
         }
     }

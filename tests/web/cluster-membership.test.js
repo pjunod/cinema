@@ -372,6 +372,7 @@ function transportObservation(phase, extra = {}) {
     raft_group: "sqlite",
     direction: "inbound",
     sample_age_ms: 40,
+    age_uncertainty_ms: 0,
     phase,
     ...extra,
   };
@@ -1033,6 +1034,93 @@ test("late predecessor failure cannot hide a newer different-snapshot successor"
     const current = ui.clusterTransportExplanation(operations, 2, false);
     assert.equal(current.code, "installing");
     assert.equal(current.observation.snapshot_id, "successor-snapshot");
+  }
+});
+
+test("response transit uncertainty cannot make a delayed predecessor look newer", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "9".repeat(64);
+  const delayedPredecessor = transportObservation("failed", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "transit-delayed-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 900,
+    attempt_age_ms: 1_900,
+    age_uncertainty_ms: 900,
+  });
+  const successor = transportObservation("installing", {
+    snapshot_id: "transit-delayed-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-receiver",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 900,
+    attempt_age_ms: 1_400,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [
+    [delayedPredecessor, successor],
+    [successor, delayedPredecessor],
+  ]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "current-receiver");
+  }
+});
+
+test("late predecessor acknowledgement cannot hide a restarted receiver", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "a".repeat(64);
+  const predecessor = transportObservation("complete", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "restarted-after-ack",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 0,
+    attempt_age_ms: 60_000,
+    acknowledged_offset: 4_096,
+  });
+  const successor = transportObservation("installing", {
+    snapshot_id: "restarted-after-ack",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-receiver",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 500,
+    attempt_age_ms: 1_000,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [[predecessor, successor], [successor, predecessor]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "current-receiver");
   }
 });
 

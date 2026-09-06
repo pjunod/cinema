@@ -218,6 +218,12 @@
     const priority={stalled:8,installing:7,awaiting_acknowledgement:6,retrying:5,
       transferring:4,connecting:3,failed:2,complete:1};
     const age=observation=>Number(observation.sample_age_ms||0);
+    const ageUncertainty=observation=>{
+      if(observation.age_uncertainty_ms===null||
+        observation.age_uncertainty_ms===undefined) return 1000;
+      const value=Number(observation.age_uncertainty_ms);
+      return Number.isFinite(value)&&value>=0?value:1000;
+    };
     const attemptAge=observation=>{
       if(observation.attempt_age_ms===null||observation.attempt_age_ms===undefined)
         return null;
@@ -252,7 +258,7 @@
       for(const field of ["direction","observing_node_id","peer_node_id","raft_group",
         "boot_id","attempt_id","socket_epoch","snapshot_id","snapshot_fingerprint",
         "attempted_offset","acknowledged_offset","locally_received_bytes","total_bytes",
-        "attempt_age_ms","last_acknowledgement_age_ms","last_local_receive_age_ms",
+        "attempt_age_ms","age_uncertainty_ms","last_acknowledgement_age_ms","last_local_receive_age_ms",
         "active_deadline_remaining_ms","reconnect_count","retry_count",
         "last_error_category","operation_owns_work"]){
         const compared=textCompare(left[field],right[field]);
@@ -264,13 +270,38 @@
       (priority[right.phase]||0)-(priority[left.phase]||0)||
       age(left)-age(right)||tieBreak(left,right);
     const chronologyOrder=observations=>{
-      // One comparison cohort must use one basis. Pairwise fallback between
-      // attempt age and event age is non-transitive in a rolling deployment.
+      // A remote age was sampled at an unknown instant between this process's
+      // request start and receipt. Sort only non-overlapping local-monotonic
+      // intervals; transit-overlapping intervals are one ambiguity cohort and
+      // use deterministic phase/event fallback. Build those cohorts once for
+      // the full comparison set so the resulting order remains transitive.
       const useAttemptAge=observations.length>0&&
         observations.every(observation=>attemptAge(observation)!==null);
-      return (left,right)=>(useAttemptAge
-        ?attemptAge(left)-attemptAge(right):age(left)-age(right))||
-        (priority[right.phase]||0)-(priority[left.phase]||0)||tieBreak(left,right);
+      const range=observation=>{
+        const upper=useAttemptAge?attemptAge(observation):age(observation);
+        return {lower:Math.max(0,upper-ageUncertainty(observation)),upper};
+      };
+      const ordered=observations.map(observation=>({observation,...range(observation)}));
+      ordered.sort((left,right)=>left.lower-right.lower||left.upper-right.upper||
+        tieBreak(left.observation,right.observation));
+      const ranks=new Map();
+      let rank=-1;
+      let overlappingUpper=-1;
+      ordered.forEach(entry=>{
+        if(rank<0||entry.lower>overlappingUpper){
+          rank+=1;
+          overlappingUpper=entry.upper;
+        }else{
+          overlappingUpper=Math.max(overlappingUpper,entry.upper);
+        }
+        ranks.set(entry.observation,rank);
+      });
+      return {
+        rank:observation=>ranks.get(observation)||0,
+        compare:(left,right)=>(ranks.get(left)||0)-(ranks.get(right)||0)||
+          (priority[right.phase]||0)-(priority[left.phase]||0)||
+          age(left)-age(right)||tieBreak(left,right),
+      };
     };
     const groups=new Map();
     candidates.forEach(observation=>{
@@ -282,9 +313,34 @@
     });
     const representatives=[];
     groups.forEach(group=>{
-      const freshest=Math.min(...group.observations.map(age));
+      // Reduce concrete attempts and establish successor chronology before
+      // considering either sender or receiver completion authority. A former
+      // leader may publish a real acknowledgement after the receiver has
+      // restarted into a newer attempt for the same snapshot.
+      const attempts=new Map();
+      group.observations.forEach(observation=>{
+        const key=attemptIdentity(observation);
+        if(!attempts.has(key)) attempts.set(key,[]);
+        attempts.get(key).push(observation);
+      });
+      const attemptRepresentatives=[];
+      attempts.forEach(observations=>{
+        observations.sort(withinIdentity);
+        attemptRepresentatives.push(observations[0]);
+      });
+      const chronology=chronologyOrder(attemptRepresentatives);
+      attemptRepresentatives.sort(chronology.compare);
+      const newestAttempts=new Set(attemptRepresentatives
+        .filter(observation=>chronology.rank(observation)===0)
+        .map(attemptIdentity));
+      const sampleRange=observation=>({
+        lower:Math.max(0,age(observation)-ageUncertainty(observation)),
+        upper:age(observation),
+      });
+      const freshest=Math.min(...group.observations.map(observation=>sampleRange(observation).lower));
       const completionCohort=group.observations.filter(
-        observation=>age(observation)<=freshest+5000);
+        observation=>newestAttempts.has(attemptIdentity(observation))&&
+          sampleRange(observation).upper<=freshest+5000);
       // A flushed sender acknowledgement is causally later than every
       // contemporaneous receiver-side phase for the same exact snapshot: the
       // receiver had to finish the install and return that response before the
@@ -294,9 +350,8 @@
       // receiver restart or leadership change; legacy and malformed identities
       // remain attempt-local.
       const nonComplete=completionCohort.filter(observation=>observation.phase!=="complete");
-      const freshestNonComplete=nonComplete.length
-        ?Math.min(...nonComplete.map(age)):Number.POSITIVE_INFINITY;
-      const completionCanSupersede=observation=>age(observation)<=freshestNonComplete;
+      const completionCanSupersede=observation=>nonComplete.every(other=>
+        sampleRange(observation).upper<=sampleRange(other).lower);
       const acknowledged=group.fingerprint
         ?completionCohort.filter(observation=>
           acknowledgedComplete(observation)&&completionCanSupersede(observation)):[];
@@ -313,33 +368,20 @@
       // it does not cover inbound failures or unrelated fingerprints.
       const receiverComplete=completionCohort.some(observation=>observation.phase==="complete"&&
         observation.direction==="inbound"&&completionCanSupersede(observation));
-      let current=group.observations;
-      if(group.fingerprint&&receiverComplete)
-        current=current.filter(observation=>
-          observation.direction!=="outbound"||acknowledgedComplete(observation));
-      // A fingerprint can survive a boot, retry, or socket replacement. First
-      // reduce observations that describe the same concrete attempt, then let
-      // attempt start chronology choose between attempts. Event freshness is
-      // only the fallback for rolling peers without attempt age: an older
-      // attempt can publish a fresh cancellation after its successor starts.
-      const attempts=new Map();
-      current.forEach(observation=>{
-        const key=attemptIdentity(observation);
-        if(!attempts.has(key)) attempts.set(key,[]);
-        attempts.get(key).push(observation);
-      });
-      const attemptRepresentatives=[];
-      attempts.forEach(observations=>{
-        observations.sort(withinIdentity);
-        attemptRepresentatives.push(observations[0]);
-      });
-      attemptRepresentatives.sort(chronologyOrder(attemptRepresentatives));
+      if(group.fingerprint&&receiverComplete){
+        const completed=completionCohort.filter(observation=>
+          observation.phase==="complete"&&observation.direction==="inbound"&&
+          completionCanSupersede(observation));
+        completed.sort((left,right)=>age(left)-age(right)||tieBreak(left,right));
+        representatives.push(completed[0]);
+        return;
+      }
       representatives.push(attemptRepresentatives[0]);
     });
     // Completion authority stays fingerprint-local above. Every surviving
     // identity representative shares one total chronology order here, so a
     // former leader's late terminal event cannot hide a successor snapshot.
-    representatives.sort(chronologyOrder(representatives));
+    representatives.sort(chronologyOrder(representatives).compare);
     return representatives[0]||null;
   }
   function clusterTransportExplanation(ops,raftId,boundedReadReady,clientElapsedMs=0){

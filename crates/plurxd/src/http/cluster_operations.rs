@@ -1713,6 +1713,7 @@ where
             let node_id = peer.node_id.clone();
             let peer_node_id = peer.raft_id;
             let peer_deadline = deadline.min(tokio::time::Instant::now() + PEER_STATUS_TIMEOUT);
+            let public_started = tokio::time::Instant::now();
             let public = async {
                 let outcome =
                     tokio::time::timeout_at(peer_deadline, public(peer, peer_deadline)).await;
@@ -1720,6 +1721,7 @@ where
             };
             let private_deadline =
                 peer_deadline.min(tokio::time::Instant::now() + Duration::from_millis(900));
+            let private_started = tokio::time::Instant::now();
             let private = async {
                 let outcome =
                     tokio::time::timeout_at(private_deadline, private(peer_node_id)).await;
@@ -1738,6 +1740,7 @@ where
                 .as_mut()
                 .and_then(|status| status.transport.as_mut())
             {
+                transport.local_request_started_at = Some(public_started);
                 transport.local_receipt_at = Some(public_receipt);
             }
             outcome.transport = private_transport
@@ -1746,6 +1749,7 @@ where
                 .flatten()
                 .filter(|status| status.observing_node_id == peer_node_id)
                 .map(|mut status| {
+                    status.local_request_started_at = Some(private_started);
                     status.local_receipt_at = Some(private_receipt);
                     status
                 });
@@ -1990,18 +1994,26 @@ fn sanitize_transport(
     transport
         .observations
         .retain(|observation| observation.observing_node_id == expected_observer);
-    let locally_elapsed_ms = transport
-        .local_receipt_at
-        .map(|receipt| {
-            u64::try_from(
-                tokio::time::Instant::now()
-                    .saturating_duration_since(receipt)
+    let now = tokio::time::Instant::now();
+    let (locally_elapsed_ms, age_uncertainty_ms) = transport
+        .local_request_started_at
+        .zip(transport.local_receipt_at)
+        .map(|(request_started, receipt)| {
+            let elapsed = u64::try_from(now.saturating_duration_since(request_started).as_millis())
+                .unwrap_or(u64::MAX);
+            let uncertainty = u64::try_from(
+                receipt
+                    .saturating_duration_since(request_started)
                     .as_millis(),
             )
-            .unwrap_or(u64::MAX)
+            .unwrap_or(u64::MAX);
+            (elapsed, uncertainty)
         })
-        .unwrap_or(fallback_elapsed_ms);
+        .unwrap_or((fallback_elapsed_ms, 0));
     age_transport_observations(&mut transport, locally_elapsed_ms);
+    for observation in &mut transport.observations {
+        observation.age_uncertainty_ms = age_uncertainty_ms;
+    }
     Some(transport)
 }
 
@@ -4348,7 +4360,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn peer_transport_age_is_normalized_from_each_monotonic_receipt() {
+    async fn peer_transport_age_retains_request_to_receipt_uncertainty() {
         let peers = vec![
             ActivityPeer {
                 node_id: "node-2".to_owned(),
@@ -4375,12 +4387,15 @@ mod tests {
                 }
             },
             |raft_id| async move {
-                if raft_id == 3 {
-                    tokio::time::sleep(Duration::from_millis(900)).await;
-                }
                 let mut transport = test_transport_status(raft_id, 0, Some(20_000));
                 transport.observations[0].attempt_age_ms =
-                    Some(if raft_id == 2 { 1_000 } else { 1_400 });
+                    Some(if raft_id == 2 { 1_000 } else { 500 });
+                if raft_id == 2 {
+                    // Construct the older peer sample before delaying its
+                    // delivery. Sleeping first would test delayed sampling and
+                    // would not reproduce response-transit uncertainty.
+                    tokio::time::sleep(Duration::from_millis(900)).await;
+                }
                 Ok(Some(transport))
             },
         )
@@ -4407,9 +4422,17 @@ mod tests {
 
         assert_eq!(old.observations[0].attempt_age_ms, Some(1_900));
         assert_eq!(successor.observations[0].attempt_age_ms, Some(1_400));
+        assert_eq!(old.observations[0].age_uncertainty_ms, 900);
+        assert_eq!(successor.observations[0].age_uncertainty_ms, 0);
         assert!(
-            successor.observations[0].attempt_age_ms < old.observations[0].attempt_age_ms,
-            "a later peer response must not make its newer attempt look older"
+            old.observations[0]
+                .attempt_age_ms
+                .expect("older attempt age")
+                .saturating_sub(old.observations[0].age_uncertainty_ms)
+                < successor.observations[0]
+                    .attempt_age_ms
+                    .expect("successor attempt age"),
+            "the delayed predecessor and successor intervals must overlap"
         );
     }
 
