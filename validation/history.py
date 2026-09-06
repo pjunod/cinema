@@ -346,14 +346,42 @@ def _audit_tips(root: Path) -> tuple[str, ...]:
 
 
 def _history_heads(root: Path) -> tuple[str, ...]:
-    """Resolve every prospective merge parent to the exact audited commit."""
+    """[`_audit_tips`] as resolved commit hashes, with the pending merge checked.
 
-    return tuple(
-        dict.fromkeys(
-            _git(root, "rev-parse", "--verify", f"{tip}^{{commit}}").strip()
-            for tip in _audit_tips(root)
-        )
-    )
+    The same tips, and deliberately a second function rather than a stricter
+    version of the first. `_audit_tips` answers in the symbolic form a `git log`
+    argument list wants and is what the audit's own contract tests pin. This
+    answers in resolved hashes, because these heads are also handed to
+    `rev-list ... --not <boundary>`, where a symbolic `HEAD` would silently mean
+    whatever the boundary comparison happened to be run against.
+
+    Resolving is also where a malformed pending merge stops being someone
+    else's problem: `MERGE_HEAD` that does not hold full hashes is a broken
+    worktree, and reading it as an ordinary single-parent audit would let
+    unreachable regression mappings pass. That is an error, not a fallback.
+    """
+
+    tips = _audit_tips(root)
+    pending = tips[1:]
+    # A `MERGE_HEAD` that exists and names nothing is the same broken worktree
+    # as one that names a non-hash, and `_audit_tips` cannot tell them apart:
+    # it drops blank lines, so an empty file and no file both come back as
+    # `("HEAD",)`. Asked here, where the difference decides between an error and
+    # an ordinary single-parent audit.
+    merge_head = Path(_git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip())
+    if not merge_head.is_absolute():
+        merge_head = root / merge_head
+    if merge_head.is_file() and not pending:
+        raise HistoryError("pending MERGE_HEAD must contain full Git commit hashes")
+    if any(
+        not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) for head in pending
+    ):
+        raise HistoryError("pending MERGE_HEAD must contain full Git commit hashes")
+    heads = [
+        _git(root, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
+        for head in tips
+    ]
+    return tuple(dict.fromkeys(heads))
 
 
 def discover_issues(

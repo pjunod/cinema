@@ -1205,10 +1205,35 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and the task starts no worker or process.
 # 391 -> 393: the serving-loss regression owns and joins/cancels its HTTP
 # waiter and serving-loss task. No new production task owner is introduced.
-# The streaming effort retains its demand-regression and settlement owners;
-# current main adds the reviewed HDHomeRun session, response, maintenance, and
-# fixture tasks. Every production owner is cancellation- or shutdown-bound,
-# and every fixture task is joined or explicitly aborted before return.
+# 389 -> 392 with HDHomeRun document-boundary fixtures: the one-response
+# redirect/size server, stalled-body server, and stalled fetch are test-only.
+# The first is joined by each caller; the stall pair is explicitly aborted or
+# awaited after the absolute deadline. None ships or owns a media producer.
+# 392 -> 394 with the HDHomeRun review regressions. One joined fake-body server
+# proves a truncated device response is URL-redacted; one joined caller task
+# per admitted forced-refresh slot proves the cache shares exactly one device
+# operation. Every handle is awaited before its test returns, neither task is
+# shipped, and neither owns an FFmpeg or tuner process.
+# +19 HDHomeRun M2: six production sites in live_tv.rs own the session worker,
+# bounded stderr drain, single tuner-response/stdin pump, descriptor open,
+# segment-response watchdog, and bounded segment reader. Two main.rs tasks
+# run shutdown-token-bound scratch sweeping and metrics refresh.
+# Eleven additional sites are regression fixtures (ten Live TV, one relay).
+# Session teardown joins the pump and confirms child exit before retirement;
+# response tasks have child cancellation and progress/total deadlines. The
+# descriptor-open blocking task cannot forcibly cancel an operating-system call.
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 413 on the effort branch and 393 on main from a shared base, and neither
+# value describes the merged tree. 417 is what the checker reads off the
+# merge, so it is what is recorded -- the two inventories above are both
+# still true, and the total is measured rather than added up.
+# 394 + (393 - 389) -> 398 when integrating the independent effort and M6
+# settlement task: retain all five demand-regression owners and all four
+# settlement owners. No source spawn or ownership obligation is discarded.
+# Merged inventory: both parents moved this counter from a shared base, so
+# neither parent's value describes the merged tree. Every ownership
+# obligation recorded above is retained on both sides; the total is read
+# off the merge rather than added up.
 expected_occurrences = 422
 
 [[module_structures]]
@@ -1220,14 +1245,20 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
 # cancellation token and deadline; the child is kill-on-drop and always reaped
 # on the explicit oversize and ordinary completion paths.
+# +1 HDHomeRun M2: spawn_live_ffmpeg launches the sole per-session encoder.
+# The session retains child and foreground admission through confirmed reap;
+# shutdown closes registry insertion before collecting existing owners.
 # 41 -> 42 with abb872ba: the Unix-only zero-progress eviction regression
 # launches `sleep 60` as a fake running producer. It transfers the child to
 # ProducerSlot, then awaits driver_pass; the capacity-hold Terminate step
 # calls Child::kill().await (kill plus reap) before asserting Absent. The child
 # is kill-on-drop if the fixture unwinds. No shipped process is added.
-# +1 HDHomeRun M2: spawn_live_ffmpeg launches the sole per-session encoder.
-# The session retains child and foreground admission through confirmed reap;
-# shutdown closes registry insertion before collecting existing owners.
+# Merging main and the streaming-reliability effort: 41 at the shared base,
+# 42 on each side, 43 on the merge. Both additions are already reviewed and
+# both survive -- vodserve.rs's failed-rendition reclaim on the effort side
+# and live_tv.rs's per-session encoder on main's. Neither side's total
+# describes the merged tree, so the count is measured off it rather than
+# carried across from one parent.
 expected_occurrences = 43
 
 [[module_structures]]
@@ -1355,11 +1386,45 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 571 -> 577: admission capacity gets one inherited-deadline timeout;
 # takeover cleanup gets one existing-reconciliation-deadline timeout. The
 # remaining net four constructors belong to bounded settlement regressions.
-# The streaming effort's bounded control, VOD cleanup, and subtitle-fixture
-# timers remain alongside current main's HDHomeRun startup, response, cleanup,
-# observation, and maintenance deadlines. These timers own no replacement
-# election; they bound work already owned by the corresponding request or
-# session.
+# Both efforts moved the count from 550 independently, so the merged total is
+# 550 + 4 + 7 rather than either branch's value.
+# +28 HDHomeRun M2: nineteen production Live TV sites bound startup, drain,
+# cleanup, file/HTTP operations, producer observation and response lifetime,
+# or pace scratch/metrics maintenance. Eight sites are regression timing.
+# One peer_transport timeout bounds response-signature verification within
+# the originating request deadline. None elects a replacement tuner owner.
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 589 on the effort branch and 577 on main from a shared base, and neither
+# value describes the merged tree. 609 is what the checker reads off the
+# merge, so it is what is recorded -- the two inventories above are both
+# still true, and the total is measured rather than added up.
+# 560 + (577 - 557) -> 580 on effort integration: both independently reviewed
+# timer deltas remain, including the demand episode retention and bounded
+# settlement owner. This is a merged inventory, not a relaxed sentinel.
+# 580 -> 582 with P1-6's accepted-film-time staging proof. Both are test-only
+# helpers in the two new control-seam regressions, and both are awaited before
+# the fixture releases its temporary media. `pace_control_exchanges` sleeps
+# past `MIN_CONTROL_INTERVAL` — the same exchange floor already reviewed at
+# 550 -> 555 and 570 -> 571 — because a second exchange inside it is answered
+# 429 and never reaches the selection engine, so the assertion would otherwise
+# run against a request the server declined to consider. `await_preparation_
+# candidate` bounds the wait for the detached preparation candidate keyed to
+# its exact predecessor, the same shape reviewed at 555 -> 557. Production
+# gains no constructor: the correction replaces one arithmetic expression.
+# Neither timer owns a process, producer, recipe or recovery decision.
+# 582 -> 583 with the failed-rendition reclaim: `tokio::time::timeout` now
+# bounds the wait `maintain` takes on outstanding terminal cleanups. It is the
+# one timer this adds and it owns nothing — no task, no child, no lease — it
+# only stops the node's single maintenance loop from being wedged forever by a
+# cleanup that never completes.
+# 583 -> 585 with the detach convergence: two `tokio::time::timeout` bounds in
+# the new regressions' own `running()` helpers, waiting for an injected
+# subtitle extractor to start. Test-local deadlines that own no task and no
+# child; the production path gains no timer here.
+# Merged inventory: both parents moved this counter from a shared base, so
+# neither parent's value describes the merged tree. Every ownership
+# obligation recorded above is retained on both sides; the total is read
+# off the merge rather than added up.
 expected_occurrences = 617
 
 [[module_structures]]
@@ -1397,9 +1462,6 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # returns. It owns no rolling producer, outlives no await, and never runs in a
 # shipped binary — it exists so the argv pin has a real Dolby-Vision-shaped
 # HEVC source to copy.
-# 67 -> 68 with abb872ba: the test-only `sleep 60` child described under
-# method-spawn. ProducerSlot owns it through the awaited kill/reap; this is a
-# running-child capacity regression, not another production encoder path.
 # +1: the HDHomeRun readiness probe constructs the exact synthetic FFmpeg HLS
 # graph, awaits its output behind a hard deadline, and marks it kill-on-drop.
 # +2 HDHomeRun M2: the production live FFmpeg command and the finite,
@@ -1407,6 +1469,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # was already counted. Both new children use kill-on-drop; production also
 # retains admission and requires confirmed reap before retirement. The finite
 # source generator has no separate output timeout; it is not a live producer.
+# 67 -> 68 with abb872ba: the test-only `sleep 60` child described under
+# method-spawn. ProducerSlot owns it through the awaited kill/reap; this is a
+# running-child capacity regression, not another production encoder path.
+# Merged inventory: both parents moved this counter from a shared base, so
+# neither parent's value describes the merged tree. Every ownership
+# obligation recorded above is retained on both sides; the total is read
+# off the merge rather than added up.
 expected_occurrences = 71
 
 [[module_structures]]
@@ -1480,10 +1549,61 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 after the second adversarial review: the internal-relay preparation replay
 # regression reads the in-process response status before asserting its retained
 # canonical body. It launches no child and owns no process.
-# The streaming effort adds VOD status projections and in-process response
-# assertions; current main adds Live TV status projections, bounded fixture
-# output, and response-code assertions. Only the reviewed Command sites launch
-# processes; the other matches are registry or HTTP status reads.
+# +3 for HDHomeRun: two HTTP status reads enforce the no-redirect/success
+# contract and one `.output()` awaits the bounded synthetic FFmpeg graph.
+# 219 -> 220 with the quorum-fence regression reading `Response::status()` on
+# the in-process signed snapshot refusal. It launches no child and is the
+# assertion that device/FFmpeg work is unreachable after authority loss.
+# +15 HDHomeRun M2: production .spawn() and fixture .output() are the only
+# two new process launches. The other thirteen matches inspect or construct
+# HTTP statuses or serialize LiveTvSession status; they own no OS process.
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 235 on the effort branch and 217 on main from a shared base, and neither
+# value describes the merged tree. 236 was what the checker read off the merge
+# itself -- the two inventories above are both still true, and the total is
+# measured rather than added up.
+# +1: one more `Response::status()` read, in the serving-fence assertion for
+# the owner's internal Live TV snapshot. Same category as the M3 and M7 rows
+# above: an HTTP status code on an in-process `oneshot` response, launching no
+# process and owning no producer.
+# 222 + (217 - 216) -> 223 retains the six effort additions and the one
+# settlement response-status assertion from their common 216-site base.
+# 223 -> 226 with P1-3's VOD delivery measurement: three `VodServe::status`
+# reads in `a_segment_answer_carries_the_meter_its_own_session_publishes`. The
+# sentinel's pattern catches `.status(` alongside `.spawn(` and `.output(`, and
+# these are registry reads that launch nothing: the test asserts what a session
+# publishes after its own answer counted bytes, and what a second viewer of the
+# same immutable rendition publishes instead. No process, producer or timer is
+# created or owned.
+# 226 -> 235 with P1-2's VOD failure classification. None of the nine launches
+# anything; the sentinel's pattern catches `.status(` alongside `.spawn(` and
+# `.output(`. Two are production: `record_failure` logs `decision.status()`, and
+# `status_publication` projects the recorded class onto `VodSessionInfo`. The
+# other seven are in the regressions -- `VodServe::status` registry reads that
+# assert what a session publishes before and after a failure is recorded, and
+# `ProducerDecisionReason::status()` projections that pin each class to its wire
+# name through action selection. No process, producer or timer is created.
+# 235 -> 237 after the P1-2 review: two more `VodServe::status` reads, in the
+# regressions that pin a moved source to `source_changed` end to end and that
+# require a recorded cause to survive its own consequence. Registry reads; they
+# launch nothing.
+# 237 -> 239 with the review's permanence proofs: two more
+# `ProducerDecisionReason::status()` projections, in the assertion that every
+# permanent reason carries its own terminal sentence and in the per-arm
+# permanence check. Projections of an enum onto its wire name; nothing is
+# launched.
+# 239 -> 242 with the capacity-hold and reattach regressions: three more
+# `VodServe::status` reads, in the proof that a stall still says `no_room` after
+# the producer it terminated is gone (healthy, held, and cleared again). Registry
+# reads; they launch nothing.
+# +1 for the failed-rendition reclaim test: one more `VodServe::status()` read,
+# asserting that a rendition that has failed reports `failed` with no capacity
+# hold. It is an in-process read of session and belief state; it launches no
+# process and owns no producer.
+# Merged inventory: both parents moved this counter from a shared base, so
+# neither parent's value describes the merged tree. Every ownership
+# obligation recorded above is retained on both sides; the total is read
+# off the merge rather than added up.
 expected_occurrences = 263
 
 [[module_structures]]
@@ -1509,12 +1629,28 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # calls coordinate test tasks before the leading fetch is released. They are
 # in-process synchronization and do not address or reap an operating-system
 # process.
-# The streaming additions are in-process barrier and registered-wait calls;
-# they own no OS child. Current main adds the HDHomeRun child's start_kill,
-# bounded wait, and observer try_wait plus the finite fixture's awaited child.
 # +4 HDHomeRun M2: cleanup_session calls start_kill and bounded wait while
 # retaining child/admission on failure; the session observer calls try_wait;
 # the real video-only fixture awaits its production-graph child.
+# 306 -> 319 with abb872ba: nine Barrier::wait calls belong to the two
+# deterministic control-acceptance/file-open cancellation seams (five behind
+# cfg(test) in the production methods and four in their fixtures). Four more
+# are WaitPool/RegisteredWait waits: the compatibility test helper delegates
+# to the request-owned wait, and three fixture calls prove notified pin
+# retention, admission refusal, and entry-local failure. The shipped GET's
+# old pool.wait becomes registered.wait, for no net change. All thirteen are
+# in-process waits, not OS-child lifecycle calls; the existing timeout remains
+# owned by each admitted request rather than by a detached task.
+# 319 -> 322 with the departing-session wait retirement: three
+# `RegisteredWait::wait` calls in `a_departing_session_takes_its_own_waits_and
+# _nobody_elses`. The sentinel's pattern catches `.wait(` alongside `.kill(` and
+# `.try_wait(`; these await a oneshot from the pool under a bounded deadline and
+# own no child process. The test requires the departing session's waiter to be
+# answered `Gone` and both surviving waiters to be served normally.
+# Merged inventory: both parents moved this counter from a shared base, so
+# neither parent's value describes the merged tree. Every ownership
+# obligation recorded above is retained on both sides; the total is read
+# off the merge rather than added up.
 expected_occurrences = 326
 
 [[module_structures]]
@@ -1543,13 +1679,17 @@ pattern = "kill_on_drop\\s*\\("
 # +1: the chapter probe is dropped by cancellation or deadline selection and
 # must not leave ffprobe holding a NAS file or the queue's global media slot.
 # +1 with the bounded subtitle window: its kill_on_drop, for the same reason the whole-track extractor has one.
-# 37 -> 38 with abb872ba: cancellation/unwind protection for the test-only
-# `sleep 60` child. The normal regression path still explicitly kills and
-# reaps it through ProducerSlot; kill-on-drop is not the success assertion.
 # +1: the HDHomeRun graph probe cannot survive cancellation or its deadline.
 # +2 HDHomeRun M2: production encoder and finite video-only source generator.
 # kill-on-drop is a fallback; successful production drain still requires
 # explicit confirmed reap rather than treating drop as cleanup proof.
+# 37 -> 38 with abb872ba: cancellation/unwind protection for the test-only
+# `sleep 60` child. The normal regression path still explicitly kills and
+# reaps it through ProducerSlot; kill-on-drop is not the success assertion.
+# Merged inventory: both parents moved this counter from a shared base, so
+# neither parent's value describes the merged tree. Every ownership
+# obligation recorded above is retained on both sides; the total is read
+# off the merge rather than added up.
 expected_occurrences = 41
 
 [[module_structures]]
