@@ -254,7 +254,20 @@ pub(crate) async fn aggregate(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<(HeaderMap, Json<ClusterOperationsAggregate>), ApiError> {
-    let aggregate = collect_aggregate(&state).await?;
+    aggregate_response_with(|| collect_aggregate(&state)).await
+}
+
+/// Complete GET response boundary whose only input is the node-owned
+/// projection collector. Keeping `AppState` outside this function makes Store
+/// or peer-network work impossible to hide inside the request boundary.
+async fn aggregate_response_with<Collect, CollectFuture>(
+    collect: Collect,
+) -> Result<(HeaderMap, Json<ClusterOperationsAggregate>), ApiError>
+where
+    Collect: FnOnce() -> CollectFuture,
+    CollectFuture: std::future::Future<Output = Result<ClusterOperationsAggregate, ApiError>>,
+{
+    let aggregate = collect().await?;
     Ok((private_no_store_headers(), Json(aggregate)))
 }
 
@@ -354,11 +367,28 @@ pub(crate) async fn support_bundle(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Response, ApiError> {
-    let aggregate = collect_aggregate(&state).await?;
+    support_bundle_response_with(
+        || collect_aggregate(&state),
+        || state.cluster_logs.tail("trace", 200),
+    )
+    .await
+}
+
+/// Complete support response boundary. Its two dependencies are deliberately
+/// narrower than `AppState`: the same cache-only aggregate projection as GET,
+/// and one bounded process-local log snapshot.
+async fn support_bundle_response_with<Collect, CollectFuture, Logs>(
+    collect: Collect,
+    logs: Logs,
+) -> Result<Response, ApiError>
+where
+    Collect: FnOnce() -> CollectFuture,
+    CollectFuture: std::future::Future<Output = Result<ClusterOperationsAggregate, ApiError>>,
+    Logs: FnOnce() -> Vec<crate::logbuf::LogEntry>,
+{
+    let aggregate = collect().await?;
     let status = serde_json::to_vec_pretty(&aggregate).map_err(bundle_error)?;
-    let logs = state
-        .cluster_logs
-        .tail("trace", 200)
+    let logs = logs()
         .into_iter()
         .map(|entry| {
             serde_json::json!({
@@ -2344,38 +2374,92 @@ mod tests {
         let membership_cache_reads = std::sync::Arc::new(AtomicUsize::new(0));
         let local_process_reads = std::sync::Arc::new(AtomicUsize::new(0));
         let peer_cache_reads = std::sync::Arc::new(AtomicUsize::new(0));
+        let log_buffer_reads = std::sync::Arc::new(AtomicUsize::new(0));
 
-        let aggregate = collect_aggregate_with_cached_sources(
-            "node-1",
-            {
-                let reads = membership_cache_reads.clone();
+        let collect = |membership_cache_reads: std::sync::Arc<AtomicUsize>,
+                       local_process_reads: std::sync::Arc<AtomicUsize>,
+                       peer_cache_reads: std::sync::Arc<AtomicUsize>| async move {
+            collect_aggregate_with_cached_sources(
+                "node-1",
                 move || async move {
-                    reads.fetch_add(1, Ordering::Relaxed);
+                    membership_cache_reads.fetch_add(1, Ordering::Relaxed);
                     MembershipStatusCacheRead::Fresh(Box::new(test_membership("node-1", 2)))
-                }
-            },
-            {
-                let reads = local_process_reads.clone();
+                },
                 move || async move {
-                    reads.fetch_add(1, Ordering::Relaxed);
+                    local_process_reads.fetch_add(1, Ordering::Relaxed);
                     test_local_status("node-1", Some(1))
-                }
-            },
-            {
-                let reads = peer_cache_reads.clone();
+                },
                 move || async move {
-                    reads.fetch_add(1, Ordering::Relaxed);
+                    peer_cache_reads.fetch_add(1, Ordering::Relaxed);
                     PeerStatusCacheRead::Fresh(BTreeMap::new())
-                }
+                },
+            )
+            .await
+        };
+
+        let (headers, Json(aggregate)) = aggregate_response_with(|| {
+            collect(
+                membership_cache_reads.clone(),
+                local_process_reads.clone(),
+                peer_cache_reads.clone(),
+            )
+        })
+        .await
+        .expect("cached aggregate response");
+        assert_eq!(aggregate.nodes.len(), 2);
+        assert_eq!(
+            headers.get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("private, no-store"))
+        );
+
+        let response = support_bundle_response_with(
+            || {
+                collect(
+                    membership_cache_reads.clone(),
+                    local_process_reads.clone(),
+                    peer_cache_reads.clone(),
+                )
+            },
+            || {
+                log_buffer_reads.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
             },
         )
         .await
-        .expect("cached aggregate");
+        .expect("cached support response");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/zip"))
+        );
 
-        assert_eq!(aggregate.nodes.len(), 2);
-        assert_eq!(membership_cache_reads.load(Ordering::Relaxed), 1);
-        assert_eq!(local_process_reads.load(Ordering::Relaxed), 1);
-        assert_eq!(peer_cache_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(membership_cache_reads.load(Ordering::Relaxed), 2);
+        assert_eq!(local_process_reads.load(Ordering::Relaxed), 2);
+        assert_eq!(peer_cache_reads.load(Ordering::Relaxed), 2);
+        assert_eq!(log_buffer_reads.load(Ordering::Relaxed), 1);
+
+        // Supplemental wiring guard: the behavioral seam above owns each
+        // complete response. Production handlers may select only the cache-only
+        // collector (and bounded log ring for support) before entering it.
+        let source = include_str!("cluster_operations.rs");
+        let aggregate_handler = source
+            .split("pub(crate) async fn aggregate(")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Complete GET response boundary").next())
+            .expect("aggregate handler source");
+        assert!(aggregate_handler
+            .contains("aggregate_response_with(|| collect_aggregate(&state)).await"));
+        assert!(!aggregate_handler.contains("state.membership"));
+        assert!(!aggregate_handler.contains("collect_peer_statuses"));
+
+        let support_handler = source
+            .split("pub(crate) async fn support_bundle(")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Complete support response boundary").next())
+            .expect("support handler source");
+        assert!(support_handler.contains("|| collect_aggregate(&state)"));
+        assert!(support_handler.contains("state.cluster_logs.tail(\"trace\", 200)"));
+        assert!(!support_handler.contains("state.membership"));
+        assert!(!support_handler.contains("collect_peer_statuses"));
     }
 
     #[test]

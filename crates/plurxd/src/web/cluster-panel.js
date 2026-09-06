@@ -153,7 +153,7 @@
     if(!ops||ops.unavailable) return null;
     return (ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId)||null;
   }
-  function clusterTransportObservation(ops,raftId,boundedReadReady){
+  function clusterTransportObservation(ops,raftId){
     if(!ops||ops.unavailable||raftId===null||raftId===undefined) return null;
     const candidates=[];
     (ops.nodes||[]).forEach(row=>{
@@ -179,10 +179,19 @@
     const priority={stalled:8,installing:7,awaiting_acknowledgement:6,retrying:5,
       transferring:4,connecting:3,failed:2,complete:1};
     const age=observation=>Number(observation.sample_age_ms||0);
-    const identity=observation=>observation.snapshot_id
-      ?`snapshot:${observation.snapshot_id}`
-      :`attempt:${observation.observing_node_id}:${observation.boot_id||""}:`+
-        `${observation.attempt_id}:${observation.socket_epoch}`;
+    const fingerprint=observation=>typeof observation.snapshot_fingerprint==="string"&&
+      /^[0-9a-f]{64}$/.test(observation.snapshot_fingerprint)
+      ?observation.snapshot_fingerprint:null;
+    const attemptIdentity=observation=>
+      `attempt:${observation.observing_node_id}:${observation.boot_id||""}:`+
+      `${observation.direction}:${observation.peer_node_id}:`+
+      `${observation.attempt_id}:${observation.socket_epoch}`;
+    // snapshot_id is a bounded display label. It can be the digest rendering
+    // of a long ID or an ordinary short ID with the same spelling, so it is
+    // never semantic identity. Older peers have no fingerprint and remain
+    // attempt-local rather than gaining unsafe cross-observer correlation.
+    const identity=observation=>fingerprint(observation)
+      ?`snapshot:${fingerprint(observation)}`:attemptIdentity(observation);
     const identityFreshness=new Map();
     candidates.forEach(observation=>{
       const key=identity(observation);
@@ -194,22 +203,29 @@
         const identityAge=identityFreshness.get(leftIdentity)-identityFreshness.get(rightIdentity);
         if(identityAge) return identityAge;
       }
+      const freshness=age(left)-age(right);
       const leftTerminal=left.phase==="failed"||left.phase==="complete";
       const rightTerminal=right.phase==="failed"||right.phase==="complete";
       if(leftTerminal&&rightTerminal){
-        const sameSnapshot=left.snapshot_id&&left.snapshot_id===right.snapshot_id;
-        if((sameSnapshot||boundedReadReady)&&left.phase!==right.phase)
-          return left.phase==="complete"?-1:1;
-        const freshness=age(left)-age(right);
+        const sameSnapshot=fingerprint(left)&&fingerprint(left)===fingerprint(right);
+        const leftReceiverComplete=left.phase==="complete"&&left.direction==="inbound";
+        const rightReceiverComplete=right.phase==="complete"&&right.direction==="inbound";
+        if(sameSnapshot&&leftReceiverComplete!==rightReceiverComplete)
+          return leftReceiverComplete?-1:1;
         if(freshness) return freshness;
       }
+      // Observers sample independently, so tiny age differences inside one
+      // snapshot are not ordering authority. Once the gap exceeds one complete
+      // five-second cache window, however, the fresh active attempt supersedes
+      // an old stalled/nonterminal view before phase severity is considered.
+      if(leftIdentity===rightIdentity&&Math.abs(freshness)>5000) return freshness;
       return (priority[right.phase]||0)-(priority[left.phase]||0)||
-        age(left)-age(right);
+        freshness;
     });
     return candidates[0]||null;
   }
   function clusterTransportExplanation(ops,raftId,boundedReadReady){
-    const observation=clusterTransportObservation(ops,raftId,boundedReadReady);
+    const observation=clusterTransportObservation(ops,raftId);
     if(!observation)
       return boundedReadReady
         ? {code:"idle",text:"transport idle; bounded-read proof ready",observation:null}

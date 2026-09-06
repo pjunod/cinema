@@ -600,6 +600,7 @@ test("transport status shows outbound evidence and expires stale samples", () =>
 test("receiver completion outranks a split-view sender failure for one snapshot", () => {
   const ui = sandbox();
   const snapshotId = "snapshot-split-view";
+  const snapshotFingerprint = "1".repeat(64);
   const operations = {
     nodes: [
       {
@@ -611,6 +612,7 @@ test("receiver completion outranks a split-view sender failure for one snapshot"
               peer_node_id: 2,
               direction: "outbound",
               snapshot_id: snapshotId,
+              snapshot_fingerprint: snapshotFingerprint,
             }),
           ],
         },
@@ -624,6 +626,7 @@ test("receiver completion outranks a split-view sender failure for one snapshot"
               peer_node_id: 1,
               direction: "inbound",
               snapshot_id: snapshotId,
+              snapshot_fingerprint: snapshotFingerprint,
               acknowledged_offset: null,
             }),
           ],
@@ -656,6 +659,7 @@ test("fresh snapshot identity outranks stale failure evidence from another obser
               peer_node_id: 2,
               direction: "outbound",
               snapshot_id: "former-leader-snapshot",
+              snapshot_fingerprint: "2".repeat(64),
               sample_age_ms: 299_000,
             }),
           ],
@@ -670,6 +674,7 @@ test("fresh snapshot identity outranks stale failure evidence from another obser
               peer_node_id: 1,
               direction: "inbound",
               snapshot_id: "current-leader-snapshot",
+              snapshot_fingerprint: "3".repeat(64),
               sample_age_ms: 40,
             }),
           ],
@@ -682,6 +687,134 @@ test("fresh snapshot identity outranks stale failure evidence from another obser
   assert.equal(current.code, "installing");
   assert.equal(current.observation.snapshot_id, "current-leader-snapshot");
   assert.equal(current.observation.observing_node_id, 2);
+});
+
+test("fresh attempt wins over a stale stall for the same snapshot fingerprint", () => {
+  const ui = sandbox();
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("stalled", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: "same-snapshot",
+              snapshot_fingerprint: "4".repeat(64),
+              boot_id: "former-boot",
+              attempt_id: 4,
+              socket_epoch: 2,
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("installing", {
+              snapshot_id: "same-snapshot",
+              snapshot_fingerprint: "4".repeat(64),
+              boot_id: "current-boot",
+              attempt_id: 9,
+              socket_epoch: 7,
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "installing");
+  assert.equal(current.observation.boot_id, "current-boot");
+});
+
+test("bounded display collisions do not correlate distinct snapshot fingerprints", () => {
+  const ui = sandbox();
+  const collidingDisplay = `sha256:${"a".repeat(64)}`;
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("failed", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: collidingDisplay,
+              snapshot_fingerprint: "5".repeat(64),
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("complete", {
+              snapshot_id: collidingDisplay,
+              snapshot_fingerprint: "6".repeat(64),
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "failed");
+  assert.equal(current.observation.snapshot_fingerprint, "5".repeat(64));
+});
+
+test("legacy snapshot labels without fingerprints remain attempt-local", () => {
+  const ui = sandbox();
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("failed", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: "legacy-shared-label",
+              boot_id: "current-sender",
+              attempt_id: 12,
+              socket_epoch: 8,
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("complete", {
+              snapshot_id: "legacy-shared-label",
+              boot_id: "former-receiver",
+              attempt_id: 3,
+              socket_epoch: 1,
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "failed");
+  assert.equal(current.observation.boot_id, "current-sender");
 });
 
 test("stalled transport renders its observer and sample age", () => {

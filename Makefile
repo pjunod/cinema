@@ -295,6 +295,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::production_snapshot_executor_ticket_order_survives_reverse_waiter_polling \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::snapshot_executor::tests::production_shared_executor_drops_abandoned_other_peer_without_phantom_status \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -364,6 +368,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::production_natural_reconnect_advances_physical_socket_epoch_without_reset \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_snapshot_catch_up_preserves_physical_socket_epoch_during_interleaving \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -468,6 +476,14 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  transport_status::tests::bounded_inbound_display_id_cannot_alias_semantic_snapshot_identity \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::snapshot_fingerprint_correlates_raw_identity_across_directions_without_display_aliasing \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::snapshot_fingerprint_is_optional_for_rolling_status_deserialization \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -637,6 +653,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::operations_peer_query_materializes_only_the_committed_roster \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::status_protocol_query_materializes_only_the_committed_roster \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::committed_roster_bound_fails_closed_instead_of_truncating \

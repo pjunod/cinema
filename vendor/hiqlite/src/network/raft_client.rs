@@ -1382,6 +1382,17 @@ impl NetworkConnectionStreaming {
 }
 
 #[cfg(any(feature = "cache", feature = "sqlite"))]
+fn catch_up_outbound_snapshot_connection(network: &NetworkConnectionStreaming) {
+    network.snapshot_transport.connecting_owned(
+        network.raft_group,
+        network.node.id,
+        network.transport_connection_id,
+        network.reset.socket_epoch(),
+        network.reset.connection_attempt_sequence(),
+    );
+}
+
+#[cfg(any(feature = "cache", feature = "sqlite"))]
 async fn bounded_full_snapshot<C>(
     network: &mut NetworkConnectionStreaming,
     vote: Vote<NodeId>,
@@ -1408,20 +1419,14 @@ where
     );
     network.snapshot_transport.begin_owned_outbound_attempt(
         &transport_attempt,
-        &attempt.snapshot_id,
+        &snapshot.meta.snapshot_id,
         crate::transport_status::OutboundSnapshotSocket {
             epoch: network.reset.socket_epoch(),
             connected: network.reset.is_connected(),
         },
         attempt.transfer_deadline,
     );
-    network.snapshot_transport.connecting_owned(
-        network.raft_group,
-        network.node.id,
-        network.transport_connection_id,
-        network.reset.epoch(),
-        network.reset.connection_attempt_sequence(),
-    );
+    catch_up_outbound_snapshot_connection(network);
     {
         let mut slot = network
             .snapshot_attempt
@@ -2231,6 +2236,58 @@ mod tests {
 
         drop(second_socket);
         drop(connection);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn production_snapshot_catch_up_preserves_physical_socket_epoch_during_interleaving() {
+        let (network, _receiver) = test_network(test_snapshot_budgets());
+        let reset = Arc::clone(&network.reset);
+        let physical_socket_epoch = reset.begin_socket();
+        let first_connection_attempt = reset.begin_connection_attempt();
+        let mut transport_attempt = network.snapshot_transport.next_outbound_attempt(
+            network.raft_group,
+            network.node.id,
+            network.transport_connection_id,
+        );
+        transport_attempt.connection_attempt_sequence = first_connection_attempt;
+        network.snapshot_transport.begin_owned_outbound_attempt(
+            &transport_attempt,
+            "catch-up-interleaving",
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: physical_socket_epoch,
+                connected: false,
+            },
+            time::Instant::now() + Duration::from_secs(120),
+        );
+
+        // Model reset churn plus a replacement connection attempt landing
+        // between snapshot registration and its production catch-up call.
+        // Logical reset epochs and physical socket epochs intentionally diverge.
+        for _ in 0..3 {
+            reset.request_reset(reset.epoch());
+        }
+        let replacement_connection_attempt = reset.begin_connection_attempt();
+        assert_ne!(reset.epoch(), physical_socket_epoch);
+        catch_up_outbound_snapshot_connection(&network);
+
+        let caught_up = network.snapshot_transport.snapshot().observations.remove(0);
+        assert_eq!(caught_up.socket_epoch, physical_socket_epoch);
+        assert_eq!(caught_up.reconnect_count, 1);
+
+        let replacement_socket_epoch = reset.begin_socket();
+        network.snapshot_transport.connected_owned(
+            network.raft_group,
+            network.node.id,
+            network.transport_connection_id,
+            replacement_socket_epoch,
+            replacement_connection_attempt,
+        );
+        assert_eq!(
+            network.snapshot_transport.snapshot().observations[0].socket_epoch,
+            replacement_socket_epoch,
+            "catch-up must not poison monotonic physical socket publication"
+        );
     }
 
     #[cfg(feature = "sqlite")]

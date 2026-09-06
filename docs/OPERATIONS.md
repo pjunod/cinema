@@ -1772,6 +1772,12 @@ node-owned FIFO executor actually admits that exact request. A queued request
 or later admission waiter cannot displace the running install's identity. This
 keeps `operation_owns_work` tied to the future that currently owns the durable
 state-machine operation, including while an older socket is disappearing.
+Admission tickets are reserved synchronously at receipt and released or
+skipped on cancellation, so scheduler polling order cannot let a later request
+overtake an earlier one. The bounded `snapshot_id` remains display text only;
+cross-observer correlation uses a separate 64-hex SHA-256 fingerprint of the
+original ID. Older peers that omit it stay attempt-local instead of acquiring
+unsafe identity from a potentially colliding display label.
 
 The existing private Hiqlite cluster listener serves
 `GET /cluster/transport/sqlite` with the same `X-API-SECRET` authentication as

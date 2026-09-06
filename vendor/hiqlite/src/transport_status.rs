@@ -83,7 +83,11 @@ pub struct SnapshotTransportObservation {
     pub raft_group: String,
     pub boot_id: String,
     pub attempt_id: u64,
+    /// Bounded operator-facing label; never use this as semantic identity.
     pub snapshot_id: Option<String>,
+    /// Lowercase SHA-256 of the original snapshot ID for opaque correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_fingerprint: Option<String>,
     pub socket_epoch: u64,
     pub direction: SnapshotTransportDirection,
     pub attempted_offset: Option<u64>,
@@ -366,6 +370,9 @@ impl LocalSnapshotTransportStatus {
                     boot_id: self.inner.boot_id.clone(),
                     attempt_id: observation.attempt_id,
                     snapshot_id: observation.snapshot_id.clone(),
+                    snapshot_fingerprint: observation
+                        .snapshot_identity_fingerprint
+                        .map(hex::encode),
                     socket_epoch: observation.socket_epoch,
                     direction: key.direction,
                     attempted_offset: observation.attempted_offset,
@@ -480,6 +487,8 @@ impl LocalSnapshotTransportStatus {
                 }
                 observation.attempt_id = attempt.attempt_id;
                 observation.snapshot_id = Some(retained_snapshot_id(snapshot_id));
+                observation.snapshot_identity_fingerprint =
+                    Some(snapshot_identity_fingerprint(snapshot_id));
                 observation.socket_epoch = socket.epoch;
                 observation.attempted_offset = None;
                 observation.acknowledged_offset = None;
@@ -1361,6 +1370,7 @@ mod tests {
         let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
         let deadline = Instant::now() + Duration::from_secs(30);
         let oversized = "x".repeat(MAX_RETAINED_SNAPSHOT_ID_BYTES + 1);
+        let expected_fingerprint = hex::encode(Sha256::digest(oversized.as_bytes()));
         let expected = format!(
             "sha256:{}",
             hex::encode(Sha256::digest(oversized.as_bytes()))
@@ -1379,6 +1389,10 @@ mod tests {
         );
         let bounded = status.snapshot().observations.remove(0);
         assert_eq!(bounded.snapshot_id.as_deref(), Some(expected.as_str()));
+        assert_eq!(
+            bounded.snapshot_fingerprint.as_deref(),
+            Some(expected_fingerprint.as_str())
+        );
         assert!(expected.len() <= MAX_RETAINED_SNAPSHOT_ID_BYTES);
         assert!(!expected.contains(&oversized));
 
@@ -1397,12 +1411,19 @@ mod tests {
             status.snapshot().observations[0].snapshot_id.as_deref(),
             Some("ordinary-snapshot-id")
         );
+        assert_eq!(
+            status.snapshot().observations[0]
+                .snapshot_fingerprint
+                .as_deref(),
+            Some(hex::encode(Sha256::digest(b"ordinary-snapshot-id")).as_str())
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn inbound_snapshot_identity_is_bounded_before_retention() {
         let deadline = Instant::now() + Duration::from_secs(30);
         let oversized = "authenticated-peer-input".repeat(64);
+        let expected_fingerprint = hex::encode(Sha256::digest(oversized.as_bytes()));
         let expected = format!(
             "sha256:{}",
             hex::encode(Sha256::digest(oversized.as_bytes()))
@@ -1426,6 +1447,12 @@ mod tests {
             status.snapshot().observations[0].snapshot_id.as_deref(),
             Some(expected.as_str())
         );
+        assert_eq!(
+            status.snapshot().observations[0]
+                .snapshot_fingerprint
+                .as_deref(),
+            Some(expected_fingerprint.as_str())
+        );
 
         let normal = LocalSnapshotTransportStatus::new(2, BTreeSet::from([1]));
         let attempt = normal
@@ -1444,6 +1471,12 @@ mod tests {
         assert_eq!(
             normal.snapshot().observations[0].snapshot_id.as_deref(),
             Some("ordinary-snapshot-id")
+        );
+        assert_eq!(
+            normal.snapshot().observations[0]
+                .snapshot_fingerprint
+                .as_deref(),
+            Some(hex::encode(Sha256::digest(b"ordinary-snapshot-id")).as_str())
         );
     }
 
@@ -1504,6 +1537,138 @@ mod tests {
         assert_eq!(literal.attempt_id, literal_attempt.attempt_id);
         assert_eq!(literal.attempted_offset, Some(8));
         assert_eq!(literal.retry_count, 0);
+        assert_eq!(
+            literal.snapshot_fingerprint.as_deref(),
+            Some(hex::encode(literal_attempt.snapshot_identity_fingerprint).as_str())
+        );
+        assert_ne!(
+            literal.snapshot_fingerprint.as_deref(),
+            Some(hex::encode(oversized_attempt.snapshot_identity_fingerprint).as_str())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_fingerprint_correlates_raw_identity_across_directions_without_display_aliasing()
+     {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let oversized = "shared-authenticated-snapshot-id".repeat(64);
+        let colliding_display = retained_snapshot_id(&oversized);
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+
+        status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            1,
+            &oversized,
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        let inbound = status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 2,
+                snapshot_id: &oversized,
+                offset: 0,
+                len: 64,
+                done: false,
+                socket_epoch: 1,
+                deadline,
+            })
+            .expect("track matching inbound identity");
+        status.inbound_admitted(&inbound, false, deadline);
+        let snapshot = status.snapshot();
+        let outbound = snapshot
+            .observations
+            .iter()
+            .find(|observation| observation.direction == SnapshotTransportDirection::Outbound)
+            .expect("outbound observation");
+        let inbound = snapshot
+            .observations
+            .iter()
+            .find(|observation| observation.direction == SnapshotTransportDirection::Inbound)
+            .expect("inbound observation");
+        assert_eq!(outbound.snapshot_id, inbound.snapshot_id);
+        assert_eq!(outbound.snapshot_fingerprint, inbound.snapshot_fingerprint);
+        let fingerprint = outbound
+            .snapshot_fingerprint
+            .as_deref()
+            .expect("every raw identity has a fingerprint");
+        assert_eq!(fingerprint.len(), 64);
+        assert!(
+            fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+
+        let alias_status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        alias_status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            1,
+            &oversized,
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        let literal = alias_status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 2,
+                snapshot_id: &colliding_display,
+                offset: 0,
+                len: 8,
+                done: false,
+                socket_epoch: 1,
+                deadline,
+            })
+            .expect("track short literal identity");
+        alias_status.inbound_admitted(&literal, false, deadline);
+        let aliases = alias_status.snapshot();
+        assert_eq!(
+            aliases.observations[0].snapshot_id,
+            aliases.observations[1].snapshot_id
+        );
+        assert_ne!(
+            aliases.observations[0].snapshot_fingerprint,
+            aliases.observations[1].snapshot_fingerprint
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_fingerprint_is_optional_for_rolling_status_deserialization() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            1,
+            "rolling-status",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            Instant::now() + Duration::from_secs(30),
+        );
+        let observation = status.snapshot().observations.remove(0);
+        let mut legacy = serde_json::to_value(observation).expect("serialize observation");
+        legacy
+            .as_object_mut()
+            .expect("observation JSON object")
+            .remove("snapshot_fingerprint");
+
+        let decoded: SnapshotTransportObservation =
+            serde_json::from_value(legacy).expect("deserialize legacy observation");
+        assert_eq!(decoded.snapshot_fingerprint, None);
+        assert!(
+            serde_json::to_value(decoded)
+                .expect("serialize compatible observation")
+                .get("snapshot_fingerprint")
+                .is_none()
+        );
     }
 
     #[tokio::test(start_paused = true)]

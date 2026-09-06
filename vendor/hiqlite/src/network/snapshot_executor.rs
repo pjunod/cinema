@@ -2,9 +2,13 @@ use openraft::Raft;
 use openraft::RaftTypeConfig;
 use openraft::error::{InstallSnapshotError, RaftError};
 use openraft::raft::{InstallSnapshotRequest, InstallSnapshotResponse};
+use std::collections::BTreeSet;
 use std::future::Future;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, oneshot, watch};
+use tokio::sync::{Mutex, Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{error, warn};
@@ -19,6 +23,90 @@ struct Job<Req, Resp> {
     response: oneshot::Sender<Resp>,
 }
 
+#[derive(Default)]
+struct AdmissionOrderState {
+    serving: u64,
+    cancelled: BTreeSet<u64>,
+}
+
+#[derive(Default)]
+struct AdmissionOrder {
+    next: AtomicU64,
+    state: StdMutex<AdmissionOrderState>,
+    changed: Notify,
+}
+
+impl AdmissionOrder {
+    fn reserve(self: &Arc<Self>) -> AdmissionTicket {
+        AdmissionTicket {
+            order: Arc::clone(self),
+            ticket: self.next.fetch_add(1, Ordering::AcqRel),
+            active: true,
+        }
+    }
+
+    async fn wait_until_serving(&self, ticket: u64) {
+        loop {
+            // Register before inspecting the state so advancing the queue
+            // cannot land between the check and the notification subscription.
+            let changed = self.changed.notified();
+            let serving = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .serving;
+            if serving == ticket {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn release(&self, ticket: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if ticket == state.serving {
+            state.serving = state.serving.wrapping_add(1);
+            let mut serving = state.serving;
+            while state.cancelled.remove(&serving) {
+                state.serving = state.serving.wrapping_add(1);
+                serving = state.serving;
+            }
+        } else if ticket > state.serving {
+            state.cancelled.insert(ticket);
+        }
+        drop(state);
+        self.changed.notify_waiters();
+    }
+}
+
+struct AdmissionTicket {
+    order: Arc<AdmissionOrder>,
+    ticket: u64,
+    active: bool,
+}
+
+impl AdmissionTicket {
+    async fn wait_until_serving(&self) {
+        self.order.wait_until_serving(self.ticket).await;
+    }
+
+    fn release(&mut self) {
+        if self.active {
+            self.active = false;
+            self.order.release(self.ticket);
+        }
+    }
+}
+
+impl Drop for AdmissionTicket {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// One node-owned worker plus one queued request.
 ///
 /// A socket owns admission and the response receiver only. Once the worker
@@ -26,6 +114,7 @@ struct Job<Req, Resp> {
 pub(crate) struct NodeOwnedExecutor<Req, Resp> {
     tx: flume::Sender<Job<Req, Resp>>,
     admission_timeout: Duration,
+    admission_order: Arc<AdmissionOrder>,
     shutdown: watch::Sender<bool>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -82,52 +171,34 @@ where
         Self {
             tx,
             admission_timeout,
+            admission_order: Arc::new(AdmissionOrder::default()),
             shutdown,
             task: Mutex::new(Some(task)),
         }
     }
 
-    pub(crate) async fn submit(
-        &self,
+    pub(crate) fn submit<'a>(
+        &'a self,
         request: Req,
-        connection_closed: &mut watch::Receiver<bool>,
-    ) -> Result<Resp, SubmitError> {
-        if *connection_closed.borrow() {
-            return Err(SubmitError::ConnectionClosed);
-        }
-        // Subscribe before inspecting the value so a concurrent shutdown is
-        // either observed here or wakes the admission/response select below.
-        // Subscribing after the check can lose the notification because a new
-        // receiver treats the current value as already seen.
-        let mut shutdown = self.shutdown.subscribe();
-        if *shutdown.borrow() {
-            return Err(SubmitError::ExecutorClosed);
-        }
-
-        let (response, response_rx) = oneshot::channel();
-        let mut pending = Job { request, response };
+        connection_closed: &'a mut watch::Receiver<bool>,
+    ) -> impl Future<Output = Result<Resp, SubmitError>> + 'a {
+        // Reserve synchronously, before this future can be polled. Inbound
+        // socket handlers call `submit` immediately after receipt, so later
+        // tasks cannot overtake an earlier receipt merely by being polled
+        // first. Dropping the future releases or skips its ticket.
+        let mut admission_ticket = self.admission_order.reserve();
         let admission_deadline = time::Instant::now() + self.admission_timeout;
-        loop {
+        async move {
             if *connection_closed.borrow() {
                 return Err(SubmitError::ConnectionClosed);
             }
+            // Subscribe before inspecting the value so a concurrent shutdown
+            // is either observed here or wakes the admission/response select.
+            let mut shutdown = self.shutdown.subscribe();
             if *shutdown.borrow() {
                 return Err(SubmitError::ExecutorClosed);
             }
-            // Check the absolute boundary before attempting ownership transfer.
-            // A successful `try_send` is the only point after which execution
-            // is permitted, so AdmissionTimeout can never race an already
-            // queued or running job.
-            if time::Instant::now() >= admission_deadline {
-                return Err(SubmitError::AdmissionTimeout);
-            }
-            match self.tx.try_send(pending) {
-                Ok(()) => break,
-                Err(flume::TrySendError::Disconnected(_)) => {
-                    return Err(SubmitError::ExecutorClosed);
-                }
-                Err(flume::TrySendError::Full(job)) => pending = job,
-            }
+
             tokio::select! {
                 biased;
                 _ = connection_closed.changed() => return Err(SubmitError::ConnectionClosed),
@@ -135,15 +206,52 @@ where
                 _ = time::sleep_until(admission_deadline) => {
                     return Err(SubmitError::AdmissionTimeout);
                 }
-                () = time::sleep(Duration::from_millis(1)) => {}
+                () = admission_ticket.wait_until_serving() => {}
             }
-        }
 
-        tokio::select! {
-            biased;
-            _ = connection_closed.changed() => Err(SubmitError::ConnectionClosed),
-            _ = shutdown.changed() => Err(SubmitError::ExecutorClosed),
-            result = response_rx => result.map_err(|_| SubmitError::ResponseClosed),
+            let (response, response_rx) = oneshot::channel();
+            let mut pending = Job { request, response };
+            loop {
+                if *connection_closed.borrow() {
+                    return Err(SubmitError::ConnectionClosed);
+                }
+                if *shutdown.borrow() {
+                    return Err(SubmitError::ExecutorClosed);
+                }
+                // A successful `try_send` is the only point after which
+                // execution is permitted, so timeout cannot race accepted work.
+                if time::Instant::now() >= admission_deadline {
+                    return Err(SubmitError::AdmissionTimeout);
+                }
+                match self.tx.try_send(pending) {
+                    Ok(()) => {
+                        admission_ticket.release();
+                        break;
+                    }
+                    Err(flume::TrySendError::Disconnected(_)) => {
+                        return Err(SubmitError::ExecutorClosed);
+                    }
+                    Err(flume::TrySendError::Full(job)) => pending = job,
+                }
+                tokio::select! {
+                    biased;
+                    _ = connection_closed.changed() => {
+                        return Err(SubmitError::ConnectionClosed);
+                    }
+                    _ = shutdown.changed() => return Err(SubmitError::ExecutorClosed),
+                    _ = time::sleep_until(admission_deadline) => {
+                        return Err(SubmitError::AdmissionTimeout);
+                    }
+                    () = time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+
+            tokio::select! {
+                biased;
+                _ = connection_closed.changed() => Err(SubmitError::ConnectionClosed),
+                _ = shutdown.changed() => Err(SubmitError::ExecutorClosed),
+                result = response_rx => result.map_err(|_| SubmitError::ResponseClosed),
+            }
         }
     }
 
@@ -536,6 +644,186 @@ mod tests {
         );
         let completed = &status.snapshot().observations[0];
         assert_eq!(completed.snapshot_id.as_deref(), Some("fifo-b"));
+        assert_eq!(completed.phase, crate::SnapshotTransportPhase::Complete);
+        assert!(!completed.operation_owns_work);
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_snapshot_executor_ticket_order_survives_reverse_waiter_polling() {
+        use crate::store::state_machine::sqlite::TypeConfigSqlite;
+        use crate::transport_status::{InboundSnapshotAttempt, InboundSnapshotChunk};
+        use openraft::{SnapshotMeta, Vote};
+
+        fn track_attempt(
+            status: &crate::LocalSnapshotTransportStatus,
+            snapshot_id: &str,
+            socket_epoch: u64,
+        ) -> InboundSnapshotAttempt {
+            status
+                .inbound_received(InboundSnapshotChunk {
+                    raft_group: "sqlite",
+                    peer_node_id: 1,
+                    snapshot_id,
+                    offset: 0,
+                    len: 64,
+                    done: true,
+                    socket_epoch,
+                    deadline: time::Instant::now() + Duration::from_secs(30),
+                })
+                .expect("track inbound snapshot")
+        }
+
+        fn request(
+            status_attempt: InboundSnapshotAttempt,
+            snapshot_id: &str,
+        ) -> SnapshotExecutorRequest<TypeConfigSqlite> {
+            SnapshotExecutorRequest {
+                status_attempt: Some(status_attempt),
+                request: InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: SnapshotMeta {
+                        last_log_id: None,
+                        last_membership: Default::default(),
+                        snapshot_id: snapshot_id.to_owned(),
+                    },
+                    offset: 0,
+                    data: vec![0; 64],
+                    done: true,
+                },
+            }
+        }
+
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        let gates = Arc::new([
+            Semaphore::new(0),
+            Semaphore::new(0),
+            Semaphore::new(0),
+            Semaphore::new(0),
+        ]);
+        let started = Arc::new(Mutex::new(Vec::<String>::new()));
+        let executor = Arc::new(start_snapshot_executor_with_installer::<
+            TypeConfigSqlite,
+            _,
+            _,
+        >(
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            status.clone(),
+            {
+                let gates = Arc::clone(&gates);
+                let started = Arc::clone(&started);
+                move |request| {
+                    let gate_index = match request.meta.snapshot_id.as_str() {
+                        "reverse-a" => 0,
+                        "reverse-b" => 1,
+                        "reverse-c" => 2,
+                        "reverse-d" => 3,
+                        other => panic!("unexpected admitted snapshot {other}"),
+                    };
+                    let gates = Arc::clone(&gates);
+                    let started = Arc::clone(&started);
+                    async move {
+                        started.lock().await.push(request.meta.snapshot_id.clone());
+                        gates[gate_index]
+                            .acquire()
+                            .await
+                            .expect("test gate")
+                            .forget();
+                        Ok(InstallSnapshotResponse { vote: request.vote })
+                    }
+                }
+            },
+        ));
+
+        let (_close_first, mut first_closed) = watch::channel(false);
+        let first = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            let first_attempt = track_attempt(&status, "reverse-a", 1);
+            async move {
+                executor
+                    .submit(request(first_attempt, "reverse-a"), &mut first_closed)
+                    .await
+            }
+        });
+        while started.lock().await.as_slice() != ["reverse-a"] {
+            tokio::task::yield_now().await;
+        }
+
+        let (_close_second, mut second_closed) = watch::channel(false);
+        let second = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            let second_attempt = track_attempt(&status, "reverse-b", 2);
+            async move {
+                executor
+                    .submit(request(second_attempt, "reverse-b"), &mut second_closed)
+                    .await
+            }
+        });
+        while !executor.tx.is_full() {
+            tokio::task::yield_now().await;
+        }
+
+        let third_attempt = track_attempt(&status, "reverse-c", 3);
+        let fourth_attempt = track_attempt(&status, "reverse-d", 4);
+        let (_close_third, mut third_closed) = watch::channel(false);
+        let (_close_fourth, mut fourth_closed) = watch::channel(false);
+        // Reserving C before D is the production receipt order. The biased
+        // join deliberately polls D first on every wake to exercise the
+        // scheduler interleaving that used to reverse the two waiters.
+        let third = executor.submit(request(third_attempt, "reverse-c"), &mut third_closed);
+        let fourth = executor.submit(request(fourth_attempt, "reverse-d"), &mut fourth_closed);
+        let controller = tokio::spawn({
+            let gates = Arc::clone(&gates);
+            let started = Arc::clone(&started);
+            async move {
+                gates[0].add_permits(1);
+                while started.lock().await.len() < 2 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(started.lock().await.as_slice(), ["reverse-a", "reverse-b"]);
+                gates[1].add_permits(1);
+                while started.lock().await.len() < 3 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    started.lock().await.as_slice(),
+                    ["reverse-a", "reverse-b", "reverse-c"]
+                );
+                gates[2].add_permits(1);
+                while started.lock().await.len() < 4 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    started.lock().await.as_slice(),
+                    ["reverse-a", "reverse-b", "reverse-c", "reverse-d"]
+                );
+                gates[3].add_permits(1);
+            }
+        });
+
+        let (fourth_result, third_result) = tokio::join!(biased; fourth, third);
+        assert!(third_result.expect("third response").is_ok());
+        assert!(fourth_result.expect("fourth response").is_ok());
+        assert!(
+            first
+                .await
+                .expect("first caller task")
+                .expect("first response")
+                .is_ok()
+        );
+        assert!(
+            second
+                .await
+                .expect("second caller task")
+                .expect("second response")
+                .is_ok()
+        );
+        controller.await.expect("release controller");
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.snapshot_id.as_deref(), Some("reverse-d"));
         assert_eq!(completed.phase, crate::SnapshotTransportPhase::Complete);
         assert!(!completed.operation_owns_work);
         assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);

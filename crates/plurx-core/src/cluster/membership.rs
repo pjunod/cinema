@@ -1809,6 +1809,19 @@ fn capability_unready_nodes_sql(capability: &str) -> String {
     )
 }
 
+/// The status projection applies the capability rule only to the exact Raft
+/// membership it already validated and bounded. Join rows may exist before
+/// their Raft membership commits (and abandoned rows may remain indefinitely),
+/// so scanning `cluster_nodes` alone is neither authoritative nor bounded.
+fn committed_capability_unready_nodes_sql(capability: &str) -> String {
+    format!(
+        "SELECT active.node_id FROM cluster_nodes AS active WHERE {} \
+         AND active.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($1)) \
+         ORDER BY active.node_id",
+        capability_unready_node_predicate(capability)
+    )
+}
+
 /// Which copy of replicated state a read may answer from.
 ///
 /// The roster route has to keep answering during quorum loss — that is when an
@@ -5637,10 +5650,12 @@ impl MembershipManager {
                  WHERE n.removed_at IS NULL \
                    AND n.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($3)) \
                  ORDER BY n.raft_id",
-                params!(now, NODE_MAINTENANCE_CAPABILITY, members_json),
+                params!(now, NODE_MAINTENANCE_CAPABILITY, members_json.as_str()),
             )
             .await?;
-        let protocol = self.protocol_status().await?;
+        let protocol = self
+            .protocol_status_for_committed_members(&members_json)
+            .await?;
         let pending = protocol
             .learner_protocol_pending
             .iter()
@@ -6874,6 +6889,43 @@ impl MembershipManager {
     /// quorum read instead.
     pub async fn protocol_status(&self) -> Result<ClusterProtocolStatus, MembershipError> {
         self.protocol_projection(Read::Local).await
+    }
+
+    /// Status-only protocol projection constrained to the already validated
+    /// committed roster. The general protocol projection intentionally retains
+    /// its broader lifecycle semantics for protocol mutations.
+    async fn protocol_status_for_committed_members(
+        &self,
+        members_json: &str,
+    ) -> Result<ClusterProtocolStatus, MembershipError> {
+        let (active_min, active_max) = self.protocol_range(Read::Local).await?;
+        Ok(ClusterProtocolStatus {
+            active_min,
+            active_max,
+            binary_min: AUTH_PROTOCOL_MIN,
+            binary_max: AUTH_PROTOCOL_MAX,
+            learner_protocol_active: (active_min, active_max)
+                == (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL),
+            learner_protocol_pending: self
+                .committed_unready_nodes(LEARNER_PROTOCOL_CAPABILITY, members_json)
+                .await?,
+        })
+    }
+
+    async fn committed_unready_nodes(
+        &self,
+        capability: &str,
+        members_json: &str,
+    ) -> Result<Vec<String>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_map::<NodeIdRow, _>(
+                committed_capability_unready_nodes_sql(capability),
+                params!(members_json),
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row.node_id).collect())
     }
 
     async fn protocol_projection(
@@ -8978,6 +9030,104 @@ mod tests {
         assert!(rows
             .iter()
             .all(|(node_id, _)| !node_id.starts_with("abandoned-")));
+    }
+
+    #[test]
+    fn status_protocol_query_materializes_only_the_committed_roster() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, \
+                   last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT NOT NULL, capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, \
+                   PRIMARY KEY(node_id, capability));",
+            )
+            .expect("create production status tables");
+        {
+            let mut node = connection
+                .prepare("INSERT INTO cluster_nodes VALUES (?1, ?2, 1000000, NULL)")
+                .expect("prepare node insert");
+            let mut capability = connection
+                .prepare("INSERT INTO cluster_node_capabilities VALUES (?1, ?2, 1000000)")
+                .expect("prepare capability insert");
+            for raft_id in 1_u64..=13 {
+                let node_id = format!("node-{raft_id}");
+                node.execute(rusqlite::params![node_id, raft_id as i64])
+                    .expect("insert committed node");
+                if raft_id % 2 == 1 {
+                    capability
+                        .execute(rusqlite::params![
+                            format!("node-{raft_id}"),
+                            LEARNER_PROTOCOL_CAPABILITY
+                        ])
+                        .expect("mark committed node ready");
+                }
+            }
+            for index in 0_u64..1_000 {
+                node.execute(rusqlite::params![
+                    format!("abandoned-{index}"),
+                    (10_000 + index) as i64
+                ])
+                .expect("insert abandoned join row");
+            }
+        }
+
+        let members = (1_u64..=13).collect::<BTreeSet<_>>();
+        let members_json =
+            bounded_committed_raft_ids_json(&members).expect("bounded committed roster");
+        let sql = committed_capability_unready_nodes_sql(LEARNER_PROTOCOL_CAPABILITY);
+        let mut statement = connection
+            .prepare(&sql)
+            .expect("prepare the production status protocol query");
+        let rows = statement
+            .query_map(rusqlite::params![members_json], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("query exact committed pending nodes")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect exact committed pending nodes");
+
+        assert_eq!(
+            rows.iter().cloned().collect::<BTreeSet<_>>(),
+            [2_u64, 4, 6, 8, 10, 12]
+                .into_iter()
+                .map(|raft_id| format!("node-{raft_id}"))
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(rows
+            .iter()
+            .all(|node_id| !node_id.starts_with("abandoned-")));
+
+        // Supplemental wiring guard: the data regression above executes the
+        // exact production SQL, while these narrow slices ensure `status()`
+        // cannot silently return to the broader lifecycle projection.
+        let source = include_str!("membership.rs");
+        let status = source
+            .split("pub async fn status(&self)")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Promote one ready learner").next())
+            .expect("status source");
+        assert!(status.contains("protocol_status_for_committed_members(&members_json)"));
+        assert!(!status.contains("self.protocol_status().await"));
+
+        let committed_protocol = source
+            .split("async fn protocol_status_for_committed_members(")
+            .nth(1)
+            .and_then(|tail| tail.split("async fn committed_unready_nodes(").next())
+            .expect("committed protocol projection source");
+        assert!(committed_protocol
+            .contains("committed_unready_nodes(LEARNER_PROTOCOL_CAPABILITY, members_json)"));
+
+        let committed_unready = source
+            .split("async fn committed_unready_nodes(")
+            .nth(1)
+            .and_then(|tail| tail.split("async fn protocol_projection(").next())
+            .expect("committed pending-node source");
+        assert!(committed_unready.contains("committed_capability_unready_nodes_sql(capability)"));
+        assert!(committed_unready.contains("params!(members_json)"));
     }
 
     #[test]

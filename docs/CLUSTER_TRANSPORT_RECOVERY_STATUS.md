@@ -75,6 +75,7 @@ default is Rust 1.95.0, so every recorded Rust command uses
 | M4 third-review correction | pass · integrated `0d868c32` | Rust 1.97.1 passes the 19-case status and 10-case executor modules, all 41 Raft-client tests, the three cache-aging regressions, root all-target check, root and vendored denied-warning Clippy, membership web suite, exact operations mapping, formatting, and diff checks; exact replacement review is in progress |
 | M4 observation-identity and retention corrections | pass · candidate branch | Public fallback transport requires both a matching status envelope and matching transport observer; valid private evidence remains independent of public-listener identity; the authenticated private route returns `Cache-Control: private, no-store`; exact re-review is pending |
 | M4 final review correction | pass · exact candidate pending commit | The combined recovery lane, 28-case daemon module, 23-case transport-status module, 45-case Raft-client module, 197 operations contracts, 23-point validation catalog, membership web suite, all-target compile and denied-warning Clippy, three vendored denied-warning Clippy lanes, formatting, and diff checks pass. Request logging is bounded to operation kind and byte count; natural reconnects advance a physical socket epoch; sender offsets remain monotonic; semantic snapshot identity cannot collide with its bounded display form; fresh snapshot evidence outranks a stale different-snapshot stall; committed membership reads are query-bounded; and aggregate GET/support reads use fresh node-owned caches |
+| M4 exact-candidate replacement | pass · replacement commit pending | The focused cluster/WAL lane, 11-case executor module, 25-case transport-status module, 46-case Raft-client module, 197 operations contracts, 23-point validation catalog, full membership web suite, all-target compile and denied-warning Clippy, three vendored denied-warning Clippy lanes, formatting, and diff checks pass. Snapshot admission is ticketed in receipt order even under reverse polling; reset and physical socket epochs remain distinct; a rolling-compatible 64-hex semantic fingerprint replaces display-ID correlation; fresh same-snapshot attempts supersede stale stalls; the complete cached membership projection excludes 1,000 abandoned rows in its production SQL regression; and both GET/support response seams are pinned to node-owned caches with no request-time Store or peer fanout |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -190,8 +191,13 @@ unbounded historical membership materialization, expired long-install evidence,
 display/semantic snapshot-ID aliasing, payload-bearing debug logs, reconnect
 epochs that did not follow physical sockets, and stale cross-snapshot UI
 precedence. Those findings are fixed on the new combined candidate with exact
-production-path regressions; three clean reviews of its committed SHA are the
-next gate. M5 replacement work includes the earlier CI receipt and exact-test
+production-path regressions. Review of exact candidate `c37970b3` then found
+an indirect abandoned-row capability scan, scheduler-dependent snapshot
+admission order, one reset/physical-epoch mix-up, missing cross-observer
+semantic identity, stale same-snapshot UI precedence, and an overclaimed
+request-path isolation test. The replacement fixes all six, the combined lane
+is green, and three clean reviews of its next committed SHA are the next gate.
+M5 replacement work includes the earlier CI receipt and exact-test
 count corrections plus the later zero-resource-growth, early archive-identity,
 and cumulative-attempt corrections. It also refuses successful recovery or
 final qualification receipts from rerun attempts, so a failed 40-cycle
