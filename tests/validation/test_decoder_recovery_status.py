@@ -20,7 +20,7 @@ M1_EFFORT_BASE = "a8bbe574"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "0eac4425"
-M1_REPAIR_HEAD = "31dc5d26"
+M1_REPAIR_HEAD = "c2248aa7"
 
 
 def normalized(text: str) -> str:
@@ -181,8 +181,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("sealed, self-contained Linux FFprobe artifact", self.status)
         self.assertIn("path and second-memfd exec", self.status)
         self.assertIn("pidfd-before-reap", self.status)
-        self.assertIn("Linux 24/24", self.status)
-        self.assertIn("Linux 1.97.1 collector 27/27", self.status)
+        self.assertIn("macOS collector 20/20", self.status)
+        self.assertIn("pinned Linux collector 33/33", self.status)
         self.assertIn("one-shot exec supervision", self.status)
         self.assertIn("does not prove arbitrary static parser code trustworthy", self.status)
         self.assertIn(
@@ -197,7 +197,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "no full unsupported-architecture compile pass is claimed",
             self.flat_status,
         )
-        self.assertIn(f"`{M1_REPAIR_HEAD}` source tree", self.status)
+        self.assertIn(f"Exact code head `{M1_REPAIR_HEAD}`", self.status)
         self.assertIn("daemon 1,777/1,777", self.status)
         self.assertIn("no exact postcommit history claim", self.status)
         self.assertNotIn("`608dd04d`: history 1,357", self.status)

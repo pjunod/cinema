@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 sixth-review findings being implemented · **Updated:** 2026-09-06 ·
+**Status:** M1 sixth-review findings implemented; exact-head re-review pending · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **M1 task PR base:**
 effort head `a8bbe574`
 
@@ -24,7 +24,7 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Exact code head `19190ee8`: Rust 1.97.1 planner 35/35, macOS collector 18/18, pinned Linux collector 31/31, and real neutral-timeout producer 1/1; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally proves the post-fork handshake, bounded launch setup, sealed-FD execution, one-shot supervised `execveat`, post-transfer descriptor-export denial, pidfd-before-reap cleanup, source-identity ownership, session-escape denial, and injected pre/post-transfer failures |
+| Focused validation | Exact code head `c2248aa7`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 33/33, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup, proves allocation-free post-fork failure paths, and injects absolute-deadline retries for ready send, acknowledgement, first seccomp receive, and first response |
 | Exact receipt | `0eac4425`: exact post-map history audit 1,365, catalog 24/30/1,441, status/ownership contracts 13/13, formatting, and diff check pass; its tracked effort hook also passed operations 211/211 and the pinned all-target workspace compile. Historical receipt `2baf0861` is evidence for `31dc5d26`, not its successors |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
 | Blocker | Obtain new exact-head adversarial approval, implement any findings, then run the one clean full-suite qualification |
@@ -34,7 +34,7 @@ An unchecked item is not implied by a nearby passing check.
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Exact-head repair review pending | `19190ee8` closes the fifth-review ownership, deadline, descriptor-export, scope, geometry, and end-to-end fallback gaps; mandatory pinned-Linux collector regressions pass 31/31 |
+| M1 · explicit plan and facts | Exact-head repair review pending | `c2248aa7` closes the sixth-review post-fork allocation, EINTR deadline, final-observation offset ownership, provenance, and scope gaps; mandatory pinned-Linux collector regressions pass 33/33 |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -679,6 +679,7 @@ lane and focused tests provide earlier feedback.
 | `19190ee8` | Exact Rust 1.97.1 macOS and Linux focused qualification | Pass · planner 35/35, macOS collector 18/18, pinned Linux collector 31/31, real neutral-timeout producer 1/1, formatting, all-target compile, and all-target Clippy with warnings denied on both platforms. The focused producer test selected the working installed FFmpeg 9.0.1 after the default Homebrew link failed to load its removed x265 ABI; no FFmpeg-8 muxer-identity qualification is inferred |
 | `19190ee8` | Unsupported RISC-V compile probe | Incomplete environment evidence · the target was installed, but a transitive native build required unavailable `riscv64-linux-gnu-gcc` and stopped before compiling Plurx. The unsupported audit-architecture fallback remains source-reviewed and fail-closed, not cross-compiled evidence |
 | `0eac4425` | Exact post-map receipt and ownership reconciliation | Pass · history 1,365, catalog 24/30/1,441, status/ownership contracts 13/13, formatting, and branch diff check. Its tracked effort hook additionally passed operations 211/211 and the pinned all-target workspace compile |
+| `c2248aa7` | Exact sixth-review repair and focused qualification | Pass · planner 35/35, macOS collector 20/20, pinned Linux collector 33/33, both real neutral-timeout producer regressions, status/ownership contracts 13/13, formatting, and denied-warning all-target Clippy on macOS and Linux. Its tracked effort hook passed history 1,365, catalog 24/30/1,441, operations 211/211, formatting, and the pinned workspace compile |
 
 ## Remaining evidence before release
 
