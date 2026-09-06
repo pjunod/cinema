@@ -409,6 +409,7 @@ paths = [
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "scripts/cluster-named-runner",
+  "scripts/require-test-count",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "vendor/hiqlite/**",
   "vendor/hiqlite-wal/**",

@@ -228,6 +228,13 @@ class CatalogCase(unittest.TestCase):
         self.assertFalse(cluster["hiqlite_spike"])
         self.assertTrue(cluster["cluster_auth"])
 
+        # This wrapper turns an exact-filter typo into a hard failure for the
+        # WAL/transport lane. A change to the guard must run the lane it guards,
+        # not only the static catalog and Makefile-shape assertions.
+        test_count_guard = scope_for_paths(catalog, ("scripts/require-test-count",))
+        self.assertTrue(test_count_guard["rust"])
+        self.assertTrue(test_count_guard["cluster_auth"])
+
         for store_shard_path in (
             "Dockerfile.store-shard",
             "validation/store_shard.py",
