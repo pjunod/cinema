@@ -193,6 +193,18 @@ class ControlRequestWireCase(unittest.TestCase):
         # The server accepts an acknowledgement M2 clients never send: they
         # consume no action, so they have nothing to acknowledge.
         rust.discard("acknowledgement")
+        # And it accepts an intent envelope no client sends yet. The field is
+        # optional precisely so every deployed client keeps working without it,
+        # and teaching the two ports to build one is §4's client-adapter work,
+        # not something to fake here by declaring a field neither of them can
+        # populate.
+        #
+        # This discard is therefore temporary in a way the one above is not,
+        # and it is the only thing standing between the ports and a real
+        # divergence — so it comes out in the same change that adds `intent` to
+        # the Swift and Kotlin requests, and the test starts comparing it
+        # again.
+        rust.discard("intent")
         self.assertSameWire(
             "ControlRequestV1",
             rust,
