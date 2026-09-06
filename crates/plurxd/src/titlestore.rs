@@ -83,18 +83,31 @@ pub struct Budgets {
     /// `playback.hls_ahead_max_bytes` / `playback.hls_scratch_max_bytes`
     /// session scratch budgets.
     pub working_set_bytes: u64,
-    /// The completed cache, `cache.max_gb`.
-    pub completed_cache_bytes: u64,
-    /// The share of the completed cache one rendition may reserve. A rendition
-    /// whose planned total exceeds this is inadmissible: it would have to
-    /// evict most of the cache to complete, and then be evicted itself.
+    /// What `cache.max_gb` sizes the per-rendition admission threshold from.
+    ///
+    /// It is not a bound on the completed cache, and reading it as one is the
+    /// mistake this comment exists to prevent. Nothing anywhere compares the
+    /// node's total admitted bytes against this number: the only thing it
+    /// feeds is [`Budgets::admission_threshold`], which multiplies it by
+    /// [`Self::admission_share`] to decide whether *one* rendition may ever be
+    /// published. The completed cache itself grows to the disk.
+    ///
+    /// That is a deliberate choice rather than a gap. Bounding the total means
+    /// evicting a completed rendition belonging to some other title — deciding
+    /// which viewer loses their cache hit so this one can have theirs — and
+    /// that is a policy nobody has asked for. `a_full_cache_admits_another_rendition`
+    /// pins the behaviour so it stays a decision rather than drifting into one.
+    pub admission_sizing_bytes: u64,
+    /// The share of [`Self::admission_sizing_bytes`] one rendition may reserve.
+    /// A rendition whose planned total exceeds this is inadmissible: it would
+    /// have to evict most of the cache to complete, and then be evicted itself.
     pub admission_share: f64,
 }
 
 impl Budgets {
     pub fn admission_threshold(&self) -> u64 {
         let share = self.admission_share.clamp(0.0, 1.0);
-        (self.completed_cache_bytes as f64 * share) as u64
+        (self.admission_sizing_bytes as f64 * share) as u64
     }
 }
 
@@ -308,10 +321,10 @@ impl Manifest {
             });
         }
         let bytes = self.materialized_bytes();
-        if bytes > budgets.completed_cache_bytes {
+        if bytes > budgets.admission_sizing_bytes {
             return Err(CompletionRefused::Inadmissible(Inadmissible::TooLarge {
                 planned: bytes,
-                threshold: budgets.completed_cache_bytes,
+                threshold: budgets.admission_sizing_bytes,
             }));
         }
         self.admitted = true;
@@ -391,7 +404,7 @@ mod tests {
     fn budgets() -> Budgets {
         Budgets {
             working_set_bytes: 8 * GB,
-            completed_cache_bytes: 50 * GB,
+            admission_sizing_bytes: 50 * GB,
             admission_share: 0.5,
         }
     }
@@ -450,7 +463,7 @@ mod tests {
         let mut manifest = manifest(6, 100_000);
         fill(&mut manifest);
         let budgets = Budgets {
-            completed_cache_bytes: 1 << 40,
+            admission_sizing_bytes: 1 << 40,
             admission_share: 1.0,
             ..budgets()
         };
@@ -480,7 +493,7 @@ mod tests {
         fill(&mut manifest);
         assert!(manifest.has_evictable(&[], &[]), "before admission");
         let budgets = Budgets {
-            completed_cache_bytes: 1 << 40,
+            admission_sizing_bytes: 1 << 40,
             admission_share: 1.0,
             ..budgets()
         };
@@ -517,6 +530,38 @@ mod tests {
         assert_eq!(manifest.materialized_count(), 0);
         assert_eq!(manifest.materialized_bytes(), 0);
         assert!(!manifest.is_admitted());
+    }
+
+    /// The completed cache is not held under a total, and that is on purpose.
+    ///
+    /// `cache.max_gb` reads like a ceiling on the cache and is not one: it
+    /// sizes a *per-rendition* admission threshold and nothing else. A node
+    /// whose completed cache already exceeds it admits the next rendition
+    /// anyway, because no code path compares the node's total admitted bytes
+    /// against anything at all.
+    ///
+    /// Pinned rather than left implicit. Behaviour nobody has written down is
+    /// indistinguishable from behaviour nobody noticed, and the next person to
+    /// read the setting's name will assume the ceiling exists. If a total ever
+    /// is enforced, this test fails and its replacement has to say which
+    /// viewer's cache hit is being taken away to make room.
+    #[test]
+    fn a_full_cache_admits_another_rendition() {
+        let budgets = Budgets {
+            working_set_bytes: 1 << 40,
+            admission_sizing_bytes: 10 * 1024 * 1024,
+            admission_share: 1.0,
+        };
+        // Two renditions, each admissible on its own, together more than the
+        // number the setting names.
+        for _ in 0..2 {
+            let mut rendition = manifest(1, 8 * 1024 * 1024);
+            rendition.reserve(&budgets).expect("one rendition fits");
+            fill(&mut rendition);
+            rendition
+                .complete(&budgets)
+                .expect("and completes, however much is already admitted");
+        }
     }
 
     #[test]
@@ -558,7 +603,7 @@ mod tests {
         // The plan's own reference case, scaled: a title whose planned total is
         // several times the cache it would have to fit in.
         let tight = Budgets {
-            completed_cache_bytes: GB,
+            admission_sizing_bytes: GB,
             ..budgets()
         };
         let mut manifest = manifest(60, 64_000_000);

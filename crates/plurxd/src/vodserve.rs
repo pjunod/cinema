@@ -144,7 +144,13 @@ pub struct VodSettings {
     /// Node-wide byte budget for un-admitted VOD working sets. Never zero by
     /// the time it reaches here (settings validation refuses a parsed zero).
     pub working_set_bytes: u64,
-    /// Budget for admitted (completed) renditions kept as cache.
+    /// What `cache.max_gb` sizes the per-rendition admission threshold from.
+    ///
+    /// Not a bound on the completed cache. It reaches `Budgets` as
+    /// `admission_sizing_bytes` and is only ever multiplied by the admission
+    /// share to decide whether one rendition may be published; the node's
+    /// total admitted bytes are counted and reported but never compared
+    /// against anything. See `Budgets::admission_sizing_bytes`.
     pub completed_cache_bytes: u64,
     /// One hard deadline for a blocking segment GET.
     pub block_budget: Duration,
@@ -5456,7 +5462,7 @@ impl Shared {
         }
         let budgets = Budgets {
             working_set_bytes: rendition.working_set_budget,
-            completed_cache_bytes: rendition.completed_cache_budget,
+            admission_sizing_bytes: rendition.completed_cache_budget,
             admission_share: 0.5,
         };
         if let Err(refused) = manifest.reserve(&budgets) {
