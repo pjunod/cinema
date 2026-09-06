@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["b27b0a66", "32aeb759", "935b060f", "3f0f75e6"]
+commits = ["b27b0a66", "32aeb759", "935b060f", "3f0f75e6", "4c093b65"]
 points = ["playback.pipeline"]
 checks = ["rust-gate"]
-reason = "The M1 selector matrix freezes the extracted decoder plan without changing broad routing: it retains the MPEG-4/VideoToolbox exclusion and legacy preferences; rejects unknown or contradictory pixel, HDR/Dolby, geometry, surface, build, device, and driver evidence; binds selected-stream and source identity into the facts digest; and records effective presentation and ordered renderer transitions. Daemon tests prove FFprobe reads a duplicate of the held descriptor without advancing production, cache identity changes with the probe build, replaced binaries cannot reuse facts, same-key misses singleflight, cancellation is bounded, oversize output is drained and refused, and legacy video ordinals retain builder mapping. These regressions fail if any of the review repairs or the original extraction is reverted."
+reason = "The M1 selector matrix freezes the extracted decoder plan without changing broad routing: it retains the MPEG-4/VideoToolbox exclusion and legacy preferences; rejects unknown or contradictory pixel, HDR/Dolby, geometry, surface, build, device, driver, and capability evidence; binds selected-stream and source identity into the facts digest; and records effective presentation and ordered renderer transitions. Daemon tests prove FFprobe runs an immutable startup snapshot, reads the exclusively leased held descriptor, resolves legacy ordinals to absolute streams before catalog merge, rechecks source and build before caching, preserves hash singleflight after waiter cancellation, reaps a cancelled child before restoring the source offset, bounds output, and leaves neutral M1 timeouts on the legacy production route. These regressions fail if any review repair or the original extraction is reverted."

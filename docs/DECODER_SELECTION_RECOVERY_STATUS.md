@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 explicit-plan extraction under adversarial review · **Updated:** 2026-09-06 ·
+**Status:** M1 review repairs implemented; exact-head re-review pending · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -20,19 +20,19 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M1 — explicit plans and bound facts |
 | Task branch | `codex/decoder-selection-m1` |
-| Task PR | Not opened; the exact corrected branch will be published to Forgejo after adversarial review |
+| Task PR | Not opened; the exact corrected branch will be published to Forgejo after exact-head re-review |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | M1 code head `3f0f75e6`: selector matrix 30/30 and bound FFprobe collector 7/7 pass on Rust 1.97.1; exact task head includes only its corrective-history mapping after that code |
+| Focused validation | M1 corrected code head `4c093b65`: selector matrix 34/34 and bound FFprobe collector 12/12 pass; default-feature Clippy denies warnings; validation catalog and history audit pass |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0; Historical pre-rebase head `01368ce1` remains history only; the M1 full suite waits until all fresh review findings are closed |
-| Blocker | None; fresh selector and bound-probe adversarial reviews are in progress |
+| Blocker | None; both adversarial change requests are implemented and await exact-head verification before the single full suite |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Adversarial review in progress | Code head `3f0f75e6`: pure selector 30/30 and bound fact collector 7/7; compile/lint and fresh exact-head approvals remain required |
+| M1 · explicit plan and facts | Corrected-head re-review | Code head `4c093b65`: pure selector 34/34, bound fact collector 12/12, compile, Clippy, validation lint, and history audit pass; exact-head approvals and the single full suite remain |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -52,25 +52,44 @@ evidence, and keeps the MPEG-4/VideoToolbox compatibility exclusion independent
 of container and profile.
 
 The daemon collector discovers and fingerprints the configured FFprobe binary,
-duplicates the already-held source descriptor without sharing its file offset,
-selects the legacy video ordinal while retaining its absolute input index, and
-returns a source/build-bound facts digest. A bounded global cache and
-singleflight prevent unbounded or duplicate probes. Deadlines, cancellation,
-oversize output, changed source identity, and replaced probe binaries fail
-closed. M1 installs these services in daemon state but does not migrate command
-construction or broaden production routing; that remains M2.
+executes an immutable private snapshot of those validated bytes, and probes the
+already-held source descriptor under an exclusive offset lease shared with
+production FFmpeg children. The lease remains owned through child kill/reap
+and offset restoration even if a waiter disappears. Legacy video ordinals are
+resolved to absolute input indices before typed catalog metadata is merged.
+The fact digest binds source and selected-stream facts; the bounded cache key
+additionally binds the FFprobe build. Source, held build, private snapshot, and
+configured build path are revalidated immediately before cache publication.
 
-Current focused evidence on M1 code head `3f0f75e6`:
+The global hash worker and probe singleflight retain their owned admission when
+a waiter times out or cancels, preventing detached work from fanning out.
+Deadlines, oversize output, changed source identity, and replaced probe binaries
+fail closed. Because M1 only observes facts, its two-second subdeadline logs and
+continues the unchanged legacy production route; already assembled output is
+checked before probing. Command construction remains an M2 migration.
 
-- `cargo test -p plurx-core --test decoder_selection`: 30 passed.
-- `cargo test -p plurxd decode_facts::tests:: -- --nocapture`: 7 passed.
-- `cargo fmt --all -- --check` and the effort-base whitespace diff pass.
-- Corrective-history mapping is committed at task head `e74a5282` and awaits
-  the history gate with the remaining compile/lint evidence.
+Current focused evidence on corrected M1 code head `4c093b65`:
+
+- `cargo test -p plurx-core --test decoder_selection`: 34 passed.
+- `cargo test -p plurxd decode_facts::tests:: -- --nocapture`: 12 passed.
+- `cargo clippy -p plurxd --all-targets -- -D warnings`: passed.
+- `make validation-lint`: 24 points, 30 checks, and 1,429 audited files pass.
+- `make history-check`: 1,349 corrective commits pass.
+- `cargo fmt --all -- --check` and the working-tree whitespace diff pass.
+
+The corrected head closes both independent reviews: selected-stream catalog
+binding, PQ/Dolby refinement, Dolby-compatible legacy routing, RPU-aware
+profile-5 refusal, negative-capability precedence, one-pixel geometry, neutral
+probe timeout behavior, immutable probe execution, final source fencing,
+cancellation-safe hash admission, and source-offset lifecycle ownership now
+have regressions. The no-default-feature `-D warnings` Clippy profile still
+reports the same 116 pre-existing dead-code diagnostics on the exact M0 base;
+M1's no-default `cargo check` passes, while default-feature Clippy is clean.
 
 Fresh independent reviews cover the pure planner and the bound probe/cache
-owner separately. Their findings and exact approved head will be recorded
-before the single corrected-head full suite and Forgejo PR.
+owner separately. Their original change requests and the corrective code head
+are recorded here; both reviewers are being asked to verify the exact receipt
+head before the single corrected-head full suite and Forgejo PR.
 
 ## M0 frozen source inventory
 
