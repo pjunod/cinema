@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 exact qualification pending · **Updated:** 2026-09-06 ·
+**Status:** M1 qualification repair in progress · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -25,15 +25,15 @@ An unchecked item is not implied by a nearby passing check.
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | M1 code head `cc464663`: selector matrix 34/34, macOS bound FFprobe collector 14/14, Linux collector 15/15, neutral observation policy 1/1, ownership inventory 7/7, status 5/5, formatting, diff check, and workspace all-target Clippy with denied warnings pass |
 | Exact receipt | `006d832d`: history 1,356, catalog 24/30/1,434, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass; it splits `cc464663` across its real Rust and catalog evidence as required by adversarial review |
-| Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `bb25576c`: 20 passed, 3 failed, 2 declared skips; the rejected run found stale ownership counts and two test-only Clippy findings, then exhausted disk during cluster compilation after all preceding cluster tests passed |
-| Blocker | Exact-head adversarial re-review and the clean isolated full suite remain; the first attempt was intentionally interrupted rather than treating a superseded tree as qualification |
+| Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
+| Blocker | Obtain exact-head adversarial re-review, apply any findings, and run one clean full-suite qualification after all fixes |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Qualification pending | Exact code head `cc464663` closes the diagnostic findings and has two independent approvals; effort receipt `da1b704e` passes the fast lane, and the clean isolated full suite remains |
+| M1 · explicit plan and facts | Qualification repair in progress | Exact runtime head `cc464663` closes the diagnostic findings; the first full attempt on receipt head `2e8c7d48` exposed a two-second test-harness bound under aggregate load, and its repaired successor must be re-reviewed and qualified |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -529,6 +529,10 @@ lane and focused tests provide earlier feedback.
 | `a129560e` | Exact receipt effort hook and adversarial evidence-map review | Hook pass · history 1,356, catalog 24/30/1,433, operations 211/211, formatting, status contract, and pinned all-target workspace compile; one reviewer approved and one found that `cc464663` needed separate Rust plus catalog ownership evidence |
 | `a129560e` | Isolated `make validate-full` attempt | Superseded and intentionally interrupted during the cold Rust build after catalog, history, operations, benchmark, version, and input-fence checks passed; no qualification claimed |
 | `006d832d` | Adversarial evidence-map finding plus effort hook | Finding applied · `cc464663` now names both playback/Rust and validation/catalog coverage; history 1,356, catalog 24/30/1,434, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass |
+| `2e8c7d48` | Full-suite command and environment used by the qualified M0 run | Rejected diagnostic · 21 passed, 2 failed, 2 declared skips; all product cluster workloads preceding cold `cluster_activation` compilation passed, then the 1,800-second aggregate cluster bound expired; Rust completed 1,772 daemon tests but two transient-path-swap tests exceeded their two-second helper readiness bound under full parallel load, and both passed immediately in isolation |
+| Working tree after `2e8c7d48` | `cargo test -p plurxd uses_manifest_bound_source_during_transient_path_swap -- --nocapture` repeated five times | Pass · both descriptor-bound FFmpeg and mkvmerge transient-path-swap tests passed in every run after replacing the scheduler-sensitive iteration count with a 15-second wall-clock deadline |
+| Working tree after `2e8c7d48` | `CARGO='rustup run 1.97.1 cargo' make unit` with the qualified FFmpeg wrappers and loopback fixture permission | Pass · core 955/955, store contracts 87/87, daemon 1,774/1,774, and all remaining workspace and documentation tests passed; 3 declared ignores and no failures. A preceding restricted-sandbox diagnostic was invalid because 65 loopback fixtures were denied socket binds |
+| Working tree after `2e8c7d48` | Warmed `CARGO='rustup run 1.97.1 cargo' make cluster-check` | Pass · 133/133 runnable three-voter store contracts with 2 helper-process ignores, topology/growth/failure drills, 7/7 activation tests, and 2/2 activity tests; the formerly cold activation target compiled in 10.06 seconds |
 
 ## Remaining evidence before release
 
