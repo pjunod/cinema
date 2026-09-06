@@ -108,6 +108,10 @@ pub struct SnapshotTransportObservation {
     pub active_deadline_remaining_ms: Option<u64>,
     pub sample_age_ms: u64,
     pub phase: SnapshotTransportPhase,
+    /// Total snapshot starts plus retry starts observed for this peer and Raft
+    /// group during the retained observation lifetime.
+    #[serde(default)]
+    pub attempt_count: u64,
     pub reconnect_count: u64,
     pub retry_count: u64,
     pub last_error_category: Option<String>,
@@ -224,6 +228,7 @@ struct Observation {
     deadline: Option<Instant>,
     last_update: Instant,
     phase: SnapshotTransportPhase,
+    attempt_count: u64,
     connection_attempt_count: u64,
     retry_count: u64,
     last_error_category: Option<&'static str>,
@@ -472,6 +477,7 @@ impl LocalSnapshotTransportStatus {
                         .map(|deadline| duration_ms(deadline.saturating_duration_since(now))),
                     sample_age_ms: duration_ms(sample_age),
                     phase: observation.phase,
+                    attempt_count: observation.attempt_count,
                     reconnect_count: observation.connection_attempt_count.saturating_sub(1),
                     retry_count: observation.retry_count,
                     last_error_category: observation.last_error_category.map(str::to_owned),
@@ -567,6 +573,9 @@ impl LocalSnapshotTransportStatus {
                 if observation.attempt_id > attempt.attempt_id {
                     return;
                 }
+                if observation.attempt_id < attempt.attempt_id {
+                    observation.attempt_count = observation.attempt_count.saturating_add(1);
+                }
                 observation.attempt_id = attempt.attempt_id;
                 observation.snapshot_id = Some(retained_snapshot_id(snapshot_id));
                 observation.snapshot_identity_fingerprint =
@@ -661,6 +670,7 @@ impl LocalSnapshotTransportStatus {
         deadline: Option<Instant>,
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
+            observation.attempt_count = observation.attempt_count.saturating_add(1);
             observation.retry_count = observation.retry_count.saturating_add(1);
             observation.phase = SnapshotTransportPhase::Retrying;
             observation.deadline = deadline;
@@ -990,6 +1000,7 @@ impl LocalSnapshotTransportStatus {
                         observation.last_error_category = None;
                     }
                     InboundSnapshotDisposition::Retrying(category) => {
+                        observation.attempt_count = observation.attempt_count.saturating_add(1);
                         observation.phase = SnapshotTransportPhase::Retrying;
                         observation.deadline = (!done).then_some(next_chunk_deadline).flatten();
                         observation.last_error_category = Some(category);
@@ -1027,6 +1038,7 @@ impl LocalSnapshotTransportStatus {
                 match disposition {
                     InboundSnapshotDisposition::Succeeded => {}
                     InboundSnapshotDisposition::Retrying(category) => {
+                        observation.attempt_count = observation.attempt_count.saturating_add(1);
                         observation.phase = SnapshotTransportPhase::Retrying;
                         observation.deadline = next_chunk_deadline;
                         observation.last_error_category = Some(category);
@@ -1302,6 +1314,7 @@ fn empty_observation(now: Instant) -> Observation {
         deadline: None,
         last_update: now,
         phase: SnapshotTransportPhase::Connecting,
+        attempt_count: 0,
         connection_attempt_count: 0,
         retry_count: 0,
         last_error_category: None,
@@ -1317,7 +1330,9 @@ fn reset_from_inbound_attempt(
     status_attempt_id: u64,
     now: Instant,
 ) {
+    let attempt_count = observation.attempt_count.saturating_add(1);
     *observation = empty_observation(now);
+    observation.attempt_count = attempt_count;
     observation.attempt_id = status_attempt_id;
     observation.snapshot_id = Some(attempt.snapshot_id.clone());
     observation.snapshot_identity_fingerprint = Some(attempt.snapshot_identity_fingerprint);
@@ -2035,6 +2050,39 @@ mod tests {
             observation.last_error_category.as_deref(),
             Some("snapshot_mismatch")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn separate_full_snapshot_attempts_accumulate_after_failure() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let connection_id = status.next_outbound_connection_id();
+        let first = status.next_outbound_attempt("sqlite", 2, connection_id);
+        status.begin_owned_outbound_attempt(
+            &first,
+            "snapshot-a",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        status.outbound_failed_owned(&first, "snapshot_attempt_ended");
+
+        let second = status.next_outbound_attempt("sqlite", 2, connection_id);
+        status.begin_owned_outbound_attempt(
+            &second,
+            "snapshot-b",
+            OutboundSnapshotSocket {
+                epoch: 2,
+                connected: true,
+            },
+            deadline,
+        );
+
+        let observation = &status.snapshot().observations[0];
+        assert_eq!(observation.attempt_count, 2);
+        assert_eq!(observation.retry_count, 0);
     }
 
     #[tokio::test(start_paused = true)]

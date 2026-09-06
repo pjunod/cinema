@@ -1930,8 +1930,13 @@ bounded transport safe for a fleet. It is a qualification workload, not a
 production toggle:
 
 ```bash
-make cluster-transport-recovery-check
+PLURX_BUILD_SHA=<40-character-candidate-sha> make cluster-transport-recovery-check
 ```
+
+Set `PLURX_BUILD_SHA` to the exact commit used to create the source archive.
+The campaign validates this identity before it creates a cluster or starts the
+first recovery cycle; an archive without `.git` fails immediately when the
+identity is missing or malformed.
 
 The command creates fresh separate-process clusters and uses the production
 TLS Raft snapshot path. A second process keeps committing acknowledged writes
@@ -1980,8 +1985,9 @@ The summary records the worst recovery, transfer, and install duration for each
 role. Do not accept an artifact if its build SHA differs from the candidate,
 either role has fewer than 20 cycles, recovery exceeds 1,500 seconds, the
 source and installed snapshot hashes differ, an acknowledged-write digest
-differs, any required timestamp is absent, or any node exceeds the fixed
-resource margins. Owned async tasks have no growth allowance.
+differs, any required timestamp is absent, or any node retains even one
+additional OS thread, socket, or owned async task after quiescence. Stable
+samples above the established baseline are a leak, not cleanup evidence.
 
 Main-bound cluster changes run this command in the dedicated
 `cluster_transport_recovery` CI job and retain the evidence, log, and exact

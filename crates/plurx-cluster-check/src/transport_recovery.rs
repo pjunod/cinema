@@ -48,8 +48,8 @@ const WRITER_PROGRESS_POLL: Duration = Duration::from_millis(100);
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(1_500);
 const RESOURCE_CLEANUP_HORIZON: Duration = Duration::from_secs(3);
 const RESOURCE_STABLE_SAMPLES: usize = 2;
-const THREAD_MARGIN: u64 = 4;
-const SOCKET_MARGIN: u64 = 2;
+const THREAD_MARGIN: u64 = 0;
+const SOCKET_MARGIN: u64 = 0;
 const OWNED_ASYNC_TASK_MARGIN: u64 = 0;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -329,6 +329,11 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
     if std::env::consts::OS != "linux" {
         bail!("transport-recovery qualification requires Linux /proc evidence");
     }
+    // Resolve the exact source identity before creating a cluster or entering
+    // the 40-cycle campaign. Source-only archives have no `.git`; their caller
+    // must bind PLURX_BUILD_SHA while compiling/running this command.
+    let build_sha = resolve_build_sha()
+        .context("resolve transport-recovery candidate SHA before campaign start")?;
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("transport-recovery campaign root")?;
     let started_at_unix_ms = unix_ms()?;
@@ -353,7 +358,7 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
     let artifact = ClusterTransportRecoveryArtifact {
         schema_version: TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION,
         evidence_scope: EVIDENCE_SCOPE.to_owned(),
-        build_sha: resolve_build_sha()?,
+        build_sha,
         platform: "linux".to_owned(),
         started_at_unix_ms,
         finished_at_unix_ms: unix_ms()?,
@@ -999,7 +1004,7 @@ fn source_outbound_evidence(
         attempted_bytes: snapshot_bytes,
         acknowledged_bytes: snapshot_bytes,
         total_bytes: snapshot_bytes,
-        attempts: observation.retry_count.saturating_add(1),
+        attempts: observation.attempt_count,
         reconnect_count: observation.reconnect_count,
         retry_count: observation.retry_count,
         elapsed_millis,
@@ -2055,7 +2060,7 @@ fn validate_cycle_transport(cycle: &RecoveryCycleEvidence) -> Result<()> {
         || source.acknowledged_bytes != cycle.source_snapshot.bytes
         || source.total_bytes != cycle.source_snapshot.bytes
         || source.attempts == 0
-        || source.attempts != source.retry_count.saturating_add(1)
+        || source.attempts < source.retry_count.saturating_add(1)
         || source.elapsed_millis != source_elapsed
         || target.observing_node_id != TARGET_NODE
         || target.source_node_id != source.observing_node_id
@@ -2308,11 +2313,20 @@ mod tests {
     }
 
     #[test]
-    fn resource_growth_beyond_the_fixed_margin_is_rejected() {
+    fn one_extra_socket_after_quiescence_is_rejected() {
         let mut value = artifact();
         value.voter.cycles[0].node_resources[0]
             .post_quiescence
-            .sockets = 11;
+            .sockets += 1;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn one_extra_thread_after_quiescence_is_rejected() {
+        let mut value = artifact();
+        value.voter.cycles[0].node_resources[0]
+            .post_quiescence
+            .threads += 1;
         assert!(validate_transport_recovery_artifact(&value).is_err());
     }
 

@@ -1213,10 +1213,16 @@ pub(super) fn unix_ms() -> Result<i64> {
 }
 
 pub(super) fn resolve_build_sha() -> Result<String> {
-    if let Ok(value) = std::env::var("GITHUB_SHA") {
-        let value = value.trim().to_ascii_lowercase();
-        if value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Ok(value);
+    if let Some(value) = option_env!("PLURX_BUILD_SHA") {
+        return normalize_build_sha(value, "embedded PLURX_BUILD_SHA");
+    }
+    for name in ["PLURX_BUILD_SHA", "GITHUB_SHA"] {
+        match std::env::var(name) {
+            Ok(value) => return normalize_build_sha(&value, name),
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_)) => {
+                bail!("{name} is not valid Unicode");
+            }
         }
     }
     let output = std::process::Command::new("git")
@@ -1226,11 +1232,13 @@ pub(super) fn resolve_build_sha() -> Result<String> {
     if !output.status.success() {
         bail!("git rev-parse HEAD failed while resolving topology artifact build SHA");
     }
-    let value = String::from_utf8(output.stdout)?
-        .trim()
-        .to_ascii_lowercase();
+    normalize_build_sha(&String::from_utf8(output.stdout)?, "git rev-parse HEAD")
+}
+
+fn normalize_build_sha(value: &str, source: &str) -> Result<String> {
+    let value = value.trim().to_ascii_lowercase();
     if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("git rev-parse HEAD did not return a full build SHA");
+        bail!("{source} did not provide a full 40-character build SHA");
     }
     Ok(value)
 }
@@ -1240,6 +1248,16 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn candidate_build_sha_is_normalized_and_malformed_input_is_rejected() {
+        assert_eq!(
+            normalize_build_sha(&"A".repeat(40), "test input").expect("valid full SHA"),
+            "a".repeat(40)
+        );
+        assert!(normalize_build_sha(&"a".repeat(39), "test input").is_err());
+        assert!(normalize_build_sha(&"g".repeat(40), "test input").is_err());
+    }
 
     fn fixture_run(voter_count: u64, workload_sha256: &str) -> TopologyRun {
         let workload = TopologyWorkload::semantic();

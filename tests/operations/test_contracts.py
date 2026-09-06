@@ -2389,7 +2389,7 @@ for (const startupDelay of [0, 1600, 7000]) {
 
         self.assertEqual(len(make_commands), 10)
         self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=19", make_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=20", make_commands[1])
         self.assertIn("scripts/require-test-count", make_commands[1])
         self.assertIn("transport_recovery::tests --lib", make_commands[1])
         exact_regressions = (
@@ -2418,6 +2418,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("lane: cluster-transport-recovery", recovery)
         self.assertIn('persistent-eligible: "true"', recovery)
         self.assertIn("make cluster-transport-recovery-check", recovery)
+        self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", recovery)
         self.assertIn("cluster-transport-recovery-receipt.json", recovery)
         self.assertIn("target/validation/cluster-transport-recovery.json", recovery)
         self.assertIn("if-no-files-found: error", recovery)
