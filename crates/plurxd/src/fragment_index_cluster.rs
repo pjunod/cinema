@@ -164,12 +164,93 @@ pub(crate) struct SourceFence {
 
 impl SourceFence {
     pub(crate) fn unchanged(&self) -> bool {
-        self.handle
-            .metadata()
-            .ok()
-            .and_then(|metadata| object_version(&metadata).ok())
-            .is_some_and(|version| version == self.object_version)
+        self.drift().is_none()
     }
+
+    /// What moved under this fence, in the operator's terms, or `None` if
+    /// nothing did.
+    ///
+    /// `unchanged` returning a bare `false` was not enough to act on. It is
+    /// the answer to three different situations — the source really was
+    /// rewritten, the source's inode metadata moved without its bytes changing
+    /// (a second link, or a name unlinked), or the `fstat` itself failed — and
+    /// they need opposite responses. The failure it produces says "source
+    /// changed before fragment publication", which is a confident sentence
+    /// about a thing that may not have happened, and there was no way from
+    /// outside to tell which case a refusal came from.
+    ///
+    /// Naming the component makes the refusal a diagnosis. Sizes and times
+    /// come from the same `fstat` the object version is built from, so this
+    /// adds no syscall to the hot path beyond the one already there.
+    pub(crate) fn drift(&self) -> Option<String> {
+        let metadata = match self.handle.metadata() {
+            Ok(metadata) => metadata,
+            // A fence whose own descriptor cannot be stated is not evidence
+            // that the source changed. It is refused just the same, because
+            // publishing against a source nothing can vouch for is worse, but
+            // it is refused under its own name.
+            Err(error) => {
+                return Some(format!(
+                    "the source descriptor could not be stated: {error}"
+                ))
+            }
+        };
+        let current = match object_version(&metadata) {
+            Ok(version) => version,
+            Err(error) => return Some(format!("the source identity could not be read: {error}")),
+        };
+        if current == self.object_version {
+            return None;
+        }
+        Some(describe_object_version_drift(
+            &self.object_version,
+            &current,
+        ))
+    }
+}
+
+/// The difference between two object versions, field by field.
+///
+/// Written out rather than printing both strings because the fields are what
+/// carry the meaning: `size` moving means the bytes changed, `mtime` moving
+/// means they were written, `ctime` moving *alone* means only the inode's
+/// metadata moved — a permission change, or a link added or removed — which is
+/// a source that did not change at all. An operator reading "ctime" and
+/// nothing else knows to look for whatever is relinking the file rather than
+/// for whatever is rewriting it.
+fn describe_object_version_drift(before: &str, after: &str) -> String {
+    const FIELDS: [&str; 8] = [
+        "regime",
+        "dev",
+        "ino",
+        "size",
+        "mtime",
+        "mtime_nsec",
+        "ctime",
+        "ctime_nsec",
+    ];
+    let before_parts: Vec<&str> = before.split(':').collect();
+    let after_parts: Vec<&str> = after.split(':').collect();
+    if before_parts.len() != after_parts.len() {
+        return format!("source identity is a different shape: {before} became {after}");
+    }
+    let moved: Vec<String> = before_parts
+        .iter()
+        .zip(after_parts.iter())
+        .enumerate()
+        .filter(|(_, (was, now))| was != now)
+        .map(|(index, (was, now))| {
+            let field = FIELDS.get(index).copied().unwrap_or("field");
+            format!("{field} {was} -> {now}")
+        })
+        .collect();
+    if moved.is_empty() {
+        // Unreachable for two strings that compared unequal, and stated rather
+        // than unwrapped so a future field-count change cannot turn into a
+        // silent "nothing moved" on a refusal.
+        return format!("source identity differs but no field does: {before} vs {after}");
+    }
+    moved.join(", ")
 }
 
 pub(crate) async fn open_source_fence(
@@ -756,6 +837,55 @@ pub(crate) fn unix_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    /// The refusal has to say which component moved, because the three things
+    /// it covers need opposite responses and the sentence in front of it —
+    /// "source changed" — is only true for one of them.
+    ///
+    /// A `ctime` that moves alone is the case worth naming: the bytes, the
+    /// size and the modification time are all still exactly what was attested,
+    /// and what actually happened is that a name was added to or removed from
+    /// the inode. Reported as "source changed" that sends an operator looking
+    /// for whatever is rewriting a file nothing is writing to.
+    #[test]
+    fn a_refusal_names_the_component_that_moved() {
+        let before = "s1:66:1234:5000:1700:0:1700:0";
+
+        let relinked = "s1:66:1234:5000:1700:0:1900:5";
+        assert_eq!(
+            super::describe_object_version_drift(before, relinked),
+            "ctime 1700 -> 1900, ctime_nsec 0 -> 5",
+            "only the inode metadata moved, and only that is reported"
+        );
+
+        let rewritten = "s1:66:1234:6000:1900:0:1900:0";
+        assert_eq!(
+            super::describe_object_version_drift(before, rewritten),
+            "size 5000 -> 6000, mtime 1700 -> 1900, ctime 1700 -> 1900",
+            "a source that really was rewritten reads as one"
+        );
+
+        let replaced = "s1:66:9999:5000:1700:0:1700:0";
+        assert_eq!(
+            super::describe_object_version_drift(before, replaced),
+            "ino 1234 -> 9999",
+            "a different file under the same name is an inode change, not a write"
+        );
+
+        let regime = "s2:66:1234:5000:1700:0:1700:0";
+        assert_eq!(
+            super::describe_object_version_drift(before, regime),
+            "regime s1 -> s2",
+            "an attestation-layout migration is not a source change either"
+        );
+
+        // A shape change would otherwise index the wrong field names onto the
+        // wrong values, which is worse than saying nothing.
+        assert_eq!(
+            super::describe_object_version_drift(before, "s1:66:1234"),
+            "source identity is a different shape: s1:66:1234:5000:1700:0:1700:0 became s1:66:1234",
+        );
+    }
+
     use super::*;
 
     #[test]

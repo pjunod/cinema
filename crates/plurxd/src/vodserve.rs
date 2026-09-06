@@ -6753,13 +6753,20 @@ impl vodgen::Sink for RenditionSink {
         // otherwise be classified `producer_write_failed` — a sink fault,
         // which is not what happened. `record_failure` is first-wins, so the
         // class recorded here survives the generation ending underneath it.
-        if self
+        if let Some(drift) = self
             .rendition
             .source
             .as_ref()
-            .is_some_and(|source| !source.unchanged())
+            .and_then(|source| source.drift())
         {
-            let cause = "source changed before fragment publication".to_owned();
+            // The sentence names what was observed, not what was concluded.
+            // "source changed" alone was a confident claim about a thing that
+            // may not have happened: the same refusal covers a rewritten
+            // source, an inode whose metadata moved without its bytes, and an
+            // `fstat` that failed outright. A viewer sees a refusal either
+            // way; an operator now sees which one, and a failing CI lane says
+            // which field moved instead of leaving it to be guessed at.
+            let cause = format!("source changed before fragment publication: {drift}");
             record_failure(
                 &self.shared,
                 &self.rendition,
