@@ -27,9 +27,9 @@ change.
 
 | Milestone | Task branch | PR | State | Blocking evidence |
 |---|---|---|---|---|
-| M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | implementation and exact-candidate adversarial reviews clean; effort gate rerunning after a CI-routing correction | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
-| M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same review | foundations implemented; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
-| M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | implementation candidate passing focused Rust, virtual-time, and Compose tests; integration/review in progress | Virtual-time exact bounds · config/env/Compose precedence |
+| M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
+| M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | not opened | rebased candidate passing focused Rust, virtual-time, deployment, and operations tests; exact-SHA adversarial review is next | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | planned | not opened | not started | Authenticated pre-HTTP status · zero store calls · stale samples expire |
 | M5 · recovery campaign | planned | not opened | not started | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
@@ -56,6 +56,11 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | Persistent regression map | pass | The transport tests are in `cluster-wal-check`; a command wrapper fails exact filters unless one test executes, the broad snapshot filter requires ten passing tests, and operations contracts preserve both guards |
 | Focused cluster/WAL fast lane | pass | `make cluster-wal-check` completed after the ninth-review fixes, including exact-socket proxy refusal/coalescing, caller-cancellation recovery, retained decoded responses, and dedicated leader-control/backpressure regressions, with enforced nonzero counts for every exact filter; loopback tests used the normal unsandboxed allowance |
 | Operations contracts | pass · 186 tests | Persistent command/count guards include the new caller-cancellation recovery regression; the existing deployment, CI, and UI-baseline contracts pass with the port-reservation fixture using the normal unsandboxed loopback allowance |
+| M3 snapshot RPC suite | pass · 32 tests | The standalone `raft_client` suite covers one absolute transfer deadline, a latched final-install deadline, caller cancellation, exact-socket reset ownership, mismatch phase transitions, and stale-attempt isolation |
+| M3 configuration suite | pass · 11 tests | Chunk, transfer, and install budgets accept documented bounds, reject invalid ordering and overflow, and preserve defaults when environment variables are empty |
+| M3 production timing seam | pass | The `hiqlite-store` migration test proves the production startup catch-up deadline is exactly transfer + install + 45 seconds |
+| M3 deployment and operations contracts | pass · 192 tests | Compose health timing derives from the three startup phases; preflight validates explicit values, opaque mounts, bounds, and chunk ≤ transfer precedence |
+| M3 compile and lint | pass | Root all-target check and denied-warning Clippy pass; standalone vendored SQLite, SQLite+cache, and full library matrices pass; root and standalone formatting pass |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
 ## Decisions to review — autonomous choices
@@ -77,21 +82,20 @@ Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    is only safe when the connection owns both split tasks and accepted
    snapshot work has a longer-lived owner. Keeping these coupled changes in
    one review prevents the flush fix from shipping with known teardown races.
-5. **Open and merge only reviewed exact candidates.** Git hosting access and
-   the pushed task branch are available. M1 pull request !56 is open against
-   the effort branch. Its first preflight exposed an unmapped validation helper;
-   the correction now routes changes to that helper through the cluster/WAL
-   lane it protects and has its own scope regression.
+5. **Open and merge only reviewed exact candidates.** M1 pull request !56 was
+   merged as `5f96469a94` only after its replacement effort gate passed. Its
+   first preflight exposed an unmapped validation helper; the merged correction
+   routes changes to that helper through the cluster/WAL lane it protects and
+   has its own scope regression.
 
-## Next checkpoint — clear the effort gate and merge M1/M2
+## Next checkpoint — review and merge the bounded M3 candidate
 
-Three adversarial tracks are clean on the reviewed M1/M2 production candidate,
-and the follow-up CI-routing review is clean after requiring changes to
-`scripts/require-test-count` to select the cluster/WAL lane. The current task is
-to let !56's replacement effort gate finish, merge it only when that required
-verdict is green, and rebase the already-running M3 candidate onto the merged
-effort head. Evidence remains explicitly bounded to 100 in-memory WebSocket
-task cycles; real socket/install acceptance is open for M5.
+M1/M2 are merged into the effort at `5f96469a94`. The M3 candidate rebased
+cleanly onto that exact merge and retains the original two reviewable commits.
+Its next checkpoint is an exact-tree rerun of the focused cluster/WAL lane and
+compiler evidence, followed by three adversarial review tracks and an effort
+PR. Evidence remains explicitly bounded to helper and virtual-time deadline
+tests; real socket/install acceptance is open for M5.
 
 **How to read this page:** “pass” means the named command completed against the
 named tree. “In progress” does not mean shippable. The effort is complete only
