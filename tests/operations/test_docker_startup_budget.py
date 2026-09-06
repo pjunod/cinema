@@ -52,11 +52,11 @@ class DockerStartupBudgetTests(unittest.TestCase):
     def test_resolved_environment_timeout_fails_closed_before_deployment(self):
         document = compose_document(
             environment={
-                "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "600",
+                "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "1200",
             }
         )
 
-        with self.assertRaisesRegex(BudgetError, r"600s.*requires at least 1935s"):
+        with self.assertRaisesRegex(BudgetError, r"1200s.*requires at least 2535s"):
             CHECKER["validate_document"](document)
 
     def test_environment_timeout_parsing_matches_the_server(self):

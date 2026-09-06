@@ -68,9 +68,10 @@ services:
     # operator's job, and it does not work: the deadline commonly lives in a
     # bind-mounted plurx.toml that `.env` never mentions, so the two halves are
     # in different files on different machines and the first report of a
-    # mismatch is a refused deploy. `make docker-up` now derives this value
-    # from the same deadline its preflight reads, so leaving it unset is always
-    # the right number rather than a number somebody has to maintain.
+    # mismatch is a refused deploy. The supported `docker-up` and
+    # `docker-image-up` targets now derive this value from the same deadline
+    # their preflight reads, so leaving it unset is always the right number
+    # rather than a number somebody has to maintain.
     #
     # Set it in `.env` only to *choose* a grace — a longer one, or a
     # deliberately short one that surfaces a broken build fast. Anything that
@@ -124,7 +125,7 @@ services:
       # from the 1,200s transfer and 120s final-install stages. It also checks
       # readable bind-mounted TOML. When either stage is set in .env, pair it
       # with PLURX_HEALTH_START_PERIOD above or leave that grace unset so
-      # `make docker-up` derives it.
+      # either supported rollout target derives it.
       PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS: "${PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS:-}"
       PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS: "${PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS:-}"
       PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: "${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"
@@ -151,7 +152,9 @@ services:
   # Splitting these roles avoids Compose's forbidden `network_mode` +
   # `networks` combination while making Bonjour visible to phones and TVs.
   plurx-discovery:
-    image: plurx/plurxd:latest
+    # The companion must run the same qualified fleet artifact as the server.
+    # Reusing PLURX_IMAGE also lets one pull satisfy both image-only services.
+    image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurx-discovery
     restart: unless-stopped
     network_mode: host

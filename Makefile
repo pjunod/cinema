@@ -782,6 +782,18 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
+# Fleet voters consume the already-qualified registry image. Pulling is safe
+# while the old container is running; the replacement still waits for the
+# resolved startup budget proof. Derive the period once after the pull and use
+# that exact value for both the proof and the no-build mutation.
+.PHONY: docker-image-up
+docker-image-up: ## Pull + (re)start the prebuilt image after its startup budget passes
+	cd deploy && docker compose pull plurxd \
+	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
+	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build
+	@echo "image up: $(VERSION)"
+
 .PHONY: release-check
 release-check: ## Verify the tree is ready to tag the current version
 	@test -z "$$(git status --porcelain)" || { echo "working tree is dirty — commit first"; exit 1; }

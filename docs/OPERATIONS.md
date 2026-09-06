@@ -218,22 +218,27 @@ PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main
 ```
 
 Pulling does not stop the running voter, so it may happen ahead of the rolling
-restart. Replacement remains serial: pull · `up -d` · `/readyz` 200, then the
-next voter.
+restart. Replacement remains serial: pull · startup-budget proof · no-build
+`up -d` · `/readyz` 200, then the next voter.
 
 ```bash
-cd /opt/noirr/plurx/deploy
-docker compose pull plurxd
-docker compose up -d
+cd /opt/noirr/plurx
+make docker-image-up
 curl -fsS http://127.0.0.1:32400/readyz
 curl -fsS http://127.0.0.1:32400/api/v1/server
 ```
 
+`make docker-image-up` pulls `plurxd`, derives one startup period from the
+resolved Compose/TOML/environment configuration, proves that exact value, and
+then applies it with `docker compose up -d --no-build`. A failed proof leaves
+the running voter untouched; `--no-build` prevents an accidental local rebuild
+from differing from the qualified fleet artifact.
+
 **Rollback by digest-bearing tag, not by rebuilding an old tree on every
 node.** Replace `main` in `deploy/.env` with the known-good
-`sha-<12hex>` tag, then run the same serial `up -d` and readiness gate. The
-Forgejo cleanup rule keeps the ten newest `sha-` tags, which bounds disk use
-and rollback depth together.
+`sha-<12hex>` tag, then run the same serial `make docker-image-up` and readiness
+gate. The Forgejo cleanup rule keeps the ten newest `sha-` tags, which bounds
+disk use and rollback depth together.
 
 If nuc3 or Forgejo is down, do not weaken the cluster sequence. Leave one
 voter down at most and use the retained local-build path on that voter:
@@ -1747,20 +1752,22 @@ maximum transfer/install pair requires 18,135 seconds; choose at least `5h3m`
 when setting a rounded Docker duration. Do not adopt that maximum as an
 ordinary default.
 
-Use `make docker-up`, not bare `docker compose up`, for a Compose rollout. It
-derives the period, proves it, and applies that same period — a preflight that
-proves one number while `compose up` applies another proves nothing. The proof
-is a read-only, fail-closed preflight that runs `docker compose config` in
-`deploy/`, so shell variables, `deploy/.env`, interpolation defaults, and
-override files have the same precedence they will have during the rollout.
-It then reads the effective chunk, transfer, and install timeouts from the resolved
-container environment or, when an environment value is empty, a readable
-bind-mounted production TOML. A resolved command-line `--config` path takes
-precedence over `PLURX_CONFIG`, as it does in the server. The command reports
-all three values and their sources, validates that the chunk budget does not
-exceed the transfer budget, and exits before any Compose mutation unless the
-health start period it is about to apply covers the two sequential stages plus
-all three named startup phases.
+Use `make docker-up` for a source build or `make docker-image-up` for a prebuilt
+fleet image, not bare `docker compose up`. Both derive the period, prove it, and
+apply that same period — a preflight that proves one number while `compose up`
+applies another proves nothing. The image target pulls before deriving and
+proving, then applies the qualified image with `--no-build`. The proof is a
+read-only, fail-closed preflight that runs `docker compose config` in `deploy/`,
+so shell variables, `deploy/.env`, interpolation defaults, and override files
+have the same precedence they will have during the rollout. It then reads the
+effective chunk, transfer, and install timeouts from the resolved container
+environment or, when an environment value is empty, a readable bind-mounted
+production TOML. A resolved command-line `--config` path takes precedence over
+`PLURX_CONFIG`, as it does in the server. The command reports all three values
+and their sources, validates that the chunk budget does not exceed the transfer
+budget, and exits before any Compose replacement unless the health start period
+it is about to apply covers the two sequential stages plus all three named
+startup phases.
 
 If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
 `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS`,
@@ -1770,10 +1777,10 @@ With any value missing, the preflight assumes that budget's source maximum
 rather than guessing that the hidden TOML uses the default.
 
 Two diagnostics, and they answer different questions. `make
-docker-startup-budget-check` answers "would `make docker-up` succeed here" — it
-derives the same period the rollout would and proves that. To ask instead what
-a bare `docker compose up` would apply, which derives nothing, run the script
-without the deriving step:
+docker-startup-budget-check` answers "would either supported rollout target
+succeed here" — it derives the same period the rollout would and proves that.
+To ask instead what a bare `docker compose up` would apply, which derives
+nothing, run the script without the deriving step:
 
 ```bash
 cd deploy && python3 ../scripts/validate-docker-startup-budget

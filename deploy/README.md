@@ -117,14 +117,16 @@ should pull:
 cd deploy
 printf '%s\n' \
   'PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main' >> .env
-docker compose pull plurxd   # downloads without touching the running voter
-docker compose up -d         # swaps this voter only after the pull completes
+cd ..
+make docker-image-up         # pulls, proves the budget, then uses --no-build
 curl -fsS http://127.0.0.1:32400/readyz
 ```
 
-On a replicated cluster, run the final two commands on one voter at a time and
-require `/readyz` to return 200 before advancing. A pull is harmless to the
-running process; the `up -d` is the quorum boundary.
+On a replicated cluster, run `make docker-image-up` and the readiness probe on
+one voter at a time, and require `/readyz` to return 200 before advancing. The
+target pulls while the existing voter runs, derives and proves one exact
+startup period, then crosses the quorum boundary with `compose up --no-build`.
+It cannot silently rebuild a different local artifact.
 
 The post-merge Forgejo job runs `scripts/registry-push` after the complete
 `main` validation fan-out. It publishes the moving `main` tag only after the
@@ -133,8 +135,11 @@ checks. Versioned releases keep the separate `latest` alias. Use the immutable
 tag for rollback:
 
 ```bash
-PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<old-sha> \
-  docker compose up -d
+sed -i.bak \
+  's|^PLURX_IMAGE=.*|PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<old-sha>|' \
+  deploy/.env
+make docker-image-up
+curl -fsS http://127.0.0.1:32400/readyz
 ```
 
 If the registry is unavailable, the tracked `build:` block remains the local
@@ -511,21 +516,23 @@ watchdog does not extend that formula. A deployment that raises either
 `cluster.snapshot_transfer_timeout_secs` or
 `cluster.install_snapshot_timeout_secs` — in `.env`, or in a production TOML
 this repository never sees — needs a longer grace, and does not have to
-maintain one: leave `PLURX_HEALTH_START_PERIOD` unset and `make docker-up`
-derives it from both resolved stage timeouts plus 135 seconds. Set the variable
-only to choose a grace deliberately. Any resolved grace other than the tracked
-25-minute default counts as chosen — wherever you wrote it — and is used
-exactly as Compose resolved it, refused by name rather than overruled if it
-cannot cover both stages. The fleet rollout pair is shown in `.env.example`.
+maintain one: leave `PLURX_HEALTH_START_PERIOD` unset and either supported
+rollout target derives it from both resolved stage timeouts plus 135 seconds.
+Use `make docker-up` for a local source build or `make docker-image-up` for a
+prebuilt fleet image. Set the variable only to choose a grace deliberately.
+Any resolved grace other than the tracked 25-minute default counts as chosen —
+wherever you wrote it — and is used exactly as Compose resolved it, refused by
+name rather than overruled if it cannot cover both stages. The fleet rollout
+pair is shown in `.env.example`.
 
-Run `make docker-up` from the repository root for every Compose rollout. Its
-first step derives the grace only if the deployment has not chosen one, its
-second proves the budget it is about to apply — shell variables, `deploy/.env`,
-Compose defaults and overrides, and a readable bind-mounted production TOML all
-at their usual precedence — and only then does `docker compose up` replace a
-container, with the same period that was proved. If a named
-volume or another opaque mount hides the production config, the check assumes
-the source maximum for each snapshot budget unless all three
+Run one of those targets from the repository root for every Compose rollout.
+After an optional image pull, it derives the grace only if the deployment has
+not chosen one, proves the budget it is about to apply — shell variables,
+`deploy/.env`, Compose defaults and overrides, and a readable bind-mounted
+production TOML all at their usual precedence — and only then does `docker
+compose up` replace a container, with the same period that was proved. If a
+named volume or another opaque mount hides the production config, the check
+assumes the source maximum for each snapshot budget unless all three
 `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS`,
 `PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS` and
 `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` are explicit. This conservative

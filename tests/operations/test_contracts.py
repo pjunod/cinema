@@ -447,6 +447,10 @@ for (const startupDelay of [0, 1600, 7000]) {
     def test_discovery_uses_host_network_without_stealing_it_from_the_server(self):
         compose = read("deploy/docker-compose.yml")
         server, discovery = compose.split("  plurx-discovery:", 1)
+        self.assertEqual(
+            compose.count("image: ${PLURX_IMAGE:-plurx/plurxd:latest}"),
+            2,
+        )
         self.assertNotRegex(server, r"(?m)^    network_mode: host$")
         self.assertIn("network_mode: host", discovery)
         configured_origin = '"http://127.0.0.1:${PLURX_HTTP_PORT:-32400}"'
@@ -454,29 +458,38 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn(f"PLURX_DISCOVERY_SERVER_URL: {configured_origin}", discovery)
         self.assertIn(f"PLURX_BIND: {configured_bind}", discovery)
 
-    def _run_rollout_recipe(self, proof_exit: int) -> tuple[int, Path]:
-        """Run the real `docker-up` recipe with the checker and Docker stubbed."""
+    def _run_rollout_recipe(
+        self,
+        target: str,
+        up_command: str,
+        proof_exit: int,
+    ) -> tuple[int, Path, Path]:
+        """Run a real rollout recipe with the checker and Docker stubbed."""
 
         rollout = [
             line
-            for line in make_dry_run_commands("docker-up")
-            if "docker compose up -d --build" in line
+            for line in make_dry_run_commands(target)
+            if up_command in line
         ][0]
         directory = Path(tempfile.mkdtemp())
-        marker = directory / "compose-up-ran"
+        pull_marker = directory / "compose-pull-ran"
+        up_marker = directory / "compose-up-ran"
         stubs = directory / "bin"
         stubs.mkdir()
         (stubs / "python3").write_text(
             "#!/bin/sh\n"
             'case "$*" in\n'
-            "  *--emit-start-period*) echo 1335s ;;\n"
+            "  *--emit-start-period*) echo 2535s ;;\n"
             f"  *) exit {proof_exit} ;;\n"
             "esac\n",
             encoding="utf-8",
         )
         (stubs / "docker").write_text(
             "#!/bin/sh\n"
-            f'printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{marker}"\n',
+            'case "$*" in\n'
+            f'  *"compose pull plurxd"*) printf pulled > "{pull_marker}" ;;\n'
+            f'  *"compose up"*) printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{up_marker}" ;;\n'
+            "esac\n",
             encoding="utf-8",
         )
         for stub in stubs.iterdir():
@@ -491,7 +504,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        return result.returncode, marker
+        return result.returncode, pull_marker, up_marker
 
     def test_a_failed_budget_proof_stops_the_rollout_before_it_touches_a_container(
         self,
@@ -501,17 +514,68 @@ for (const startupDelay of [0, 1600, 7000]) {
         # the guarantee is shell-level and has to be exercised: a `;` here
         # would let a refused budget deploy anyway, and no assertion about the
         # recipe's text catches that.
-        code, marker = self._run_rollout_recipe(proof_exit=2)
+        code, pull_marker, up_marker = self._run_rollout_recipe(
+            "docker-up", "docker compose up -d --build", proof_exit=2
+        )
         self.assertNotEqual(code, 0)
+        self.assertFalse(pull_marker.exists())
         self.assertFalse(
-            marker.exists(), "compose up ran after the budget proof failed"
+            up_marker.exists(), "compose up ran after the budget proof failed"
         )
 
-        code, marker = self._run_rollout_recipe(proof_exit=0)
+        code, pull_marker, up_marker = self._run_rollout_recipe(
+            "docker-up", "docker compose up -d --build", proof_exit=0
+        )
         self.assertEqual(code, 0)
-        self.assertTrue(marker.exists())
+        self.assertFalse(pull_marker.exists())
+        self.assertTrue(up_marker.exists())
         # The period that was proved is the period that gets applied.
-        self.assertEqual(marker.read_text(encoding="utf-8"), "1335s")
+        self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+
+    def test_prebuilt_image_rollout_pulls_then_proves_before_replacement(self):
+        commands = make_dry_run_commands("docker-image-up")
+        rollouts = [
+            line for line in commands if "docker compose up -d --no-build" in line
+        ]
+        self.assertEqual(len(rollouts), 1)
+        rollout = rollouts[0]
+        self.assertTrue(rollout.startswith("cd deploy && "))
+        self.assertEqual(rollout.count("docker compose pull plurxd"), 1)
+        self.assertEqual(rollout.count("--emit-start-period"), 1)
+        proof = (
+            'PLURX_HEALTH_START_PERIOD="$period" python3 '
+            "../scripts/validate-docker-startup-budget"
+        )
+        up = "docker compose up -d --no-build"
+        self.assertIn(proof, rollout)
+        self.assertLess(
+            rollout.index("docker compose pull plurxd"),
+            rollout.index("--emit-start-period"),
+        )
+        self.assertLess(rollout.index("--emit-start-period"), rollout.index(proof))
+        self.assertLess(rollout.index(proof), rollout.index(up))
+        self.assertIn(
+            'PLURX_HEALTH_START_PERIOD="$period" PLURX_NODE_HOSTNAME=',
+            rollout,
+        )
+        self.assertNotIn("PLURX_BUILD_REF", rollout)
+
+        code, pull_marker, up_marker = self._run_rollout_recipe(
+            "docker-image-up", up, proof_exit=2
+        )
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists(), "image was not pulled before the proof")
+        self.assertFalse(
+            up_marker.exists(), "compose up ran after the budget proof failed"
+        )
+
+        code, pull_marker, up_marker = self._run_rollout_recipe(
+            "docker-image-up", up, proof_exit=0
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertTrue(up_marker.exists())
+        self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
 
     def test_docker_up_preserves_override_discovery_and_stamps_the_build(self):
         commands = make_dry_run_commands("docker-up")
