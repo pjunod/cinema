@@ -1734,6 +1734,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "origin_waits_for_exact_claim_apply_before_observing_added_member",
             "automatic_activation_runs_outside_the_membership_projection",
             "full_roster_projection_activates_without_a_credential_mutation",
+            "permanent_activation_stops_the_one_time_worker",
             "stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown",
             "automatic_activation_checks_the_permanent_marker_before_taking_the_gate",
         )

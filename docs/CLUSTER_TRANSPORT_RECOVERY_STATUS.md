@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | replacement `fc54e84f` passed its complete lane; one review was clean and two found that automatic activation could block diagnostics during ambiguous cleanup and redundantly contend with ordinary credential mutations. Activation now has a separate shutdown-aware task and a marker-aware preflight; focused regressions, compile, lint, operations inventory, and web suites pass, with complete requalification next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | `10f7356c` passed its complete focused Rust lane and all 197 operations contracts; all three exact-candidate reviews then found one shared performance issue: its one-time activation worker kept polling after the permanent transition. The correction retires the worker after one local marker observation and its focused regression passes; exact-candidate requalification and review remain | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | the reviewed campaign implementation has been rebuilt in an independent clone on the latest M4 line and passes pinned workspace check and denied-warning Clippy; it will move to the replacement M4 commit before qualification | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -217,6 +217,14 @@ keeps membership publication independent, logs bounded activation failures,
 and makes the quorum preflight require that the permanent marker is absent.
 Paused-time stuck-activation/shutdown and marker-present/live-lease regressions
 pass alongside the static production-wiring inventory.
+All three exact reviews of `10f7356c` then found that the dedicated one-time
+worker continued a leader-only consistency read every three seconds on every
+member after the permanent marker existed. At the 64-member bound that would
+have created roughly 21 unnecessary consistency barriers per second and noisy
+warnings during a later quorum loss. The correction reads the locally applied
+permanent marker before any quorum preflight, returns a terminal activation
+state, and exits the worker. A paused-time regression advances 30 seconds and
+proves that a completed worker performs exactly one callback.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 

@@ -6782,6 +6782,24 @@ impl MembershipManager {
         Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
+    /// Whether this process's local applied SQLite state already contains the
+    /// permanent credential-guard marker. Automatic activation uses this
+    /// cheap local read to retire its one-time worker; the quorum-backed exact
+    /// roster check remains authoritative while the transition is pending.
+    pub async fn cache_admin_revocation_activated_locally(&self) -> Result<bool, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(false);
+        };
+        let rows = inner
+            .client
+            .query_map::<CountRow, _>(
+                "SELECT EXISTS (SELECT 1 FROM cluster_credential_guard_activation) AS count",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count == 1))
+    }
+
     /// Whether this exact cache-admin exclusion has reached this process's
     /// local applied SQLite state. Peer Begin acknowledgements use this local
     /// read rather than a quorum round trip: the origin already committed the

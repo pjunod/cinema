@@ -844,6 +844,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::full_roster_projection_activates_without_a_credential_mutation \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::permanent_activation_stops_the_one_time_worker \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \

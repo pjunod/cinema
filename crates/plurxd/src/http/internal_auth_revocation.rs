@@ -212,14 +212,30 @@ pub(crate) struct ClusterCacheRevocation {
     transport: PeerTransport,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CacheAdminRevocationActivation {
+    Pending,
+    Complete,
+}
+
 impl ClusterCacheRevocation {
     /// Permanently activate the current revocation protocol as soon as every
     /// committed member advertises it. This uses the same exclusion, stable
     /// roster, and global Begin/End invalidation as a credential mutation, but
     /// deliberately performs no Store write.
-    pub(crate) async fn activate_if_ready(state: &AppState) -> Result<(), ApiError> {
+    pub(crate) async fn activate_if_ready(
+        state: &AppState,
+    ) -> Result<CacheAdminRevocationActivation, ApiError> {
         if !state.membership.is_replicated() {
-            return Ok(());
+            return Ok(CacheAdminRevocationActivation::Pending);
+        }
+        if state
+            .membership
+            .cache_admin_revocation_activated_locally()
+            .await
+            .map_err(|_| propagation_error())?
+        {
+            return Ok(CacheAdminRevocationActivation::Complete);
         }
         if !state
             .membership
@@ -227,7 +243,7 @@ impl ClusterCacheRevocation {
             .await
             .map_err(|_| propagation_error())?
         {
-            return Ok(());
+            return Ok(CacheAdminRevocationActivation::Pending);
         }
         let operation_guard = state
             .cache_only_admin_proofs
@@ -237,7 +253,8 @@ impl ClusterCacheRevocation {
         Self::begin(state, local, operation_guard)
             .await?
             .finish(state)
-            .await
+            .await?;
+        Ok(CacheAdminRevocationActivation::Complete)
     }
 
     pub(crate) async fn begin_digest(state: &AppState, digest: &str) -> Result<Self, ApiError> {
@@ -447,7 +464,7 @@ pub(crate) async fn cache_admin_revocation_activation_loop_with<Activate, Activa
     mut activate: Activate,
 ) where
     Activate: FnMut() -> ActivateFuture,
-    ActivateFuture: std::future::Future<Output = Result<(), String>>,
+    ActivateFuture: std::future::Future<Output = Result<CacheAdminRevocationActivation, String>>,
 {
     loop {
         let result = tokio::select! {
@@ -455,8 +472,12 @@ pub(crate) async fn cache_admin_revocation_activation_loop_with<Activate, Activa
             () = shutdown.cancelled() => break,
             result = activate() => result,
         };
-        if let Err(error) = result {
-            tracing::warn!(%error, "cache admin revocation activation attempt failed");
+        match result {
+            Ok(CacheAdminRevocationActivation::Complete) => break,
+            Ok(CacheAdminRevocationActivation::Pending) => {}
+            Err(error) => {
+                tracing::warn!(%error, "cache admin revocation activation attempt failed");
+            }
         }
         tokio::select! {
             biased;
@@ -704,6 +725,14 @@ mod tests {
             .split_once("pub(crate) async fn begin_digest")
             .expect("automatic activation entry end")
             .0;
+        assert!(
+            source
+                .find("cache_admin_revocation_activated_locally()")
+                .expect("local permanent-marker stop")
+                < source
+                    .find("cache_admin_revocation_activation_ready()")
+                    .expect("marker-aware quorum preflight")
+        );
         assert!(
             source
                 .find("cache_admin_revocation_activation_ready()")

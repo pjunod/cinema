@@ -2926,16 +2926,39 @@ mod tests {
         let activations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_activations = activations.clone();
         let shutdown = tokio_util::sync::CancellationToken::new();
-        let cancel = shutdown.clone();
         super::super::internal_auth_revocation::cache_admin_revocation_activation_loop_with(
             shutdown,
             move || {
                 observed_activations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                cancel.cancel();
-                async { Ok(()) }
+                async {
+                    Ok(
+                        super::super::internal_auth_revocation::CacheAdminRevocationActivation::Complete,
+                    )
+                }
             },
         )
         .await;
+        assert_eq!(activations.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn permanent_activation_stops_the_one_time_worker() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let activations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_activations = activations.clone();
+        super::super::internal_auth_revocation::cache_admin_revocation_activation_loop_with(
+            shutdown,
+            move || {
+                observed_activations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async {
+                    Ok(
+                        super::super::internal_auth_revocation::CacheAdminRevocationActivation::Complete,
+                    )
+                }
+            },
+        )
+        .await;
+        tokio::time::advance(Duration::from_secs(30)).await;
         assert_eq!(activations.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
@@ -2945,15 +2968,19 @@ mod tests {
         let activation_shutdown = shutdown.clone();
         let activations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_activations = activations.clone();
-        let activation = tokio::spawn(
-            super::super::internal_auth_revocation::cache_admin_revocation_activation_loop_with(
-                activation_shutdown,
-                move || {
-                    observed_activations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    std::future::pending::<Result<(), String>>()
-                },
-            ),
-        );
+        let activation =
+            tokio::spawn(
+                super::super::internal_auth_revocation::cache_admin_revocation_activation_loop_with(
+                    activation_shutdown,
+                    move || {
+                        observed_activations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        std::future::pending::<Result<
+                        super::super::internal_auth_revocation::CacheAdminRevocationActivation,
+                        String,
+                    >>()
+                    },
+                ),
+            );
         tokio::task::yield_now().await;
         assert_eq!(activations.load(std::sync::atomic::Ordering::Relaxed), 1);
 
