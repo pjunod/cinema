@@ -100,6 +100,7 @@ pub(crate) async fn start_raft_db(
     )
     .await
     .expect("Raft create failed");
+    snapshot_transport.bind_sqlite_membership(raft.metrics());
     let snapshot_executor = crate::network::snapshot_executor::start_snapshot_executor(
         raft.clone(),
         node_config.snapshot_chunk_timeout,

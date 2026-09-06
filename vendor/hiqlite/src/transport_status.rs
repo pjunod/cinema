@@ -6,9 +6,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::Instant;
+
+#[cfg(feature = "sqlite")]
+use openraft::RaftMetrics;
+#[cfg(feature = "sqlite")]
+use tokio::sync::watch;
 
 const RETIRED_PEER_ALLOWANCE: usize = 4;
 // SQLite and cache can each have independent inbound and outbound work.
@@ -101,6 +107,19 @@ pub(crate) struct OutboundSnapshotSocket {
     pub(crate) connected: bool,
 }
 
+/// Identity of one outbound snapshot operation and the Raft client that owns it.
+///
+/// OpenRaft creates ordinary RPC and snapshot clients for the same peer. Both
+/// share the node's status handle, so neither the attempt nor connection
+/// identity may be allocated by an individual client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OutboundSnapshotAttempt {
+    raft_group: &'static str,
+    peer_node_id: u64,
+    pub(crate) attempt_id: u64,
+    connection_id: u64,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct InboundSnapshotAttempt {
     raft_group: &'static str,
@@ -148,6 +167,7 @@ struct Observation {
     retry_count: u64,
     last_error_category: Option<&'static str>,
     operation_owns_work: bool,
+    outbound_connection_id: Option<u64>,
 }
 
 struct State {
@@ -155,6 +175,9 @@ struct State {
     next_inbound_socket_epoch: u64,
     observations: BTreeMap<ObservationKey, Observation>,
     pending_inbound: BTreeMap<ObservationKey, PendingInboundSnapshot>,
+    current_peers: BTreeSet<u64>,
+    #[cfg(feature = "sqlite")]
+    sqlite_membership: Option<watch::Receiver<RaftMetrics<u64, crate::Node>>>,
 }
 
 struct PendingInboundSnapshot {
@@ -165,8 +188,8 @@ struct PendingInboundSnapshot {
 struct Inner {
     observing_node_id: u64,
     boot_id: String,
-    configured_peers: BTreeSet<u64>,
-    capacity: usize,
+    next_outbound_attempt: AtomicU64,
+    next_outbound_connection: AtomicU64,
     state: Mutex<State>,
 }
 
@@ -178,11 +201,6 @@ pub struct LocalSnapshotTransportStatus {
 
 impl LocalSnapshotTransportStatus {
     pub(crate) fn new(observing_node_id: u64, configured_peers: BTreeSet<u64>) -> Self {
-        let capacity = configured_peers
-            .len()
-            .saturating_mul(OBSERVATIONS_PER_PEER)
-            .saturating_add(RETIRED_PEER_ALLOWANCE * OBSERVATIONS_PER_PEER)
-            .max(OBSERVATIONS_PER_PEER);
         let boot_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
@@ -191,16 +209,81 @@ impl LocalSnapshotTransportStatus {
             inner: Arc::new(Inner {
                 observing_node_id,
                 boot_id: format!("{observing_node_id}-{boot_nanos}"),
-                configured_peers,
-                capacity,
+                next_outbound_attempt: AtomicU64::new(0),
+                next_outbound_connection: AtomicU64::new(0),
                 state: Mutex::new(State {
                     next_inbound_attempt: 0,
                     next_inbound_socket_epoch: 0,
                     observations: BTreeMap::new(),
                     pending_inbound: BTreeMap::new(),
+                    current_peers: configured_peers,
+                    #[cfg(feature = "sqlite")]
+                    sqlite_membership: None,
                 }),
             }),
         }
+    }
+
+    /// Bind capacity and retention to OpenRaft's committed live membership.
+    ///
+    /// The receiver is an in-memory watch handle. Status recording and scrape
+    /// paths only borrow its latest value; they never query the store or make a
+    /// network request.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn bind_sqlite_membership(
+        &self,
+        membership: watch::Receiver<RaftMetrics<u64, crate::Node>>,
+    ) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.sqlite_membership = Some(membership);
+        refresh_current_peers(&mut state);
+    }
+
+    /// Allocate the node-global identity of one OpenRaft network client.
+    pub(crate) fn next_outbound_connection_id(&self) -> u64 {
+        self.inner
+            .next_outbound_connection
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    /// Allocate the node-global identity of one snapshot transfer.
+    pub(crate) fn next_outbound_attempt(
+        &self,
+        raft_group: &'static str,
+        peer_node_id: u64,
+        connection_id: u64,
+    ) -> OutboundSnapshotAttempt {
+        OutboundSnapshotAttempt {
+            raft_group,
+            peer_node_id,
+            attempt_id: self
+                .inner
+                .next_outbound_attempt
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1),
+            connection_id,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outbound_attempt_count(&self) -> u64 {
+        self.inner.next_outbound_attempt.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn current_capacity(&self) -> usize {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_current_peers(&mut state);
+        observation_capacity(state.current_peers.len())
     }
 
     /// Allocate an identity for one accepted inbound Raft WebSocket.
@@ -223,11 +306,18 @@ impl LocalSnapshotTransportStatus {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_current_peers(&mut state);
+        let current_peers = state.current_peers.clone();
         state.observations.retain(|key, observation| {
-            self.inner.configured_peers.contains(&key.peer_node_id)
-                || !observation_expired(observation, now)
+            current_peers.contains(&key.peer_node_id) || !observation_expired(observation, now)
         });
         retain_pending_for_observations(&mut state);
+        let capacity = observation_capacity(current_peers.len());
+        while state.observations.len() > capacity {
+            if !evict_oldest_retired(&mut state, &current_peers) {
+                break;
+            }
+        }
         let observations = state
             .observations
             .iter_mut()
@@ -288,10 +378,11 @@ impl LocalSnapshotTransportStatus {
         }
     }
 
-    pub(crate) fn connecting(
+    pub(crate) fn connecting_owned(
         &self,
         raft_group: &'static str,
         peer_node_id: u64,
+        connection_id: u64,
         socket_epoch: u64,
     ) {
         self.update_existing(
@@ -299,7 +390,9 @@ impl LocalSnapshotTransportStatus {
             peer_node_id,
             SnapshotTransportDirection::Outbound,
             |observation, now| {
-                if !observation.operation_owns_work {
+                if !observation.operation_owns_work
+                    || observation.outbound_connection_id != Some(connection_id)
+                {
                     return;
                 }
                 observation.socket_epoch = socket_epoch;
@@ -313,21 +406,22 @@ impl LocalSnapshotTransportStatus {
         );
     }
 
-    pub(crate) fn begin_outbound_attempt(
+    pub(crate) fn begin_owned_outbound_attempt(
         &self,
-        raft_group: &'static str,
-        peer_node_id: u64,
-        attempt_id: u64,
+        attempt: &OutboundSnapshotAttempt,
         snapshot_id: &str,
         socket: OutboundSnapshotSocket,
         deadline: Instant,
     ) {
         self.update(
-            raft_group,
-            peer_node_id,
+            attempt.raft_group,
+            attempt.peer_node_id,
             SnapshotTransportDirection::Outbound,
             |observation, now| {
-                observation.attempt_id = attempt_id;
+                if observation.attempt_id > attempt.attempt_id {
+                    return;
+                }
+                observation.attempt_id = attempt.attempt_id;
                 observation.snapshot_id = Some(snapshot_id.to_owned());
                 observation.socket_epoch = socket.epoch;
                 observation.attempted_offset = None;
@@ -343,11 +437,122 @@ impl LocalSnapshotTransportStatus {
                 observation.retry_count = 0;
                 observation.last_error_category = None;
                 observation.operation_owns_work = true;
+                observation.outbound_connection_id = Some(attempt.connection_id);
                 observation.last_update = now;
             },
         );
     }
 
+    pub(crate) fn outbound_chunk_owned(
+        &self,
+        attempt: &OutboundSnapshotAttempt,
+        offset: u64,
+        len: usize,
+        done: bool,
+        deadline: Instant,
+    ) {
+        self.update_outbound_attempt(attempt, |observation, now| {
+            let end_offset = offset.saturating_add(len as u64);
+            observation.attempted_offset = Some(end_offset);
+            if done {
+                observation.total_bytes = Some(end_offset);
+            }
+            observation.deadline = Some(deadline);
+            observation.phase = if done {
+                SnapshotTransportPhase::Installing
+            } else {
+                SnapshotTransportPhase::AwaitingAcknowledgement
+            };
+            observation.operation_owns_work = true;
+            observation.last_update = now;
+        });
+    }
+
+    pub(crate) fn outbound_acknowledged_owned(
+        &self,
+        attempt: &OutboundSnapshotAttempt,
+        acknowledged_offset: u64,
+        done: bool,
+        transfer_deadline: Option<Instant>,
+    ) {
+        self.update_outbound_attempt(attempt, |observation, now| {
+            observation.acknowledged_offset = Some(acknowledged_offset);
+            observation.last_acknowledgement = Some(now);
+            observation.deadline = (!done).then_some(transfer_deadline).flatten();
+            observation.phase = if done {
+                SnapshotTransportPhase::Complete
+            } else {
+                SnapshotTransportPhase::Transferring
+            };
+            observation.operation_owns_work = !done;
+            observation.last_error_category = None;
+            observation.last_update = now;
+        });
+    }
+
+    pub(crate) fn outbound_retry_owned(
+        &self,
+        attempt: &OutboundSnapshotAttempt,
+        category: &'static str,
+        deadline: Option<Instant>,
+    ) {
+        self.update_outbound_attempt(attempt, |observation, now| {
+            observation.retry_count = observation.retry_count.saturating_add(1);
+            observation.phase = SnapshotTransportPhase::Retrying;
+            observation.deadline = deadline;
+            observation.last_error_category = Some(category);
+            observation.operation_owns_work = true;
+            observation.last_update = now;
+        });
+    }
+
+    pub(crate) fn outbound_failed_owned(
+        &self,
+        attempt: &OutboundSnapshotAttempt,
+        category: &'static str,
+    ) {
+        self.update_outbound_attempt(attempt, |observation, now| {
+            observation.phase = SnapshotTransportPhase::Failed;
+            observation.deadline = None;
+            if category != "snapshot_attempt_ended" || observation.last_error_category.is_none() {
+                observation.last_error_category = Some(category);
+            }
+            observation.operation_owns_work = false;
+            observation.last_update = now;
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connecting(
+        &self,
+        raft_group: &'static str,
+        peer_node_id: u64,
+        socket_epoch: u64,
+    ) {
+        self.connecting_owned(raft_group, peer_node_id, 1, socket_epoch);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_outbound_attempt(
+        &self,
+        raft_group: &'static str,
+        peer_node_id: u64,
+        attempt_id: u64,
+        snapshot_id: &str,
+        socket: OutboundSnapshotSocket,
+        deadline: Instant,
+    ) -> OutboundSnapshotAttempt {
+        let attempt = OutboundSnapshotAttempt {
+            raft_group,
+            peer_node_id,
+            attempt_id,
+            connection_id: 1,
+        };
+        self.begin_owned_outbound_attempt(&attempt, snapshot_id, socket, deadline);
+        attempt
+    }
+
+    #[cfg(test)]
     pub(crate) fn outbound_chunk(
         &self,
         raft_group: &'static str,
@@ -357,28 +562,12 @@ impl LocalSnapshotTransportStatus {
         done: bool,
         deadline: Instant,
     ) {
-        self.update(
-            raft_group,
-            peer_node_id,
-            SnapshotTransportDirection::Outbound,
-            |observation, now| {
-                let end_offset = offset.saturating_add(len as u64);
-                observation.attempted_offset = Some(end_offset);
-                if done {
-                    observation.total_bytes = Some(end_offset);
-                }
-                observation.deadline = Some(deadline);
-                observation.phase = if done {
-                    SnapshotTransportPhase::Installing
-                } else {
-                    SnapshotTransportPhase::AwaitingAcknowledgement
-                };
-                observation.operation_owns_work = true;
-                observation.last_update = now;
-            },
-        );
+        if let Some(attempt) = self.current_outbound_attempt(raft_group, peer_node_id) {
+            self.outbound_chunk_owned(&attempt, offset, len, done, deadline);
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn outbound_acknowledged(
         &self,
         raft_group: &'static str,
@@ -387,26 +576,17 @@ impl LocalSnapshotTransportStatus {
         done: bool,
         transfer_deadline: Option<Instant>,
     ) {
-        self.update(
-            raft_group,
-            peer_node_id,
-            SnapshotTransportDirection::Outbound,
-            |observation, now| {
-                observation.acknowledged_offset = Some(acknowledged_offset);
-                observation.last_acknowledgement = Some(now);
-                observation.deadline = (!done).then_some(transfer_deadline).flatten();
-                observation.phase = if done {
-                    SnapshotTransportPhase::Complete
-                } else {
-                    SnapshotTransportPhase::Transferring
-                };
-                observation.operation_owns_work = !done;
-                observation.last_error_category = None;
-                observation.last_update = now;
-            },
-        );
+        if let Some(attempt) = self.current_outbound_attempt(raft_group, peer_node_id) {
+            self.outbound_acknowledged_owned(
+                &attempt,
+                acknowledged_offset,
+                done,
+                transfer_deadline,
+            );
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn outbound_retry(
         &self,
         raft_group: &'static str,
@@ -414,42 +594,45 @@ impl LocalSnapshotTransportStatus {
         category: &'static str,
         deadline: Option<Instant>,
     ) {
-        self.update(
-            raft_group,
-            peer_node_id,
-            SnapshotTransportDirection::Outbound,
-            |observation, now| {
-                observation.retry_count = observation.retry_count.saturating_add(1);
-                observation.phase = SnapshotTransportPhase::Retrying;
-                observation.deadline = deadline;
-                observation.last_error_category = Some(category);
-                observation.operation_owns_work = true;
-                observation.last_update = now;
-            },
-        );
+        if let Some(attempt) = self.current_outbound_attempt(raft_group, peer_node_id) {
+            self.outbound_retry_owned(&attempt, category, deadline);
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn outbound_failed(
         &self,
         raft_group: &'static str,
         peer_node_id: u64,
         category: &'static str,
     ) {
-        self.update(
+        if let Some(attempt) = self.current_outbound_attempt(raft_group, peer_node_id) {
+            self.outbound_failed_owned(&attempt, category);
+        }
+    }
+
+    #[cfg(test)]
+    fn current_outbound_attempt(
+        &self,
+        raft_group: &'static str,
+        peer_node_id: u64,
+    ) -> Option<OutboundSnapshotAttempt> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let observation = state.observations.get(&ObservationKey {
             raft_group,
             peer_node_id,
-            SnapshotTransportDirection::Outbound,
-            |observation, now| {
-                observation.phase = SnapshotTransportPhase::Failed;
-                observation.deadline = None;
-                if category != "snapshot_attempt_ended" || observation.last_error_category.is_none()
-                {
-                    observation.last_error_category = Some(category);
-                }
-                observation.operation_owns_work = false;
-                observation.last_update = now;
-            },
-        );
+            direction: SnapshotTransportDirection::Outbound,
+        })?;
+        Some(OutboundSnapshotAttempt {
+            raft_group,
+            peer_node_id,
+            attempt_id: observation.attempt_id,
+            connection_id: observation.outbound_connection_id?,
+        })
     }
 
     pub(crate) fn inbound_received(
@@ -843,35 +1026,79 @@ impl LocalSnapshotTransportStatus {
         log_transition(self.inner.observing_node_id, &key, previous, observation);
     }
 
+    fn update_outbound_attempt(
+        &self,
+        attempt: &OutboundSnapshotAttempt,
+        mutate: impl FnOnce(&mut Observation, Instant),
+    ) {
+        self.update_existing(
+            attempt.raft_group,
+            attempt.peer_node_id,
+            SnapshotTransportDirection::Outbound,
+            |observation, now| {
+                if observation.attempt_id != attempt.attempt_id
+                    || observation.outbound_connection_id != Some(attempt.connection_id)
+                {
+                    return;
+                }
+                mutate(observation, now);
+            },
+        );
+    }
+
     fn make_room(&self, state: &mut State, now: Instant, incoming: &ObservationKey) -> bool {
+        refresh_current_peers(state);
+        let current_peers = state.current_peers.clone();
         state.observations.retain(|key, observation| {
-            self.inner.configured_peers.contains(&key.peer_node_id)
-                || !observation_expired(observation, now)
+            current_peers.contains(&key.peer_node_id) || !observation_expired(observation, now)
         });
         retain_pending_for_observations(state);
-        if state.observations.contains_key(incoming)
-            || state.observations.len() < self.inner.capacity
-        {
+        let capacity = observation_capacity(current_peers.len());
+        if state.observations.contains_key(incoming) || state.observations.len() < capacity {
             return true;
         }
-        let oldest_retired = state
-            .observations
-            .iter()
-            .filter(|(key, observation)| {
-                !self.inner.configured_peers.contains(&key.peer_node_id)
-                    && !observation.operation_owns_work
-            })
-            .min_by_key(|(_, observation)| observation.last_update)
-            .map(|(key, _)| key.clone());
-        if let Some(key) = oldest_retired {
-            state.observations.remove(&key);
-            state.pending_inbound.remove(&key);
-            true
-        } else {
-            false
-        }
+        evict_oldest_retired(state, &current_peers)
     }
 }
+
+fn evict_oldest_retired(state: &mut State, current_peers: &BTreeSet<u64>) -> bool {
+    let oldest_retired = state
+        .observations
+        .iter()
+        .filter(|(key, _)| !current_peers.contains(&key.peer_node_id))
+        .min_by_key(|(_, observation)| (observation.operation_owns_work, observation.last_update))
+        .map(|(key, _)| key.clone());
+    if let Some(key) = oldest_retired {
+        state.observations.remove(&key);
+        state.pending_inbound.remove(&key);
+        true
+    } else {
+        false
+    }
+}
+
+fn observation_capacity(peer_count: usize) -> usize {
+    peer_count
+        .saturating_mul(OBSERVATIONS_PER_PEER)
+        .saturating_add(RETIRED_PEER_ALLOWANCE * OBSERVATIONS_PER_PEER)
+        .max(OBSERVATIONS_PER_PEER)
+}
+
+#[cfg(feature = "sqlite")]
+fn refresh_current_peers(state: &mut State) {
+    if let Some(membership) = state.sqlite_membership.as_ref() {
+        let current_peers = membership
+            .borrow()
+            .membership_config
+            .nodes()
+            .map(|(node_id, _)| *node_id)
+            .collect();
+        state.current_peers = current_peers;
+    }
+}
+
+#[cfg(not(feature = "sqlite"))]
+fn refresh_current_peers(_state: &mut State) {}
 
 fn empty_observation(now: Instant) -> Observation {
     Observation {
@@ -892,6 +1119,7 @@ fn empty_observation(now: Instant) -> Observation {
         retry_count: 0,
         last_error_category: None,
         operation_owns_work: false,
+        outbound_connection_id: None,
     }
 }
 
@@ -1024,6 +1252,34 @@ fn unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "sqlite")]
+    fn membership_metrics(node_ids: &[u64]) -> RaftMetrics<u64, crate::Node> {
+        use openraft::{Membership, StoredMembership};
+
+        let nodes: BTreeMap<u64, crate::Node> = node_ids
+            .iter()
+            .map(|node_id| {
+                (
+                    *node_id,
+                    crate::Node {
+                        id: *node_id,
+                        addr_raft: format!("127.0.0.1:{}", 8_100 + node_id),
+                        addr_api: format!("127.0.0.1:{}", 8_200 + node_id),
+                    },
+                )
+            })
+            .collect();
+        let voters = BTreeSet::from([*node_ids
+            .first()
+            .expect("test membership must contain one voter")]);
+        let mut metrics = RaftMetrics::new_initial(1);
+        metrics.membership_config = Arc::new(StoredMembership::new(
+            None,
+            Membership::new(vec![voters], nodes),
+        ));
+        metrics
+    }
 
     #[tokio::test(start_paused = true)]
     async fn local_status_distinguishes_receive_ack_install_retry_and_completion() {
@@ -1547,7 +1803,99 @@ mod tests {
         }
 
         assert_eq!(status.snapshot().observations.len(), 24);
-        assert!(status.inner.capacity >= 24);
+        assert!(status.current_capacity() >= 24);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn live_membership_add_remove_churn_rekeys_capacity_and_retired_allowance() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([1, 2]));
+        let (membership_tx, membership_rx) = watch::channel(membership_metrics(&[1, 2]));
+        status.bind_sqlite_membership(membership_rx);
+
+        membership_tx.send_replace(membership_metrics(&[1, 2, 3, 4, 5, 6, 7, 8]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        for peer in 2..=8 {
+            for group in ["sqlite", "cache"] {
+                status.begin_outbound_attempt(
+                    group,
+                    peer,
+                    peer,
+                    "outbound",
+                    OutboundSnapshotSocket {
+                        epoch: 1,
+                        connected: true,
+                    },
+                    deadline,
+                );
+                status.inbound_received(InboundSnapshotChunk {
+                    raft_group: group,
+                    peer_node_id: peer,
+                    snapshot_id: "inbound",
+                    offset: 0,
+                    len: 64,
+                    done: false,
+                    socket_epoch: 1,
+                    deadline,
+                });
+            }
+        }
+        let expanded = status.snapshot();
+        assert_eq!(expanded.observations.len(), 28);
+        assert!(
+            expanded
+                .observations
+                .iter()
+                .any(|item| item.peer_node_id == 8)
+        );
+
+        // The observing node and old voters may themselves be removed. The
+        // latest committed membership owns the protected slots immediately.
+        membership_tx.send_replace(membership_metrics(&[8]));
+        for peer in 20..=40 {
+            for group in ["sqlite", "cache"] {
+                status.begin_outbound_attempt(
+                    group,
+                    peer,
+                    peer,
+                    "retired",
+                    OutboundSnapshotSocket {
+                        epoch: 1,
+                        connected: true,
+                    },
+                    deadline,
+                );
+                status.inbound_received(InboundSnapshotChunk {
+                    raft_group: group,
+                    peer_node_id: peer,
+                    snapshot_id: "retired",
+                    offset: 0,
+                    len: 1,
+                    done: false,
+                    socket_epoch: 1,
+                    deadline,
+                });
+            }
+        }
+
+        let contracted = status.snapshot();
+        assert!(contracted.observations.len() <= observation_capacity(1));
+        assert_eq!(
+            contracted
+                .observations
+                .iter()
+                .filter(|item| item.peer_node_id == 8)
+                .count(),
+            OBSERVATIONS_PER_PEER
+        );
+        assert!(
+            contracted
+                .observations
+                .iter()
+                .filter(|item| item.peer_node_id != 8)
+                .count()
+                <= RETIRED_PEER_ALLOWANCE * OBSERVATIONS_PER_PEER
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1733,7 +2081,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(30),
             );
         }
-        assert!(status.snapshot().observations.len() <= status.inner.capacity);
+        assert!(status.snapshot().observations.len() <= status.current_capacity());
 
         let saturated = LocalSnapshotTransportStatus::new(1, BTreeSet::new());
         for peer in 2..100 {
@@ -1751,7 +2099,7 @@ mod tests {
         }
         assert_eq!(
             saturated.snapshot().observations.len(),
-            saturated.inner.capacity
+            saturated.current_capacity()
         );
     }
 }
