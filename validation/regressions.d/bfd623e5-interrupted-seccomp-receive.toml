@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["bfd623e5", "7d8439f2", "4c1abfaf", "b8646183", "e4243049", "22d89d27", "ac520a0b", "fca42314", "f84999b7"]
+commits = ["bfd623e5", "7d8439f2", "4c1abfaf", "b8646183", "e4243049", "22d89d27", "ac520a0b", "fca42314", "f84999b7", "07c8f905"]
 points = ["playback.pipeline", "validation.framework"]
 checks = ["rust-gate", "catalog-contract"]
 reason = "The Rust gate makes seccomp notification receive a single attempt after each fresh readiness poll, exercises absolute-deadline cleanup for every persistently interrupted bootstrap phase, models an invalidated first notification, and uses interruption-hit observations plus distinct long-deadline stop coverage to prove both bounds on repeated steady-state response interruption. The catalog contract narrows the status claim to an explicit transitive source audit of post-fork allocation and panic forms."

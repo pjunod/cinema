@@ -1403,7 +1403,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 645 -> 646 after steady-response interruption coverage: one test-only
 # timeout proves the detached version owner returns after deliberately slow
 # reap and the stop/deadline-aware supervisor join. It starts no shipped work.
-expected_occurrences = 646
+# 646 -> 647 after mutation-sensitive response bounds: one test-only timeout
+# waits for the supervisor's deadline-exit receipt, preventing outer teardown
+# from masquerading as response-loop evidence. It starts no shipped work.
+expected_occurrences = 647
 
 [[module_structures]]
 id = "bare-time-constructor"

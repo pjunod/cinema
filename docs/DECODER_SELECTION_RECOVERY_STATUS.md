@@ -24,8 +24,8 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63), open against the effort; current repair/receipt head published, with exact-head approval and final qualification pending |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Exact code head `22d89d27`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 35/35, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup. Its explicit transitive post-fork helper inventory statically rejects common allocation and panic forms. Single-interruption success plus persistent expiry at ready send, acknowledgement, first seccomp receive, first response, and steady-state response are covered; an invalidated first notification separately proves bounded teardown |
-| Exact receipt | `628277d1`: exact mapped history audit 1,374, catalog 24/30/1,443, status/ownership contracts 13/13, operations 211/211, formatting, and the pinned all-target workspace compile pass. Historical receipts `123b522a` and `fa9e27d7` predate the steady-response repair and are not presented as its evidence |
+| Focused validation | Exact code head `07c8f905`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 36/36, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup. Its explicit transitive post-fork helper inventory statically rejects common allocation and panic forms. Single-interruption success plus persistent expiry at ready send, acknowledgement, first seccomp receive, first response, and steady-state response are covered; an invalidated first notification separately proves bounded teardown. The steady-state deadline case requires observed response interruptions and a deadline-exit receipt; a distinct long-deadline case requires a stop-exit receipt |
+| Exact receipt | `628277d1`: exact mapped history audit 1,374, catalog 24/30/1,443, status/ownership contracts 13/13, operations 211/211, formatting, and the pinned all-target workspace compile pass. This receipt predates the latest test-evidence repair at `07c8f905`; its successor is being prepared before review resumes |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
 | Blocker | Obtain new exact-head adversarial approval, implement any findings, then run the one clean full-suite qualification |
 
@@ -34,7 +34,7 @@ An unchecked item is not implied by a nearby passing check.
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Exact-head repair review pending | `22d89d27` makes notification receive one-shot after each fresh readiness poll, bounds bootstrap and steady-state response retries by the shared deadline/stop signal, and retains the earlier offset-ownership, provenance, and scope repairs; mandatory pinned-Linux collector regressions pass 35/35 |
+| M1 · explicit plan and facts | Exact-head repair review pending | `07c8f905` makes notification receive one-shot after each fresh readiness poll, bounds bootstrap and steady-state response retries by the shared deadline/stop signal, and makes both steady-response exits mutation-sensitive with observed interruption and branch-specific exit receipts; mandatory pinned-Linux collector regressions pass 36/36 |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -244,6 +244,16 @@ kill-domain assertion passed alone but failed once under the expanded parallel
 Linux suite; its outer observation window is now 1.5 seconds, while the escaped
 fixture still writes invalidating output after 500 ms, so the safety mutation
 continues to fail deterministically.
+Three reviews of `b8f6312b` then found that slow reap could satisfy the timeout
+and ownership assertions even if the response injection were removed. Commit
+`ac520a0b` through `07c8f905` add mode-isolated interruption counters and
+require repeated hits plus a response-loop deadline receipt before accepting
+the deadline result. A separate production-composed launch uses a two-second
+deadline, raises the supervisor stop signal after an observed response
+interruption, requires a response-loop stop receipt, and must complete within
+500 ms. Exact Linux mutation runs remove injection, deadline enforcement, and
+the stop check individually; all three regressions fail at the intended
+assertion.
 
 The security contract is deliberately narrower than a general parser sandbox.
 Production binds the immutable primary self-contained ELF, prevents a
@@ -713,6 +723,8 @@ lane and focused tests provide earlier feedback.
 | `c7a339fb` | Three independent exact-head adversarial reviews | Changes requested · all found the already-published PR's stale “pending push” wording; probe review additionally found unbounded repeated `EINTR` in the steady-state notification-response loop and missing production-composed teardown coverage |
 | `22d89d27` | Steady-response repair and exact focused Linux qualification | Pass · steady denial retries observe the shared launch deadline and supervisor stop; the production-composed second-notification test proves detached ownership returns after slow reap and bounded join. Pinned Linux 1.97.1 all-target Clippy passes and the collector passes 35/35 in parallel; the scheduler-sensitive kill-domain test also passes alone on the preceding exact tree and in the final parallel suite after its observation-window correction |
 | `628277d1` | Exact post-map steady-response receipt | Pass · history 1,374, catalog 24/30/1,443, status/ownership contracts 13/13, operations 211/211, formatting, diff check, and the pinned all-target workspace compile |
+| `b8f6312b` | Three independent exact-head adversarial reviews | Changes requested · all found that the steady-response regression's one-second slow reap could satisfy every timeout and ownership assertion without proving the second notification or interruption injection was reached; two also required distinct long-deadline stop-path evidence |
+| `ac520a0b`–`07c8f905` | Mutation-sensitive steady-response proof and exact Linux qualification | Pass · mode-isolated counters prove repeated response interruptions precede the deadline result, branch-specific receipts distinguish deadline from stop, and a separate two-second launch completes through the stop path in under 500 ms. Pinned Linux Rust 1.97.1 all-target Clippy passes and the complete collector suite passes 36/36 in parallel. Exact removal of injection, deadline enforcement, and the stop check produces 0/1, 0/1, and 0/1 as required |
 
 ## Remaining evidence before release
 
