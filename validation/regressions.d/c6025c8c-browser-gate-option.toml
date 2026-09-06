@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c6025c8c"]
+points = ["web.experience", "playback.pipeline"]
+checks = ["web-layout"]
+reason = "control-browser-check constructed the playback-control Reporter with a snapshot option after the reporter had been renamed to take capture, so the constructor threw and the gate never ran the reporter at all — the exact failure mode the gate exists to catch, since every Node test injects its own capture and kept passing while the only real-browser caller was left on the old name. The harness now passes capture and builds it through the module's own capture() wrapper, so a hand-shaped object cannot be dropped silently by notify and let the gate pass without exercising anything. Passing is two completed exchanges in a real browser, not a construction that did not throw."
