@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["19190ee8"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate exercises the nonblocking fork acknowledgement and seccomp-listener descriptor transfer in the production Linux probe path, ensuring an unexpectedly full control socket cannot escape the absolute launch deadline. The catalog contract records the exact cross-platform validation, the intentionally narrow trusted-parser boundary, and the unsupported-architecture evidence limit."

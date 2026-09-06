@@ -1214,7 +1214,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # version child, group terminator, and admission permit when its caller times
 # out; one test-only task proves detached cleanup retains its owned permit.
 # Both finish independently of the caller, and neither chooses a producer.
-expected_occurrences = 425
+# 425 -> 428 after fifth-review deadline repair: one blocking owner contains
+# `Command::spawn` and the inherited pre-exec handshake; a second holds both
+# source-identity and probe admissions through an uninterruptible metadata
+# syscall; a third owns final source revalidation. Caller timeout detaches each
+# owner without releasing its permits, and no task selects recovery policy.
+expected_occurrences = 428
 
 [[module_structures]]
 id = "method-spawn"
@@ -1235,7 +1240,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # 44 -> 45 after one-shot exec supervision: one named standard thread owns the
 # seccomp notification listener from the trusted pre-exec call through process
 # reap. It denies every later exec request and is explicitly stopped and joined.
-expected_occurrences = 45
+# 45 -> 44 after fifth-review launch consolidation: two chained command-spawn
+# expressions became one shared `command.spawn()` inside the blocking launch
+# owner counted above. The named seccomp supervisor is unchanged and joined.
+expected_occurrences = 44
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1377,7 +1385,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 631 -> 636 with pidfd fault injection: two injected cleanup delays and three
 # bounded test waits prove caller deadlines detach without releasing the version
 # or held-source ownership before explicit reap. All five are test-only.
-expected_occurrences = 636
+# 636 -> 644 after fifth-review deadline repair: one injected supervisor delay,
+# one inner whole-launch timeout, four source-identity admission/owner timers,
+# and two ownership-return assertions. Production delays remain zero; the
+# timeouts retain permits until the corresponding blocking owner really exits.
+expected_occurrences = 644
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1519,7 +1531,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 241 -> 242 after the escape review: `std::thread::Builder::spawn` starts the
 # named seccomp-notification owner described under method-spawn; it is not a
 # second parser process and its result is joined after the child is reaped.
-expected_occurrences = 242
+# 242 -> 241 after fifth-review launch consolidation: the two descriptor-bound
+# command chains now share one `command.spawn()` in the blocking launch owner.
+# Both callers still receive and reap their own child; this is a syntax-count
+# decrease, not removal of a process owner.
+expected_occurrences = 241
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 fourth-review repair awaiting exact-head review · **Updated:** 2026-09-06 ·
+**Status:** M1 fifth-review findings implemented; exact-head re-review pending · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -23,17 +23,17 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Exact code head `31dc5d26`: macOS collector 17/17, pinned Linux 1.97.1 collector 27/27, neutral legacy route 1/1, cross-platform all-target Clippy with warnings denied, status/ownership contracts 13/13, catalog 24/30/1,438, history 1,362, and operations 211/211. Linux composes production discovery, sealed-FD execution, one-shot supervised `execveat`, deny-all path execution, pidfd-before-reap cleanup, bound source FD 3, JSON parsing, direct and `/proc/self/fd` second-memfd denial, FD-reuse denial, session-escape denial, executable-source refusal, and injected pidfd failure ownership |
-| Exact receipt | `2baf0861`: exact post-map history audit 1,362, catalog 24/30/1,438, operations 211/211, formatting, status/ownership contracts 13/13, and pinned all-target workspace compile pass. Earlier receipt `adce1125` remains the rejected third-repair review record |
+| Focused validation | Exact code head `19190ee8`: Rust 1.97.1 planner 35/35, macOS collector 18/18, pinned Linux collector 31/31, and real neutral-timeout producer 1/1; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally proves the post-fork handshake, bounded launch setup, sealed-FD execution, one-shot supervised `execveat`, post-transfer descriptor-export denial, pidfd-before-reap cleanup, source-identity ownership, session-escape denial, and injected pre/post-transfer failures |
+| Exact receipt | `2baf0861`: exact post-map history audit 1,362, catalog 24/30/1,438, operations 211/211, formatting, status/ownership contracts 13/13, and pinned all-target workspace compile pass. That is a historical receipt for `31dc5d26`, not evidence for its successors. Exact `d827a2f0` hook evidence is history 1,364, catalog 24/30/1,440, operations 211/211, formatting, and pinned all-target workspace compile. `19190ee8` has no exact postcommit history claim until its successor mapping is committed |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
-| Blocker | Obtain new exact-head adversarial approval before the one clean full-suite qualification |
+| Blocker | Obtain new exact-head adversarial approval, implement any findings, then run the one clean full-suite qualification |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Exact-head repair review pending | `31dc5d26` replaces the bypassable stateless exec allow rule with one-shot supervision, denies session/group escape, and retains ownership through injected pidfd failures; mandatory Linux collector regressions pass 27/27 |
+| M1 · explicit plan and facts | Exact-head repair review pending | `19190ee8` closes the fifth-review ownership, deadline, descriptor-export, scope, geometry, and end-to-end fallback gaps; mandatory pinned-Linux collector regressions pass 31/31 |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -176,6 +176,45 @@ and process-session escape attempts are denied without treating unsupported
 isolation as a pass. Injected pidfd-open and readiness failures prove the
 caller deadline can detach cleanup without releasing version or source
 ownership before explicit reap.
+
+Three independent reviews of exact `7b11a8e6` reopened M1. They found that the
+initial seccomp policy still admitted descriptor export, the control-socket
+receiver could be interrupted or outlive its owned descriptor, setup work and
+source identity were outside the absolute deadline, Linux architecture support
+was overclaimed, fixture-only supervisor tests did not compose the production
+path, odd geometry was rounded in the wrong order, and the neutral timeout
+regression stopped short of launching a real legacy producer. They also found
+that the status page blurred code-head evidence with its successor receipt and
+described the trusted parser boundary too broadly.
+
+Commits `b5ad30ae` through `19190ee8` close those findings. The child now
+confirms that `fork` has captured the intended descriptor table before the
+supervisor may inject failure or release ownership. Listener transfer is
+followed by a stacked filter that denies `sendmsg` and `sendmmsg`; production
+native tests attempt to export source FD 3 and prove that no rights arrive.
+The entire version launch, blocking spawn, source metadata/hash, and final
+revalidation retain their admission and descriptor owners behind one absolute
+deadline. Native modes cover successful production execution, descendant
+session/group escape, pre- and post-transfer supervisor failure, and pidfd read
+failure. All control sends are nonblocking, ancillary truncation is rejected,
+and the raw receiver number is never used after its owning `OwnedFd` can be
+dropped. Presentation width is derived from the capped raw height before both
+axes are rounded. A real `produce_into` regression proves a neutral two-second
+observation timeout restores the full legacy producer budget and publishes
+segments.
+
+The security contract is deliberately narrower than a general parser sandbox.
+Production binds the immutable primary self-contained ELF, prevents a
+path-backed or later descriptor execution, prevents descriptor export through
+the inherited control channel, and retains a killable process tree. It does not
+make arbitrary malicious parser code safe and does not prevent an already
+trusted parser from interpreting or mapping bytes it can read as code. Safe
+enablement therefore requires an operator-selected, qualified FFprobe artifact
+in addition to the named kernel primitives. Unsupported Linux audit
+architectures have an explicit fail-closed filter builder. A RISC-V workspace
+compile was attempted, but native dependency compilation stopped before Plurx
+because `riscv64-linux-gnu-gcc` was unavailable; no full unsupported-architecture
+compile pass is claimed.
 
 ## M0 frozen source inventory
 
@@ -611,11 +650,18 @@ lane and focused tests provide earlier feedback.
 | `29dd8e88` source tree | `CARGO='rustup run 1.97.1 cargo' make unit` with qualified FFmpeg 8.1.2 and loopback fixture permission | Pass · core 955/955, decoder integration 34/34, store 87/87, PGS 20/20, daemon 1,777/1,777, 3 declared ignores, and no failures |
 | `29dd8e88` source tree | macOS plus pinned Linux 1.97.1 `cargo clippy --locked -p plurxd --all-targets -- -D warnings` | Pass · no warnings on either platform |
 | `adce1125` | Exact planner and subprocess adversarial reviews | Changes requested · both reviewers demonstrated the stateless FD-4 `execveat` rule could execute an absolute `/proc/self/fd` memfd; the subprocess review additionally found session/group escape and pidfd-open/readiness ownership gaps |
-| Working tree after `adce1125` | pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · 27/27, including one-shot exec supervision, absolute proc-memfd and FD-reuse attempts, session-escape denial, and injected pidfd-open/readiness cleanup ownership |
+| Working tree after `adce1125` | pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · Linux 1.97.1 collector 27/27, including one-shot exec supervision, absolute proc-memfd and FD-reuse attempts, session-escape denial, and injected pidfd-open/readiness cleanup ownership |
 | Working tree after `adce1125` | macOS focused tests, cross-platform all-target Clippy, repository contracts, and policy audits | Pass · macOS collector 17/17, neutral legacy routing 1/1, no Clippy warnings on macOS or pinned Linux, status/ownership 13/13, catalog 24/30/1,437, history 1,361, operations 211/211, formatting, and diff check |
 | `31dc5d26` source tree | Effort hook and focused validation | Pass · the commit hook reran catalog 24/30/1,437, history 1,361, operations 211/211, formatting, status contract, and pinned all-target workspace compile after the focused macOS 17/17, Linux 27/27, neutral-route 1/1, and cross-platform denied-warning Clippy passes |
 | Working tree after `31dc5d26` | Corrective-history and evidence-map audits | Pass · catalog 24/30/1,438 and history 1,362 with the supervised-probe mapping present; status/ownership contracts remain 13/13 and formatting/diff checks are clean |
 | `2baf0861` | Exact post-map receipt | Pass · history 1,362, catalog 24/30/1,438, operations 211/211, formatting, status/ownership contracts 13/13, and pinned all-target workspace compile |
+| `7b11a8e6` | Three independent exact-head adversarial reviews | Changes requested · one reviewer approved; probe and milestone-scope reviewers found descriptor export, interrupted/stale receiver ownership, launch and source-identity deadline gaps, fixture-only production claims, unsupported-architecture compilation risk, odd-height geometry drift, a helper-only legacy fallback test, stale receipt attribution, and an overbroad parser-sandbox claim |
+| `b5ad30ae` source tree | Rust 1.97.1 focused macOS planner, collector, and real legacy-producer tests | Pass · planner 35/35, collector 18/18, and neutral-timeout producer 1/1; a first Linux delayed-failure run then exposed a real pre-transfer fork/receiver deadlock, so this tree was not advanced |
+| `73180743` | Production post-fork readiness/acknowledgement repair | Finding applied · failure injection waits until the child descriptor table exists; pre-fork failure shuts down but retains the owned receiver, and the child cannot block forever waiting to transfer the listener |
+| `b13d7f7b` | Exact pinned Linux 1.97.1 collector plus Linux all-target Clippy diagnostic | Collector pass · 31/31 production/native tests. Clippy correctly rejected unused non-test launch state, an oversized collection signature, and two lint-only ownership helpers; `d827a2f0` repairs those findings |
+| `d827a2f0` | Exact effort fast-lane hook after Linux Clippy repair | Pass · history 1,364, catalog 24/30/1,440, operations 211/211, formatting, and pinned all-target workspace compile |
+| `19190ee8` | Exact Rust 1.97.1 macOS and Linux focused qualification | Pass · planner 35/35, macOS collector 18/18, pinned Linux collector 31/31, real neutral-timeout producer 1/1, formatting, all-target compile, and all-target Clippy with warnings denied on both platforms. The focused producer test selected the working installed FFmpeg 9.0.1 after the default Homebrew link failed to load its removed x265 ABI; no FFmpeg-8 muxer-identity qualification is inferred |
+| `19190ee8` | Unsupported RISC-V compile probe | Incomplete environment evidence · the target was installed, but a transitive native build required unavailable `riscv64-linux-gnu-gcc` and stopped before compiling Plurx. The unsupported audit-architecture fallback remains source-reviewed and fail-closed, not cross-compiled evidence |
 
 ## Remaining evidence before release
 
