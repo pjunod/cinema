@@ -462,7 +462,8 @@ following activation suite partway through. The activation suite then passed
 On POSIX, the runner first proves that its process census is available, then
 starts every check in a new session. If the outer budget expires, one bounded
 cleanup deadline covers discovery, termination, direct-shell reap, and output
-EOF. The runner immediately stops the root process group, discovers both the
+EOF; half of its remaining time is reserved for final kill, reap, and proof.
+The runner immediately stops the root process group, discovers both the
 launch session and retained-parent child sessions, stops newly observed groups
 until a complete stopped closure is confirmed unchanged by two subsequent
 censuses, and sends `SIGKILL`
@@ -474,12 +475,17 @@ only when the closure, kill, live-identity proof, reap, and output drain all
 succeed. Census, convergence, signal, reap, identity, or EOF failure aborts
 validation as an infrastructure error. Linux uses a bounded `ps` enumeration,
 then binds each candidate to the parent, group, session, state, and
-boot-relative start ticks read atomically from `/proc/<pid>/stat`. It stops and
-kills exact identities through pidfds, never through a reusable numeric group
-at final teardown. Darwin preserves a stable PID/start identity across ordinary
-parent or state changes, retries relevant group/session ambiguity, commits a
-numeric group only after a matching stopped identity is observed, and refuses
-to signal a final group containing an unowned identity. Its unavoidable
+boot-relative start ticks read atomically from `/proc/<pid>/stat`. The initial
+anchored root-group stop is numeric; Linux stops discovered child identities
+and performs every final kill through pidfds, never through a reusable numeric
+group at final teardown. Darwin preserves a stable PID/start identity across
+ordinary parent or state changes, retries relevant group/session ambiguity,
+commits a numeric group only after a matching stopped identity is observed,
+and refuses to signal a final group containing an unowned identity. Every
+group for which a stop was attempted remains in the final cleanup ledger even
+when its confirming census fails. A detected unowned stopped replacement
+aborts with an explicit warning that operator recovery may be required; it
+never becomes a timeout verdict. Darwin's unavoidable
 census-to-signal interval is accepted only under this trusted-host contract;
 it is not pidfd-grade containment against hostile PID churn. Windows uses
 bounded `taskkill /T /F`, and every launch error, nonzero, timed-out, or

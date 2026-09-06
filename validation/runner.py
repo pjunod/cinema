@@ -658,6 +658,7 @@ def _terminate_process_tree(
     if root_group <= 1:
         raise RuntimeError(f"unsafe validation root process group: {root_group}")
     frozen_groups: dict[int, int] = {}
+    attempted_groups: dict[int, int] = {}
     frozen_identities: set[_ProcessIdentity] = set()
     cleanup_error: Exception | None = None
     try:
@@ -670,15 +671,27 @@ def _terminate_process_tree(
             # Census that anchored session before deciding cleanup failed.
             pass
         _freeze_process_tree(
-            root_group, frozen_groups, frozen_identities, cleanup_deadline
+            root_group,
+            frozen_groups,
+            frozen_identities,
+            _freeze_phase_deadline(cleanup_deadline),
+            attempted_groups=attempted_groups,
         )
     except Exception as error:  # fallback still kills every group observed so far
         cleanup_error = error
 
-    signal_errors = _kill_frozen_groups(
-        root_group, frozen_groups, frozen_identities, cleanup_deadline
-    )
-    if signal_errors and process.poll() is None:
+    cleanup_groups = dict(frozen_groups)
+    for process_group, depth in attempted_groups.items():
+        cleanup_groups[process_group] = max(
+            depth, cleanup_groups.get(process_group, depth)
+        )
+    try:
+        signal_errors = _kill_frozen_groups(
+            root_group, cleanup_groups, frozen_identities, cleanup_deadline
+        )
+    except Exception as error:  # owned-shell cleanup must survive every kill-stage bug
+        signal_errors = [f"kill stage: {error}"]
+    if (cleanup_error is not None or signal_errors) and process.poll() is None:
         try:
             process.kill()
         except OSError as error:
@@ -696,6 +709,13 @@ def _terminate_process_tree(
     if reap_error is not None:
         raise RuntimeError("could not reap the owned validation shell") from reap_error
     _verify_processes_gone(frozen_identities, cleanup_deadline)
+
+
+def _freeze_phase_deadline(cleanup_deadline: float) -> float:
+    """Reserve half of the remaining cleanup budget for kill, reap, and proof."""
+
+    remaining = _remaining_cleanup_time(cleanup_deadline)
+    return cleanup_deadline - (remaining / 2)
 
 
 def _kill_and_reap_owned_process(
@@ -775,11 +795,18 @@ def _kill_frozen_groups(
         if not owned_members:
             continue
         if sys.platform.startswith("linux"):
-            errors.extend(
-                _kill_linux_identities(
-                    root_pid, process_group, owned_members, frozen_identities, deadline
+            try:
+                errors.extend(
+                    _kill_linux_identities(
+                        root_pid,
+                        process_group,
+                        owned_members,
+                        frozen_identities,
+                        deadline,
+                    )
                 )
-            )
+            except Exception as error:
+                errors.append(f"pgid {process_group} pidfd teardown: {error}")
             continue
         try:
             os.killpg(process_group, signal.SIGKILL)
@@ -825,7 +852,7 @@ def _kill_linux_identities(
             signal.pidfd_send_signal(pidfd, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except OSError as error:
+        except Exception as error:
             errors.append(f"pid {record.identity.pid} pidfd kill: {error}")
         finally:
             os.close(pidfd)
@@ -837,9 +864,12 @@ def _freeze_process_tree(
     frozen_groups: dict[int, int],
     frozen_identities: set[_ProcessIdentity],
     deadline: float,
+    *,
+    attempted_groups: dict[int, int] | None = None,
 ) -> None:
     """Stop an attached descendant closure and prove a stable fixed point."""
 
+    attempted = attempted_groups if attempted_groups is not None else {}
     previous_closure: frozenset[_ProcessRecord] | None = None
     stable_snapshots = 0
     while True:
@@ -878,10 +908,10 @@ def _freeze_process_tree(
                 for record, _ in discovered
                 if record.process_group == process_group
             }
-            if _stop_and_confirm_group(
-                root_pid, process_group, expected, deadline
-            ):
+            attempted[process_group] = depth
+            if _stop_and_confirm_group(root_pid, process_group, expected, deadline):
                 frozen_groups[process_group] = depth
+                attempted.pop(process_group, None)
 
         all_stopped = all(
             record.state.startswith(("T", "Z")) for record, _ in discovered
@@ -932,17 +962,29 @@ def _stop_and_confirm_group(
         snapshot = _process_snapshot(
             deadline, root_pid=root_pid, required_identities=expected
         )
-        matching = tuple(
+        occupants = tuple(
             record
             for record in snapshot.values()
-            if record.process_group == process_group and record.identity in expected
+            if record.process_group == process_group
+            and not record.state.startswith("Z")
         )
-        live_matching = tuple(
-            record for record in matching if not record.state.startswith("Z")
+        unexpected = tuple(
+            record.identity
+            for record in occupants
+            if record.identity not in expected
         )
-        if not live_matching:
+        if unexpected:
+            rendered = ", ".join(str(identity.pid) for identity in unexpected)
+            raise RuntimeError(
+                f"pgid {process_group} changed ownership after stop; "
+                f"unowned stopped identities may require operator recovery: {rendered}"
+            )
+        matching = tuple(
+            record for record in occupants if record.identity in expected
+        )
+        if not matching:
             return False
-        if all(record.state.startswith("T") for record in live_matching):
+        if all(record.state.startswith("T") for record in matching):
             return True
         time.sleep(min(0.01, _remaining_cleanup_time(deadline)))
 
@@ -1180,12 +1222,12 @@ def _process_snapshot(
                 first_row is not None
                 and first_row.started == row.started
                 and row.process_group > 1
+                and not row.state.startswith("Z")
                 and pid not in first_observations
             ):
                 ambiguous.append(
                     (_ProcessIdentity(pid, row.started), row.parent_pid, 0)
                 )
-                break
         required = required_identities or set()
         owned_pids = (
             {

@@ -1198,6 +1198,40 @@ time.sleep(30)
                 time.monotonic() + 0.03, root_pid=100
             )
 
+    def test_darwin_process_snapshot_checks_every_reappeared_ambiguity(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout=(
+                "100 1 100 T Tue Aug 25 13:05:10 2026\n"
+                "200 1 200 T Tue Aug 25 13:05:11 2026\n"
+                "201 100 201 T Tue Aug 25 13:05:12 2026\n"
+            ),
+            stderr="",
+        )
+
+        def observe_group(pid: int) -> int:
+            if pid == 100:
+                return 100
+            raise ProcessLookupError
+
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(
+                validation_runner.os, "getpgid", side_effect=observe_group
+            ),
+            mock.patch.object(validation_runner.os, "getsid", return_value=100),
+            self.assertRaisesRegex(
+                RuntimeError, "unambiguous snapshot|cleanup exceeded"
+            ),
+        ):
+            validation_runner._process_snapshot(
+                time.monotonic() + 0.03, root_pid=100
+            )
+
     def test_process_snapshot_rejects_an_oversized_inventory(self):
         completed = subprocess.CompletedProcess(
             args=["ps"],
@@ -1259,7 +1293,10 @@ time.sleep(30)
             _groups: dict[int, int],
             identities: set[validation_runner._ProcessIdentity],
             _deadline: float,
+            *,
+            attempted_groups: dict[int, int],
         ) -> None:
+            self.assertEqual(attempted_groups, {})
             identities.add(identity)
 
         with (
@@ -1272,6 +1309,131 @@ time.sleep(30)
             validation_runner._terminate_process_tree(process, time.monotonic() + 1)
 
         self.assertEqual(verify.call_args.args[0], {identity})
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_kill_stage_exception_still_kills_and_reaps_owned_shell(self):
+        process = mock.Mock()
+        process.pid = 100
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(validation_runner, "_freeze_process_tree"),
+            mock.patch.object(
+                validation_runner,
+                "_kill_frozen_groups",
+                side_effect=RuntimeError("injected final census failure"),
+            ),
+            mock.patch.object(validation_runner, "_verify_processes_gone") as verify,
+            self.assertRaisesRegex(RuntimeError, "kill stage"),
+        ):
+            validation_runner._terminate_process_tree(
+                process, time.monotonic() + 1
+            )
+
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
+        verify.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_linux_final_census_failure_still_kills_and_reaps_owned_shell(self):
+        process = mock.Mock()
+        process.pid = 100
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        child = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(200, "linux-start-ticks:10"),
+            100,
+            200,
+            100,
+            "T",
+        )
+
+        def freeze(
+            _root_pid: int,
+            groups: dict[int, int],
+            identities: set[validation_runner._ProcessIdentity],
+            _deadline: float,
+            *,
+            attempted_groups: dict[int, int],
+        ) -> None:
+            self.assertEqual(attempted_groups, {})
+            groups[200] = 1
+            identities.add(child.identity)
+
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "linux"),
+            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(
+                validation_runner, "_freeze_process_tree", side_effect=freeze
+            ),
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                side_effect=[
+                    {200: child},
+                    RuntimeError("injected second Linux census failure"),
+                    {},
+                ],
+            ),
+            mock.patch.object(
+                validation_runner.os, "pidfd_open", return_value=9, create=True
+            ),
+            mock.patch.object(validation_runner.os, "close") as close,
+            mock.patch.object(
+                validation_runner.signal, "pidfd_send_signal", create=True
+            ) as pidfd_signal,
+            self.assertRaisesRegex(RuntimeError, "second Linux census failure"),
+        ):
+            validation_runner._terminate_process_tree(
+                process, time.monotonic() + 1
+            )
+
+        pidfd_signal.assert_not_called()
+        close.assert_called_once_with(9)
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_post_stop_census_failure_kills_attempted_owned_group(self):
+        process = mock.Mock()
+        process.pid = 100
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        root = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(100, "root"), 1, 100, 100, "T"
+        )
+        child = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(200, "child"),
+            100,
+            200,
+            100,
+            "T",
+        )
+
+        with (
+            mock.patch.object(validation_runner.sys, "platform", "darwin"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                side_effect=[
+                    {100: root, 200: dataclasses.replace(child, state="R")},
+                    RuntimeError("injected post-stop census failure"),
+                    {100: root, 200: child},
+                    {100: root, 200: child},
+                ],
+            ),
+            self.assertRaisesRegex(RuntimeError, "could not prove"),
+        ):
+            validation_runner._terminate_process_tree(
+                process, time.monotonic() + 1
+            )
+
+        self.assertIn(mock.call(200, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
 
     def test_reused_process_group_is_not_killed(self):
         original = validation_runner._ProcessIdentity(200, "start-old")
@@ -1320,12 +1482,9 @@ time.sleep(30)
         snapshots = [
             {100: root, 200: child},
             {100: root, 201: replacement},
-            {100: root},
-            {100: root},
-            {100: root},
-            {100: root},
         ]
         frozen_groups = {100: 0}
+        attempted_groups: dict[int, int] = {}
         frozen_identities: set[validation_runner._ProcessIdentity] = set()
         with (
             mock.patch.object(validation_runner.sys, "platform", "darwin"),
@@ -1334,16 +1493,18 @@ time.sleep(30)
             ),
             mock.patch.object(validation_runner.os, "killpg") as killpg,
             mock.patch.object(validation_runner.time, "sleep"),
+            self.assertRaisesRegex(RuntimeError, "changed ownership after stop"),
         ):
             validation_runner._freeze_process_tree(
-                100, frozen_groups, frozen_identities, time.monotonic() + 1
-            )
-            errors = validation_runner._kill_frozen_groups(
-                100, frozen_groups, frozen_identities, time.monotonic() + 1
+                100,
+                frozen_groups,
+                frozen_identities,
+                time.monotonic() + 1,
+                attempted_groups=attempted_groups,
             )
 
-        self.assertEqual(errors, [])
         self.assertNotIn(200, frozen_groups)
+        self.assertEqual(attempted_groups, {200: 1})
         self.assertIn(mock.call(200, signal.SIGSTOP), killpg.call_args_list)
         self.assertNotIn(mock.call(200, signal.SIGKILL), killpg.call_args_list)
 
