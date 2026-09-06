@@ -24,9 +24,12 @@ pub(crate) const MAX_REQUEST_BYTES: usize = 256;
 const FANOUT_TIMEOUT: Duration = Duration::from_secs(2);
 const FANOUT_CONCURRENCY: usize = 8;
 const MAX_STABLE_ROSTER_PASSES: usize = MAX_OPERATIONS_PEERS + 2;
+const WIRE_SCHEMA_VERSION: u32 = 2;
 const MEMBERSHIP_EXCLUSION_DURATION: Duration = Duration::from_secs(15);
 const EXCLUSION_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(50);
 const EXCLUSION_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(2);
+const LOCAL_CLAIM_APPLY_TIMEOUT: Duration = Duration::from_millis(1_500);
+const LOCAL_CLAIM_APPLY_POLL: Duration = Duration::from_millis(10);
 
 type PeerIdentity = (String, u64, Option<String>);
 
@@ -58,13 +61,17 @@ struct StableBeginRoster {
 /// only after Drop cleanup becomes a no-op rather than crossing the exclusion.
 struct CacheAdminMembershipExclusion {
     lease: Option<CacheAdminRevocationLease>,
+    operation_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     membership: MembershipManager,
     shutdown: tokio_util::sync::CancellationToken,
     release_runtime: tokio::runtime::Handle,
 }
 
 impl CacheAdminMembershipExclusion {
-    fn prepare(state: &AppState) -> Result<Self, ApiError> {
+    fn prepare(
+        state: &AppState,
+        operation_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<Self, ApiError> {
         let lease = state
             .membership
             .is_replicated()
@@ -78,6 +85,7 @@ impl CacheAdminMembershipExclusion {
             .map_err(|_| propagation_error())?;
         Ok(Self {
             lease,
+            operation_guard: Some(operation_guard),
             membership: state.membership.clone(),
             shutdown: state.shutdown.clone(),
             release_runtime: tokio::runtime::Handle::current(),
@@ -100,12 +108,20 @@ impl CacheAdminMembershipExclusion {
             .map(CacheAdminRevocationLease::mutation_claim)
     }
 
+    fn operation_id(&self) -> String {
+        self.lease
+            .as_ref()
+            .map(|lease| lease.claim_id().to_owned())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string())
+    }
+
     async fn release(&mut self) -> Result<(), ApiError> {
         let Some(lease) = self.lease.as_ref() else {
             return Ok(());
         };
         release_membership_exclusion_with_retry(&self.membership, lease, &self.shutdown).await?;
         self.lease.take();
+        self.operation_guard.take();
         Ok(())
     }
 }
@@ -115,6 +131,7 @@ impl Drop for CacheAdminMembershipExclusion {
         let Some(lease) = self.lease.take() else {
             return;
         };
+        let operation_guard = self.operation_guard.take();
         if self.shutdown.is_cancelled() {
             // Replicated heartbeat expiry is the bounded crash cleanup.
             return;
@@ -122,6 +139,11 @@ impl Drop for CacheAdminMembershipExclusion {
         let membership = self.membership.clone();
         let shutdown = self.shutdown.clone();
         self.release_runtime.spawn(async move {
+            // The fail-fast process gate remains owned until exact cleanup is
+            // definitive. An ambiguous release therefore coalesces all later
+            // local requests into immediate refusals instead of spawning more
+            // claims and retry tasks.
+            let _operation_guard = operation_guard;
             if let Err(error) =
                 release_membership_exclusion_with_retry(&membership, &lease, &shutdown).await
             {
@@ -191,27 +213,40 @@ pub(crate) struct ClusterCacheRevocation {
 
 impl ClusterCacheRevocation {
     pub(crate) async fn begin_digest(state: &AppState, digest: &str) -> Result<Self, ApiError> {
+        let operation_guard = state
+            .cache_only_admin_proofs
+            .try_acquire_revocation_operation()
+            .map_err(|_| propagation_error())?;
         let local = state
             .cache_only_admin_proofs
             .begin_digest_revocation(digest);
-        Self::begin(state, local).await
+        Self::begin(state, local, operation_guard).await
     }
 
     pub(crate) async fn begin_user(state: &AppState, user_id: i64) -> Result<Self, ApiError> {
+        let operation_guard = state
+            .cache_only_admin_proofs
+            .try_acquire_revocation_operation()
+            .map_err(|_| propagation_error())?;
         let local = state.cache_only_admin_proofs.begin_user_revocation(user_id);
-        Self::begin(state, local).await
+        Self::begin(state, local, operation_guard).await
     }
 
     async fn begin(
         state: &AppState,
         mut local: CacheOnlyAdminRevocation,
+        operation_guard: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Self, ApiError> {
-        let mut membership_exclusion = CacheAdminMembershipExclusion::prepare(state)?;
+        let mut membership_exclusion =
+            CacheAdminMembershipExclusion::prepare(state, operation_guard)?;
         membership_exclusion.commit().await?;
         let transport = PeerTransport::new(state.membership.clone());
-        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        // The wire operation ID is the exact replicated claim. A peer only
+        // acknowledges Begin after this same row is visible in its local
+        // applied SQL, causally ordering any later absence after the acquire.
+        let operation_id = membership_exclusion.operation_id();
         let request = Request {
-            schema_version: 1,
+            schema_version: WIRE_SCHEMA_VERSION,
             operation_id: operation_id.clone(),
             phase: Phase::Begin,
         };
@@ -332,7 +367,7 @@ impl ClusterCacheRevocation {
 
     fn request(&self, phase: Phase) -> Request {
         Request {
-            schema_version: 1,
+            schema_version: WIRE_SCHEMA_VERSION,
             operation_id: self.operation_id.clone(),
             phase,
         }
@@ -354,13 +389,9 @@ async fn release_membership_exclusion_with_retry(
 ) -> Result<(), ApiError> {
     let mut delay = EXCLUSION_CLEANUP_RETRY_INITIAL;
     loop {
-        match membership
-            .release_cache_admin_revocation_lease(lease)
-            .await
-            .map_err(|_| propagation_error())?
-        {
-            CacheAdminRevocationCleanupOutcome::Confirmed => return Ok(()),
-            CacheAdminRevocationCleanupOutcome::Ambiguous => {
+        match membership.release_cache_admin_revocation_lease(lease).await {
+            Ok(CacheAdminRevocationCleanupOutcome::Confirmed) => return Ok(()),
+            Ok(CacheAdminRevocationCleanupOutcome::Ambiguous) | Err(_) => {
                 tokio::select! {
                     () = shutdown.cancelled() => return Err(propagation_error()),
                     () = tokio::time::sleep(delay) => {}
@@ -451,8 +482,60 @@ pub(crate) async fn receive(
     }
     let request: Request = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
     validate(&request)?;
-    apply(&state.cache_only_admin_proofs, &request).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let membership = state.membership.clone();
+    let claim_id = request.operation_id.clone();
+    apply_and_wait_for_local_claim_with(
+        &state.cache_only_admin_proofs,
+        &request,
+        &state.shutdown,
+        move || {
+            let membership = membership.clone();
+            let claim_id = claim_id.clone();
+            async move {
+                membership
+                    .cache_admin_revocation_claim_applied(&claim_id)
+                    .await
+                    .map_err(|_| "cache-admin exclusion local apply read failed")
+            }
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn apply_and_wait_for_local_claim_with<Check, CheckFuture>(
+    cache: &super::extract::CacheOnlyAdminProofCache,
+    request: &Request,
+    shutdown: &tokio_util::sync::CancellationToken,
+    mut check: Check,
+) -> Result<(), &'static str>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<bool, &'static str>>,
+{
+    // Install the memory fence first. A timeout or read error deliberately
+    // leaves it active until the origin's End cleanup or its bounded TTL.
+    apply(cache, request)?;
+    if !matches!(request.phase, Phase::Begin) {
+        return Ok(());
+    }
+
+    tokio::time::timeout(LOCAL_CLAIM_APPLY_TIMEOUT, async {
+        loop {
+            if check().await? {
+                return Ok(());
+            }
+            tokio::select! {
+                () = shutdown.cancelled() => {
+                    return Err("shutdown before cache-admin exclusion applied");
+                }
+                () = tokio::time::sleep(LOCAL_CLAIM_APPLY_POLL) => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| "cache-admin exclusion local apply timed out")?
 }
 
 fn apply(
@@ -468,7 +551,7 @@ fn apply(
 fn validate(request: &Request) -> Result<(), StatusCode> {
     let canonical_operation_id = uuid::Uuid::parse_str(&request.operation_id)
         .is_ok_and(|id| id.hyphenated().to_string() == request.operation_id);
-    if request.schema_version == 1 && canonical_operation_id {
+    if request.schema_version == WIRE_SCHEMA_VERSION && canonical_operation_id {
         Ok(())
     } else {
         Err(StatusCode::BAD_REQUEST)
@@ -477,7 +560,10 @@ fn validate(request: &Request) -> Result<(), StatusCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply, Phase, Request, StableBeginRoster};
+    use super::{
+        apply, apply_and_wait_for_local_claim_with, validate, Phase, Request, StableBeginRoster,
+        WIRE_SCHEMA_VERSION,
+    };
     use crate::http::extract::CacheOnlyAdminProofCache;
     use plurx_core::auth;
     use plurx_core::cluster::membership::ActivityPeer;
@@ -516,6 +602,23 @@ mod tests {
         );
         assert!(begin.contains("membership_exclusion,"));
 
+        let digest_entry = source
+            .split_once("pub(crate) async fn begin_digest")
+            .expect("digest revocation entry")
+            .1
+            .split_once("pub(crate) async fn begin_user")
+            .expect("digest revocation entry end")
+            .0;
+        assert!(
+            digest_entry
+                .find("try_acquire_revocation_operation()")
+                .expect("fail-fast process gate")
+                < digest_entry
+                    .find("begin_digest_revocation(digest)")
+                    .expect("local invalidation"),
+            "the bounded gate must be owned before any per-request revocation state exists"
+        );
+
         let finish = source
             .split_once("pub(crate) async fn finish")
             .expect("cluster revocation finish")
@@ -529,7 +632,16 @@ mod tests {
                     .rfind("self.membership_exclusion.release().await?")
                     .expect("replicated exclusion release")
         );
-        assert!(source.contains("release_membership_exclusion_with_retry"));
+        let drop_owner = source
+            .split_once("impl Drop for CacheAdminMembershipExclusion")
+            .expect("membership exclusion Drop")
+            .1
+            .split_once("impl StableBeginRoster")
+            .expect("membership exclusion Drop end")
+            .0;
+        assert!(drop_owner.contains("let operation_guard = self.operation_guard.take()"));
+        assert!(drop_owner.contains("let _operation_guard = operation_guard"));
+        assert!(drop_owner.contains("release_membership_exclusion_with_retry"));
     }
 
     fn admin(id: i64) -> User {
@@ -563,6 +675,79 @@ mod tests {
     }
 
     #[test]
+    fn local_apply_ack_wire_version_rejects_pre_barrier_receivers() {
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        assert!(validate(&Request {
+            schema_version: WIRE_SCHEMA_VERSION,
+            operation_id: operation_id.clone(),
+            phase: Phase::Begin,
+        })
+        .is_ok());
+        assert_eq!(
+            validate(&Request {
+                schema_version: WIRE_SCHEMA_VERSION - 1,
+                operation_id,
+                phase: Phase::Begin,
+            }),
+            Err(axum::http::StatusCode::BAD_REQUEST),
+            "an old receiver's unconditional 204 must not satisfy the new Begin contract"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let digest = auth::hash_token("apply-lag-admin-token");
+        record(&cache, &digest, &admin(46));
+        let request = Request {
+            schema_version: WIRE_SCHEMA_VERSION,
+            operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            phase: Phase::Begin,
+        };
+        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = checks.clone();
+        apply_and_wait_for_local_claim_with(
+            &cache,
+            &request,
+            &tokio_util::sync::CancellationToken::new(),
+            || {
+                assert!(
+                    !cache.authenticate(&digest),
+                    "the memory fence must precede every local-applied claim check"
+                );
+                let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async move { Ok(attempt == 2) }
+            },
+        )
+        .await
+        .expect("third exact-claim observation acknowledges Begin");
+        assert_eq!(checks.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_local_apply_wait_leaves_peer_memory_fence_closed() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let digest = auth::hash_token("cancelled-apply-wait-admin");
+        record(&cache, &digest, &admin(47));
+        let request = Request {
+            schema_version: WIRE_SCHEMA_VERSION,
+            operation_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            phase: Phase::Begin,
+        };
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        shutdown.cancel();
+        assert!(
+            apply_and_wait_for_local_claim_with(&cache, &request, &shutdown, || async {
+                Ok(false)
+            })
+            .await
+            .is_err()
+        );
+        assert!(cache.authentication_ticket().is_none());
+        assert!(!cache.authenticate(&digest));
+    }
+
+    #[test]
     fn membership_added_between_begin_passes_is_fenced_before_store_admission() {
         let node_b = CacheOnlyAdminProofCache::default();
         let node_c = CacheOnlyAdminProofCache::default();
@@ -572,7 +757,7 @@ mod tests {
         record(&node_c, &digest, &user);
         let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
         let begin = Request {
-            schema_version: 1,
+            schema_version: WIRE_SCHEMA_VERSION,
             operation_id,
             phase: Phase::Begin,
         };
@@ -621,7 +806,7 @@ mod tests {
         wire(
             &node_b,
             Request {
-                schema_version: 1,
+                schema_version: WIRE_SCHEMA_VERSION,
                 operation_id: operation_id.clone(),
                 phase: Phase::Begin,
             },
@@ -631,7 +816,7 @@ mod tests {
         wire(
             &node_b,
             Request {
-                schema_version: 1,
+                schema_version: WIRE_SCHEMA_VERSION,
                 operation_id,
                 phase: Phase::End,
             },
@@ -654,7 +839,7 @@ mod tests {
         wire(
             &node_b,
             Request {
-                schema_version: 1,
+                schema_version: WIRE_SCHEMA_VERSION,
                 operation_id: operation_id.clone(),
                 phase: Phase::Begin,
             },
@@ -663,7 +848,7 @@ mod tests {
         wire(
             &node_b,
             Request {
-                schema_version: 1,
+                schema_version: WIRE_SCHEMA_VERSION,
                 operation_id,
                 phase: Phase::End,
             },

@@ -1824,10 +1824,13 @@ back to Store. Store-backed authentication captures the cache revocation
 generation before its read and publishes proof only if that generation is
 unchanged. On replicated nodes, publication and cache-only authentication start
 disabled. A background projection enables them only after every member in the
-exact committed Raft configuration carries a `cache_admin_revocation_v2` row
-whose timestamp equals that node's current heartbeat. Version 2 means the node
-supports the replicated credential-mutation exclusion and exact Store-write
-predicate described below. A joining member, missing
+exact committed Raft configuration carries a `cache_admin_revocation_v3` row
+whose timestamp equals that node's current heartbeat. Version 3 means the node
+supports the replicated credential-mutation exclusion, exact Store-write
+predicate, and local-applied claim acknowledgement described below. Version 1
+and version 2 capability heartbeats are retired by the replicated schema so a
+rolled-back process cannot silently restore the weaker contract. A joining
+member, missing
 row, refresh failure, or heartbeat from a rolled-back binary closes the gate and
 clears every proof; reopening requires a new ordinary authentication. Logout,
 demotion, password reset, and user deletion invalidate proof and advance the
@@ -1840,9 +1843,14 @@ two-second aggregate bound. The Store mutation names the exact lease claim, so
 a delayed write cannot commit after cancellation has released it. The lease
 remains owned until the terminal peer invalidation; heartbeat expiry creates a
 permanent receipt before cleanup after a crash.
-The peer wire contains only a random operation UUID and phase, never a token
-digest or user ID. A peer clears its bounded proof cache and refuses all
-cache-only recovery authorization while any fence is active; at most 128
+The peer wire contains only the random lease-claim UUID and phase, never a token
+digest or user ID. A peer installs its process-local fence before polling its
+local-applied SQLite view and acknowledges begin only after that exact claim is
+visible. Cache readiness independently remains false while any such lease is
+present; the ordered local application of its release is the only event that
+can reopen readiness after a restart or local fence expiry. A peer clears its
+bounded proof cache and refuses all cache-only recovery authorization while any
+fence is active; at most 128
 remote fences are retained, and an end that is lost or whose commit outcome is
 unknown expires no later than the existing non-sliding five-minute proof TTL.
 The origin retains the same global five-minute fence when a Store mutation or

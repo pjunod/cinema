@@ -34,6 +34,7 @@ const MAX_CACHE_ONLY_ADMIN_PROOFS: usize = 64;
 #[derive(Clone, Default)]
 pub(crate) struct CacheOnlyAdminProofCache {
     inner: Arc<Mutex<CachedAdminProofState>>,
+    revocation_operation_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct CachedAdminProofState {
@@ -185,6 +186,18 @@ impl CacheOnlyAdminProofCache {
         let cache = Self::default();
         cache.set_cluster_revocation_capability_ready(!replicated);
         cache
+    }
+
+    /// Admit at most one cache-admin mutation coordinator in this process.
+    /// Callers use a fail-fast acquire so a request burst cannot accumulate an
+    /// unbounded queue of futures, claims, or detached cleanup tasks.
+    pub(crate) fn try_acquire_revocation_operation(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, &'static str> {
+        self.revocation_operation_gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "cache-admin revocation already in progress")
     }
 
     /// Publish the latest heartbeat-coupled committed-roster verdict. Every
@@ -696,6 +709,56 @@ mod tests {
         tokio::time::advance(super::REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL).await;
         assert!(cache.authentication_ticket().is_some());
         assert!(!cache.authenticate(&digest));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew() {
+        let cache = CacheOnlyAdminProofCache::new(true);
+        let digest = auth::hash_token("restart-during-revocation");
+        let admin = user(11, true);
+        cache.set_cluster_revocation_capability_ready(true);
+        record(&cache, digest.clone(), &admin);
+        assert!(cache.authenticate(&digest));
+
+        cache
+            .begin_remote_revocation("exact-replicated-claim")
+            .expect("peer Begin");
+        // A restarted process has no memory fence, but starts with the same
+        // closed readiness value until its local-applied projection proves
+        // that the exact replicated exclusion was deleted.
+        cache.set_cluster_revocation_capability_ready(false);
+        tokio::time::advance(
+            super::REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL + Duration::from_secs(60 * 60),
+        )
+        .await;
+        assert!(cache.authentication_ticket().is_none());
+        assert!(!cache.authenticate(&digest));
+
+        cache.set_cluster_revocation_capability_ready(true);
+        assert!(cache.authentication_ticket().is_some());
+        assert!(
+            !cache.authenticate(&digest),
+            "the replicated deletion edge must clear every pre-revocation proof"
+        );
+    }
+
+    #[test]
+    fn cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let owner = cache
+            .try_acquire_revocation_operation()
+            .expect("first request owns the process gate");
+        for _ in 0..1_024 {
+            assert!(
+                cache.try_acquire_revocation_operation().is_err(),
+                "concurrent requests must not queue or allocate claims"
+            );
+        }
+        drop(owner);
+        assert!(
+            cache.try_acquire_revocation_operation().is_ok(),
+            "RAII cancellation releases the gate when no cleanup owns it"
+        );
     }
 
     #[tokio::test(start_paused = true)]

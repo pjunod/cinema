@@ -113,9 +113,11 @@ const LEARNER_LIFECYCLE_CAPABILITY: &str = "learner_lifecycle_v1";
 /// protocol for process-local cache-only admin authorization. Unlike an
 /// activated Raft protocol this remains a rolling capability: consumers must
 /// stop using the cache whenever any committed member no longer proves it.
-const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v2";
+const CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v3";
 #[cfg(test)]
-const LEGACY_CACHE_ADMIN_REVOCATION_CAPABILITY: &str = "cache_admin_revocation_v1";
+const LEGACY_CACHE_ADMIN_REVOCATION_V1_CAPABILITY: &str = "cache_admin_revocation_v1";
+#[cfg(test)]
+const LEGACY_CACHE_ADMIN_REVOCATION_V2_CAPABILITY: &str = "cache_admin_revocation_v2";
 /// Minimum unreserved capacity required before a learner may be promoted.
 /// This is deliberately independent of media-cache headroom: a voter must
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
@@ -544,11 +546,11 @@ const REQUIRE_CACHE_ADMIN_LEASE_DELETE_INTENT_SQL: &str =
      WHEN NOT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_lease_intents intent \
        WHERE intent.claim_id = OLD.claim_id) \
      BEGIN SELECT RAISE(IGNORE); END";
-// Once the v2 exclusion schema has landed, a full binary rollback must not
-// make every node's old v1 heartbeat proof current again. Ignoring only the
-// legacy capability statement lets the rest of an older heartbeat commit;
-// equality with the newly advanced node timestamp then keeps cache-only auth
-// closed without taking the node itself offline.
+// Once the v3 local-apply acknowledgement has landed, a binary rollback must
+// not make an older heartbeat proof current again. Ignoring only the retired
+// capability statements lets the rest of an older heartbeat commit; equality
+// with the newly advanced node timestamp then keeps cache-only auth closed
+// without taking the node itself offline.
 const RETIRE_CACHE_ADMIN_V1_INSERT_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_cache_admin_v1_insert_retired \
      BEFORE INSERT ON cluster_node_capabilities \
@@ -558,6 +560,16 @@ const RETIRE_CACHE_ADMIN_V1_UPDATE_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_cache_admin_v1_update_retired \
      BEFORE UPDATE ON cluster_node_capabilities \
      WHEN NEW.capability = 'cache_admin_revocation_v1' \
+     BEGIN SELECT RAISE(IGNORE); END";
+const RETIRE_CACHE_ADMIN_V2_INSERT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_cache_admin_v2_insert_retired \
+     BEFORE INSERT ON cluster_node_capabilities \
+     WHEN NEW.capability = 'cache_admin_revocation_v2' \
+     BEGIN SELECT RAISE(IGNORE); END";
+const RETIRE_CACHE_ADMIN_V2_UPDATE_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_cache_admin_v2_update_retired \
+     BEFORE UPDATE ON cluster_node_capabilities \
+     WHEN NEW.capability = 'cache_admin_revocation_v2' \
      BEGIN SELECT RAISE(IGNORE); END";
 
 /// One additive column, named as well as spelled.
@@ -770,6 +782,8 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
     PROTECT_CACHE_ADMIN_LEASE_FROM_OPERATION_SQL,
     RETIRE_CACHE_ADMIN_V1_INSERT_SQL,
     RETIRE_CACHE_ADMIN_V1_UPDATE_SQL,
+    RETIRE_CACHE_ADMIN_V2_INSERT_SQL,
+    RETIRE_CACHE_ADMIN_V2_UPDATE_SQL,
     // These triggers make the removed-owner fence authoritative for every
     // client version. A still-running older binary uses lease SQL that does
     // not know about the settings marker, but SQLite evaluates these guards
@@ -2027,6 +2041,29 @@ fn committed_capability_ready_sql(capability: &str) -> String {
     )
 }
 
+/// Whether cache-only admin recovery is safe on this local applied view.
+///
+/// Capability equality proves that every committed member runs the revocation
+/// protocol, but it does not preserve a peer's process-local Begin fence over
+/// a restart. The replicated exclusion is therefore itself a readiness
+/// blocker: while it exists, it can still authorize the delayed Store write
+/// whose revocation every cache must observe.
+fn committed_cache_admin_revocation_ready_sql() -> String {
+    format!(
+        "SELECT (\
+           EXISTS (SELECT 1 FROM json_each($1) AS committed \
+             WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+               JOIN cluster_node_capabilities AS capability \
+                 ON capability.node_id = active.node_id \
+              WHERE active.raft_id = CAST(committed.value AS INTEGER) \
+                AND active.removed_at IS NULL \
+                AND capability.capability = '{CACHE_ADMIN_REVOCATION_CAPABILITY}' \
+                AND capability.last_seen_at = active.last_seen_at)) \
+           OR EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases)\
+         ) AS count"
+    )
+}
+
 /// Which copy of replicated state a read may answer from.
 ///
 /// The roster route has to keep answering during quorum loss — that is when an
@@ -2163,6 +2200,10 @@ fn retry_ambiguous_cluster_operation_acquire(
     expires_at_unix_ms: i64,
 ) -> bool {
     cluster_operation_write_may_be_ambiguous(error) && now_unix_ms < expires_at_unix_ms
+}
+
+fn cache_admin_rejection_requires_release_receipt(saw_ambiguous_response: bool) -> bool {
+    saw_ambiguous_response
 }
 
 const CLUSTER_OPERATION_RETRY_INITIAL: Duration = Duration::from_millis(50);
@@ -2316,6 +2357,13 @@ impl CacheAdminRevocationLease {
     #[must_use]
     pub fn mutation_claim(&self) -> &CacheAdminMutationClaim {
         &self.claim
+    }
+
+    /// Exact identifier carried by the peer Begin protocol so acknowledgers
+    /// can prove this same lease has reached their local applied state.
+    #[must_use]
+    pub fn claim_id(&self) -> &str {
+        self.claim.as_str()
     }
 }
 
@@ -4818,6 +4866,13 @@ impl MembershipManager {
                 Ok(results) => {
                     let changes = results.into_iter().collect::<Result<Vec<_>, _>>()?;
                     if changes.get(1) != Some(&1) {
+                        // A first-attempt zero-row result is definitive: this
+                        // claim never reached the singleton, so no delayed
+                        // acquire exists to tombstone. Keep the conservative
+                        // receipt only if an earlier transport result was
+                        // ambiguous and may still materialize later.
+                        lease.retain_release_receipt =
+                            cache_admin_rejection_requires_release_receipt(saw_ambiguous_response);
                         return Err(MembershipError::ClusterOperationPending);
                     }
                     if saw_ambiguous_response {
@@ -5628,6 +5683,16 @@ impl MembershipManager {
             .map(|(raft_id, _)| *raft_id)
             .collect::<BTreeSet<_>>();
         let members_json = bounded_committed_raft_ids_json(&members)?;
+        let capability = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                committed_capability_ready_sql(CACHE_ADMIN_REVOCATION_CAPABILITY),
+                params!(members_json.clone()),
+            )
+            .await?;
+        if !capability.first().is_some_and(|row| row.count == 0) {
+            return Err(MembershipError::MembershipUpgradeRequired);
+        }
         let rows = inner
             .client
             .query_consistent_map::<ActivityPeerRow, _>(
@@ -6524,11 +6589,34 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<CountRow, _>(
-                committed_capability_ready_sql(CACHE_ADMIN_REVOCATION_CAPABILITY),
+                committed_cache_admin_revocation_ready_sql(),
                 params!(members_json),
             )
             .await?;
         Ok(rows.first().is_some_and(|row| row.count == 0))
+    }
+
+    /// Whether this exact cache-admin exclusion has reached this process's
+    /// local applied SQLite state. Peer Begin acknowledgements use this local
+    /// read rather than a quorum round trip: the origin already committed the
+    /// claim and needs proof that each peer's restart-persistent view has
+    /// caught up before it may issue the guarded Store mutation.
+    pub async fn cache_admin_revocation_claim_applied(
+        &self,
+        claim_id: &str,
+    ) -> Result<bool, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(true);
+        };
+        let rows = inner
+            .client
+            .query_map::<CountRow, _>(
+                "SELECT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases \
+                 WHERE claim_id = $1) AS count",
+                params!(claim_id),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
     /// Promote one ready learner into the committed voter set.
@@ -10586,6 +10674,41 @@ mod tests {
     }
 
     #[test]
+    fn definitive_cache_admin_singleton_losers_leave_no_receipts() {
+        assert!(!cache_admin_rejection_requires_release_receipt(false));
+        let mut connection = guarded_cache_admin_lease_fixture();
+        assert_eq!(
+            acquire_guarded_cache_admin_lease(&mut connection, "owner", true),
+            1
+        );
+
+        for attempt in 0..256 {
+            let claim_id = format!("definite-loser-{attempt}");
+            assert_eq!(
+                acquire_guarded_cache_admin_lease(&mut connection, &claim_id, true),
+                0,
+                "the live singleton owner must reject every competing claim"
+            );
+            // A first-attempt, definite zero-row result has no delayed acquire
+            // to suppress, so production disarms receipt retention before its
+            // exact cleanup runs.
+            release_guarded_cache_admin_lease(&mut connection, &claim_id, false);
+        }
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_cache_admin_revocation_lease_releases",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count rejected-claim release receipts"),
+            0,
+            "definitive singleton contention must not grow replicated storage"
+        );
+    }
+
+    #[test]
     fn ambiguous_cache_admin_acquire_keeps_receipt_and_cannot_resurrect() {
         let mut connection = guarded_cache_admin_lease_fixture();
         let claim_id = "ambiguous-acquire";
@@ -10609,6 +10732,31 @@ mod tests {
             acquire_guarded_cache_admin_lease(&mut connection, claim_id, true),
             0,
             "the delayed acquire must lose to its permanent exact receipt"
+        );
+    }
+
+    #[test]
+    fn zero_after_ambiguous_cache_admin_acquire_keeps_release_receipt() {
+        assert!(cache_admin_rejection_requires_release_receipt(true));
+        let mut connection = guarded_cache_admin_lease_fixture();
+        assert_eq!(
+            acquire_guarded_cache_admin_lease(&mut connection, "owner", true),
+            1
+        );
+        mark_guarded_cache_admin_acquire_definitive(&mut connection, "owner");
+
+        let delayed_claim = "ambiguous-then-zero";
+        assert_eq!(
+            acquire_guarded_cache_admin_lease(&mut connection, delayed_claim, true),
+            0,
+            "the retry observes a competing singleton after an earlier ambiguous submission"
+        );
+        release_guarded_cache_admin_lease(&mut connection, delayed_claim, true);
+        release_guarded_cache_admin_lease(&mut connection, "owner", false);
+        assert_eq!(
+            acquire_guarded_cache_admin_lease(&mut connection, delayed_claim, true),
+            0,
+            "the retained receipt must defeat the earlier delayed acquire after the owner leaves"
         );
     }
 
@@ -10687,10 +10835,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_admin_exclusion_is_separate_rolling_safe_and_capability_v2() {
+    fn cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3() {
         assert_eq!(
             CACHE_ADMIN_REVOCATION_CAPABILITY,
-            "cache_admin_revocation_v2"
+            "cache_admin_revocation_v3"
         );
         assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
             statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
@@ -10718,6 +10866,8 @@ mod tests {
             "cluster_cache_admin_lease_operation_guard",
             "cluster_cache_admin_v1_insert_retired",
             "cluster_cache_admin_v1_update_retired",
+            "cluster_cache_admin_v2_insert_retired",
+            "cluster_cache_admin_v2_update_retired",
         ] {
             assert!(MEMBERSHIP_SCHEMA
                 .iter()
@@ -11837,6 +11987,11 @@ mod tests {
                  CREATE TABLE cluster_node_removal_attempts (\
                    node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
                    PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE cluster_cache_admin_revocation_leases (\
+                   singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                   node_id TEXT NOT NULL, claim_id TEXT NOT NULL UNIQUE, \
+                   expires_at INTEGER NOT NULL, \
+                   retain_release_receipt INTEGER NOT NULL); \
                  INSERT INTO cluster_meta VALUES (1, 11, 4, 4, 0); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 1, 100, NULL, 'voter'); \
                  INSERT INTO cluster_nodes VALUES ('node-b', 2, 200, NULL, NULL); \
@@ -12834,6 +12989,87 @@ mod tests {
     }
 
     #[test]
+    fn active_cache_revocation_exclusion_blocks_readiness_without_wall_clock_expiry() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        for node_id in ["node-a", "node-b", "node-c"] {
+            connection
+                .execute(
+                    "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                     SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
+                    rusqlite::params![node_id, CACHE_ADMIN_REVOCATION_CAPABILITY],
+                )
+                .expect("write cache revocation capability with the heartbeat");
+        }
+        let ready = || {
+            connection
+                .query_row(
+                    &committed_cache_admin_revocation_ready_sql(),
+                    rusqlite::params!["[1,2,3]"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read cache revocation readiness")
+                == 0
+        };
+        assert!(ready());
+
+        connection
+            .execute(
+                "INSERT INTO cluster_cache_admin_revocation_leases \
+                 (singleton, node_id, claim_id, expires_at, retain_release_receipt) \
+                 VALUES (1, 'node-a', 'delayed-store', -9223372036854775808, 1)",
+                [],
+            )
+            .expect("install an exclusion older than any possible local clock");
+        assert!(
+            !ready(),
+            "restart readiness must remain closed while the row can authorize delayed Store"
+        );
+        connection
+            .execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, password_hash TEXT); \
+                            INSERT INTO users VALUES (1, 'old');",
+            )
+            .expect("seed delayed credential mutation target");
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE users SET password_hash = 'committed' \
+                     WHERE id = 1 AND EXISTS (\
+                       SELECT 1 FROM cluster_cache_admin_revocation_leases \
+                       WHERE claim_id = 'delayed-store')",
+                    [],
+                )
+                .expect("run claim-authorized delayed Store mutation"),
+            1,
+            "wall-clock expiry alone does not revoke the Store claim"
+        );
+
+        connection
+            .execute(
+                "DELETE FROM cluster_cache_admin_revocation_leases \
+                 WHERE claim_id = 'delayed-store'",
+                [],
+            )
+            .expect("linearize exact exclusion release");
+        assert!(
+            ready(),
+            "only replicated release, not elapsed local time or skew, reopens readiness"
+        );
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE users SET password_hash = 'too-late' \
+                     WHERE id = 1 AND EXISTS (\
+                       SELECT 1 FROM cluster_cache_admin_revocation_leases \
+                       WHERE claim_id = 'delayed-store')",
+                    [],
+                )
+                .expect("reject Store proposal after exact release"),
+            0
+        );
+    }
+
+    #[test]
     fn cache_revocation_capability_keeps_a_joiner_closed_until_self_is_committed() {
         assert!(!cache_admin_roster_admits_local(&BTreeSet::new(), 4));
         assert!(!cache_admin_roster_admits_local(
@@ -12847,67 +13083,80 @@ mod tests {
     }
 
     #[test]
-    fn rollback_heartbeat_advances_but_cannot_republish_retired_cache_revocation_v1() {
-        let mut connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
-        connection
-            .execute_batch(
-                "CREATE TABLE cluster_nodes (\
-                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL); \
-                 CREATE TABLE cluster_node_capabilities (\
-                   node_id TEXT NOT NULL, capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, \
-                   PRIMARY KEY(node_id, capability)); \
-                 INSERT INTO cluster_nodes VALUES ('node-a', 100);",
-            )
-            .expect("construct pre-v2 capability state");
-        assert_eq!(
+    fn rollback_heartbeat_cannot_republish_retired_cache_revocation_capabilities() {
+        for (capability, insert_trigger, update_trigger) in [
+            (
+                LEGACY_CACHE_ADMIN_REVOCATION_V1_CAPABILITY,
+                RETIRE_CACHE_ADMIN_V1_INSERT_SQL,
+                RETIRE_CACHE_ADMIN_V1_UPDATE_SQL,
+            ),
+            (
+                LEGACY_CACHE_ADMIN_REVOCATION_V2_CAPABILITY,
+                RETIRE_CACHE_ADMIN_V2_INSERT_SQL,
+                RETIRE_CACHE_ADMIN_V2_UPDATE_SQL,
+            ),
+        ] {
+            let mut connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
             connection
-                .execute(
-                    "INSERT INTO cluster_node_capabilities VALUES ('node-a', ?1, 100)",
-                    rusqlite::params![LEGACY_CACHE_ADMIN_REVOCATION_CAPABILITY],
+                .execute_batch(
+                    "CREATE TABLE cluster_nodes (\
+                       node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL); \
+                     CREATE TABLE cluster_node_capabilities (\
+                       node_id TEXT NOT NULL, capability TEXT NOT NULL, \
+                       last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability)); \
+                     INSERT INTO cluster_nodes VALUES ('node-a', 100);",
                 )
-                .expect("seed pre-v2 capability"),
-            1
-        );
-        connection
-            .execute_batch(RETIRE_CACHE_ADMIN_V1_INSERT_SQL)
-            .expect("retire v1 insert");
-        connection
-            .execute_batch(RETIRE_CACHE_ADMIN_V1_UPDATE_SQL)
-            .expect("retire v1 update");
+                .expect("construct previous capability state");
+            assert_eq!(
+                connection
+                    .execute(
+                        "INSERT INTO cluster_node_capabilities VALUES ('node-a', ?1, 100)",
+                        rusqlite::params![capability],
+                    )
+                    .expect("seed previous capability"),
+                1
+            );
+            connection
+                .execute_batch(insert_trigger)
+                .expect("retire legacy insert");
+            connection
+                .execute_batch(update_trigger)
+                .expect("retire legacy update");
 
-        let transaction = connection.transaction().expect("old heartbeat transaction");
-        transaction
-            .execute(
-                "UPDATE cluster_nodes SET last_seen_at = last_seen_at + 1 \
-                 WHERE node_id = 'node-a'",
-                [],
-            )
-            .expect("old heartbeat still advances node state");
-        transaction
-            .execute(
-                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
-                 SELECT node_id, $2, last_seen_at FROM cluster_nodes WHERE node_id = $1 \
-                 ON CONFLICT(node_id, capability) DO UPDATE SET \
-                   last_seen_at = excluded.last_seen_at",
-                rusqlite::params!["node-a", LEGACY_CACHE_ADMIN_REVOCATION_CAPABILITY],
-            )
-            .expect("retired capability statement is an ignored no-op");
-        transaction.commit().expect("old heartbeat commits");
+            let transaction = connection.transaction().expect("old heartbeat transaction");
+            transaction
+                .execute(
+                    "UPDATE cluster_nodes SET last_seen_at = last_seen_at + 1 \
+                     WHERE node_id = 'node-a'",
+                    [],
+                )
+                .expect("old heartbeat still advances node state");
+            transaction
+                .execute(
+                    "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                     SELECT node_id, $2, last_seen_at FROM cluster_nodes WHERE node_id = $1 \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at",
+                    rusqlite::params!["node-a", capability],
+                )
+                .expect("retired capability statement is an ignored no-op");
+            transaction.commit().expect("old heartbeat commits");
 
-        let (node_seen, capability_seen) = connection
-            .query_row(
-                "SELECT node.last_seen_at, capability.last_seen_at \
-                 FROM cluster_nodes node JOIN cluster_node_capabilities capability \
-                   ON capability.node_id = node.node_id \
-                 WHERE node.node_id = 'node-a' AND capability.capability = $1",
-                rusqlite::params![LEGACY_CACHE_ADMIN_REVOCATION_CAPABILITY],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .expect("read rollback capability freshness");
-        assert!(
-            node_seen > capability_seen,
-            "the rollback heartbeat remains live while its cache-only proof stays stale"
-        );
+            let (node_seen, capability_seen) = connection
+                .query_row(
+                    "SELECT node.last_seen_at, capability.last_seen_at \
+                     FROM cluster_nodes node JOIN cluster_node_capabilities capability \
+                       ON capability.node_id = node.node_id \
+                     WHERE node.node_id = 'node-a' AND capability.capability = $1",
+                    rusqlite::params![capability],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .expect("read rollback capability freshness");
+            assert!(
+                node_seen > capability_seen,
+                "the rollback heartbeat remains live while {capability} stays stale"
+            );
+        }
     }
 
     /// A binary old enough to predate heartbeat intents is caught one step

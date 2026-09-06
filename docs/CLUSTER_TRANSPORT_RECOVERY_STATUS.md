@@ -100,11 +100,21 @@ eleven, mapped their regressions into the persistent focused lane, and passed
 that lane from the beginning plus the complete pre-review matrix. Pre-commit
 audit then found that roster stability alone left a final membership TOCTOU and
 that direct restart cancellation could leave the exact preparation token
-latched. The current replacement adds a replicated exclusion with claim-bound
-Store writes, resolves both cancellation tokens, and retains permanent
-anti-resurrection receipts only for ambiguous acquisitions. The complete
-focused lane, pre-review matrix, formatting, and diff hygiene pass before the
-new exact commit.
+latched. The next replacement added a replicated exclusion with claim-bound
+Store writes, resolved both cancellation tokens, and retained permanent
+anti-resurrection receipts only for ambiguous acquisitions. Its complete
+focused lane, pre-review matrix, formatting, and diff hygiene passed before
+commit `eba5dfc3`. Three fresh exact-SHA reviews rejected that candidate with
+five findings: definitive singleton losers could still create permanent
+receipts and cleanup tasks; restart or a locally expired peer fence could
+reopen cached authorization while a replicated claim remained capable of
+authorizing Store; an expired restart or maintenance token could become
+unresolvable; and local transport status did not include peer-collection dwell.
+Those corrections are implemented with a versioned local-apply acknowledgement
+and persistent fast-lane mappings. The complete cluster/WAL lane, 197 operations
+contracts, web contracts, validation catalog, workspace check, denied-warning
+Clippy, formatting, and diff hygiene pass; the rejected candidate will not be
+pushed or opened as a pull request.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -150,7 +160,8 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 ninth-review corrections | fail · exact head `7130f456` rejected | The transport reviewer was clean, but the other exact-head tracks found a heartbeat/delete-trigger deadlock, a cross-operation local-fence cancellation race, and a pending-removal credential-revocation omission. This exact tree is not a release candidate. |
 | M4 tenth-review corrections | fail · `d0daa67f` rejected after green qualification | Exact review found two remote/local-age projection gaps; five planned-outage compatibility, ABA, cancellation, overlap, and reconciliation failures; unbounded detached release retries; two non-atomic credential mutations; and a membership-add revocation window. The replacement is active and must repeat focused qualification plus all three reviews. |
 | M4 eleventh-review corrections | pass · superseded before commit | Local monotonic receipt age includes collection dwell; legacy heartbeats reach trusted receipt-owning expiry; local outage fences and cleanup are generation-scoped and serialized; retries are deduplicated, backed off, and shutdown-aware; password/session and last-admin mutations are atomic; and revocation requires a stable twice-observed exact committed roster. The complete focused lane and pre-review matrix passed, but pre-commit audit found two remaining races. |
-| M4 twelfth-review corrections | pass · awaiting exact-head review | A dedicated replicated cache-admin lease excludes membership and planned-outage changes across the claim-bound Store mutation; a definitive direct restart cancellation resolves both its synthetic token and the exact preparation latch it clears; 256 definitive credential cycles leave no receipts while ambiguous acquisition retains its permanent receipt. The complete focused lane and pre-review matrix pass. |
+| M4 twelfth-review corrections | fail · `eba5dfc3` rejected after green qualification | A dedicated replicated cache-admin lease excludes membership and planned-outage changes across the claim-bound Store mutation, but exact review found five remaining boundedness, restart, fence-expiry, token-resolution, and local-aging defects. This exact tree is not a release candidate. |
+| M4 thirteenth-review corrections | pass · awaiting commit and exact-SHA review | Definitive singleton losers are receipt-free, cleanup ownership is fail-fast and bounded, readiness remains false while any claim can authorize Store, v3 Begin ACK proves exact local application, expired operation identities remain exactly resolvable, and locally collected transport evidence includes monotonic collection dwell. The complete focused lane and pre-review checks pass; three new exact-SHA reviews remain. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -274,6 +285,14 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
     definitive. Normal logout/password/admin churn removes its temporary
     receipt; cancellation, response loss, or ambiguous acquisition preserves
     the permanent anti-resurrection record.
+23. **Require a versioned local-apply acknowledgement before credential
+    mutation.** Cache revocation capability v3 retires both older capability
+    rows. A peer installs its memory fence first and acknowledges begin only
+    after the exact replicated lease claim is visible in its local applied
+    state; readiness remains closed until the ordered release is locally
+    visible. This prevents restart, replication lag, clock skew, and the local
+    five-minute fence bound from reopening stale cached authority while a
+    delayed Store write can still commit.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 

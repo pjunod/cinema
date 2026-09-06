@@ -394,6 +394,20 @@ impl ServingFence {
         self.restart_drain.changed.notify_waiters();
     }
 
+    /// A definitive current-operation cancellation supersedes every exact
+    /// cleanup generation for that owner. Callers hold the operation gate, so
+    /// no successor of the same owner can be admitted while this set is
+    /// drained. Tokens belonging to the other planned-outage lifecycle remain
+    /// authoritative.
+    fn resolve_planned_outage_owner_releases(&self, owner: PlannedOutageFenceOwner) {
+        self.restart_drain
+            .unresolved_releases
+            .lock()
+            .expect("planned-outage release set")
+            .retain(|token| token.owner != owner);
+        self.restart_drain.changed.notify_waiters();
+    }
+
     /// Wait until every admission that won before the drain flag has either
     /// failed or published its owned-work lifetime. Once this returns, the
     /// caller can sample the owned registries without a start slipping
@@ -436,6 +450,7 @@ impl ServingFence {
         cancellation: PlannedOutageFenceToken,
         active_sessions: usize,
     ) -> RestartDrainStatus {
+        debug_assert_eq!(cancellation.owner, PlannedOutageFenceOwner::Restart);
         let mut state = self.restart_drain.state.lock().await;
         let restart = state
             .token
@@ -445,14 +460,12 @@ impl ServingFence {
             state.expires_at_unix_ms = None;
             state.token = None;
         }
-        if let Some(token) = restart {
-            // A detached exact cleanup may not have acquired the operation
-            // gate yet. This definitive current-claim cancellation already
-            // made that cleanup redundant, so do not leave its local latch
-            // dependent on a second network round trip.
-            self.resolve_planned_outage_release(token);
-        }
-        self.resolve_planned_outage_release(cancellation);
+        // A detached exact cleanup may not have acquired the operation gate
+        // yet, and an expired timed fence no longer retains its token in
+        // `state`. This definitive current-claim cancellation makes every
+        // restart cleanup generation redundant, including the cancellation
+        // token itself, without disturbing maintenance ownership.
+        self.resolve_planned_outage_owner_releases(PlannedOutageFenceOwner::Restart);
         self.restart_drain.changed.notify_waiters();
         restart_drain_status(&self.restart_drain, &state, active_sessions)
     }
@@ -473,9 +486,10 @@ impl ServingFence {
             state.expires_at_unix_ms = None;
             state.token = None;
         }
-        if let Some(token) = maintenance {
-            self.resolve_planned_outage_release(token);
-        }
+        // The durable maintenance exit is definitive even when the local
+        // timer already discarded its exact identity. Resolve every older
+        // maintenance cleanup generation while preserving restart ownership.
+        self.resolve_planned_outage_owner_releases(PlannedOutageFenceOwner::Maintenance);
         self.restart_drain.changed.notify_waiters();
         restart_drain_status(&self.restart_drain, &state, active_sessions)
     }
@@ -802,6 +816,60 @@ mod tests {
             .await;
 
         assert!(!status.new_admissions_blocked);
+        assert!(fence.try_restart_admission().await.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_current_restart_cancel_resolves_an_expired_exact_latch() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let restart = fence
+            .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+            .await
+            .expect("restart token");
+        fence.retain_planned_outage_preparation_until_cancelled(restart);
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(fence.restart_drain_status(0).await.new_admissions_blocked);
+        let cancellation = fence.retain_restart_cancellation();
+        let status = fence
+            .cancel_current_restart_preparation(cancellation, 0)
+            .await;
+
+        assert!(!status.new_admissions_blocked);
+        assert!(fence.try_restart_admission().await.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmed_maintenance_exit_resolves_an_expired_exact_latch() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let maintenance = fence
+            .begin_maintenance_preparation_until(unix_ms().saturating_add(60_000))
+            .await
+            .expect("maintenance token");
+        fence.retain_planned_outage_preparation_until_cancelled(maintenance);
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(fence.restart_drain_status(0).await.new_admissions_blocked);
+        let status = fence.cancel_current_maintenance_preparation(0).await;
+
+        assert!(!status.new_admissions_blocked);
+        assert!(fence.try_restart_admission().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn confirmed_maintenance_exit_preserves_a_restart_owned_latch() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let restart = fence
+            .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+            .await
+            .expect("restart token");
+        fence.retain_planned_outage_preparation_until_cancelled(restart);
+
+        let status = fence.cancel_current_maintenance_preparation(0).await;
+
+        assert!(status.new_admissions_blocked);
+        assert!(fence.try_restart_admission().await.is_none());
+        fence.cancel_planned_outage_preparation(restart, 0).await;
         assert!(fence.try_restart_admission().await.is_some());
     }
 

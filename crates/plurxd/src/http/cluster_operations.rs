@@ -805,11 +805,17 @@ where
                 )
             })?;
 
-        let local_status = local_read().await;
+        let mut local_status = local_read().await;
         let peer_collection_started = tokio::time::Instant::now();
         let remote = collect_peers(peers, deadline).await;
         let peer_observation_age =
             tokio::time::Instant::now().saturating_duration_since(peer_collection_started);
+        if let Some(transport) = local_status.transport.as_mut() {
+            age_transport_observations(
+                transport,
+                u64::try_from(peer_observation_age.as_millis()).unwrap_or(u64::MAX),
+            );
+        }
         Ok(assemble_aggregate(
             local_node_id,
             membership,
@@ -3477,6 +3483,42 @@ mod tests {
         assert!(maintenance.contains("reconcile_local_maintenance_commit()"));
         assert!(maintenance.contains("lease.release().await"));
         assert!(maintenance.contains("lease.disarm()"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mutation_preflight_ages_local_transport_across_peer_collection() {
+        let deadline = tokio::time::Instant::now() + AGGREGATE_TIMEOUT;
+        let aggregate = collect_current_aggregate_with_sources(
+            "node-1",
+            deadline,
+            || async { Ok(test_membership("node-1", 1)) },
+            || async { Ok(Vec::new()) },
+            || async {
+                let mut status = test_local_status("node-1", Some(1));
+                status.transport = Some(test_transport_status(1, 0, Some(500)));
+                status
+            },
+            |_peers, received_deadline| async move {
+                assert_eq!(received_deadline, deadline);
+                tokio::time::advance(Duration::from_secs(1)).await;
+                BTreeMap::new()
+            },
+        )
+        .await
+        .expect("fresh mutation preflight");
+
+        let observation = aggregate.nodes[0]
+            .transport
+            .as_ref()
+            .and_then(|transport| transport.observations.first())
+            .expect("local transport observation");
+        assert_eq!(observation.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(0));
+        assert_eq!(observation.sample_age_ms, 1_000);
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("snapshot_stalled")
+        );
     }
 
     async fn wait_for_local_planned_outage_cleanup(serving: &crate::serving_fence::ServingFence) {
