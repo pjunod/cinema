@@ -1,10 +1,11 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 fifth-review findings implemented; exact-head re-review pending · **Updated:** 2026-09-06 ·
-**Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
-Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
+**Status:** M1 sixth-review findings being implemented · **Updated:** 2026-09-06 ·
+**Integration branch:** `effort/decoder-selection-recovery` · **M1 task PR base:**
+effort head `a8bbe574`
 
-The original M0 research baseline was `main` at
+The effort was created from Forgejo `main` at
+`4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
 `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`. It remains useful as historical
 content evidence, but no command or review performed on that tree is presented
 as exact-tree evidence for the current Forgejo base.
@@ -24,7 +25,7 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | Exact code head `19190ee8`: Rust 1.97.1 planner 35/35, macOS collector 18/18, pinned Linux collector 31/31, and real neutral-timeout producer 1/1; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally proves the post-fork handshake, bounded launch setup, sealed-FD execution, one-shot supervised `execveat`, post-transfer descriptor-export denial, pidfd-before-reap cleanup, source-identity ownership, session-escape denial, and injected pre/post-transfer failures |
-| Exact receipt | `2baf0861`: exact post-map history audit 1,362, catalog 24/30/1,438, operations 211/211, formatting, status/ownership contracts 13/13, and pinned all-target workspace compile pass. That is a historical receipt for `31dc5d26`, not evidence for its successors. Exact `d827a2f0` hook evidence is history 1,364, catalog 24/30/1,440, operations 211/211, formatting, and pinned all-target workspace compile. `19190ee8` has no exact postcommit history claim until its successor mapping is committed |
+| Exact receipt | `0eac4425`: exact post-map history audit 1,365, catalog 24/30/1,441, status/ownership contracts 13/13, formatting, and diff check pass; its tracked effort hook also passed operations 211/211 and the pinned all-target workspace compile. Historical receipt `2baf0861` is evidence for `31dc5d26`, not its successors |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
 | Blocker | Obtain new exact-head adversarial approval, implement any findings, then run the one clean full-suite qualification |
 
@@ -49,8 +50,9 @@ M1 adds pure `DecodeFacts`, `DecodeCapabilities`, `DecodePolicySnapshot`,
 single selector validates complete decoder, renderer, encoder, surface, source,
 and presentation semantics before returning a plan. It retains the current
 legacy preference order without making advertised decoder names qualified
-evidence, and keeps the MPEG-4/VideoToolbox compatibility exclusion independent
-of container and profile.
+evidence. M1 models a not-yet-consumed MPEG-4/VideoToolbox compatibility
+exclusion independent of container and profile; M2 will make command arguments
+and cache identity consume that rule, so the M1 base behavior is unchanged.
 
 The daemon collector discovers and fingerprints a configured parser artifact.
 The enforced production boundary requires a self-contained Linux ELF with no
@@ -61,8 +63,10 @@ seccomp user-notification owner continues exactly the trusted pre-exec call
 and denies every later `execveat` from the installed image or its descendants.
 The BPF layer also prevents the parser from changing FD 4 or leaving its
 killable session/process group. Unsupported kernels,
-architectures, production Unix targets, scripts, and dynamic or indirect
-launchers fail closed; M1 treats the unavailable observation as neutral and
+architectures, production Unix targets, scripts, and structurally dynamic ELF
+images fail closed. The boundary binds the immutable primary image and later
+exec behavior; it does not prove arbitrary static parser code trustworthy. M1
+treats the unavailable observation as neutral and
 continues the unchanged legacy route. Test-only scripted fixtures are selected
 through an explicit fixture constructor and do not replace the production-mode
 tests. Every probe owns a process session so timeout or cancellation signals
@@ -89,7 +93,7 @@ is added back to the producer deadline so it cannot consume the legacy FFmpeg
 startup budget. Already assembled output is checked before probing. Command
 construction remains an M2 migration.
 
-Current focused code evidence on M1 code head `cc464663`:
+Historical first-review focused evidence on M1 code head `cc464663`:
 
 - `cargo test -p plurx-core --test decoder_selection`: 34 passed.
 - macOS `cargo test -p plurxd decode_facts::tests:: -- --nocapture`: 14 passed.
@@ -202,6 +206,18 @@ dropped. Presentation width is derived from the capped raw height before both
 axes are rounded. A real `produce_into` regression proves a neutral two-second
 observation timeout restores the full legacy producer budget and publishes
 segments.
+
+Review of exact receipt `0eac4425` found three more boundary defects: child-side
+error construction could allocate after `fork`, repeated `EINTR` could evade
+the launch deadline, and a stalled final source observation retained the shared
+offset lane needed by the neutral legacy fallback. The current repair uses only
+raw OS errors in the audited pre-exec call graph, rechecks one absolute deadline
+on every bootstrap retry, and restores the offset plus releases its permit as
+soon as the probe tree is reaped. A stack-local injection covers ready send,
+acknowledgement, first notification receive, and first response retries; a real
+producer regression stalls only final metadata observation and proves legacy
+FFmpeg can still publish segments. The same review corrected task-base,
+MPEG-4-scope, and trusted-parser wording without expanding M1 behavior.
 
 The security contract is deliberately narrower than a general parser sandbox.
 Production binds the immutable primary self-contained ELF, prevents a
@@ -662,6 +678,7 @@ lane and focused tests provide earlier feedback.
 | `d827a2f0` | Exact effort fast-lane hook after Linux Clippy repair | Pass · history 1,364, catalog 24/30/1,440, operations 211/211, formatting, and pinned all-target workspace compile |
 | `19190ee8` | Exact Rust 1.97.1 macOS and Linux focused qualification | Pass · planner 35/35, macOS collector 18/18, pinned Linux collector 31/31, real neutral-timeout producer 1/1, formatting, all-target compile, and all-target Clippy with warnings denied on both platforms. The focused producer test selected the working installed FFmpeg 9.0.1 after the default Homebrew link failed to load its removed x265 ABI; no FFmpeg-8 muxer-identity qualification is inferred |
 | `19190ee8` | Unsupported RISC-V compile probe | Incomplete environment evidence · the target was installed, but a transitive native build required unavailable `riscv64-linux-gnu-gcc` and stopped before compiling Plurx. The unsupported audit-architecture fallback remains source-reviewed and fail-closed, not cross-compiled evidence |
+| `0eac4425` | Exact post-map receipt and ownership reconciliation | Pass · history 1,365, catalog 24/30/1,441, status/ownership contracts 13/13, formatting, and branch diff check. Its tracked effort hook additionally passed operations 211/211 and the pinned all-target workspace compile |
 
 ## Remaining evidence before release
 

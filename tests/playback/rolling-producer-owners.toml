@@ -1219,7 +1219,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # source-identity and probe admissions through an uninterruptible metadata
 # syscall; a third owns final source revalidation. Caller timeout detaches each
 # owner without releasing its permits, and no task selects recovery policy.
-expected_occurrences = 428
+# 428 -> 427 after sixth-review offset-lane repair: final source observation
+# remains authoritative but no longer runs inside the collection task. The
+# probe tree restores the shared offset and releases its permit immediately
+# after reap; only the final fstat owner can remain detached.
+expected_occurrences = 427
 
 [[module_structures]]
 id = "method-spawn"
@@ -1389,6 +1393,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # one inner whole-launch timeout, four source-identity admission/owner timers,
 # and two ownership-return assertions. Production delays remain zero; the
 # timeouts retain permits until the corresponding blocking owner really exits.
+# The sixth-review unsupported-Unix regression bounds the public discovery
+# call. The EINTR seam is stack-local and the final-observation fallback
+# regression reuses the existing production deadline; the reviewed total
+# remains 644.
 expected_occurrences = 644
 
 [[module_structures]]

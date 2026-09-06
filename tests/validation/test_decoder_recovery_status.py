@@ -15,10 +15,11 @@ CONTRACTS = ROOT / "tests/playback/decoder-health/diagnostic-contracts.toml"
 FLEET = ROOT / "tests/playback/decoder-health/fleet-ffmpeg-2026-09-05.toml"
 MEDIA = ROOT / "tests/playback/decoder-media-baseline-2026-09-05.toml"
 HARNESS = ROOT / "scripts/decoder-diagnostic-qualification"
-FORGEJO_TASK_BASE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
+FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
+M1_EFFORT_BASE = "a8bbe574"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
-M1_RECEIPT_HEAD = "2baf0861"
+M1_RECEIPT_HEAD = "0eac4425"
 M1_REPAIR_HEAD = "31dc5d26"
 
 
@@ -153,7 +154,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertNotIn("tests.validation.test_decoder_selection_inventory", self.status)
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
-        self.assertIn(FORGEJO_TASK_BASE, self.status)
+        self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
+        self.assertIn(
+            f"M1 task PR base:** effort head `{M1_EFFORT_BASE}`", self.flat_status
+        )
         self.assertIn("Historical pre-rebase head `01368ce1`", self.status)
         self.assertIn(M0_FORGEJO_PR, self.status)
         self.assertIn(
@@ -170,8 +174,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_m1_review_repair_distinguishes_exact_and_working_tree_evidence(self) -> None:
         self.assertIn(
-            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact post-map history audit 1,362, "
-            "catalog 24/30/1,438",
+            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact post-map history audit 1,365, "
+            "catalog 24/30/1,441",
             self.status,
         )
         self.assertIn("sealed, self-contained Linux FFprobe artifact", self.status)
@@ -180,6 +184,19 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("Linux 24/24", self.status)
         self.assertIn("Linux 1.97.1 collector 27/27", self.status)
         self.assertIn("one-shot exec supervision", self.status)
+        self.assertIn("does not prove arbitrary static parser code trustworthy", self.status)
+        self.assertIn(
+            "does not make arbitrary malicious parser code safe", self.flat_status
+        )
+        self.assertIn(
+            "does not prevent an already trusted parser from interpreting or "
+            "mapping bytes it can read as code",
+            self.flat_status,
+        )
+        self.assertIn(
+            "no full unsupported-architecture compile pass is claimed",
+            self.flat_status,
+        )
         self.assertIn(f"`{M1_REPAIR_HEAD}` source tree", self.status)
         self.assertIn("daemon 1,777/1,777", self.status)
         self.assertIn("no exact postcommit history claim", self.status)

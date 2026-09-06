@@ -9499,6 +9499,8 @@ pub struct TranscodeManager {
     /// FFprobe build rather than to a mutable pathname.
     decode_facts: crate::decode_facts::DecodeFactCache,
     decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
+    #[cfg(test)]
+    decode_source_final_identity_delay: Duration,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
@@ -9841,6 +9843,8 @@ impl TranscodeManager {
             decoders: Vec::new(),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
+            #[cfg(test)]
+            decode_source_final_identity_delay: Duration::ZERO,
             pipeline,
             admissions: Admissions::new(),
             cache: None,
@@ -9964,6 +9968,12 @@ impl TranscodeManager {
         identity: Option<crate::decode_facts::DecodeProbeIdentity>,
     ) -> Self {
         self.decode_probe_identity = identity;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_decode_source_final_identity_delay(mut self, delay: Duration) -> Self {
+        self.decode_source_final_identity_delay = delay;
         self
     }
 
@@ -13039,14 +13049,18 @@ impl TranscodeManager {
                     None
                 }
             };
+            let decode_fact_source = crate::decode_facts::DecodeFactSource::new(
+                Arc::clone(&source.handle),
+                Arc::clone(&source.offset_gate),
+            );
+            #[cfg(test)]
+            let decode_fact_source = decode_fact_source
+                .with_final_identity_delay(self.decode_source_final_identity_delay);
             let observation = neutral_decode_fact_observation(
                 self.decode_facts
                     .get_or_probe(
                         probe,
-                        crate::decode_facts::DecodeFactSource::new(
-                            Arc::clone(&source.handle),
-                            Arc::clone(&source.offset_gate),
-                        ),
+                        decode_fact_source,
                         catalog.as_ref(),
                         crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
                         deadline
@@ -21803,6 +21817,103 @@ pub(crate) mod tests {
         assert!(
             started.elapsed() >= NEUTRAL_DECODE_FACT_PROBE_BUDGET,
             "the slow collector did not exercise the production timeout"
+        );
+        assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_final_probe_observation_releases_legacy_producer_offset_lane() {
+        use plurx_core::store::SqliteStore;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        super::require_ffmpeg();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source_path = media.path().join("final-probe-observation-timeout.mkv");
+        write_real_video(&source_path, 2);
+        let file_id = seed_real_file(&store, &source_path).await;
+        let mut file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
+        let source_metadata = std::fs::metadata(&source_path).expect("source metadata");
+        file.size = source_metadata.len() as i64;
+        file.mtime = source_metadata
+            .modified()
+            .expect("source modified time")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("source after epoch")
+            .as_secs() as i64;
+
+        let probe = media.path().join("fast-ffprobe");
+        std::fs::write(
+            &probe,
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\n  printf '%s\\n' 'ffprobe version final-observation-timeout'\n  exit 0\nfi\nprintf '%s\\n' '{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"h264\"}]}'\n",
+        )
+        .expect("write fast probe");
+        let mut permissions = std::fs::metadata(&probe)
+            .expect("probe metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&probe, permissions).expect("executable probe");
+        let probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(
+            probe.to_str().expect("probe path"),
+        )
+        .await
+        .expect("fixture probe identity");
+
+        let (manager, _work, _cache) = cached_manager(&store);
+        let manager = manager
+            .with_decode_probe(Some(probe))
+            .with_decode_source_final_identity_delay(Duration::from_secs(5));
+        let output = crate::test_tempdir().expect("output");
+        let output = plurx_core::fs_secure::SecureDirectory::open(output.path())
+            .await
+            .expect("secure output");
+        let bound_source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()])
+            .await
+            .expect("bound source");
+        let options = manager.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            120,
+            0.0,
+            None,
+            None,
+            Some(1),
+            ToneMap::None,
+            OutputGrade::Sdr,
+        );
+        let production_budget = Duration::from_secs(2);
+        let started = Instant::now();
+        let produced = manager
+            .produce_into(
+                &output,
+                "final-probe-observation-timeout",
+                &PortableProduction {
+                    file: &file,
+                    opts: &options,
+                    encoder: Encoder::Software,
+                    deadline: started + production_budget,
+                    yield_to_offline: false,
+                    cancelled: None,
+                    offline_package_id: None,
+                    publication_fence: None,
+                    pretranscode_fence: None,
+                    expected_policy_generation: None,
+                    expected_source_snapshot: None,
+                    bound_source: Some(Arc::new(bound_source)),
+                },
+                None,
+            )
+            .await
+            .expect("legacy producer after final observation timeout")
+            .expect("legacy FFmpeg completed after the probe released its source offset lane");
+        assert!(
+            started.elapsed() >= NEUTRAL_DECODE_FACT_PROBE_BUDGET,
+            "the final source observation did not reach the neutral timeout"
         );
         assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
     }

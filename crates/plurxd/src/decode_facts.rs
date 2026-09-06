@@ -78,6 +78,8 @@ enum ProbeLaunchMode {
     #[cfg(all(test, target_os = "linux"))]
     ProductionSupervisorReceiveFailure,
     #[cfg(all(test, target_os = "linux"))]
+    ProductionBootstrapInterrupted,
+    #[cfg(all(test, target_os = "linux"))]
     ProductionFdExport(std::os::fd::RawFd),
 }
 
@@ -92,6 +94,7 @@ impl ProbeLaunchMode {
             | Self::ProductionPidfdReadFailure
             | Self::ProductionSupervisorDelay
             | Self::ProductionSupervisorReceiveFailure
+            | Self::ProductionBootstrapInterrupted
             | Self::ProductionFdExport(_) => true,
         }
     }
@@ -139,6 +142,20 @@ impl ProbeLaunchMode {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn bootstrap_interrupts(self) -> LinuxBootstrapInterrupts {
+        #[cfg(test)]
+        if self == Self::ProductionBootstrapInterrupted {
+            return LinuxBootstrapInterrupts {
+                ready_send: 1,
+                acknowledgement_send: 1,
+                first_notification_receive: 1,
+                first_notification_response: 1,
+            };
+        }
+        LinuxBootstrapInterrupts::default()
+    }
+
     #[cfg(all(test, target_os = "linux"))]
     fn supervisor_test_counter(self) -> Option<&'static std::sync::atomic::AtomicUsize> {
         match self {
@@ -158,7 +175,9 @@ pub(crate) struct DecodeFactSource {
     handle: Arc<std::fs::File>,
     offset_gate: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
-    identity_delay: Duration,
+    initial_identity_delay: Duration,
+    #[cfg(test)]
+    final_identity_delay: Duration,
 }
 
 impl DecodeFactSource {
@@ -170,7 +189,9 @@ impl DecodeFactSource {
             handle,
             offset_gate,
             #[cfg(test)]
-            identity_delay: Duration::ZERO,
+            initial_identity_delay: Duration::ZERO,
+            #[cfg(test)]
+            final_identity_delay: Duration::ZERO,
         }
     }
 
@@ -181,17 +202,33 @@ impl DecodeFactSource {
 
     #[cfg(test)]
     fn with_identity_delay(mut self, delay: Duration) -> Self {
-        self.identity_delay = delay;
+        self.initial_identity_delay = delay;
         self
     }
 
     #[cfg(test)]
-    fn identity_delay(&self) -> Duration {
-        self.identity_delay
+    pub(crate) fn with_final_identity_delay(mut self, delay: Duration) -> Self {
+        self.final_identity_delay = delay;
+        self
+    }
+
+    #[cfg(test)]
+    fn initial_identity_delay(&self) -> Duration {
+        self.initial_identity_delay
     }
 
     #[cfg(not(test))]
-    fn identity_delay(&self) -> Duration {
+    fn initial_identity_delay(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    #[cfg(test)]
+    fn final_identity_delay(&self) -> Duration {
+        self.final_identity_delay
+    }
+
+    #[cfg(not(test))]
+    fn final_identity_delay(&self) -> Duration {
         Duration::ZERO
     }
 }
@@ -208,12 +245,14 @@ struct ProbeFileIdentity {
     content_digest: String,
 }
 
-/// Startup-bound FFprobe identity. Production collection accepts only a
-/// self-contained Linux ELF, copies it into a sealed anonymous executable, and
-/// confines each child so it cannot replace itself with another parser. Path
-/// revalidation before and after collection detects replacement of the
+/// Startup-bound FFprobe identity. Production collection accepts only an
+/// operator-trusted, self-contained Linux ELF, copies its primary image into a
+/// sealed anonymous executable, and prevents that child from performing a
+/// later exec. This binds the primary image; it is not a sandbox for malicious
+/// parser behavior such as interpreting or mapping readable bytes as code.
+/// Path revalidation before and after collection detects replacement of the
 /// configured artifact without allowing a transient swap to choose another
-/// executable object.
+/// primary executable object.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodeProbeIdentity {
     executable: PathBuf,
@@ -373,9 +412,11 @@ impl DecodeProbeIdentity {
     }
 }
 
-/// Qualified fact collection executes one self-contained parser artifact. A
-/// script, dynamic executable, or unsupported Unix launcher could select or
-/// load parser code outside the retained digest, so production refuses it.
+/// Qualified fact collection executes one self-contained primary parser image.
+/// Scripts and dynamic ELF images have an external launch/dependency closure,
+/// so production refuses them. Structural ELF inspection does not establish
+/// that arbitrary parser code is trustworthy or unable to interpret readable
+/// input as code; safe enablement requires an operator-trusted artifact.
 #[cfg(unix)]
 fn require_direct_probe_executable(file: &std::fs::File) -> Result<(), DecodeFactError> {
     #[cfg(target_os = "linux")]
@@ -710,12 +751,8 @@ impl LinuxProbeSeccomp {
         if listener == -1 {
             Err(std::io::Error::last_os_error())
         } else {
-            let listener = libc::c_int::try_from(listener).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "FFprobe seccomp listener exceeded the descriptor range",
-                )
-            })?;
+            let listener = libc::c_int::try_from(listener)
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::EOVERFLOW))?;
             Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(listener) })
         }
     }
@@ -897,6 +934,36 @@ struct LinuxSeccompResponse {
     flags: u32,
 }
 
+/// Per-launch EINTR injection stays on the stack so parallel tests cannot
+/// interfere with one another. Production always constructs the zero value.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct LinuxBootstrapInterrupts {
+    ready_send: u8,
+    acknowledgement_send: u8,
+    first_notification_receive: u8,
+    first_notification_response: u8,
+}
+
+#[cfg(target_os = "linux")]
+fn consume_linux_bootstrap_interrupt(remaining: &mut u8) -> bool {
+    if *remaining == 0 {
+        false
+    } else {
+        *remaining -= 1;
+        true
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_probe_deadline(deadline: Option<std::time::Instant>) -> std::io::Result<()> {
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "linux")]
 const fn linux_ioctl_read_write<T>(number: u8) -> libc::c_ulong {
     const IOC_WRITE: libc::c_ulong = 1;
@@ -914,19 +981,41 @@ const fn linux_ioctl_read_write<T>(number: u8) -> libc::c_ulong {
 fn receive_linux_seccomp_notification(
     listener: std::os::fd::RawFd,
 ) -> std::io::Result<LinuxSeccompNotification> {
+    let mut interrupts = 0;
+    receive_linux_seccomp_notification_until(listener, None, &mut interrupts)
+}
+
+#[cfg(target_os = "linux")]
+fn receive_linux_seccomp_notification_until(
+    listener: std::os::fd::RawFd,
+    deadline: Option<std::time::Instant>,
+    injected_interrupts: &mut u8,
+) -> std::io::Result<LinuxSeccompNotification> {
     let mut notification = LinuxSeccompNotification::default();
     loop {
-        if unsafe {
-            libc::ioctl(
-                listener,
-                linux_ioctl_read_write::<LinuxSeccompNotification>(0),
-                &raw mut notification,
-            )
-        } == 0
-        {
+        ensure_linux_probe_deadline(deadline)?;
+        let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
+        let received = if injected {
+            -1
+        } else {
+            unsafe {
+                libc::ioctl(
+                    listener,
+                    linux_ioctl_read_write::<LinuxSeccompNotification>(0),
+                    &raw mut notification,
+                )
+            }
+        };
+        if received == 0 {
             return Ok(notification);
         }
-        let error = std::io::Error::last_os_error();
+        let error = if injected {
+            // A just-consumed test injection represents EINTR without
+            // mutating process-global errno.
+            std::io::Error::from_raw_os_error(libc::EINTR)
+        } else {
+            std::io::Error::last_os_error()
+        };
         if error.kind() != std::io::ErrorKind::Interrupted {
             return Err(error);
         }
@@ -938,18 +1027,39 @@ fn answer_linux_seccomp_notification(
     listener: std::os::fd::RawFd,
     response: &mut LinuxSeccompResponse,
 ) -> std::io::Result<()> {
+    let mut interrupts = 0;
+    answer_linux_seccomp_notification_until(listener, response, None, &mut interrupts)
+}
+
+#[cfg(target_os = "linux")]
+fn answer_linux_seccomp_notification_until(
+    listener: std::os::fd::RawFd,
+    response: &mut LinuxSeccompResponse,
+    deadline: Option<std::time::Instant>,
+    injected_interrupts: &mut u8,
+) -> std::io::Result<()> {
     loop {
-        if unsafe {
-            libc::ioctl(
-                listener,
-                linux_ioctl_read_write::<LinuxSeccompResponse>(1),
-                response as *mut LinuxSeccompResponse,
-            )
-        } == 0
-        {
+        ensure_linux_probe_deadline(deadline)?;
+        let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
+        let answered = if injected {
+            -1
+        } else {
+            unsafe {
+                libc::ioctl(
+                    listener,
+                    linux_ioctl_read_write::<LinuxSeccompResponse>(1),
+                    response as *mut LinuxSeccompResponse,
+                )
+            }
+        };
+        if answered == 0 {
             return Ok(());
         }
-        let error = std::io::Error::last_os_error();
+        let error = if injected {
+            std::io::Error::from_raw_os_error(libc::EINTR)
+        } else {
+            std::io::Error::last_os_error()
+        };
         if error.kind() != std::io::ErrorKind::Interrupted {
             return Err(error);
         }
@@ -976,10 +1086,7 @@ fn send_linux_seccomp_listener(
     message.msg_controllen = std::mem::size_of_val(&control);
     let header = unsafe { libc::CMSG_FIRSTHDR(&raw const message) };
     if header.is_null() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "seccomp listener control message has no header",
-        ));
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
     }
     unsafe {
         (*header).cmsg_level = libc::SOL_SOCKET;
@@ -1081,10 +1188,7 @@ fn wait_for_linux_fd(
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "probe supervisor launch handshake timed out",
-            ));
+            return Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT));
         }
         let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
         let mut descriptor = libc::pollfd {
@@ -1097,10 +1201,7 @@ fn wait_for_linux_fd(
             return Ok(());
         }
         if ready == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "probe supervisor launch handshake timed out",
-            ));
+            return Err(std::io::Error::from_raw_os_error(libc::ETIMEDOUT));
         }
         if ready == -1 {
             let error = std::io::Error::last_os_error();
@@ -1109,10 +1210,7 @@ fn wait_for_linux_fd(
             }
             return Err(error);
         }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "probe supervisor launch channel closed",
-        ));
+        return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
     }
 }
 
@@ -1120,10 +1218,15 @@ fn wait_for_linux_fd(
 fn receive_linux_seccomp_notification_before(
     listener: std::os::fd::RawFd,
     deadline: std::time::Instant,
+    injected_interrupts: &mut u8,
 ) -> std::io::Result<LinuxSeccompNotification> {
     loop {
         wait_for_linux_fd(listener, libc::POLLIN, deadline)?;
-        match receive_linux_seccomp_notification(listener) {
+        match receive_linux_seccomp_notification_until(
+            listener,
+            Some(deadline),
+            injected_interrupts,
+        ) {
             Ok(notification) => return Ok(notification),
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
             Err(error) => return Err(error),
@@ -1195,21 +1298,32 @@ fn receive_linux_probe_fork_ready(
 }
 
 #[cfg(target_os = "linux")]
-fn acknowledge_linux_probe_fork(socket: std::os::fd::RawFd) -> std::io::Result<()> {
+fn acknowledge_linux_probe_fork(
+    socket: std::os::fd::RawFd,
+    deadline: std::time::Instant,
+    injected_interrupts: &mut u8,
+) -> std::io::Result<()> {
     let byte = b'A';
     loop {
-        if unsafe {
-            libc::send(
-                socket,
-                (&raw const byte).cast(),
-                1,
-                libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
-            )
-        } == 1
+        ensure_linux_probe_deadline(Some(deadline))?;
+        let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
+        if !injected
+            && unsafe {
+                libc::send(
+                    socket,
+                    (&raw const byte).cast(),
+                    1,
+                    libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+                )
+            } == 1
         {
             return Ok(());
         }
-        let error = std::io::Error::last_os_error();
+        let error = if injected {
+            std::io::Error::from_raw_os_error(libc::EINTR)
+        } else {
+            std::io::Error::last_os_error()
+        };
         if error.kind() != std::io::ErrorKind::Interrupted {
             return Err(error);
         }
@@ -1220,21 +1334,29 @@ fn acknowledge_linux_probe_fork(socket: std::os::fd::RawFd) -> std::io::Result<(
 fn confirm_linux_probe_fork(
     socket: std::os::fd::RawFd,
     deadline: std::time::Instant,
+    injected_interrupts: &mut u8,
 ) -> std::io::Result<()> {
     let byte = b'F';
     loop {
-        if unsafe {
-            libc::send(
-                socket,
-                (&raw const byte).cast(),
-                1,
-                libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
-            )
-        } == 1
+        ensure_linux_probe_deadline(Some(deadline))?;
+        let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
+        if !injected
+            && unsafe {
+                libc::send(
+                    socket,
+                    (&raw const byte).cast(),
+                    1,
+                    libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+                )
+            } == 1
         {
             break;
         }
-        let error = std::io::Error::last_os_error();
+        let error = if injected {
+            std::io::Error::from_raw_os_error(libc::EINTR)
+        } else {
+            std::io::Error::last_os_error()
+        };
         if error.kind() != std::io::ErrorKind::Interrupted {
             return Err(error);
         }
@@ -1254,10 +1376,7 @@ fn confirm_linux_probe_fork(
             }
             return Err(error);
         }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "probe supervisor closed before acknowledging the child fork",
-        ));
+        return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
     }
 }
 
@@ -1268,8 +1387,7 @@ fn supervise_linux_probe_execs(
     launch_mode: ProbeLaunchMode,
     launch_deadline: std::time::Instant,
 ) -> std::io::Result<()> {
-    #[cfg(not(test))]
-    let _ = launch_mode;
+    let mut interrupts = launch_mode.bootstrap_interrupts();
 
     struct ReceiverCleanup {
         receiver: Arc<LinuxProbeReceiver>,
@@ -1309,11 +1427,19 @@ fn supervise_linux_probe_execs(
             "probe supervisor launch handshake timed out",
         ));
     }
-    acknowledge_linux_probe_fork(socket)?;
+    acknowledge_linux_probe_fork(
+        socket,
+        launch_deadline,
+        &mut interrupts.acknowledgement_send,
+    )?;
     let listener = receive_linux_seccomp_listener(socket, launch_deadline)?;
     receiver.close();
     use std::os::fd::AsRawFd;
-    let first = receive_linux_seccomp_notification_before(listener.as_raw_fd(), launch_deadline)?;
+    let first = receive_linux_seccomp_notification_before(
+        listener.as_raw_fd(),
+        launch_deadline,
+        &mut interrupts.first_notification_receive,
+    )?;
     if first.flags != 0
         || first.data.arch != LINUX_AUDIT_ARCH
         || first.data.nr != libc::SYS_execveat as libc::c_int
@@ -1325,7 +1451,12 @@ fn supervise_linux_probe_execs(
             error: -libc::EPERM,
             ..LinuxSeccompResponse::default()
         };
-        let _ = answer_linux_seccomp_notification(listener.as_raw_fd(), &mut denied);
+        let _ = answer_linux_seccomp_notification_until(
+            listener.as_raw_fd(),
+            &mut denied,
+            Some(launch_deadline),
+            &mut interrupts.first_notification_response,
+        );
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "first supervised probe exec did not match the bound descriptor call",
@@ -1340,7 +1471,12 @@ fn supervise_linux_probe_execs(
         flags: SECCOMP_USER_NOTIF_FLAG_CONTINUE,
         ..LinuxSeccompResponse::default()
     };
-    answer_linux_seccomp_notification(listener.as_raw_fd(), &mut allowed)?;
+    answer_linux_seccomp_notification_until(
+        listener.as_raw_fd(),
+        &mut allowed,
+        Some(launch_deadline),
+        &mut interrupts.first_notification_response,
+    )?;
 
     while !stop.load(Ordering::Acquire) {
         let mut descriptor = libc::pollfd {
@@ -1656,7 +1792,7 @@ impl LinuxExecveArguments {
                 libc::AT_EMPTY_PATH,
             )
         };
-        debug_assert_eq!(result, -1);
+        let _ = result;
         Err(std::io::Error::last_os_error())
     }
 }
@@ -1731,13 +1867,14 @@ fn configure_probe_execution(
             }
             #[cfg(target_os = "linux")]
             {
+                let mut interrupts = launch_mode.bootstrap_interrupts();
                 let Some(receiver_fd) = supervisor_receiver_fd else {
                     return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
                 };
                 let Some(sender_fd) = supervisor_sender_fd else {
                     return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
                 };
-                confirm_linux_probe_fork(sender_fd, launch_deadline)?;
+                confirm_linux_probe_fork(sender_fd, launch_deadline, &mut interrupts.ready_send)?;
                 libc::close(receiver_fd);
                 mark_unrelated_fds_close_on_exec()?;
                 #[cfg(test)]
@@ -1763,10 +1900,7 @@ fn configure_probe_execution(
             }
             #[cfg(not(target_os = "linux"))]
             {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "qualified FFprobe execution requires Linux isolation",
-                ))
+                Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
             }
         });
     }
@@ -2408,7 +2542,7 @@ impl DecodeFactCache {
             gate,
             remaining,
             cancelled,
-            source.identity_delay(),
+            source.initial_identity_delay(),
         )
         .await?;
         let bound_identity = bound_source.identity.clone();
@@ -2448,13 +2582,12 @@ impl DecodeFactCache {
         // permit. Dropping or aborting this waiter cannot abandon a live child
         // or restore the shared source offset before kill/reap completes.
         let collection = tokio::spawn(async move {
-            let _source_offset_permit = source_offset_permit;
             let result = collect(
                 &owned_probe,
                 DecodeFactCollectionSource {
                     handle: Arc::clone(&source.handle),
                     observation: bound_source,
-                    identity_delay: source.identity_delay(),
+                    offset_permit: source_offset_permit,
                 },
                 owned_catalog.as_ref(),
                 selected_stream,
@@ -2475,7 +2608,7 @@ impl DecodeFactCache {
             gate,
             remaining,
             cancelled,
-            source.identity_delay(),
+            source.final_identity_delay(),
         )
         .await?;
         if after_source.identity != key.source {
@@ -2596,7 +2729,7 @@ struct DecodeSourceObservation {
 struct DecodeFactCollectionSource {
     handle: Arc<std::fs::File>,
     observation: DecodeSourceObservation,
-    identity_delay: Duration,
+    offset_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 #[cfg(unix)]
@@ -2677,26 +2810,6 @@ async fn source_observation_with_probe_gate(
     Ok((observation?, probe_gate))
 }
 
-#[cfg(unix)]
-async fn source_observation_owned(
-    source: Arc<std::fs::File>,
-    delay: Duration,
-) -> Result<DecodeSourceObservation, DecodeFactError> {
-    let permit = identity_gate()
-        .acquire_owned()
-        .await
-        .map_err(|_| DecodeFactError::CacheInvariant)?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        if !delay.is_zero() {
-            std::thread::sleep(delay);
-        }
-        source_observation(&source)
-    })
-    .await
-    .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?
-}
-
 #[cfg(not(unix))]
 async fn source_observation_with_probe_gate(
     _source: Arc<std::fs::File>,
@@ -2742,10 +2855,15 @@ async fn collect(
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
+    let DecodeFactCollectionSource {
+        handle,
+        observation,
+        offset_permit,
+    } = source;
     let started = std::time::Instant::now();
     let launch_deadline = started + budget.min(PROBE_DEADLINE);
-    let source_fd = source.handle.as_raw_fd();
-    if probe.launch_mode.is_production() && source.observation.executable {
+    let source_fd = handle.as_raw_fd();
+    if probe.launch_mode.is_production() && observation.executable {
         return Err(DecodeFactError::SourceMetadata(
             "bound media source must not have executable mode bits".to_owned(),
         ));
@@ -2770,7 +2888,7 @@ async fn collect(
             }
         }
     }
-    let _restore_offset = RestoreOffset {
+    let restore_offset = RestoreOffset {
         fd: source_fd,
         offset: source_offset,
     };
@@ -2892,6 +3010,12 @@ async fn collect(
         }
     };
     let supervisor_result = supervisor.finish();
+    // The probe process tree is reaped now. Restore the shared open-file
+    // offset and release the producer lane before parsing or the authoritative
+    // final metadata observation. A blocked final fstat must never prevent the
+    // neutral M1 fallback from launching the legacy FFmpeg producer.
+    drop(restore_offset);
+    drop(offset_permit);
     if let Some(error) = exit_error {
         return Err(error);
     }
@@ -2918,14 +3042,7 @@ async fn collect(
             .collect();
         return Err(DecodeFactError::Failed(status.code(), reason));
     }
-    if source_observation_owned(Arc::clone(&source.handle), source.identity_delay)
-        .await?
-        .identity
-        != source.observation.identity
-    {
-        return Err(DecodeFactError::SourceChanged);
-    }
-    let before = source.observation.identity.clone();
+    let before = observation.identity.clone();
     let json: serde_json::Value = serde_json::from_slice(&stdout.0)
         .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?;
     match selected_stream {
@@ -3001,6 +3118,68 @@ async fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_pre_exec_call_graph_avoids_allocating_error_construction() {
+        fn item_body<'a>(source: &'a str, needle: &str) -> &'a str {
+            let start = source
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"));
+            let open = source[start..]
+                .find('{')
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("missing body for {needle}"));
+            let mut depth = 0_usize;
+            for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &source[open..=open + offset];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unterminated body for {needle}")
+        }
+
+        let source = include_str!("decode_facts.rs");
+        for item in [
+            "command.pre_exec(move ||",
+            "fn start_probe_session(",
+            "fn duplicate_child_fd(",
+            "fn assign_child_fd(",
+            "fn install_child_fd(",
+            "fn install_probe_child_fds(",
+            "fn confirm_linux_probe_fork(",
+            "fn wait_for_linux_fd(",
+            "fn mark_unrelated_fds_close_on_exec(",
+            "fn install_linux_filesystem_execute_denial(",
+            "fn send_linux_seccomp_listener(",
+            "fn install(&self)",
+            "fn install_listener(&self)",
+            "fn execute_held_probe(&self)",
+        ] {
+            let body = item_body(source, item);
+            for allocating in [
+                "std::io::Error::new(",
+                "std::io::Error::other(",
+                "format!(",
+                "to_owned(",
+                "to_string(",
+                "panic!(",
+                "assert!(",
+                "assert_eq!(",
+            ] {
+                assert!(
+                    !body.contains(allocating),
+                    "post-fork item {item} contains allocating or panic path {allocating}"
+                );
+            }
+        }
+    }
 
     #[cfg(unix)]
     fn executable(path: &std::path::Path, body: &str) {
@@ -3298,6 +3477,24 @@ void probe_main(unsigned long *stack) {
         );
     }
 
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[tokio::test]
+    async fn production_discovery_refuses_unsupported_unix_within_its_deadline() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("native-looking-ffprobe");
+        executable(
+            &probe,
+            "#!/bin/sh\nprintf '%s\\n' 'unsupported Unix probe must not execute'\n",
+        );
+        let result = tokio::time::timeout(
+            IDENTITY_DEADLINE + VERSION_DEADLINE,
+            DecodeProbeIdentity::discover(probe.to_str().expect("probe path")),
+        )
+        .await
+        .expect("unsupported Unix discovery remains bounded");
+        assert!(matches!(result, Err(DecodeFactError::UnsupportedPlatform)));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn self_contained_elf_has_no_external_parser_dependency() {
@@ -3396,6 +3593,38 @@ void probe_main(unsigned long *stack) {
             .expect("sealed production collection");
         assert_eq!(facts.input_video_stream(), 4);
         assert_eq!(facts.codec(), Some("h264"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn production_bootstrap_eintr_retries_share_the_absolute_deadline() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("static-ffprobe");
+        build_static_probe(&probe, 0);
+        let mut identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production probe identity and version");
+        identity.launch_mode = ProbeLaunchMode::ProductionBootstrapInterrupted;
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"production-bound source").expect("media");
+        let source = Arc::new(std::fs::File::open(media).expect("open media"));
+        let started = std::time::Instant::now();
+        let facts = DecodeFactCache::new()
+            .get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(source),
+                None,
+                ProbeStreamSelection::Absolute(4),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .expect("all injected bootstrap EINTR paths retry successfully");
+        assert_eq!(facts.input_video_stream(), 4);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "ready send, acknowledgement, first receive, and first response retries remain bounded"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -3969,7 +4198,10 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
             DecodeFactCollectionSource {
                 handle: Arc::new(source),
                 observation,
-                identity_delay: Duration::ZERO,
+                offset_permit: Arc::new(tokio::sync::Semaphore::new(1))
+                    .acquire_owned()
+                    .await
+                    .expect("source offset permit"),
             },
             None,
             ProbeStreamSelection::FirstPlayable,
@@ -4019,7 +4251,10 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             DecodeFactCollectionSource {
                 handle: Arc::new(source),
                 observation,
-                identity_delay: Duration::ZERO,
+                offset_permit: Arc::new(tokio::sync::Semaphore::new(1))
+                    .acquire_owned()
+                    .await
+                    .expect("source offset permit"),
             },
             None,
             ProbeStreamSelection::FirstPlayable,
