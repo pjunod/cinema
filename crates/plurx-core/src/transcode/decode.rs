@@ -358,6 +358,25 @@ impl DecodeCatalogMetadata {
             if dynamic_range != Some(DynamicRangeClass::DolbyVision) {
                 return Err(PlanError::ConflictingMetadata("dolby vision"));
             }
+            if let Some(compatibility_id) = dolby_vision.bl_compat_id {
+                let typed_base = match compatibility_id {
+                    1 | 6 => Some(DynamicRangeClass::Hdr10),
+                    4 => Some(DynamicRangeClass::Hlg),
+                    _ => None,
+                };
+                let labelled_base = hdr_format.as_deref().and_then(|format| {
+                    if format.contains("HDR10-compatible") {
+                        Some(DynamicRangeClass::Hdr10)
+                    } else if format.contains("HLG-compatible") {
+                        Some(DynamicRangeClass::Hlg)
+                    } else {
+                        None
+                    }
+                });
+                if labelled_base.is_some() && labelled_base != typed_base {
+                    return Err(PlanError::ConflictingMetadata("dolby compatibility"));
+                }
+            }
         }
         let encoded = serde_json::to_vec(&(dynamic_range, hdr_format.as_deref(), dolby_vision))
             .map_err(|_| PlanError::InvalidFact("catalog serialization"))?;
@@ -646,14 +665,15 @@ impl DecodeFacts {
             Some(DynamicRangeClass::DolbyVision) => match self.dolby_vision.bl_compat_id {
                 Some(1 | 6) => Some(DynamicRangeClass::Hdr10.name()),
                 Some(4) => Some(DynamicRangeClass::Hlg.name()),
-                _ if self
+                Some(_) => Some(DynamicRangeClass::DolbyVision.name()),
+                None if self
                     .hdr_format
                     .as_deref()
                     .is_some_and(|format| format.contains("HDR10-compatible")) =>
                 {
                     Some(DynamicRangeClass::Hdr10.name())
                 }
-                _ if self
+                None if self
                     .hdr_format
                     .as_deref()
                     .is_some_and(|format| format.contains("HLG-compatible")) =>
@@ -869,12 +889,12 @@ fn merge_dynamic_range(
             Some(refined @ (DynamicRangeClass::Hdr10Plus | DynamicRangeClass::DolbyVision)),
         ) => Ok(Some(refined)),
         (Some(DynamicRangeClass::Hlg), Some(DynamicRangeClass::DolbyVision))
-            if catalog.is_some_and(|metadata| {
-                metadata.dolby_vision.bl_compat_id == Some(4)
-                    || metadata
-                        .hdr_format
-                        .as_deref()
-                        .is_some_and(|format| format.contains("HLG-compatible"))
+            if catalog.is_some_and(|metadata| match metadata.dolby_vision.bl_compat_id {
+                Some(id) => id == 4,
+                None => metadata
+                    .hdr_format
+                    .as_deref()
+                    .is_some_and(|format| format.contains("HLG-compatible")),
             }) =>
         {
             Ok(Some(DynamicRangeClass::DolbyVision))

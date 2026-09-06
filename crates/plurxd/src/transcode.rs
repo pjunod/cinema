@@ -261,6 +261,24 @@ const ACTOR_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
 /// consume the portable producer's startup budget. M2 makes the prepared plan
 /// mandatory and moves this bound into the preparation transaction.
 const NEUTRAL_DECODE_FACT_PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+enum NeutralDecodeFactObservation {
+    Collected(Box<plurx_core::transcode::DecodeFacts>),
+    ContinueLegacy(crate::decode_facts::DecodeFactError),
+    Cancelled,
+}
+
+fn neutral_decode_fact_observation(
+    result: Result<plurx_core::transcode::DecodeFacts, crate::decode_facts::DecodeFactError>,
+) -> NeutralDecodeFactObservation {
+    match result {
+        Ok(facts) => NeutralDecodeFactObservation::Collected(Box::new(facts)),
+        Err(crate::decode_facts::DecodeFactError::Cancelled) => {
+            NeutralDecodeFactObservation::Cancelled
+        }
+        Err(error) => NeutralDecodeFactObservation::ContinueLegacy(error),
+    }
+}
 /// How long ffmpeg's output timestamp may sit still. It is the actor's
 /// progress budget for every actor-managed rolling producer.
 /// How long a flow evaluation waits for the actor to order its desire.
@@ -13010,24 +13028,25 @@ impl TranscodeManager {
                     None
                 }
             };
-            match self
-                .decode_facts
-                .get_or_probe(
-                    probe,
-                    crate::decode_facts::DecodeFactSource::new(
-                        Arc::clone(&source.handle),
-                        Arc::clone(&source.offset_gate),
-                    ),
-                    catalog.as_ref(),
-                    crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(NEUTRAL_DECODE_FACT_PROBE_BUDGET),
-                    cancelled,
-                )
-                .await
-            {
-                Ok(facts) => tracing::debug!(
+            let observation = neutral_decode_fact_observation(
+                self.decode_facts
+                    .get_or_probe(
+                        probe,
+                        crate::decode_facts::DecodeFactSource::new(
+                            Arc::clone(&source.handle),
+                            Arc::clone(&source.offset_gate),
+                        ),
+                        catalog.as_ref(),
+                        crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(NEUTRAL_DECODE_FACT_PROBE_BUDGET),
+                        cancelled,
+                    )
+                    .await,
+            );
+            match observation {
+                NeutralDecodeFactObservation::Collected(facts) => tracing::debug!(
                     recipe = %hash,
                     video_stream = facts.input_video_stream(),
                     codec = facts.codec().unwrap_or("unknown"),
@@ -13035,14 +13054,16 @@ impl TranscodeManager {
                     ffprobe_build_digest = probe.build_digest(),
                     "collected bound decoder facts for explicit planning"
                 ),
-                Err(crate::decode_facts::DecodeFactError::Cancelled) => return Ok(None),
-                Err(crate::decode_facts::DecodeFactError::Deadline) => {
+                NeutralDecodeFactObservation::Cancelled => return Ok(None),
+                NeutralDecodeFactObservation::ContinueLegacy(
+                    crate::decode_facts::DecodeFactError::Deadline,
+                ) => {
                     tracing::warn!(
                         recipe = %hash,
                         "decoder fact collection reached its neutral observation deadline; retaining the configured legacy decode route"
                     );
                 }
-                Err(error) => tracing::warn!(
+                NeutralDecodeFactObservation::ContinueLegacy(error) => tracing::warn!(
                     recipe = %hash,
                     %error,
                     "bound decoder facts are unavailable; retaining the configured legacy decode route"
@@ -21637,6 +21658,20 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn neutral_decoder_fact_deadline_retains_the_legacy_route() {
+        assert!(matches!(
+            neutral_decode_fact_observation(Err(crate::decode_facts::DecodeFactError::Deadline)),
+            NeutralDecodeFactObservation::ContinueLegacy(
+                crate::decode_facts::DecodeFactError::Deadline
+            )
+        ));
+        assert!(matches!(
+            neutral_decode_fact_observation(Err(crate::decode_facts::DecodeFactError::Cancelled)),
+            NeutralDecodeFactObservation::Cancelled
+        ));
+    }
 
     #[tokio::test]
     async fn orphan_sweep_never_enters_the_live_tv_owned_namespace() {

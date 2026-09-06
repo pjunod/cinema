@@ -23,6 +23,8 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_CACHE_ENTRIES: usize = 256;
+#[cfg(unix)]
+const HELD_PROBE_FD: std::os::fd::RawFd = 4;
 
 fn identity_gate() -> Arc<tokio::sync::Semaphore> {
     static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -82,18 +84,46 @@ struct ProbeFileIdentity {
     content_digest: String,
 }
 
-/// Startup-bound FFprobe identity. Fact collection executes this held,
-/// validated file descriptor rather than reopening the canonical pathname.
-/// Path revalidation before and after collection detects replacement without
-/// allowing a transient swap to choose a different executable object.
+/// Startup-bound FFprobe identity. Linux executes the held snapshot descriptor;
+/// macOS executes a snapshot protected from mutation or replacement by the
+/// user-immutable file flag. Path revalidation before and after collection
+/// detects replacement of the configured executable without allowing a
+/// transient swap to choose a different executable object.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodeProbeIdentity {
     executable: PathBuf,
     executable_file: Arc<std::fs::File>,
-    executable_snapshot: Arc<tempfile::NamedTempFile>,
+    executable_snapshot: Arc<ExecutableSnapshot>,
     build_digest: String,
     file: ProbeFileIdentity,
     snapshot_file: ProbeFileIdentity,
+}
+
+#[derive(Debug)]
+struct ExecutableSnapshot {
+    file: tempfile::NamedTempFile,
+}
+
+impl ExecutableSnapshot {
+    fn as_file(&self) -> &std::fs::File {
+        self.file.as_file()
+    }
+
+    #[cfg(any(test, not(target_os = "linux")))]
+    fn path(&self) -> &Path {
+        self.file.path()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ExecutableSnapshot {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        unsafe {
+            libc::fchflags(self.file.as_file().as_raw_fd(), 0);
+        }
+    }
 }
 
 impl DecodeProbeIdentity {
@@ -127,7 +157,7 @@ impl DecodeProbeIdentity {
         if snapshot_file.content_digest != before.content_digest {
             return Err(DecodeFactError::ProbeChanged);
         }
-        let version = probe_version(executable_snapshot.path()).await?;
+        let version = probe_version(&executable_snapshot, &executable).await?;
         let after_path = executable.clone();
         let after = path_probe_file_identity_within(after_path, IDENTITY_DEADLINE, None).await?;
         if before != after {
@@ -236,7 +266,34 @@ fn install_child_fd(source: std::os::fd::RawFd, target: std::os::fd::RawFd) -> s
 }
 
 #[cfg(unix)]
-fn snapshot_executable(source: &std::fs::File) -> Result<tempfile::NamedTempFile, DecodeFactError> {
+fn start_probe_session() -> std::io::Result<()> {
+    if unsafe { libc::setsid() } == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+async fn terminate_probe_session(
+    child: &mut tokio::process::Child,
+    process_group: Option<libc::pid_t>,
+) {
+    kill_probe_session(process_group);
+    let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+fn kill_probe_session(process_group: Option<libc::pid_t>) {
+    if let Some(process_group) = process_group {
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
     use std::os::unix::fs::{FileExt, PermissionsExt};
 
     let mut snapshot = tempfile::Builder::new()
@@ -271,14 +328,32 @@ fn snapshot_executable(source: &std::fs::File) -> Result<tempfile::NamedTempFile
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o700))
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    Ok(snapshot)
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+
+        if unsafe { libc::fchflags(snapshot.as_file().as_raw_fd(), libc::UF_IMMUTABLE) } == -1 {
+            return Err(DecodeFactError::ProbeIdentity(
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+    }
+    Ok(ExecutableSnapshot { file: snapshot })
 }
 
 #[cfg(not(unix))]
-fn snapshot_executable(
-    _source: &std::fs::File,
-) -> Result<tempfile::NamedTempFile, DecodeFactError> {
+fn snapshot_executable(_source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
     Err(DecodeFactError::UnsupportedPlatform)
+}
+
+#[cfg(target_os = "linux")]
+fn snapshot_execution_path(_snapshot: &ExecutableSnapshot) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{HELD_PROBE_FD}"))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn snapshot_execution_path(snapshot: &ExecutableSnapshot) -> PathBuf {
+    snapshot.path().to_owned()
 }
 
 #[cfg(unix)]
@@ -424,17 +499,32 @@ fn probe_file_identity_from_file(
 }
 
 #[cfg(unix)]
-async fn probe_version(path: &Path) -> Result<Vec<u8>, DecodeFactError> {
-    let mut command = tokio::process::Command::new(path);
+async fn probe_version(
+    executable: &ExecutableSnapshot,
+    configured_path: &Path,
+) -> Result<Vec<u8>, DecodeFactError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let executable_fd = executable.as_file().as_raw_fd();
+    let mut command = tokio::process::Command::new(snapshot_execution_path(executable));
+    command.as_std_mut().arg0(configured_path);
     command
         .arg("-version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
+    unsafe {
+        command.pre_exec(move || {
+            start_probe_session()?;
+            install_child_fd(executable_fd, HELD_PROBE_FD)
+        });
+    }
     let mut child = command
         .spawn()
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
     let outcome = tokio::time::timeout(VERSION_DEADLINE, async {
         let (stdout, status) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait());
@@ -447,11 +537,11 @@ async fn probe_version(path: &Path) -> Result<Vec<u8>, DecodeFactError> {
             status.map_err(|error| DecodeFactError::Read(error.to_string()))?,
         ),
         Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            terminate_probe_session(&mut child, process_group).await;
             return Err(DecodeFactError::Deadline);
         }
     };
+    kill_probe_session(process_group);
     if stdout.1 || stdout.0.is_empty() || !status.success() {
         return Err(DecodeFactError::ProbeIdentity(
             "bounded version probe failed".to_owned(),
@@ -461,7 +551,10 @@ async fn probe_version(path: &Path) -> Result<Vec<u8>, DecodeFactError> {
 }
 
 #[cfg(not(unix))]
-async fn probe_version(_path: &Path) -> Result<Vec<u8>, DecodeFactError> {
+async fn probe_version(
+    _executable: &ExecutableSnapshot,
+    _configured_path: &Path,
+) -> Result<Vec<u8>, DecodeFactError> {
     Err(DecodeFactError::UnsupportedPlatform)
 }
 
@@ -542,6 +635,10 @@ impl DecodeFactCache {
                     .map_err(|_| DecodeFactError::CacheInvariant)?
             }
         };
+        let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(DecodeFactError::Deadline);
+        }
         let owned_probe = probe.clone();
         let owned_catalog = catalog.cloned();
         let owned_cancelled = cancelled.cloned();
@@ -741,7 +838,9 @@ async fn collect(
         fd: source_fd,
         offset: source_offset,
     };
-    let mut command = tokio::process::Command::new(probe.executable_snapshot.path());
+    let executable_fd = probe.executable_snapshot.as_file().as_raw_fd();
+    let mut command =
+        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
     command.as_std_mut().arg0(probe.executable());
     #[cfg(test)]
     command.env("PLURX_TEST_PROBE_PATH", probe.executable());
@@ -757,8 +856,9 @@ async fn collect(
     ]);
     unsafe {
         command.pre_exec(move || {
+            start_probe_session()?;
             install_child_fd(source_fd, 3)?;
-            Ok(())
+            install_child_fd(executable_fd, HELD_PROBE_FD)
         });
     }
     let mut child = command
@@ -768,13 +868,13 @@ async fn collect(
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
     let stderr = child.stderr.take().ok_or(DecodeFactError::MissingPipe)?;
     let outcome = tokio::select! {
         biased;
         _ = wait_for_cancellation(cancelled) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            terminate_probe_session(&mut child, process_group).await;
             return Err(DecodeFactError::Cancelled);
         }
         outcome = tokio::time::timeout(budget.min(PROBE_DEADLINE), async {
@@ -793,11 +893,11 @@ async fn collect(
             status.map_err(|error| DecodeFactError::Read(error.to_string()))?,
         ),
         Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            terminate_probe_session(&mut child, process_group).await;
             return Err(DecodeFactError::Deadline);
         }
     };
+    kill_probe_session(process_group);
     if stdout.1 || stderr.1 {
         return Err(DecodeFactError::OversizedOutput);
     }
@@ -826,19 +926,21 @@ async fn collect(
             let index = absolute_video_ordinal(&json, ordinal).ok_or_else(|| {
                 DecodeFactError::InvalidFacts("legacy video stream is missing".to_owned())
             })?;
-            match catalog {
+            match catalog.filter(|_| first_playable_video_index(&json) == Some(index)) {
                 Some(catalog) => {
                     DecodeFacts::from_ffprobe_json_at_with_catalog(&json, before, index, catalog)
                 }
                 None => DecodeFacts::from_ffprobe_json_at(&json, before, index),
             }
         }
-        ProbeStreamSelection::Absolute(index) => match catalog {
-            Some(catalog) => {
-                DecodeFacts::from_ffprobe_json_at_with_catalog(&json, before, index, catalog)
+        ProbeStreamSelection::Absolute(index) => {
+            match catalog.filter(|_| first_playable_video_index(&json) == Some(index)) {
+                Some(catalog) => {
+                    DecodeFacts::from_ffprobe_json_at_with_catalog(&json, before, index, catalog)
+                }
+                None => DecodeFacts::from_ffprobe_json_at(&json, before, index),
             }
-            None => DecodeFacts::from_ffprobe_json_at(&json, before, index),
-        },
+        }
     }
     .map_err(|error| DecodeFactError::InvalidFacts(error.to_string()))
 }
@@ -851,6 +953,23 @@ fn absolute_video_ordinal(json: &serde_json::Value, ordinal: u32) -> Option<u32>
             stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
         })
         .nth(usize::try_from(ordinal).ok()?)?
+        .get("index")?
+        .as_u64()
+        .and_then(|index| u32::try_from(index).ok())
+}
+
+fn first_playable_video_index(json: &serde_json::Value) -> Option<u32> {
+    json.get("streams")?
+        .as_array()?
+        .iter()
+        .find(|stream| {
+            stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+                && !stream
+                    .get("disposition")
+                    .and_then(|value| value.get("attached_pic"))
+                    .and_then(serde_json::Value::as_i64)
+                    .is_some_and(|value| value != 0)
+        })?
         .get("index")?
         .as_u64()
         .and_then(|index| u32::try_from(index).ok())
@@ -985,6 +1104,19 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"mjpeg",
             },
         )
         .expect("catalog facts");
+        let attached_with_catalog = cache
+            .get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(Arc::clone(&source)),
+                Some(&catalog),
+                ProbeStreamSelection::LegacyVideoOrdinal(0),
+                Duration::from_secs(2),
+                None,
+            )
+            .await
+            .expect("first-playable catalog is not applied to attached art");
+        assert_eq!(attached_with_catalog.input_video_stream(), 4);
+        assert_eq!(attached_with_catalog.dynamic_range(), Some("sdr"));
         let playable = cache
             .get_or_probe(
                 &identity,
@@ -1103,6 +1235,66 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
                 .content_digest,
             identity.file.content_digest
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_path_swap_cannot_change_the_executable_object() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"source").expect("media");
+        let source = std::fs::File::open(&media).expect("open source");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version snapshot-a'; exit 0; fi
+printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
+"###,
+        );
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("identity");
+        let snapshot_path = identity.executable_snapshot.path().to_owned();
+        let held_path = snapshot_path.with_extension("held");
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::rename(&snapshot_path, &held_path).expect("move snapshot pathname");
+            executable(
+                &snapshot_path,
+                r###"#!/bin/sh
+touch "$PLURX_TEST_PROBE_PATH.snapshot-b"
+printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
+"###,
+            );
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            std::fs::rename(&snapshot_path, &held_path).is_err(),
+            "the immutable snapshot path must refuse replacement"
+        );
+        let before = source_identity(&source).expect("source identity");
+        let facts = collect(
+            &identity,
+            &source,
+            before,
+            None,
+            ProbeStreamSelection::FirstPlayable,
+            Duration::from_secs(2),
+            None,
+        )
+        .await
+        .expect("held snapshot descriptor remains the execution object");
+        assert_eq!(facts.codec(), Some("h264"));
+        assert!(
+            !probe.with_extension("snapshot-b").exists(),
+            "replacement at the snapshot pathname must never execute"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::remove_file(&snapshot_path).expect("remove replacement snapshot");
+            std::fs::remove_file(&held_path).expect("remove displaced snapshot link");
+        }
     }
 
     #[cfg(unix)]
@@ -1355,10 +1547,12 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             &probe,
             r###"#!/bin/sh
 if test "$1" = "-version"; then printf '%s\n' 'ffprobe version running-cancel'; exit 0; fi
-cat "$8" >/dev/null
+( sleep 1
+  dd if="$8" of=/dev/null bs=1 skip=6 count=1 >/dev/null 2>&1
+  touch "$PLURX_TEST_PROBE_PATH.descendant"
+) &
 touch "$PLURX_TEST_PROBE_PATH.started"
-sleep 5
-printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
+wait
 "###,
         );
         let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
@@ -1394,6 +1588,63 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             .expect("source lease released only after child reap");
         let mut view = source.try_clone().expect("source view");
         assert_eq!(view.stream_position().expect("restored source offset"), 3);
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert!(
+            !probe.with_extension("descendant").exists(),
+            "cancellation must terminate every inherited-descriptor descendant"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_lease_wait_is_charged_to_the_probe_deadline() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"source").expect("media");
+        let source = Arc::new(std::fs::File::open(&media).expect("open source"));
+        let offset_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&offset_gate)
+            .acquire_owned()
+            .await
+            .expect("hold source lease");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version lease-deadline'; exit 0; fi
+touch "$PLURX_TEST_PROBE_PATH.started"
+sleep 5
+printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
+"###,
+        );
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("identity");
+        let cache = DecodeFactCache::new();
+        let started = std::time::Instant::now();
+        let collection = cache.get_or_probe(
+            &identity,
+            DecodeFactSource::new(source, offset_gate),
+            None,
+            ProbeStreamSelection::FirstPlayable,
+            Duration::from_millis(600),
+            None,
+        );
+        tokio::pin!(collection);
+        tokio::select! {
+            result = &mut collection => panic!("collector returned while source lease was held: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(450)) => {}
+        }
+        drop(held);
+        assert_eq!(collection.await, Err(DecodeFactError::Deadline));
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "waiting for the source lease must not restart the full probe budget"
+        );
+        assert!(
+            probe.with_extension("started").exists(),
+            "the regression must exercise collection after lease acquisition"
+        );
     }
 
     #[tokio::test]

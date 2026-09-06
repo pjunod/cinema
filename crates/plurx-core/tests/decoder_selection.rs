@@ -1366,6 +1366,43 @@ fn dolby_compatible_bases_preserve_legacy_routing_and_profile5_needs_rpu_graph()
     )
     .expect("HLG-compatible Dolby source retains the legacy CPU route");
 
+    for (compatibility_id, stale_label) in [
+        (0, "Dolby Vision · Profile 5 (HDR10-compatible)"),
+        (2, "Dolby Vision · Profile 8 (HLG-compatible)"),
+    ] {
+        assert_eq!(
+            DecodeCatalogMetadata::new(
+                Some("dolby_vision"),
+                Some(stale_label),
+                DolbyVisionFacts {
+                    profile: Some(if compatibility_id == 0 { 5 } else { 8 }),
+                    level: Some(6),
+                    bl_compat_id: Some(compatibility_id),
+                    el_present: Some(false),
+                    rpu_present: Some(true),
+                },
+            ),
+            Err(PlanError::ConflictingMetadata("dolby compatibility")),
+            "typed compatibility id {compatibility_id} must outrank {stale_label}"
+        );
+    }
+
+    let stale_hlg = DecodeCatalogMetadata::new(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 5 (HLG-compatible)"),
+        DolbyVisionFacts {
+            profile: Some(5),
+            level: Some(6),
+            bl_compat_id: Some(0),
+            el_present: Some(false),
+            rpu_present: Some(true),
+        },
+    );
+    assert_eq!(
+        stale_hlg,
+        Err(PlanError::ConflictingMetadata("dolby compatibility"))
+    );
+
     let profile5 = DecodeCatalogMetadata::new(
         Some("dolby_vision"),
         Some("Dolby Vision · Profile 5"),
