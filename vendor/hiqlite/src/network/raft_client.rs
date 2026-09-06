@@ -1150,13 +1150,10 @@ impl NetworkConnectionStreaming {
         })
     }
 
-    fn finish_snapshot_response(
+    fn restore_transfer_after_snapshot_mismatch(
         &self,
-        response: Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
-    ) -> Result<
-        InstallSnapshotResponse<NodeId>,
-        RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
-    > {
+        response: &Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
+    ) {
         if matches!(
             &response,
             Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(
@@ -1175,8 +1172,6 @@ impl NetworkConnectionStreaming {
             // final chunk and the retry has no non-final RPC at all.
             attempt.return_to_transfer();
         }
-
-        response.map_err(|error| remote_raft_error(&self.node, error))
     }
 
     #[inline(always)]
@@ -1393,7 +1388,10 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
             .send(RaftRequest::SnapshotDB((ack, req)), rx, rpc_ttl)
             .await?
         {
-            RaftStreamResponsePayload::SnapshotDB(resp) => self.finish_snapshot_response(resp),
+            RaftStreamResponsePayload::SnapshotDB(resp) => {
+                self.restore_transfer_after_snapshot_mismatch(&resp);
+                resp.map_err(|error| remote_raft_error(&self.node, error))
+            }
             _ => unreachable!(),
         }
     }
@@ -1468,7 +1466,10 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
             .send(RaftRequest::SnapshotCache((ack, req)), rx, rpc_ttl)
             .await?
         {
-            RaftStreamResponsePayload::SnapshotCache(resp) => self.finish_snapshot_response(resp),
+            RaftStreamResponsePayload::SnapshotCache(resp) => {
+                self.restore_transfer_after_snapshot_mismatch(&resp);
+                resp.map_err(|error| remote_raft_error(&self.node, error))
+            }
             _ => unreachable!(),
         }
     }
