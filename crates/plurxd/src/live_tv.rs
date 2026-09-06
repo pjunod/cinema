@@ -2528,6 +2528,11 @@ async fn capture_live_stderr(
             || (text.contains("decoder (codec ") && text.contains(") not found for input stream"))
             || text.contains("stream map '0:a:0' matches no streams")
             || text.contains("stream map '0:v:0' matches no streams")
+            // FFmpeg 8.1.2 can redact the requested map between the quotes in
+            // this exact live-TV child. Both mapped streams are mandatory, so
+            // the unattributed spelling still proves this profile cannot be
+            // produced from the tuner input; it does not identify a decoder.
+            || text.contains("stream map '' matches no streams")
         {
             decoder_unavailable.store(true, Ordering::Release);
         }
@@ -4202,6 +4207,7 @@ exec /bin/cat >/dev/null
             ("Decoding requested, but no decoder found for: ac4", true),
             ("Decoder (codec ac4) not found for input stream #0:1", true),
             ("Stream map '0:a:0' matches no streams.", true),
+            ("Stream map '' matches no streams.", true),
             ("Error opening output: no space left on device", false),
             ("Invalid data found when processing input", false),
         ] {
