@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | the late predecessor-failure finding against exact candidate `086eedcd` is fixed in `b554ecc8`; focused regressions are green and the replacement exact-SHA fast lane/reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | four chronology findings against exact candidate `a54223ed` are fixed in `794a4d30` and `b54f5c2c`; focused regressions are green and the replacement exact-SHA fast lane/reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -149,7 +149,21 @@ wrong, and exact claims plus rollback when token deletion fails after the user
 update. The web suite, exact new regressions, 197 operations contracts,
 workspace check and denied-warning Clippy, vendored denied-warning Clippy,
 formatting, history audit, validation catalog, and the complete cluster/WAL lane
-pass. Three replacement exact-SHA reviews remain.
+pass. Review of replacement `a54223ed` then found four final selection gaps:
+the five-second completion cohort ran before attempt chronology, pairwise
+mixed-version clock fallback was not a transitive order, and chronology was
+lost across different snapshot fingerprints. Peer responses sampled at
+different points in the bounded fanout were also aged from one shared
+collection-start instant, which could invert two attempts' real chronology.
+Runtime correction `794a4d30`
+compares every non-expired attempt first, chooses one ordering basis for the
+whole cohort, and applies that total order across fingerprints while retaining
+the completion exception only inside a fingerprint. Runtime correction
+`b54f5c2c` stamps each authenticated public or private response with its own
+process-local monotonic receipt time and ages cached transport evidence from
+that receipt. The permutation-complete web regressions and delayed-peer
+paused-time collector regression pass; exact-candidate requalification and
+three fresh reviews remain.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -199,6 +213,7 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 thirteenth-review corrections | fail · `aa504834` rejected after green moved-base qualification | Definitive singleton losers are receipt-free, cleanup ownership is fail-fast and bounded, readiness remains false while any claim can authorize Store, v3 Begin ACK proves exact local application, expired operation identities remain exactly resolvable, and locally collected transport evidence includes monotonic collection dwell. Three exact reviews still found five correctness and persistent-inventory gaps; this exact tree is not a release candidate. |
 | M4 fourteenth-review corrections | fail · exact candidate `cc7fa35a` rejected after green qualification | Stalled age is deadline-relative, planned-outage waiting ends with its exact fence, combined promotion/password/token revocation is atomic, ambiguous cache-admin anti-replay state is one bounded expiration watermark, and all focused regressions are permanently inventoried. Three adversarial reviews still found four completion-freshness, fallback-deadline, revocation-roster, and clustered-Store-coverage gaps. |
 | M4 fifteenth-review corrections | pass · committed `c0725954`, exact review pending | Completion authority is freshness-bounded; deadline-less active state publishes and projects the producer's 30-second fallback; cache-admin revocation covers up to 63 remote committed members with concurrency eight; and a three-voter contract proves missing/wrong/exact claims plus atomic rollback on token deletion failure. Exact regressions, web, 197 operations contracts, workspace and vendored denied-warning Clippy, validation lint, history audit, formatting, and the complete cluster/WAL lane pass; three exact-SHA reviews restart from zero. |
+| M4 chronology total-order correction | pass · committed `794a4d30` and `b54f5c2c`, exact review pending | The selector orders all non-expired attempts before applying fingerprint-local completion authority, uses one clock basis for a mixed-version cohort, handles explicit null attempt ages as absent, and preserves retry chronology across different fingerprints. Per-response monotonic receipts normalize independently sampled ages before selection. Both input-order and all six mixed-cohort permutations plus the delayed-peer collector regression pass. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -352,14 +367,19 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
     daemon and browser consumers derive the same boundary for rolling peers.
     Same-snapshot completion can suppress live evidence only when it is at
     least as fresh, preventing an older terminal sample from hiding a successor.
-28. **Order distinct recovery attempts by start chronology.** Phase severity remains
-    authoritative inside one concrete boot/attempt/socket identity, while a
-    more recently started identity for the same snapshot fingerprint wins
-    across retries and restarts. Event freshness is only a rolling-peer fallback:
-    an old attempt may publish its cancellation after a successor starts. The
-    only cross-attempt override is validated, equally fresh causal completion.
-    A deadline-less observation that is already stalled also keeps its original
-    zero-remaining boundary across repeated status reads.
+28. **Order distinct recovery attempts by one cohort-wide chronology.** Phase
+    severity remains authoritative inside one concrete boot/attempt/socket
+    identity, while the more recently started non-expired identity wins across
+    retries, restarts, and snapshot fingerprints. Attempt age is authoritative
+    only when every representative supplies it; otherwise the entire cohort
+    falls back to event age, avoiding a non-transitive pairwise comparator for
+    rolling peers. The only cross-attempt override is validated causal
+    completion inside the same fingerprint's five-second freshness cohort. A
+    deadline-less observation that is already stalled also keeps its original
+    zero-remaining boundary across repeated status reads. Independently
+    completed peer responses retain their process-local monotonic receipt time,
+    so cache projection ages each sample from its actual receipt rather than a
+    shared fanout start; no cross-machine wall clock enters that comparison.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 
@@ -449,10 +469,21 @@ could let a four-second-old attempt hide a restarted attempt for the same
 fingerprint. Runtime correction `3f7530e8` fixes both with repeated paused-time
 and permutation-independent browser regressions. Review of exact candidate
 `086eedcd` then found that a predecessor could publish a fresh failure after a
-newer attempt had started. Runtime correction `b554ecc8` orders distinct
-attempts by their monotonic start age and covers that late-failure ordering in
-both input permutations. The focused tests pass; the complete focused lane,
-compiler/lint matrix, and three clean exact-candidate reviews are the next gate.
+newer attempt had started. Runtime correction `b554ecc8` ordered distinct
+attempts by their monotonic start age. Three reviews of `a54223ed` found that
+the five-second completion prefilter could still discard a newer quiet retry,
+that pairwise attempt/event clock fallback was non-transitive (and treated
+explicit null as zero), that outer fingerprint selection reverted to event
+age, and that independently completed peer responses were not normalized to a
+common local selection time. Runtime correction `794a4d30` makes chronology one
+cohort-wide total order, applies it before fingerprint-local completion
+authority, and covers the same- and different-fingerprint late-failure cases
+plus every permutation of a mixed current/current/legacy cohort. Runtime
+correction `b54f5c2c` records an authenticated response's process-local
+monotonic receipt and adds only elapsed time since that receipt when projecting
+cached transport evidence. The focused web and delayed-peer collector tests
+pass; the complete focused lane, compiler/lint matrix, and three clean
+exact-candidate reviews are the next gate.
 M5 replacement work includes the earlier CI receipt and exact-test
 count corrections plus the later zero-resource-growth, early archive-identity,
 and cumulative-attempt corrections. It also refuses successful recovery or
