@@ -102,6 +102,7 @@ EXPECTED_INVENTORY_IDS = {
     "offline.playlist",
     "offline.segment",
     "client.web_actions",
+    "client.live_tv_web",
     "client.apple_actions",
     "client.android_actions",
 }
@@ -434,7 +435,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         identifiers = [surface["id"] for surface in surfaces]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         self.assertEqual(set(identifiers), EXPECTED_INVENTORY_IDS)
-        self.assertEqual(len(surfaces), 72)
+        self.assertEqual(len(surfaces), 73)
         for surface in surfaces:
             with self.subTest(surface=surface["id"]):
                 source = ROOT / surface["source"]

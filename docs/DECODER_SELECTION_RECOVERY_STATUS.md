@@ -257,16 +257,21 @@ preservation, or decoded pixels. Each node row retains the exact `sha256:` image
 ID, full decoder-list hash, hardware-acceleration-list hash and decoded list;
 no fleet backend class is qualified in M0.
 
-Postpublication recovery is likewise unqualified. The clients advertise only
-`hold`, `retry_resource`, and `terminal`; their existing parsers intentionally
-reject undeclared `prepare_replacement`. Server preparation/commit machinery
-does not make a client perform a two-player handoff.
+Postpublication recovery is likewise unqualified. The ordinary movie clients
+advertise only `hold`, `retry_resource`, and `terminal`; their existing parsers
+intentionally reject undeclared `prepare_replacement`. Server preparation/commit
+machinery does not make a client perform a two-player handoff. Live TV Web is a
+separate lifecycle: it never enters `playback-control`, has no action
+negotiation, and stops/releases the tuner session on failure. Live TV is limited
+to prepublication recovery until that distinct lifecycle implements and
+physically qualifies a two-player successor.
 
 | Client | Declared actions | Parses `prepare_replacement` | Two players and readiness | Commit/retirement evidence | Current effective recovery |
 |---|---|---|---|---|---|
 | Web | `hold`, `retry_resource`, `terminal` | No | No | No | At most `prepublication` after server qualification |
 | Apple | `hold`, `retry_resource`, `terminal` | No; unit test expects terminal protocol error | No | No physical run | At most `prepublication` after server qualification |
 | Android | `hold`, `retry_resource`, `terminal` | No; unit test expects terminal protocol error | No | No physical run | At most `prepublication` after server qualification |
+| Live TV Web | None; outside `playback-control` | No protocol participant | No; one owned media element | No physical run | Prepublication only after server qualification |
 
 The visible Settings → Developer values are operator-requested upper bounds,
 not a claim that every node or session can execute them. Each node computes an
@@ -337,7 +342,8 @@ and exact-tree qualification remain pending.
 
 | Post-rebase finding | Resolution on working tree |
 |---|---|
-| Current `main` added direct Live TV FFmpeg construction outside the frozen movie builders | Five Live TV builder, producer, stderr, graph-probe, and renderer rows bring the inventory to 72; static discovery and a complete software argv baseline prevent silent omission |
+| Current `main` added direct Live TV FFmpeg construction outside the frozen movie builders | Five producer-side Live TV rows plus its distinct Web client boundary bring the inventory to 73; static discovery and a complete software argv baseline prevent silent omission |
+| Live TV Web bypasses the ordinary playback-control replacement protocol | A separate client capability row and gap matrix limit it to prepublication recovery until two-player handoff is implemented and physically qualified |
 | Historical receipts were relabeled with rebased hashes | Original hashes are retained as pre-rebase evidence; only commands actually run on the current tree may be recorded as current qualification |
 | Baseline and milestone state remained stale after rebase | The authoritative Forgejo base is explicit and M0 remains pending until repaired-head reviews and qualification finish |
 | Diagnostic counters were unbounded | Every published diagnostic counter saturates at `u64::MAX`; exact maximum and maximum-plus-one repeat summaries are covered |

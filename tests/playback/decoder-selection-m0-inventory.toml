@@ -498,6 +498,13 @@ anchor = 'Object.freeze(["hold", "retry_resource", "terminal"])'
 obligation = "add and physically qualify prepare_replacement before full recovery"
 
 [[surfaces]]
+id = "client.live_tv_web"
+kind = "client_capability"
+source = "crates/plurxd/src/web/index.html"
+anchor = "// Live TV owns its own media element and capability. It never enters PLAYER,"
+obligation = "remain prepublication-only until its separate lifecycle negotiates and physically qualifies a two-player successor handoff"
+
+[[surfaces]]
 id = "client.apple_actions"
 kind = "client_capability"
 source = "clients/apple/Sources/PlaybackControlReporter.swift"

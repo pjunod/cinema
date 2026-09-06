@@ -40,8 +40,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_frozen_inventory_and_argument_claims_match_retained_artifacts(self) -> None:
         surfaces = self.inventory["surfaces"]
-        self.assertEqual(len(surfaces), 72)
-        self.assertIn("bring the inventory to 72", self.status)
+        self.assertEqual(len(surfaces), 73)
+        self.assertIn("bring the inventory to 73", self.status)
 
         names = [case["name"] for case in self.arguments]
         self.assertEqual(len(names), 16)
@@ -111,6 +111,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             self.flat_status,
         )
         self.assertIn("Postpublication recovery is likewise unqualified.", self.status)
+        self.assertIn("Live TV Web", self.status)
+        self.assertIn(
+            "Live TV is limited to prepublication recovery",
+            self.flat_status,
+        )
         self.assertIn(
             "Unsupported sessions end explicitly; they do not silently run an "
             "unqualified automatic replacement.",
