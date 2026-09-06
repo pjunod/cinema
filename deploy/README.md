@@ -114,6 +114,8 @@ Set `PLURX_IMAGE` only when one builder publishes an image that every server
 should pull:
 
 ```bash
+git fetch origin
+git switch --detach origin/main # the checkout must match the published image
 cd deploy
 printf '%s\n' \
   'PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main' >> .env
@@ -124,9 +126,12 @@ curl -fsS http://127.0.0.1:32400/readyz
 
 On a replicated cluster, run `make docker-image-up` and the readiness probe on
 one voter at a time, and require `/readyz` to return 200 before advancing. The
-target pulls while the existing voter runs, derives and proves one exact
-startup period, then crosses the quorum boundary with `compose up --no-build`.
-It cannot silently rebuild a different local artifact.
+target pulls while the existing voter runs, freezes the pulled image ID, and
+requires its nonempty `org.opencontainers.image.revision` OCI label to match
+the clean checkout before any checkout-owned budget proof runs. It also
+requires the server and discovery companion to resolve to that same frozen ID.
+Only then does it derive and prove one exact startup period and cross the quorum
+boundary with `compose up --no-build --pull never`.
 
 The post-merge Forgejo job runs `scripts/registry-push` after the complete
 `main` validation fan-out. It publishes the moving `main` tag only after the
@@ -135,12 +140,19 @@ checks. Versioned releases keep the separate `latest` alias. Use the immutable
 tag for rollback:
 
 ```bash
+git fetch origin
+git switch --detach <old-40-character-sha>
 sed -i.bak \
-  's|^PLURX_IMAGE=.*|PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<old-sha>|' \
+  's|^PLURX_IMAGE=.*|PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<first-12-characters>|' \
   deploy/.env
 make docker-image-up
 curl -fsS http://127.0.0.1:32400/readyz
 ```
+
+The 40-character checkout SHA and the image's `sha-` tag must name the same
+commit. A mismatch is refused before the startup-budget checker or replacement
+runs; use the exact revision printed by the target rather than guessing which
+commit a moving tag contains.
 
 If the registry is unavailable, the tracked `build:` block remains the local
 fallback. Build the checked-out revision with `make docker-up`; it preserves

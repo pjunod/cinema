@@ -784,14 +784,45 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe
 # while the old container is running; the replacement still waits for the
-# resolved startup budget proof. Derive the period once after the pull and use
-# that exact value for both the proof and the no-build mutation.
+# resolved startup budget proof. That proof reads constants from this checkout,
+# so the pulled runtime's immutable image ID must carry the same revision as a
+# clean HEAD before the checker is allowed to run. Pin both Compose services to
+# that ID for the proof and mutation: neither a moving tag nor an override may
+# swap the artifact after it was inspected.
 .PHONY: docker-image-up
 docker-image-up: ## Pull + (re)start the prebuilt image after its startup budget passes
-	cd deploy && docker compose pull plurxd \
-	  && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
-	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build
+	cd deploy && image_ref="$$(docker compose config --images plurxd)" \
+	  && test -n "$$image_ref" \
+	  && docker compose pull plurxd \
+	  && image_id="$$(docker image inspect --format '{{.Id}}' "$$image_ref")" \
+	  && test -n "$$image_id" \
+	  && revision="$$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$$image_id")" \
+	  && source_revision="$$(git rev-parse HEAD)" \
+	  && if test -n "$$(git status --porcelain --untracked-files=no)"; then \
+	       echo >&2 "docker-image-up refuses a tracked-dirty checkout because its source cannot prove a published image"; \
+	       echo >&2 "commit or stash tracked changes, then check out revision $$revision"; \
+	       exit 1; \
+	     fi \
+	  && if test -z "$$revision" || test "$$revision" = '<no value>'; then \
+	       echo >&2 "pulled image $$image_id ($$image_ref) has no org.opencontainers.image.revision label"; \
+	       echo >&2 "choose a qualified Plurx image built with PLURX_BUILD_SHA"; \
+	       exit 1; \
+	     fi \
+	  && if test "$$revision" != "$$source_revision"; then \
+	       echo >&2 "pulled image $$image_id was built from $$revision, but this checkout is $$source_revision"; \
+	       echo >&2 "fetch and check out $$revision, or choose the image published for $$source_revision"; \
+	       exit 1; \
+	     fi \
+	  && resolved_images="$$(PLURX_IMAGE="$$image_id" docker compose config --images plurxd plurx-discovery)" \
+	  && set -- $$resolved_images \
+	  && if test "$$#" -ne 2 || test "$$1" != "$$image_id" || test "$$2" != "$$image_id"; then \
+	       echo >&2 "plurxd and plurx-discovery must both resolve to inspected image $$image_id"; \
+	       echo >&2 "resolved images: $$resolved_images"; \
+	       exit 1; \
+	     fi \
+	  && period="$$(PLURX_IMAGE="$$image_id" python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	  && PLURX_IMAGE="$$image_id" PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
+	  && PLURX_IMAGE="$$image_id" PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build --pull never
 	@echo "image up: $(VERSION)"
 
 .PHONY: release-check

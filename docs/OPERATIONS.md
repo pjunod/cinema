@@ -223,22 +223,41 @@ restart. Replacement remains serial: pull · startup-budget proof · no-build
 
 ```bash
 cd /opt/noirr/plurx
+git fetch origin
+git switch --detach origin/main # must match the revision in the fleet image
 make docker-image-up
 curl -fsS http://127.0.0.1:32400/readyz
 curl -fsS http://127.0.0.1:32400/api/v1/server
 ```
 
-`make docker-image-up` pulls `plurxd`, derives one startup period from the
-resolved Compose/TOML/environment configuration, proves that exact value, and
-then applies it with `docker compose up -d --no-build`. A failed proof leaves
-the running voter untouched; `--no-build` prevents an accidental local rebuild
-from differing from the qualified fleet artifact.
+`make docker-image-up` pulls `plurxd`, freezes its immutable local image ID,
+and reads `org.opencontainers.image.revision` from that ID rather than from the
+moving tag. The label must be nonempty and exactly match a tracked-clean
+checkout's `HEAD`; the server and discovery companion must both resolve to the
+same frozen ID. Only then does the target derive one startup period from the
+resolved Compose/TOML/environment configuration, prove that exact value, and
+apply it with `docker compose up -d --no-build --pull never`. An identity,
+configuration, or budget failure leaves the running voter untouched. If
+`origin/main` moved ahead of the published fleet tag, use the image revision
+printed by the refusal or wait for publication rather than bypassing the
+check.
 
 **Rollback by digest-bearing tag, not by rebuilding an old tree on every
 node.** Replace `main` in `deploy/.env` with the known-good
-`sha-<12hex>` tag, then run the same serial `make docker-image-up` and readiness
-gate. The Forgejo cleanup rule keeps the ten newest `sha-` tags, which bounds
-disk use and rollback depth together.
+`sha-<12hex>` tag and check out that same full 40-character commit. Then run the
+same serial `make docker-image-up` and readiness gate. The Forgejo cleanup rule
+keeps the ten newest `sha-` tags, which bounds disk use and rollback depth
+together.
+
+```bash
+git fetch origin
+git switch --detach <old-40-character-sha>
+sed -i.bak \
+  's|^PLURX_IMAGE=.*|PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<first-12-characters>|' \
+  deploy/.env
+make docker-image-up
+curl -fsS http://127.0.0.1:32400/readyz
+```
 
 If nuc3 or Forgejo is down, do not weaken the cluster sequence. Leave one
 voter down at most and use the retained local-build path on that voter:
@@ -251,8 +270,10 @@ curl -fsS http://127.0.0.1:32400/readyz
 ```
 
 This fallback is slower, but it keeps a registry outage from becoming a
-deployment dead end. Restore `deploy/.env` to `latest` only after Forgejo is
-healthy and that voter can pull the intended immutable tag.
+deployment dead end. After Forgejo recovers, keep the known-good immutable tag
+while the rollback remains active. To resume normal fleet updates, restore
+`deploy/.env` to `main`, fetch the repository, and check out the revision named
+by the pulled image before running `make docker-image-up`.
 
 ### Rolling back a deploy
 

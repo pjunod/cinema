@@ -120,6 +120,12 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
 # cold qualification exceed the Docker job's one-hour bound before these
 # runtime assertions could report a result.
 FROM runtime-assets AS runtime
+ARG PLURX_BUILD_SHA=""
+# The fleet rollout inspects this label on the pulled image ID before it trusts
+# checkout-owned deployment policy. Redeclare the build arg in this final stage:
+# Docker build args are stage-scoped, and a label inherited only by the build
+# stage would leave the shipped runtime unverifiable.
+LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"
 COPY --from=build /plurxd /usr/local/bin/plurxd
 # Stopped-node recovery and cluster validation tooling. The WAL inspector is
 # read-only, refuses a live lock, and lets an operator diagnose the same image
