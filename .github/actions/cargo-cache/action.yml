@@ -57,6 +57,23 @@ runs:
         PERSISTENT_ELIGIBLE: ${{ inputs.persistent-eligible }}
       run: |
         set -euo pipefail
+        # First, and before the cache mode is even chosen. A runner that
+        # cannot fit this build reports a linker bus error rather than a full
+        # disk, and that message costs an hour to read correctly.
+        #
+        # This lived inside the persistent-cache branch on its first attempt,
+        # which meant it never ran on any lane that took the hosted path —
+        # including the `fast Rust gate`, which then filled the disk exactly
+        # as before while the check reported nothing at all. A preflight that
+        # only guards some jobs is worse than none, because the jobs it
+        # skips look identically clean.
+        #
+        # The number is measured rather than chosen: a full debug workspace
+        # tree is 21G on the pinned toolchain. 20G was the first guess and
+        # could never have been enough. `disk-gb` lets a heavier lane ask for
+        # what it needs instead of every lane inheriting the worst case.
+        "$GITHUB_WORKSPACE/scripts/ci-require-disk" \
+          "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" "${DISK_GB:-30}"
         [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
           echo "::error::Cargo cache lane must be filesystem-safe"
           exit 1
@@ -80,20 +97,6 @@ runs:
           echo "::error::Cannot derive the pinned Rust toolchain"
           exit 1
         }
-        # Before anything expensive: a runner that cannot fit this build
-        # reports a linker bus error rather than a full disk, and that message
-        # costs an hour to read correctly.
-        #
-        # The number is measured, not chosen. A full debug workspace tree is
-        # 21G on the pinned toolchain, and the jobs that carry Playwright
-        # browsers and an ffmpeg build on top of it need more again. 20G was
-        # the first guess and it was wrong: the browser-acceptance job passed
-        # the check and then filled the disk mid-build, which is the exact
-        # failure this exists to pre-empt. `disk-gb` lets a heavier lane ask
-        # for what it actually needs rather than every lane inheriting the
-        # worst case.
-        "$GITHUB_WORKSPACE/scripts/ci-require-disk" \
-          "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" "${DISK_GB:-30}"
         mapfile -t cache_paths < <(
           "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-prepare" \
             "$RUNNER_TOOL_CACHE" "$runner_name" "$toolchain" "$CACHE_LANE"
