@@ -1397,7 +1397,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # call. The EINTR seam is stack-local and the final-observation fallback
 # regression reuses the existing production deadline; the reviewed total
 # remains 644.
-expected_occurrences = 644
+# 644 -> 645 after persistent bootstrap interruption coverage: one test-only
+# timeout awaits return of the version owner after the shared absolute launch
+# deadline. It starts no work and cannot release until supervisor teardown.
+expected_occurrences = 645
 
 [[module_structures]]
 id = "bare-time-constructor"

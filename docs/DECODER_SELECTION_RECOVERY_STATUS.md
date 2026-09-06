@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 sixth-review findings implemented; exact-head re-review pending · **Updated:** 2026-09-06 ·
+**Status:** M1 latest adversarial findings implemented; exact-head re-review pending · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **M1 task PR base:**
 effort head `a8bbe574`
 
@@ -21,11 +21,11 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M1 — explicit plans and bound facts |
 | Task branch | `codex/decoder-selection-m1` |
-| Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
+| Task PR | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63), open against the effort; repair head pending push and exact-head approval |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Exact code head `c2248aa7`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 33/33, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup, proves allocation-free post-fork failure paths, and injects absolute-deadline retries for ready send, acknowledgement, first seccomp receive, and first response |
-| Exact receipt | `fa9e27d7`: exact post-map history audit 1,366, catalog 24/30/1,442, status/ownership contracts 13/13, formatting, and diff check pass; its tracked effort hook also passed operations 211/211 and the pinned all-target workspace compile. Historical receipt `0eac4425` is evidence for `c2248aa7`'s parent, not the sixth-review repair |
+| Focused validation | Exact code head `4c1abfaf`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 34/34, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup. Its explicit transitive post-fork helper inventory statically rejects common allocation and panic forms. Single-interruption success plus persistent expiry at ready send, acknowledgement, first seccomp receive, and first response are covered; an invalidated first notification separately proves bounded teardown |
+| Exact receipt | `4c1abfaf`: exact mapped history audit 1,369, catalog 24/30/1,443, operations 211/211, formatting, and the pinned all-target workspace compile pass. Historical receipt `fa9e27d7` predates the latest notification-receive repair and is not presented as its evidence |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
 | Blocker | Obtain new exact-head adversarial approval, implement any findings, then run the one clean full-suite qualification |
 
@@ -34,7 +34,7 @@ An unchecked item is not implied by a nearby passing check.
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Exact-head repair review pending | `c2248aa7` closes the sixth-review post-fork allocation, EINTR deadline, final-observation offset ownership, provenance, and scope gaps; mandatory pinned-Linux collector regressions pass 33/33 |
+| M1 · explicit plan and facts | Exact-head repair review pending | `4c1abfaf` makes seccomp notification receive one-shot after each fresh readiness poll, adds persistent phase-by-phase deadline/cleanup coverage, and retains the earlier offset-ownership, provenance, and scope repairs; mandatory pinned-Linux collector regressions pass 34/34 |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -218,6 +218,20 @@ acknowledgement, first notification receive, and first response retries; a real
 producer regression stalls only final metadata observation and proves legacy
 FFmpeg can still publish segments. The same review corrected task-base,
 MPEG-4-scope, and trusted-parser wording without expanding M1 behavior.
+
+Adversarial review of exact PR head `b38523be` then found that
+`SECCOMP_IOCTL_NOTIF_RECV` still retried directly after `EINTR`. A target can
+invalidate its pending notification while interrupting that ioctl, so the
+next receive can block even though the preceding poll was ready. Commits
+`bfd623e5` through `4c1abfaf` make every receive ioctl a single attempt and
+return `EINTR`, `ENOENT`, or `EAGAIN` to a fresh deadline- or stop-aware poll.
+The Linux regression now drives persistent interruption through expiry at
+ready send, acknowledgement, first notification receive, and first response;
+it separately models invalidation after the first receive interruption and
+waits for supervisor ownership to return after teardown. A static source audit
+enumerates the complete transitive pre-exec helper set and rejects common
+allocation and panic forms. This is source-level enforcement of the enumerated
+forms, not a general proof that arbitrary future Rust code cannot allocate.
 
 The security contract is deliberately narrower than a general parser sandbox.
 Production binds the immutable primary self-contained ELF, prevents a
@@ -681,6 +695,8 @@ lane and focused tests provide earlier feedback.
 | `0eac4425` | Exact post-map receipt and ownership reconciliation | Pass · history 1,365, catalog 24/30/1,441, status/ownership contracts 13/13, formatting, and branch diff check. Its tracked effort hook additionally passed operations 211/211 and the pinned all-target workspace compile |
 | `c2248aa7` | Exact sixth-review repair and focused qualification | Pass · planner 35/35, macOS collector 20/20, pinned Linux collector 33/33, both real neutral-timeout producer regressions, status/ownership contracts 13/13, formatting, and denied-warning all-target Clippy on macOS and Linux. Its tracked effort hook passed history 1,365, catalog 24/30/1,441, operations 211/211, formatting, and the pinned workspace compile |
 | `fa9e27d7` | Exact post-map sixth-review receipt | Pass · history 1,366, catalog 24/30/1,442, status/ownership contracts 13/13, operations 211/211, formatting, branch diff check, and the pinned all-target workspace compile |
+| `b38523be` | Three independent exact-head adversarial reviews on Forgejo PR #63 | Changes requested · one reviewer approved; two found the direct post-`EINTR` notification receive could block after invalidation, the single-interruption regression did not prove expiry or teardown, and the post-fork source audit omitted transitive helpers and common allocation forms |
+| `4c1abfaf` | Latest notification-receive repair and exact focused qualification | Pass · receive is single-attempt after fresh poll; persistent interruption covers all four bootstrap phases and invalidated-notification teardown. Planner 35/35, macOS collector 20/20, pinned Linux 1.97.1 collector 34/34, both real neutral-timeout producer regressions, macOS/Linux all-target Clippy with warnings denied, history 1,369, catalog 24/30/1,443, operations 211/211, formatting, and pinned workspace compile pass. The first local final-producer invocation selected a broken Homebrew FFmpeg link; the exact rerun used the installed `ffmpeg-full` binary and passed |
 
 ## Remaining evidence before release
 
