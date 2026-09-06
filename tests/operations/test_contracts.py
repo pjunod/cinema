@@ -1406,9 +1406,12 @@ for (const startupDelay of [0, 1600, 7000]) {
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
         effort = read(".github/workflows/effort-ci.yml")
+        effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
+        effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
         precommit = read("scripts/pre-commit")
+        catalog = tomllib.loads(read("validation/points.toml"))
 
         # Forgejo has no GitHub merge-queue event. The single required
         # aggregate workflow fires on main-bound pull requests, while the
@@ -1431,7 +1434,61 @@ for (const startupDelay of [0, 1600, 7000]) {
         # release suites; an effort/** -> main PR is expanded above instead.
         self.assertIn('      - "effort/**"', effort)
         self.assertIn("name: Effort development gate", effort)
-        self.assertIn("run: make effort-rust-check", effort)
+        self.assertEqual(
+            list(effort_rust_steps),
+            [
+                "Check out the candidate",
+                "Install the pinned Rust toolchain",
+                "Restore the effort Rust cache",
+                "Compile every Rust target without executing tests",
+                "Enforce persistent Cargo bounds",
+            ],
+        )
+        rust_toolchain = effort_rust_steps["Install the pinned Rust toolchain"]
+        self.assertEqual(
+            workflow_step_scalar(rust_toolchain, "uses"),
+            "https://github.com/dtolnay/rust-toolchain@1.97.1",
+        )
+        self.assertIn("          components: rustfmt, clippy", rust_toolchain)
+        self.assertEqual(
+            workflow_step_literal(
+                effort_rust_steps["Compile every Rust target without executing tests"],
+                "run",
+            ),
+            ["make effort-rust-check", "make hiqlite-vendor-clippy"],
+        )
+        self.assertEqual(
+            make_dry_run_commands("hiqlite-vendor-clippy"),
+            [
+                "cargo clippy --locked --manifest-path vendor/hiqlite/Cargo.toml "
+                "--lib --no-default-features "
+                "--features auto-heal,cache,macros,sqlite -- -D warnings"
+            ],
+        )
+        vendor_clippy = next(
+            check
+            for check in catalog["checks"]
+            if check["id"] == "hiqlite-vendor-clippy"
+        )
+        self.assertEqual(
+            vendor_clippy,
+            {
+                "id": "hiqlite-vendor-clippy",
+                "title": (
+                    "Vendored Hiqlite production snapshot transport "
+                    "denied-warning Clippy"
+                ),
+                "command": "make hiqlite-vendor-clippy",
+                "profiles": ["commit", "ci", "full", "nightly"],
+                "requires": ["cargo", "make"],
+                "missing": "fail",
+                "timeout_seconds": 1800,
+            },
+        )
+        cluster_point = next(
+            point for point in catalog["points"] if point["id"] == "cluster.auth"
+        )
+        self.assertIn("hiqlite-vendor-clippy", cluster_point["checks"])
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
         self.assertIn("run: make web-check", effort)
@@ -1664,6 +1721,7 @@ for (const startupDelay of [0, 1600, 7000]) {
                 "mkdir -p target/validation",
                 "{",
                 '  if [ "$RUN_CLUSTER_AUTH" = true ]; then',
+                "    make hiqlite-vendor-clippy",
                 "    make cluster-harness-check",
                 "  fi",
                 '  if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
@@ -1684,6 +1742,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn('--result "$LANE_RESULT"', topology_receipt)
         for command in (
+            "make hiqlite-vendor-clippy",
             "make cluster-harness-check",
             "cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml "
             "--tests --no-deps -- -D warnings",

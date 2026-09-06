@@ -105,6 +105,15 @@ missing = "fail"
 timeout_seconds = 1800
 
 [[checks]]
+id = "hiqlite-vendor-clippy"
+title = "Vendored Hiqlite production snapshot transport denied-warning Clippy"
+command = "make hiqlite-vendor-clippy"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 1800
+
+[[checks]]
 id = "web-static"
 title = "Embedded JavaScript and theme contrast"
 command = "make web-check"
@@ -416,7 +425,7 @@ paths = [
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+checks = ["rust-gate", "rust-gate-ci", "hiqlite-vendor-clippy", "cluster-auth"]
 depends_on = ["core.media", "identity.access"]
 
 [[points]]

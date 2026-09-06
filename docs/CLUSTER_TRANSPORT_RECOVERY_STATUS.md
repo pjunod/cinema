@@ -29,7 +29,7 @@ change.
 |---|---|---|---|---|
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
-| M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | second exact-SHA review found the prebuilt proof was not bound to the pulled artifact; the replacement candidate freezes the image ID, requires clean source/revision identity, and is awaiting exact-SHA review and the effort gate | Virtual-time exact bounds · config/env/Compose precedence |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | runtime candidate `2c018809` passed three exact-SHA reviews; the effort gate exposed missing corrective-history mappings, now committed in this evidence candidate and awaiting replacement exact review, gate rerun, and merge | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | `codex/cluster-transport-m4` | not opened | combined candidate is undergoing review-finding fixes before exact-SHA re-review | Authenticated pre-HTTP status · zero store calls · stale samples expire |
 | M5 · recovery campaign | isolated review-fix branch | not opened | campaign harness and resource evidence are undergoing review-finding fixes before final integration | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
@@ -62,6 +62,7 @@ local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M3 production timing seam | pass | The `hiqlite-store` migration test proves the production startup catch-up deadline is exactly transfer + install + 45 seconds |
 | M3 deployment and operations contracts | pass · 197 tests | Compose health timing derives from the three startup phases; the 1,200-second install case requires 2,535 seconds, and the prebuilt-image target binds its exact resolved period to the inspected runtime revision before replacement |
 | M3 compile and lint | pass | Root all-target check and denied-warning Clippy pass; standalone vendored SQLite, SQLite+cache, and full library matrices pass; root and standalone formatting pass |
+| M3 corrective-history audit | pass · local replacement | Explicit current-check mappings cover both runtime corrective commits and the lint-only refactor; six status-only corrections are recorded as non-runtime. The lint refactor now owns a persistent vendored-Hiqlite denied-warning Clippy check in the effort and promotion workflows; static contracts pin its exact recipe, catalog record, and workflow order, and edits to either fail open into the cluster lane. The 1,339-commit history audit, 116 validation tests, 197 operations contracts, and 23-point/29-check catalog pass locally. |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
 ## Decisions to review — autonomous choices
@@ -94,7 +95,7 @@ local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    timeout. The node-owned executor now captures the validated C value at
    startup, and its capacity-one regression uses a non-default scaled budget.
 
-## Next checkpoint — review, gate, and merge M3
+## Next checkpoint — re-review, gate, and merge M3
 
 M1/M2 are merged into the effort at `5f96469a94`. The first exact-SHA M3 review
 found eight boundary gaps: final mismatch restored T too late, a stale T timer
@@ -107,7 +108,10 @@ three adversarial tracks and is now in PR !60. The first replacement
 review also caught a cache-only denied-warning lint in a helper's oversized
 `Result`; the helper now performs only the phase restoration and the trait
 implementations retain error mapping. All three prescribed standalone Clippy
-matrices and the 37-test snapshot client suite pass after that change. A final
+matrices and the 37-test snapshot client suite pass after that change. The
+evidence review rejected classifying the production-vendor refactor as
+non-runtime, so the current candidate permanently routes `cluster.auth`
+changes through its relevant standalone denied-warning Clippy matrix. A final
 independent pass then found that the documented prebuilt-image command bypassed
 the startup-budget proof. The replacement candidate adds a dedicated
 pull/prove/no-build fleet target and persistent ordering coverage. Its first

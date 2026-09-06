@@ -126,6 +126,12 @@ hiqlite-spike: ## Run the isolated M0 raft/SQLite semantic proof
 	$(CARGO) test --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
 	  --test hiqlite_m0 -- --nocapture
 
+.PHONY: hiqlite-vendor-clippy
+hiqlite-vendor-clippy: ## Deny warnings in the vendored production snapshot transport
+	$(CARGO) clippy --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --lib --no-default-features --features auto-heal,cache,macros,sqlite \
+	  -- -D warnings
+
 .PHONY: hiqlite-baseline
 hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 	$(CARGO) test --release --manifest-path spikes/hiqlite-m0/Cargo.toml \
