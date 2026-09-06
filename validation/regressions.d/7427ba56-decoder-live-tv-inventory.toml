@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["7427ba56", "2c366779"]
+commits = ["7427ba56", "2c366779", "70c94345"]
 points = ["live-tv.integration", "playback.pipeline", "validation.framework"]
 checks = ["rust-gate", "operations-contract", "catalog-contract"]
 reason = "Post-rebase review found that the M0 inventory and exact-tree evidence omitted the newly inherited direct Live TV FFmpeg producer. The mapped tests freeze its complete software HLS argv, discover both shipping Live TV command constructors and five ownership surfaces, saturate diagnostic counters at the published u64 boundary, and prevent historical pre-rebase receipts from being presented as current qualification."
