@@ -1787,8 +1787,13 @@ fn live_tv_activation_guard_predicate() -> String {
       OR EXISTS (SELECT 1 FROM settings WHERE key = $4 \
         AND value = CAST($5 AS TEXT) AND CAST(value AS INTEGER) = $5)\
     )";
+    // `role` is written only by `promote_learner`, so a node that joined as a
+    // voter carries NULL here and `role = 'voter'` matched nothing. Ask the
+    // question the way every other predicate in this file asks it: a node that
+    // is not a learner is a voter. `IS NOT` because the value is normally NULL,
+    // and `NULL <> 'learner'` is NULL rather than true.
     let owner_ready = "EXISTS (SELECT 1 FROM cluster_nodes owner \
-      WHERE owner.node_id = $6 AND owner.role = 'voter' \
+      WHERE owner.node_id = $6 AND owner.role IS NOT 'learner' \
         AND owner.removed_at IS NULL \
         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
           WHERE removal.node_id = owner.node_id) \
@@ -9299,7 +9304,7 @@ mod tests {
         connection
             .execute_batch(&format!(
                 "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL); \
-                 CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, role TEXT NOT NULL, removed_at INTEGER, last_seen_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, role TEXT, removed_at INTEGER, last_seen_at INTEGER NOT NULL); \
                  CREATE TABLE cluster_node_capabilities (node_id TEXT NOT NULL, capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability)); \
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
@@ -9312,7 +9317,7 @@ mod tests {
                  {MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL}; \
                  {REQUIRE_LIVE_TV_JOIN_INTENT_ON_RESERVATION_SQL}; \
                  {REQUIRE_LIVE_TV_JOIN_INTENT_ON_STAGING_SQL}; \
-                 INSERT INTO cluster_nodes VALUES ('owner', 'voter', NULL, 1);"
+                 INSERT INTO cluster_nodes (node_id, role, removed_at, last_seen_at) VALUES ('owner', NULL, NULL, 1);"
             ))
             .expect("live-TV membership fixture");
         connection
@@ -9798,6 +9803,58 @@ mod tests {
         );
     }
 
+    /// A voter that joined as one owns Live TV; a learner does not.
+    ///
+    /// `cluster_nodes.role` is written in exactly one place -- `promote_learner`
+    /// -- so a node that joined as a voter carries NULL there. `owner.role =
+    /// 'voter'` therefore matched no row in any real cluster, and the guard was
+    /// unsatisfiable: every visible requirement could be met and the write was
+    /// still refused, with nothing on screen saying which clause said no. The
+    /// fixture hid it by declaring `role TEXT NOT NULL` in a column order
+    /// production does not have, so the test agreed with the bug.
+    #[test]
+    fn a_voter_that_was_never_promoted_can_own_live_tv() {
+        let connection = rusqlite::Connection::open_in_memory().expect("fixture");
+        install_live_tv_membership_fixture(&connection);
+        connection
+            .execute(
+                "INSERT INTO cluster_nodes (node_id, role, removed_at, last_seen_at) \
+                 VALUES ('promoted', 'voter', NULL, 1)",
+                [],
+            )
+            .expect("a node promoted from learner does carry the string");
+        connection
+            .execute(
+                "INSERT INTO cluster_nodes (node_id, role, removed_at, last_seen_at) \
+                 VALUES ('a-learner', 'learner', NULL, 1)",
+                [],
+            )
+            .expect("learner row");
+
+        let owner_ready = |node: &str| -> bool {
+            connection
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM cluster_nodes owner \
+                       WHERE owner.node_id = ?1 AND owner.role IS NOT 'learner' \
+                         AND owner.removed_at IS NULL)",
+                    rusqlite::params![node],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("owner readiness")
+        };
+
+        // `owner` is the fixture's node: joined as a voter, so NULL role.
+        assert!(
+            owner_ready("owner"),
+            "a voter that joined as one carries NULL and must still be able to own Live TV"
+        );
+        assert!(owner_ready("promoted"), "a promoted learner is a voter too");
+        assert!(
+            !owner_ready("a-learner"),
+            "a learner must not own the tuner"
+        );
+    }
+
     #[test]
     fn enabled_live_tv_rejects_old_joins_and_rollback_heartbeats_fail_closed() {
         let mut connection = rusqlite::Connection::open_in_memory().expect("fixture");
@@ -9843,7 +9900,10 @@ mod tests {
             .expect("compatible staging");
         transaction
             .execute(
-                "INSERT INTO cluster_nodes VALUES ('new-node', 'voter', NULL, 1)",
+                // NULL role, like every voter that joined as one rather than
+                // being promoted from a learner.
+                "INSERT INTO cluster_nodes (node_id, role, removed_at, last_seen_at) \
+                 VALUES ('new-node', NULL, NULL, 1)",
                 [],
             )
             .expect("compatible node");
