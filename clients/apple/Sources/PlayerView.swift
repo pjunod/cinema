@@ -2362,9 +2362,23 @@ struct PlayerView: View {
         } label: {
             Label(
                 "Auto",
-                systemImage: controller.selectedHeight == nil
+                systemImage: controller.selectedHeight == nil && !controller.selectedQualityIsOriginal
                     ? "checkmark"
                     : "wand.and.stars"
+            )
+        }
+        Button {
+            controller.selectOriginalQuality()
+            #if os(iOS)
+            dismissOptionMenu()
+            #endif
+            revealControls()
+        } label: {
+            Label(
+                "Original",
+                systemImage: controller.selectedQualityIsOriginal
+                    ? "checkmark"
+                    : "film"
             )
         }
         ForEach(controller.qualityRungs) { rung in

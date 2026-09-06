@@ -136,10 +136,12 @@ enum ClientErrorCode: String, Codable, Equatable {
     case network, manifest, media, decoder, drm, unknown
 }
 
-/// `{"mode": "auto"}` or `{"mode": "manual", "height": 1080}` — the server's
+/// `{"mode": "auto"}`, `{"mode": "original"}`, or
+/// `{"mode": "manual", "height": 1080}` — the server's
 /// internally tagged `QualitySelection`.
 enum QualitySelection: Codable, Equatable {
     case auto
+    case original
     case manual(height: Int)
 
     private enum CodingKeys: String, CodingKey { case mode, height }
@@ -148,6 +150,7 @@ enum QualitySelection: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         switch try container.decode(String.self, forKey: .mode) {
         case "auto": self = .auto
+        case "original": self = .original
         case "manual": self = .manual(height: try container.decode(Int.self, forKey: .height))
         default:
             throw DecodingError.dataCorruptedError(
@@ -161,6 +164,8 @@ enum QualitySelection: Codable, Equatable {
         switch self {
         case .auto:
             try container.encode("auto", forKey: .mode)
+        case .original:
+            try container.encode("original", forKey: .mode)
         case .manual(let height):
             try container.encode("manual", forKey: .mode)
             try container.encode(height, forKey: .height)
@@ -343,11 +348,11 @@ final class SubtitleReadinessRetryState: @unchecked Sendable {
     private let lock = NSLock()
     private var lastReady: Bool?
 
-    func record(_ value: String?) -> Bool {
+    func record(_ value: String?, commitReady: Bool = true) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         let ready = SubtitleReadinessDecision.meansReady(value)
-        defer { lastReady = ready }
+        defer { if !ready || commitReady { lastReady = ready } }
         return lastReady == false && ready
     }
 }
@@ -389,13 +394,29 @@ struct ControlProtocolError: Error, Equatable {
 
 // MARK: - Reporter
 
-/// One in-flight exchange, newest-snapshot-wins coalescing, monotonic
-/// sequences, and a bounded exchange deadline.
-///
-/// An actor rather than a lock because every rule here is about ordering:
-/// exactly one exchange may be outstanding, a snapshot that arrives during an
-/// exchange replaces any other waiting snapshot instead of queueing behind
-/// it, and the sequence a request carries must never be reused or skipped.
+/// Local ownership is deliberately separate from the server's 409 generation.
+struct PlaybackControlCaptureOwner: Equatable, Sendable {
+    let lifecycleId: String
+    let attachmentGeneration: Int
+}
+
+/// A source-actor value, never a snapshot labelled after an actor hop. Swift
+/// value semantics keep nested capabilities and selections immutable too.
+struct PlaybackControlCapture: Equatable, Sendable {
+    let snapshot: PlaybackControlSnapshot
+    let intentGeneration: Int
+    let owner: PlaybackControlCaptureOwner
+    let sourceRevision: Int
+
+    func hasSameIntent(as other: Self?) -> Bool {
+        guard let other else { return false }
+        return owner == other.owner && intentGeneration == other.intentGeneration
+    }
+}
+
+/// One in-flight exchange, newest-capture-wins coalescing, monotonic
+/// sequences, and a bounded exchange deadline. The actor owns ordering, not
+/// source observation: all player reads happen before the capture reaches it.
 actor PlaybackControlReporter {
     typealias Send = @Sendable (String, ControlRequest) async throws -> ControlResponse
     typealias Sleep = @Sendable (Int, SleepKind) async throws -> Void
@@ -414,11 +435,20 @@ actor PlaybackControlReporter {
         var request: ControlRequest
         var response: ControlResponse?
         var failure: String?
+        /// Local-only viewer intent that produced this request.
+        let capture: PlaybackControlCapture
+        var intentGeneration: Int { capture.intentGeneration }
+    }
+
+    private struct PendingRequest {
+        var request: ControlRequest
+        let capture: PlaybackControlCapture
     }
 
     private(set) var bootstrap: ControlBootstrap
     private let clientInstanceId: String
-    private let snapshot: @Sendable () -> PlaybackControlSnapshot?
+    private let owner: PlaybackControlCaptureOwner
+    private let capture: @Sendable () -> PlaybackControlCapture?
     private let send: Send
     private let sleep: Sleep
     private let now: @Sendable () -> Int
@@ -427,9 +457,10 @@ actor PlaybackControlReporter {
     private(set) var sequence = 0
     private(set) var acceptedSequence = 0
     private(set) var stopped = false
+    private var terminalStop: PlaybackControlCapture?
     private var inFlight = false
-    private var pending: PlaybackControlSnapshot?
-    private var retryRequest: ControlRequest?
+    private var pending: PlaybackControlCapture?
+    private var retryRequest: PendingRequest?
     private var acceptedCapabilities: DynamicCapabilities?
     private var lastStartedAt: Int?
     private var nextAllowedAt = 0
@@ -438,7 +469,8 @@ actor PlaybackControlReporter {
     init?(
         bootstrap: ControlBootstrap,
         clientInstanceId: String,
-        snapshot: @escaping @Sendable () -> PlaybackControlSnapshot?,
+        owner: PlaybackControlCaptureOwner,
+        capture: @escaping @Sendable () -> PlaybackControlCapture?,
         send: @escaping Send,
         sleep: @escaping Sleep,
         now: @escaping @Sendable () -> Int,
@@ -447,7 +479,8 @@ actor PlaybackControlReporter {
         guard bootstrap.isValid, PlaybackControl.isUUID(clientInstanceId) else { return nil }
         self.bootstrap = bootstrap
         self.clientInstanceId = clientInstanceId
-        self.snapshot = snapshot
+        self.owner = owner
+        self.capture = capture
         self.send = send
         self.sleep = sleep
         self.now = now
@@ -459,17 +492,19 @@ actor PlaybackControlReporter {
     /// alive is a no-op rather than a second exchange loop.
     func start() {
         guard !stopped, pump == nil else { return }
-        pending = pending ?? snapshot()
+        if pending == nil { pending = newestCapture(nil) }
         pump = Task { [weak self] in await self?.run() }
     }
 
     /// The player changed. The newest snapshot replaces any waiting one — an
     /// intermediate position between two exchanges is not worth a round trip,
     /// and reporting it late would be worse than not reporting it.
-    func notify(_ value: PlaybackControlSnapshot? = nil) {
-        guard !stopped else { return }
-        guard let newest = value ?? snapshot(), newest.isValid else { return }
+    func notify(_ value: PlaybackControlCapture? = nil) {
+        guard let newest = newestCapture(value), newest.snapshot.isValid else { return }
+        let resume = stopped
+        guard admitAfterTerminal(newest) else { return }
         pending = newest
+        if resume { pump = Task { [weak self] in await self?.run() } }
     }
 
     /// Report now rather than at the next cadence.
@@ -485,20 +520,51 @@ actor PlaybackControlReporter {
     /// the old pump exits at its next iteration instead of racing this one.
     /// An exchange already in flight is left alone — `run()` picks up
     /// `pending` immediately after it, without sleeping.
-    func notifyUrgently(_ value: PlaybackControlSnapshot? = nil) {
-        notify(value)
-        guard !stopped, !inFlight, pending != nil else { return }
-        pump?.cancel()
-        pump = Task { [weak self] in await self?.run() }
+    @discardableResult
+    func notifyUrgently(_ value: PlaybackControlCapture? = nil) -> Int? {
+        guard let newest = newestCapture(value), newest.snapshot.isValid,
+              admitAfterTerminal(newest) else { return nil }
+        pending = newest
+        // A retry can replay the current sequence, but it cannot consume the
+        // next new request. A replacement retains this floor even if ending
+        // this reporter cancels the pump before it reaches the server.
+        let floor = sequence + 1
+        if !inFlight {
+            pump?.cancel()
+            pump = Task { [weak self] in await self?.run() }
+        }
+        return floor
     }
 
     func stop() {
+        terminalStop = nil
         guard !stopped else { return }
         stopped = true
         pending = nil
         retryRequest = nil
         pump?.cancel()
         pump = nil
+    }
+
+    /// A terminal stops only the captured intent. MainActor may publish B
+    /// immediately after this check, so B's notification can resume this
+    /// latch. Explicit End/stop and protocol failure remain permanent.
+    private func stopForTerminal(_ captured: PlaybackControlCapture) {
+        guard !stopped, captured.hasSameIntent(as: newestCapture(pending)) else { return }
+        stopped = true
+        terminalStop = captured
+        pending = nil
+        retryRequest = nil
+        pump?.cancel()
+        pump = nil
+    }
+
+    private func admitAfterTerminal(_ newest: PlaybackControlCapture) -> Bool {
+        guard stopped else { return true }
+        guard let terminalStop, !terminalStop.hasSameIntent(as: newest) else { return false }
+        self.terminalStop = nil
+        stopped = false
+        return true
     }
 
     func status() -> [String: Int] {
@@ -517,7 +583,7 @@ actor PlaybackControlReporter {
     private func run() async {
         while !stopped && !Task.isCancelled {
             if pending == nil && retryRequest == nil {
-                pending = snapshot()
+                pending = newestCapture(nil)
             }
             guard pending != nil || retryRequest != nil else {
                 try? await sleep(bootstrap.nextExchangeMs, .pacing)
@@ -548,14 +614,15 @@ actor PlaybackControlReporter {
     /// A retry replays the exact request that failed — the same sequence, the
     /// same body — because a control exchange the server never accepted must
     /// not consume a sequence number, and the server dedupes on it.
-    private func nextRequest() -> ControlRequest? {
+    private func nextRequest() -> PendingRequest? {
         if let retryRequest { return retryRequest }
-        guard let snapshot = pending, snapshot.isValid else {
+        guard let pending = newestCapture(pending), pending.snapshot.isValid else {
             pending = nil
             return nil
         }
-        pending = nil
+        self.pending = nil
         sequence += 1
+        let snapshot = pending.snapshot
         var request = ControlRequest(
             proto: PlaybackControl.protocolName,
             generation: bootstrap.generation,
@@ -581,10 +648,11 @@ actor PlaybackControlReporter {
         if request.sequence != 1 && snapshot.capabilities == acceptedCapabilities {
             request.capabilities = nil
         }
-        return request
+        return PendingRequest(request: request, capture: pending)
     }
 
-    private func exchange(_ request: ControlRequest) async {
+    private func exchange(_ pendingRequest: PendingRequest) async {
+        let request = pendingRequest.request
         nextAllowedAt = 0
         lastStartedAt = now()
         inFlight = true
@@ -606,15 +674,21 @@ actor PlaybackControlReporter {
             if response.action.type == "retry_resource", let afterMs = response.action.afterMs {
                 nextAllowedAt = now() + max(PlaybackControl.minimumExchangeMs, afterMs)
             }
-            onExchange(Exchange(request: request, response: response, failure: nil))
+            onExchange(Exchange(
+                request: request,
+                response: response,
+                failure: nil,
+                capture: pendingRequest.capture
+            ))
             // A terminal verdict ends reporting. It does not tear the player
             // down: this reporter still owns no recovery, and buffer already
             // fetched is still worth playing. The milestone that moves that
             // authority is the one that acts on this.
-            if request.demand == .end || response.action.type == "terminal" { stop() }
+            if request.demand == .end { stop() }
+            else if response.action.type == "terminal" { stopForTerminal(pendingRequest.capture) }
         } catch {
             if stopped { return }
-            handle(failure: error, for: request)
+            handle(failure: error, for: pendingRequest)
         }
     }
 
@@ -664,10 +738,16 @@ actor PlaybackControlReporter {
         }
     }
 
-    private func handle(failure: Error, for request: ControlRequest) {
+    private func handle(failure: Error, for pendingRequest: PendingRequest) {
+        let request = pendingRequest.request
         if let transport = failure as? ControlTransportError, transport.canceled { return }
         onExchange(
-            Exchange(request: request, response: nil, failure: describe(failure))
+            Exchange(
+                request: request,
+                response: nil,
+                failure: describe(failure),
+                capture: pendingRequest.capture
+            )
         )
         if failure is ControlProtocolError {
             stop()
@@ -688,7 +768,7 @@ actor PlaybackControlReporter {
             stop()
             return
         }
-        retryRequest = request
+        retryRequest = pendingRequest
         let fallback = retryableControl ? 500 : bootstrap.nextExchangeMs
         nextAllowedAt = now() + retryDelay(transport, fallback)
     }
@@ -708,7 +788,10 @@ actor PlaybackControlReporter {
         let generationChanged = generation != bootstrap.generation
         let epochChanged = epoch > bootstrap.controlEpoch
         guard generationChanged || epochChanged else { return false }
-        guard let newest = snapshot(), newest.isValid else { return false }
+        // Source may be intentionally empty between intent invalidation and
+        // publication. Adopt the validated wire owner without inventing data;
+        // fresh admission will wait for this local attachment's next capture.
+        let newest = currentCapture().flatMap { $0.snapshot.isValid ? $0 : nil }
         bootstrap.generation = generation
         bootstrap.controlEpoch = epoch
         sequence = 0
@@ -718,6 +801,20 @@ actor PlaybackControlReporter {
         lastStartedAt = nil
         pending = newest
         return true
+    }
+
+    private func currentCapture() -> PlaybackControlCapture? {
+        guard let current = capture(), current.owner == owner else { return nil }
+        return current
+    }
+
+    /// Actor delivery order is not source observation order. Adopt the newer
+    /// source envelope whole; never relabel an older queued payload.
+    private func newestCapture(_ value: PlaybackControlCapture?) -> PlaybackControlCapture? {
+        guard let current = currentCapture() else { return nil }
+        if let value, value.owner != owner { return nil }
+        guard let value, value.sourceRevision >= current.sourceRevision else { return current }
+        return value
     }
 
     private func retryDelay(_ error: ControlTransportError?, _ fallback: Int) -> Int {

@@ -6354,10 +6354,12 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         resume_below_seconds: None,
         resume_below_bytes: None,
         ahead_bytes: None,
-        delivered_bytes: 0,
-        delivered_bps: None,
-        delivered_idle_ms: i64::try_from(info.idle_seconds.saturating_mul(1_000))
-            .unwrap_or(i64::MAX),
+        // Measured, not assumed. The zero and the session-touch age this
+        // replaces looked like a reading and were not one: a handle touched a
+        // second ago reported a fresh delivery whether or not a byte had moved.
+        delivered_bytes: info.delivered_bytes,
+        delivered_bps: info.delivered_bps,
+        delivered_idle_ms: info.delivered_idle_ms,
         readrate: 0.0,
         suspended: false,
         suspend_count: 0,
@@ -10049,6 +10051,19 @@ impl TranscodeManager {
         self.cache_readers
             .begin_eviction(recipe)
             .expect("test eviction claim")
+    }
+
+    /// Blocked-GET admission counters for the operator surfaces.
+    ///
+    /// Read through `self.vod` at call time rather than captured once. This
+    /// manager replaces its own `VodServe` on the cluster boot path, so a
+    /// handle taken at construction can address a pool nothing serves from —
+    /// and an admission counter that quietly stops moving is worse than no
+    /// counter, because it reads as a quiet node.
+    pub(crate) fn blocked_get_metrics_handle(
+        &self,
+    ) -> std::sync::Arc<crate::waitpool::BlockedGetMetrics> {
+        self.vod.blocked_get_metrics_handle()
     }
 
     /// Narrow process-metrics handle with no session map or Store access.
@@ -13806,6 +13821,12 @@ impl TranscodeManager {
         const MAX_BLOCK_BUDGET_SECS: f64 = 30.0;
         const DEFAULT_MATERIALIZE_BUDGET_SECS: f64 = 30.0;
         const MAX_MATERIALIZE_BUDGET_SECS: f64 = 300.0;
+        /// Sixteen viewers each at the per-session cap of four. The ceiling is
+        /// a sanity bound, not a capacity claim: each parked GET holds a
+        /// response open and a retention pin, so an unbounded value lets one
+        /// seek storm park work until the node runs out of sockets.
+        const DEFAULT_BLOCKED_GET_CAP: usize = 64;
+        const MAX_BLOCKED_GET_CAP: usize = 4_096;
         let working_set_bytes = match read(plurx_core::store::keys::VOD_WORKING_SET_BYTES).await? {
             Some(raw) => match raw.trim().parse::<u64>() {
                 // The settings surface refuses a zero on the way in; one that
@@ -13854,11 +13875,27 @@ impl TranscodeManager {
                 .saturating_mul(1 << 30),
             None => 0,
         };
+        // Absent or unparseable keeps the built-in default: a node that has
+        // never been tuned still bounds its parked work. Clamped rather than
+        // trusted, because a zero would refuse every blocked GET — turning
+        // every seek into an immediate 503 — and an unbounded value would let
+        // one seek storm park work until the node ran out of sockets.
+        let blocked_get_cap = match read(plurx_core::store::keys::VOD_BLOCKED_GET_CAP).await? {
+            Some(raw) => raw
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|cap| *cap > 0)
+                .map(|cap| cap.min(MAX_BLOCKED_GET_CAP))
+                .unwrap_or(DEFAULT_BLOCKED_GET_CAP),
+            None => DEFAULT_BLOCKED_GET_CAP,
+        };
         Ok(Some(crate::vodserve::VodSettings {
             working_set_bytes,
             completed_cache_bytes,
             block_budget: Duration::from_secs_f64(block_secs),
             materialize_budget: Duration::from_secs_f64(materialize_secs),
+            blocked_get_cap,
         }))
     }
 
@@ -22611,6 +22648,81 @@ pub(crate) mod tests {
             read_scratch_sample(&generation, &bytes, &sampled_at),
             (0, 0)
         );
+    }
+
+    /// P2-10. The stored key reaches `VodSettings`, and an absent or unusable
+    /// value keeps the built-in default.
+    ///
+    /// This is the layer the first version of the change never tested: its
+    /// only test hand-built a `VodSettings` in Rust, so the entire
+    /// store → reader → pool wire could be deleted with the whole suite green.
+    /// A setting nothing reads is not a setting.
+    #[tokio::test]
+    async fn the_blocked_get_cap_setting_is_read_and_bounded() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            dir.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let req = SessionRequest {
+            control_sequence: None,
+            file_id: 1,
+            playback_id: "cap-probe".to_owned(),
+            request_id: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
+        };
+        let cap = |manager: &Arc<TranscodeManager>, req: &SessionRequest| {
+            let manager = Arc::clone(manager);
+            let req = req.clone();
+            async move {
+                manager
+                    .vod_settings(&req)
+                    .await
+                    .expect("settings read")
+                    .expect("VOD presentation is on")
+                    .blocked_get_cap
+            }
+        };
+
+        assert_eq!(
+            cap(&manager, &req).await,
+            64,
+            "an unconfigured node still bounds its parked work"
+        );
+
+        for (stored, expected, why) in [
+            ("512", 512, "the operator's number"),
+            ("", 64, "cleared means the default, not zero"),
+            ("0", 64, "zero would refuse every blocked GET"),
+            ("banana", 64, "unparseable is not a budget"),
+            ("999999", 4_096, "clamped to the sanity bound"),
+            ("1", 1, "the floor is usable"),
+        ] {
+            store
+                .put_setting(plurx_core::store::keys::VOD_BLOCKED_GET_CAP, stored)
+                .await
+                .expect("store the setting");
+            assert_eq!(cap(&manager, &req).await, expected, "{stored:?}: {why}");
+        }
     }
 
     #[tokio::test]

@@ -296,6 +296,51 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("page.add_init_script(ACTIVITY_CAPTURE_JS)", script)
         self.assertIn("ACTIVITY_DETAIL_BUSY === 0", script)
 
+    def test_global_activity_capture_stops_before_runner_delay_adds_a_second_tick(self):
+        script = read("scripts/ui-baseline")
+        capture = runpy.run_path(str(ROOT / "scripts/ui-baseline"))["ACTIVITY_CAPTURE_JS"]
+        contract = r"""
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const capture = process.argv[1];
+let now = 0, next = 0;
+const timers = new Map(), calls = [];
+const context = vm.createContext({
+  location: {hash: '#/item/7'}, ACT_TIMER: null,
+  setInterval(callback, delay, ...args) {
+    const id = ++next;
+    timers.set(id, {callback, delay, args, due: now + delay});
+    return id;
+  },
+  clearInterval(id) { timers.delete(id); },
+  record: value => calls.push(value),
+});
+context.window = context;
+vm.runInContext(capture, context);
+vm.runInContext(`
+  ACT_TIMER = setInterval(() => record('activity'), 4000);
+  setInterval(() => record('unrelated'), 4000);
+`, context);
+const target = 8500; // Model a badly delayed 4.5s Playwright sleep callback.
+while (true) {
+  const ready = [...timers].filter(([, timer]) => timer.due <= target)
+    .sort((a, b) => a[1].due - b[1].due)[0];
+  if (!ready) break;
+  const [id, timer] = ready;
+  now = timer.due;
+  timer.due += timer.delay;
+  timer.callback(...timer.args);
+  if (timers.has(id)) timers.set(id, timer);
+}
+assert.deepEqual(calls.filter(call => call === 'activity'), ['activity']);
+assert.deepEqual(calls.filter(call => call === 'unrelated'), ['unrelated', 'unrelated']);
+assert.equal(context.__plurxGlobalActivityCaptureTick, true);
+assert.equal(context.ACT_TIMER, null);
+"""
+        subprocess.run(["node", "-e", contract, capture], check=True)
+        self.assertIn("window.__plurxGlobalActivityCaptureTick = false;", script)
+        self.assertIn("window.__plurxGlobalActivityCaptureTick === true && !ACT_POLLING", script)
+
     def test_store_verdict_handles_unused_forgejo_workflow_without_weakening_required_lane(self):
         verdict = workflow_job_blocks(".github/workflows/ci.yml")["cluster_store"]
         step = workflow_step_blocks(verdict)["Select the required Store graph"]
@@ -937,6 +982,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn("name: Main promotion gate", workflow)
         self.assertIn("branches: [main]", workflow)
+        self.assertIn("effort/*|integration/*-into-main)", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  check:", 1)[1].split(
@@ -967,6 +1013,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         vod_web = workflow.split("\n  vod_web:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
+        self.assertIn("needs: [scope, preflight, web_layout]", vod_web)
+        self.assertNotIn("group: plurx-browser-heavy", web_layout)
+        self.assertNotIn("group: plurx-browser-heavy", vod_web)
         self.assertIn("--case suspend-resume", vod_web)
         self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
         self.assertIn(
@@ -1607,6 +1656,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIsNotNone(workflow_pin)
         self.assertIsNotNone(cache_pin)
         self.assertEqual(workflow_pin.group(1), cache_pin.group(1))
+        self.assertIn("PLURX_PLAYBACK_CHROME=$chromium", action)
+        self.assertIn('test -x "$chromium"', action)
+        self.assertNotIn("exit 0", action)
 
         # Both Android jobs reuse the Forgejo toolchain image keyed on the
         # Dockerfile hash, and the Makefile honors the pre-pull instead of

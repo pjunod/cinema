@@ -71,6 +71,16 @@ pub enum Failure {
     Stream(String),
     /// The sink refused a write.
     Sink(std::io::Error),
+    /// A publication fence refused because the fragment-index engine moved
+    /// under a rendition planned against it. Distinct from `Stream`, which is
+    /// the producer's output genuinely failing: filing this as a read fault
+    /// would name the wrong subsystem in the class a client acts on.
+    ///
+    /// The sibling source-moved fence has no variant here because it is
+    /// reached from the sink, which can only answer an `io::Error`; it records
+    /// its own class directly and `record_failure` is first-wins, so the
+    /// consequence vodgen reports afterwards cannot overwrite it.
+    EngineChanged(String),
 }
 
 /// How a generation ended.

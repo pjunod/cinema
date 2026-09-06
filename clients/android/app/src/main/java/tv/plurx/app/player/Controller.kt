@@ -69,6 +69,7 @@ import tv.plurx.app.data.SubTrack
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlaybackSessionStatus
+import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.Session
 import tv.plurx.app.ui.AppViewModel
 import tv.plurx.app.ui.theme.Accent
@@ -119,6 +120,7 @@ class Controller(
     private val plan: PlanLike,
     private val caps: Map<String, String>,
     private val decisionCaps: DeviceCaps,
+    private val playbackIntent: PlaybackIntent,
     private val vm: AppViewModel,
     private val scope: CoroutineScope,
     initialAudioOffsetMs: Long = 0,
@@ -127,6 +129,10 @@ class Controller(
     private val onError: (String) -> Unit = {},
 ) {
     val player: ExoPlayer = builtPlayer.player
+
+    /** Immutable quality of this exact decision; pending intent is separate. */
+    private val activeQuality = plan.requestedQuality
+    private val planReplacement = PlaybackPlanReplacement(activeQuality)
 
     private val progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
     val observedBitsPerSecond: Long? get() = progressiveMediaOrigin.currentObservedBitsPerSecond()
@@ -198,7 +204,11 @@ class Controller(
     private var sameHdrRetryUsed = false
 
     private val stallReopenBudget = StallReopenBudget()
-    private val stallGuard = ControllerStallGuard(stallReopenBudget)
+    private val openStallTracker = OpenPlaybackStallTracker()
+    private val stallGuard = ControllerStallGuard(stallReopenBudget, openStallTracker)
+    private var sessionlessStallRecoveryUsed = false
+    private var sessionlessStallRecoveryPositionMs: Long? = null
+    private var seekJob: Job? = null
 
     /**
      * Every create for this playback passes through one coordinator. This
@@ -209,6 +219,7 @@ class Controller(
         createSession = { body -> vm.createHlsSession(plan.fileId, body) },
         isBadRequest = { failure -> failure is HttpException && failure.code() == 400 },
         freshRequestId = { UUID.randomUUID().toString() },
+        releaseSession = vm::endHlsSession,
     )
 
     /**
@@ -243,6 +254,33 @@ class Controller(
     /** How that selection is being carried — see `SubtitlePolicy.kt`. */
     private var subtitleDelivery: SubtitleDelivery =
         routeSubtitle(trackFor(selectedSubtitle), SubtitleDelivery.Plan).delivery
+    private val recipeOwnership = PlaybackRecipeOwnership()
+    private var selectionRecipe: PlaybackRecipeOwnership.Claim? = null
+    private data class RecipeExecution(
+        val sequence: Long,
+        val recipe: PlaybackRecipeOwnership.Claim,
+        val inPlace: Boolean,
+    )
+    private var recipeExecution: RecipeExecution? = null
+
+    private fun currentRecipe(): PlaybackRecipeOwnership.Claim = recipeOwnership.request(
+        PlaybackMediaRecipe(
+            quality = playbackIntent.desiredQuality,
+            mode = planMode,
+            audioIndex = selectedAudio,
+            subtitleIndex = selectedSubtitle,
+            subtitleDelivery = subtitleDelivery,
+            audioOffsetMs = audioOffsetMs,
+            compatibilityTranscode = forceCompatibilityTranscode,
+        ),
+    )
+
+    private fun attachRecipe(recipe: PlaybackRecipeOwnership.Claim) {
+        recipeOwnership.attach(recipe)
+        selectionRecipe = recipe
+        textSelectionArmed = true
+        audioSelectionArmed = true
+    }
 
     /**
      * The dynamic range the *current* delivery puts on the wire, as the server
@@ -297,11 +335,15 @@ class Controller(
      * copied; only the playlist gained a subtitle group.
      */
     val deliveryMode: String
-        get() = when (subtitleDelivery) {
-            SubtitleDelivery.Burn -> "transcode"
-            SubtitleDelivery.NativeSession -> if (planMode == "transcode") "transcode" else "remux"
-            SubtitleDelivery.BitmapOverlay,
-            SubtitleDelivery.Plan -> planMode
+        get() {
+            val recipe = recipeOwnership.attached?.recipe
+            val mode = recipe?.mode ?: planMode
+            return when (recipe?.subtitleDelivery ?: subtitleDelivery) {
+                SubtitleDelivery.Burn -> "transcode"
+                SubtitleDelivery.NativeSession -> if (mode == "transcode") "transcode" else "remux"
+                SubtitleDelivery.BitmapOverlay,
+                SubtitleDelivery.Plan -> mode
+            }
         }
 
     val pgsOverlayIsActive: Boolean
@@ -309,11 +351,13 @@ class Controller(
 
     /** True while the original file is being read directly, base timeline = 0. */
     private val directTransport: Boolean
-        get() = subtitleDelivery.usesPlanTransport && planMode == "direct"
+        get() = (recipeOwnership.attached?.recipe?.subtitleDelivery ?: subtitleDelivery).usesPlanTransport &&
+            (recipeOwnership.attached?.recipe?.mode ?: planMode) == "direct"
 
     /** True while Media3 is reading the live progressive remux response. */
     private val progressiveTransport: Boolean
-        get() = subtitleDelivery.usesPlanTransport && planMode == "remux"
+        get() = (recipeOwnership.attached?.recipe?.subtitleDelivery ?: subtitleDelivery).usesPlanTransport &&
+            (recipeOwnership.attached?.recipe?.mode ?: planMode) == "remux"
 
     var encoder: String? = null
         private set
@@ -356,20 +400,23 @@ class Controller(
         emit = { event -> postPlaybackClientLog(scope, event) },
     )
     private val stallWatchdogJob: Job
+    private val targetPresentationWatchdogJob: Job
+    private val targetPresentationDeadline = playbackIntent.targetPresentationDeadline
+    private val targetPresentationOwner = targetPresentationDeadline.claimOwner(monotonicNowMs())
+    private var presentationForeground = true
+    private var mediaMutationEpoch = 0L
     private var statusPollingJob: Job? = null
     var playbackStallCount by mutableIntStateOf(0)
         private set
     var lastTimeToFirstFrameMs by mutableStateOf<Long?>(null)
         private set
 
-    /** Stable for this player instance — the server's supersession key. */
-    private val playbackId = UUID.randomUUID().toString()
-
     /**
      * This player's passive control reporting. Nothing about playback depends
      * on it: a server that offers no bootstrap leaves it silent.
      */
     private val playbackControl = PlaybackControlSession(scope)
+    private val playbackControlBootstrapFence = PlaybackControlBootstrapFence()
 
     /**
      * When the player began buffering, or null while it is not. The protocol
@@ -445,6 +492,11 @@ class Controller(
 
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
+            if (!playbackControlBootstrapFence.isActive()) return
+            // The departing item's failure does not own a newer requested
+            // recipe (or seek create). That create and its target deadline
+            // still own success/failure; failover must not steal the request.
+            if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
             // Only a transport failure can be answered by another node. A
             // terminal answer — an ended session's 404, a refused
@@ -571,43 +623,171 @@ class Controller(
             }
         }
 
+        /** Media3 calls this after output, unlike its pre-render metadata hook. */
         override fun onRenderedFirstFrame() {
             establishedPlayback = true
+            openStallTracker.reset()
             lastTimeToFirstFrameMs = playbackTelemetry.firstFrame(monotonicNowMs())?.elapsedMs
+            playbackNotice = null
         }
 
         override fun onTracksChanged(tracks: Tracks) {
             applyTextSelection()
             applyAudioSelection()
+            completeRecipeExecution()
         }
 
         override fun onPositionDiscontinuity(
             oldPosition: Player.PositionInfo,
             newPosition: Player.PositionInfo,
             reason: Int,
-        ) = pgsOverlay.reconcile()
-
-        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) =
+        ) {
             pgsOverlay.reconcile()
+        }
 
-        override fun onIsPlayingChanged(isPlaying: Boolean) = pgsOverlay.reconcile()
+        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+            settleAudioPlaybackIntentIfPresented()
+            pgsOverlay.reconcile()
+        }
 
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) =
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            settleAudioPlaybackIntentIfPresented()
+            if (isPlaying && plan.videoCodec == null) {
+                establishedPlayback = true
+                openStallTracker.reset()
+            }
+            pgsOverlay.reconcile()
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (!playbackControlBootstrapFence.isActive()) return
+            // Includes MediaSession transport controls. Internal replacement
+            // writes always apply this same latest value; transient buffering
+            // and audio-focus suppression do not replace viewer intent.
+            if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                playbackIntent.setPlaybackRequested(playWhenReady)
+            }
+            sampleTargetPresentationDeadline()
+        }
+
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             pgsOverlay.itemChanged()
+        }
+    }
+
+    /** One actual-output listener carrying the exact mutation it can settle. */
+    private var presentationListener: Player.Listener? = null
+    private var recipePresentationFrame: Pair<Long, Long>? = null
+
+    private fun disarmVideoPresentation() {
+        presentationListener?.let(player::removeListener)
+        presentationListener = null
+    }
+
+    private fun armVideoPresentation(sequence: Long) {
+        disarmVideoPresentation()
+        // Audio-only destinations settle from two advancing player-clock
+        // samples; they will never render a video frame.
+        if (plan.videoCodec == null) return
+        val captured = object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                if (!playbackIntent.isCurrent(sequence)) return
+                if (recipeExecution?.sequence == sequence) {
+                    recipePresentationFrame = sequence to realPosition()
+                    completeRecipeExecution()
+                    return
+                }
+                val recipe = selectionRecipe ?: return
+                if (!recipeOwnership.canPresent(recipe)) return
+                if (!playbackIntent.presentedVideoFrame(realPosition(), sequence)) return
+                playbackControl.playerChanged()
+                player.removeListener(this)
+                if (presentationListener === this) presentationListener = null
+            }
+        }
+        presentationListener = captured
+        player.addListener(captured)
+    }
+
+    private fun markIntentExecuted(
+        sequence: Long,
+        recipe: PlaybackRecipeOwnership.Claim = currentRecipe(),
+        inPlace: Boolean = false,
+    ) {
+        if (recipeOwnership.needsMediaReplacement(recipe) || !playbackIntent.isCurrent(sequence)) return
+        recipeExecution = RecipeExecution(sequence, recipe, inPlace)
+        recipePresentationFrame = null
+        playbackIntent.markExecuted(
+            sequence,
+            observedAtMs = monotonicNowMs(),
+            playbackActive = player.isPlaying,
+            playbackRate = player.playbackParameters.speed.toDouble(),
+        )
+        armVideoPresentation(sequence)
+        completeRecipeExecution()
+    }
+
+    private fun completeRecipeExecution() {
+        if (textSelectionArmed || audioSelectionArmed) return
+        val recipe = selectionRecipe ?: return
+        if (!recipeOwnership.selectionApplied(recipe)) return
+        val execution = recipeExecution ?: return
+        if (execution.recipe != recipe || !recipeOwnership.canPresent(recipe) ||
+            !playbackIntent.isCurrent(execution.sequence)
+        ) return
+        recipeExecution = null
+        val sequence = execution.sequence
+        val presented = if (execution.inPlace) {
+            playbackIntent.presentedInPlace(sequence)
+        } else {
+            recipePresentationFrame?.takeIf { it.first == sequence }
+                ?.let { playbackIntent.presentedVideoFrame(it.second, sequence) } == true
+        }
+        if (presented) {
+            playbackControl.playerChanged()
+            disarmVideoPresentation()
+        }
     }
 
     init {
+        player.playWhenReady = playbackIntent.playbackRequested
         player.addListener(listener)
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
+        targetPresentationWatchdogJob = scope.launch {
+            while (isActive) {
+                sampleTargetPresentationDeadline()
+                delay(targetPresentationDeadline.nextSampleDelayMs(monotonicNowMs()))
+            }
+        }
         stallWatchdogJob = scope.launch {
             while (isActive) {
+                settleAudioPlaybackIntentIfPresented()
                 playbackControlPlayerChanged()
-                val measurement = playbackTelemetry.sampleStall(establishedPlayback, monotonicNowMs())
-                if (measurement != null) {
-                    playbackStallCount += 1
-                    onStall(measurement.positionMs)
+                val observedAtMs = monotonicNowMs()
+                // Retrospective telemetry still records the final interruption
+                // duration, but recovery is owned by the open deadline below.
+                playbackTelemetry.sampleStall(establishedPlayback, observedAtMs)
+                val openStall = openStallTracker.sample(
+                    playbackRequested = player.playWhenReady && presentationForeground &&
+                        playbackIntent.pendingSeek == null,
+                    playbackEnded = player.playbackState == Player.STATE_ENDED,
+                    establishedPlayback = establishedPlayback,
+                    positionMs = realPosition(),
+                    observedAtMs = observedAtMs,
+                )
+                if (openStall != null) {
+                    if (openStall.controlMayDefer) {
+                        playbackStallCount += 1
+                    }
+                    onStall(openStall)
                 }
-                delay(1_000)
+                sessionlessStallRecoveryPositionMs?.let { recoveredAt ->
+                    if (kotlin.math.abs(realPosition() - recoveredAt) >= 5_000) {
+                        sessionlessStallRecoveryUsed = false
+                        sessionlessStallRecoveryPositionMs = null
+                    }
+                }
+                delay(openStallTracker.nextSampleDelayMs(monotonicNowMs(), establishedPlayback))
             }
         }
     }
@@ -632,20 +812,93 @@ class Controller(
         )
     }
 
+    /** The viewer's newest film target, even while the predecessor still renders. */
+    fun positionForPlaybackIntent(): Long =
+        playbackIntent.positionForPlaybackIntent(realPosition())
+
+    /** An explicit Retry is a new viewer command, unlike an automatic reopen. */
+    fun prepareViewerRetry(): Long {
+        val target = positionForPlaybackIntent()
+        stallGuard.invalidateForUserAction()
+        playbackControl.clearVerdict()
+        playbackIntent.beginSeek(target, realPosition())
+        sampleTargetPresentationDeadline()
+        return target
+    }
+
     private fun beginPlaybackAttempt(
         reason: String,
         observedAtMs: Long = monotonicNowMs(),
     ): PlaybackAttempt {
         establishedPlayback = false
+        openStallTracker.reset()
         return playbackTelemetry.begin(reason, observedAtMs)
     }
 
     fun seekTo(targetMs: Long) {
         val t = targetMs.coerceIn(0, if (plan.durationMs > 0) plan.durationMs else Long.MAX_VALUE)
+        enqueueSeek { playbackIntent.beginSeek(t, realPosition()) }
+    }
+
+    /** Repeated transport nudges accumulate while the newest seek is coalescing. */
+    fun seekBy(deltaMs: Long) {
+        enqueueSeek {
+            playbackIntent.beginRelativeSeek(deltaMs, realPosition(), plan.durationMs)
+        }
+    }
+
+    private fun enqueueSeek(begin: () -> PlaybackIntent.PendingSeek) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        stallGuard.viewerSeek {
+            playbackControl.clearVerdict()
+            val pending = begin()
+            sampleTargetPresentationDeadline()
+            val publicationEpoch = mediaMutationEpoch
+            seekJob?.cancel()
+            seekJob = scope.launch {
+                if (!publishIntent(pending, publicationEpoch = publicationEpoch)) return@launch
+                delay(SEEK_COALESCE_MS)
+                if (!playbackControlBootstrapFence.isActive() ||
+                    mediaMutationEpoch != publicationEpoch ||
+                    !playbackIntent.isCurrent(pending.sequence)
+                ) return@launch
+                executeSeek(pending.targetMs, pending.sequence)
+            }
+        }
+    }
+
+    private suspend fun publishIntent(
+        pending: PlaybackIntent.PendingSeek,
+        quality: PlaybackQuality = playbackIntent.desiredQuality,
+        publicationEpoch: Long,
+    ): Boolean {
+        return publishReplacementIntent(
+            playbackIntent,
+            pending,
+            quality,
+            isActive = {
+                playbackControlBootstrapFence.isActive() && mediaMutationEpoch == publicationEpoch
+            },
+            publish = playbackControl::reportIntent,
+        )
+    }
+
+    /** Execute only the final target after its immutable intent was enqueued. */
+    private fun executeSeek(t: Long, sequence: Long) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        mediaMutationEpoch += 1
+        if (planReplacement.route(playbackIntent)) return
+        val recipe = currentRecipe()
+        if (recipeOwnership.needsMediaReplacement(recipe)) {
+            restartAt(t, "selection")
+            return
+        }
+        armTrackSelections(recipe)
         when {
             directTransport -> {
                 beginPlaybackAttempt("seek")
                 player.seekTo(t)
+                markIntentExecuted(sequence)
             }
             subtitleDelivery.usesPlanTransport && planMode == "remux" -> {
                 val attempt = beginPlaybackAttempt("seek")
@@ -656,30 +909,67 @@ class Controller(
                 activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, t)
                 player.setMediaItem(MediaItem.fromUri(uri))
+                attachRecipe(recipe)
+                markIntentExecuted(sequence, recipe)
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = true
+                player.playWhenReady = playbackIntent.playbackRequested
                 armTrackSelections()
             }
             // A cached session holds the whole stream: native seeking, no
             // session churn. A live one can't be range-sought, so it reopens.
             sessionIsVod -> {
                 beginPlaybackAttempt("seek")
-                stallGuard.vodSeek { player.seekTo(t) }
+                player.seekTo(t)
+                markIntentExecuted(sequence)
             }
             else -> {
                 val attempt = beginPlaybackAttempt("seek")
-                stallGuard.liveSessionSeek { openSession(t, attempt) }
+                openSession(t, attempt, sequence)
             }
         }
     }
 
+    /** Publish a screen-owned replacement before Compose disposes this controller. */
+    fun prepareReplacement(
+        positionMs: Long,
+        quality: PlaybackQuality,
+        onPrepared: (Long, PlaybackQuality) -> Unit,
+    ) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        planReplacement.retain(onPrepared)
+        stallGuard.invalidateForUserAction()
+        playbackControl.clearVerdict()
+        val pending = playbackIntent.beginSeek(
+            playbackIntent.positionForPlaybackIntent(positionMs),
+            realPosition(),
+            quality,
+        )
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
+        scope.launch {
+            val current = publishIntent(pending, quality, publicationEpoch)
+            if (current) planReplacement.route(playbackIntent, force = true)
+        }
+    }
+
     fun playPause() {
-        player.playWhenReady = !player.playWhenReady
+        if (!playbackControlBootstrapFence.isActive()) return
+        playbackControl.clearVerdict()
+        stallGuard.setPlaybackRequested(playbackIntent, !playbackIntent.playbackRequested) {
+            player.playWhenReady = it
+        }
+        playbackControl.playerChanged()
     }
 
     fun release() {
+        if (!playbackControlBootstrapFence.isActive()) return
+        playbackControlBootstrapFence.release()
+        seekJob?.cancel()
         stallWatchdogJob.cancel()
+        targetPresentationWatchdogJob.cancel()
+        targetPresentationDeadline.suspendOwner(targetPresentationOwner, monotonicNowMs())
+        planReplacement.release()
         clearStatusPolling()
         pgsOverlay.release()
         stallGuard.invalidateForUserAction()
@@ -696,14 +986,25 @@ class Controller(
         sessionId = null
 
         player.removeListener(listener)
+        disarmVideoPresentation()
         mediaSession.release()
         player.release()
     }
 
     fun switchAudio(index: Long) {
-        val position = realPosition()
+        if (!playbackControlBootstrapFence.isActive()) return
+        if (index == selectedAudio) return
+        val position = positionForPlaybackIntent()
+        stallGuard.invalidateForUserAction()
+        playbackControl.clearVerdict()
         selectedAudio = index
-        restartAt(position, "audio")
+        val pending = playbackIntent.beginSeek(position, position)
+        currentRecipe()
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
+        scope.launch {
+            if (publishIntent(pending, publicationEpoch = publicationEpoch)) restartAt(position, "audio")
+        }
     }
 
     /**
@@ -715,6 +1016,7 @@ class Controller(
      * track the server can hand over as a WebVTT rendition for free.
      */
     fun switchSubtitle(index: Long?): Boolean {
+        if (!playbackControlBootstrapFence.isActive()) return false
         val track = index?.let(::trackFor)
         // An index the decision never listed cannot be routed, and guessing
         // here means guessing "burn". Ignore it instead.
@@ -724,22 +1026,34 @@ class Controller(
             return false
         }
         playbackNotice = null
-        // Read the position before the state moves: which timeline the player
-        // is on depends on the delivery about to change.
-        val position = realPosition()
+        // Keep an executed seek's optimistic film target even while the
+        // predecessor item still exposes its old clock.
+        val position = positionForPlaybackIntent()
+        val inheritedSeek = playbackIntent.needsSeekForInPlaceSelection()
         val route = routeSubtitle(track, subtitleDelivery)
+        stallGuard.invalidateForUserAction()
+        playbackControl.clearVerdict()
         selectedSubtitle = index
         subtitleDelivery = route.delivery
-        pgsOverlay.select(index.takeIf { route.delivery == SubtitleDelivery.BitmapOverlay })
-        if (route.reopen) {
-            restartAt(position, "quality")
-        } else {
-            // No reopen means the same media item, so its tracks are already
-            // published and this lands now — which is what makes switching
-            // between two text tracks cost nothing.
-            stallGuard.inPlaceSubtitleChange {
-                armTrackSelections()
-                applyTextSelection()
+        val recipe = currentRecipe()
+        val pending = playbackIntent.beginSeek(position, position)
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
+        scope.launch {
+            if (!publishIntent(pending, publicationEpoch = publicationEpoch)) return@launch
+            if (planReplacement.route(playbackIntent)) return@launch
+            if (recipeOwnership.needsMediaReplacement(recipe)) {
+                restartAt(position, "quality")
+            } else {
+                // A subtitle change supersedes the coalesced seek command, so
+                // it must execute that destination itself. Only a track-only
+                // change can settle without a new target frame.
+                if (inheritedSeek) {
+                    executeSeek(position, pending.sequence)
+                } else {
+                    armTrackSelections(recipe)
+                    markIntentExecuted(pending.sequence, recipe, inPlace = true)
+                }
             }
         }
         return true
@@ -757,14 +1071,23 @@ class Controller(
 
     /** Apply an A/V correction to this controller only and reopen in place. */
     fun setAudioOffset(offsetMs: Long) {
-        val position = realPosition()
+        if (!playbackControlBootstrapFence.isActive()) return
+        val position = positionForPlaybackIntent()
+        stallGuard.invalidateForUserAction()
+        playbackControl.clearVerdict()
         audioOffsetMs = offsetMs.coerceIn(-15_000, 15_000)
         // The correction can move a direct play onto the remuxer, and the
         // remuxer's progressive stream carries no subtitle tracks — so the
         // current selection has to be re-routed, not just replayed.
         subtitleDelivery =
             routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
-        restartAt(position, "audio")
+        val pending = playbackIntent.beginSeek(position, position)
+        currentRecipe()
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
+        scope.launch {
+            if (publishIntent(pending, publicationEpoch = publicationEpoch)) restartAt(position, "audio")
+        }
     }
 
     private fun restartAt(
@@ -772,21 +1095,31 @@ class Controller(
         reason: String,
         observedAtMs: Long = monotonicNowMs(),
     ) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        mediaMutationEpoch += 1
+        if (planReplacement.route(playbackIntent, retry = reason == "presentation-recovery")) return
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
         Session.resetMediaFailover()
 
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
+        val executionSequence = playbackIntent.pendingSeek?.sequence
+        val recipe = currentRecipe()
         when {
-            !subtitleDelivery.usesPlanTransport -> openSession(positionMs, attempt)
+            !subtitleDelivery.usesPlanTransport ->
+                openSession(positionMs, attempt, executionSequence)
             planMode == "direct" -> {
                 leaveSessionPlayback()
                 activeMediaPath = relativeMediaPath(plan.playUrl)
                 player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
+                attachRecipe(recipe)
+                executionSequence?.let { sequence ->
+                    markIntentExecuted(sequence, recipe)
+                }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = true
+                player.playWhenReady = playbackIntent.playbackRequested
                 armTrackSelections()
             }
             planMode == "remux" -> {
@@ -796,12 +1129,16 @@ class Controller(
                 activeMediaPath = relativeMediaPath(uri)
                 progressiveMediaOrigin.begin(uri, positionMs)
                 player.setMediaItem(MediaItem.fromUri(uri))
+                attachRecipe(recipe)
+                executionSequence?.let { sequence ->
+                    markIntentExecuted(sequence, recipe)
+                }
                 player.prepare()
                 playbackTelemetry.prepared(attempt)
-                player.playWhenReady = true
+                player.playWhenReady = playbackIntent.playbackRequested
                 armTrackSelections()
             }
-            else -> openSession(positionMs, attempt)
+            else -> openSession(positionMs, attempt, executionSequence)
         }
     }
 
@@ -813,73 +1150,86 @@ class Controller(
      * is [subtitleSessionBody]'s answer, so the shape of every request this
      * client sends is unit-tested rather than assembled inline.
      */
-    private fun openSession(ms: Long, attempt: PlaybackAttempt) {
+    private fun openSession(
+        ms: Long,
+        attempt: PlaybackAttempt,
+        executionSequence: Long? = playbackIntent.pendingSeek?.sequence,
+    ) {
         val requestVersion = stallGuard.beginRequest()
+        val recipe = currentRecipe()
+        val createBody = sessionBody(ms, recipe = recipe.recipe)
+        endPlaybackControl()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
         scope.launch {
-            val hls = try {
-                sessionCreateCoordinator.create(
-                    body = sessionBody(ms, playbackControl.controlSequence()),
-                    isCurrent = { stallGuard.isCurrent(requestVersion) },
-                ) ?: return@launch
-            } catch (cancelled: CancellationException) {
-                // The screen left composition (or a newer request superseded
-                // this one) — the caller saying stop, not the server failing.
-                // Swallowing it here would show a failure state for a stream
-                // nobody is waiting for any more.
-                throw cancelled
-            } catch (error: Exception) {
-                if (stallGuard.isCurrent(requestVersion)) {
-                    playbackTelemetry.report(
-                        event = "playback_error",
-                        level = "error",
-                        message = "session create failed before Media3 started",
-                        code = (error as? HttpException)?.code(),
-                        detail = redactedFailureDetail("session_create", error),
-                        attempt = attempt,
-                    )
-                    playbackTelemetry.cancel(attempt)
-                    Log.w(
-                        "PlurxPlayback",
-                        "session create failed ${redactedFailureDetail("session_create", error)}",
-                    )
-                    onError("The server couldn't start this stream.")
+            try {
+                val hls = try {
+                    sessionCreateCoordinator.create(
+                        body = createBody.copy(control_sequence = playbackIntent.orderedControlSequence(playbackControl.controlSequence())),
+                        isCurrent = { stallGuard.isCurrent(requestVersion) },
+                    ) ?: return@launch
+                } catch (cancelled: CancellationException) {
+                    // The screen left composition (or a newer request superseded
+                    // this one) — the caller saying stop, not the server failing.
+                    // Swallowing it here would show a failure state for a stream
+                    // nobody is waiting for any more.
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (stallGuard.isCurrent(requestVersion)) {
+                        playbackTelemetry.report(
+                            event = "playback_error",
+                            level = "error",
+                            message = "session create failed before Media3 started",
+                            code = (error as? HttpException)?.code(),
+                            detail = redactedFailureDetail("session_create", error),
+                            attempt = attempt,
+                        )
+                        playbackTelemetry.cancel(attempt)
+                        Log.w(
+                            "PlurxPlayback",
+                            "session create failed ${redactedFailureDetail("session_create", error)}",
+                        )
+                        onError("The server couldn't start this stream.")
+                    }
+                    return@launch
                 }
-                return@launch
+                // A later seek or track switch won while this request was in
+                // flight. Release this now-stale server session instead of letting
+                // its older timeline replace the current one.
+                sessionCreateCoordinator.attachIfCurrent(hls, { stallGuard.isCurrent(requestVersion) }) { hls ->
+                    sessionId = hls.session_id
+                    beginPlaybackControl(hls)
+                    startStatusPolling(hls.session_id)
+                    // Save this session's resolved height so the stall-reopen budget
+                    // can compare each stall response against the predecessor rung.
+                    stallReopenBudget.seed(hls.height)
+                    encoder = hls.encoder
+                    sessionIsVod = hls.vod
+                    adoptSessionDelivery(hls)
+                    // A cached session is the whole stream on disk: its timeline
+                    // starts at zero and the player seeks, exactly like direct play.
+                    val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
+                    baseMs = timeline.baseMs
+                    activeMediaPath = relativeMediaPath(hls.playlist_url)
+                    player.setMediaItem(
+                        MediaItem.fromUri(Session.url(hls.playlist_url)),
+                        timeline.attachPositionMs,
+                    )
+                    attachRecipe(recipe)
+                    executionSequence?.let { sequence ->
+                        markIntentExecuted(sequence, recipe)
+                    }
+                    player.prepare()
+                    playbackTelemetry.prepared(attempt)
+                    player.playWhenReady = playbackIntent.playbackRequested
+                    armTrackSelections()
+                }
+            } finally {
+                stallGuard.finishRequest(requestVersion)
             }
-            // A later seek or track switch won while this request was in
-            // flight. Release this now-stale server session instead of letting
-            // its older timeline replace the current one.
-            if (!stallGuard.isCurrent(requestVersion)) {
-                vm.endHlsSession(hls.session_id)
-                return@launch
-            }
-            sessionId = hls.session_id
-            beginPlaybackControl(hls)
-            startStatusPolling(hls.session_id)
-            // Save this session's resolved height so the stall-reopen budget
-            // can compare each stall response against the predecessor rung.
-            stallReopenBudget.seed(hls.height)
-            encoder = hls.encoder
-            sessionIsVod = hls.vod
-            adoptSessionDelivery(hls)
-            // A cached session is the whole stream on disk: its timeline
-            // starts at zero and the player seeks, exactly like direct play.
-            val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
-            baseMs = timeline.baseMs
-            activeMediaPath = relativeMediaPath(hls.playlist_url)
-            player.setMediaItem(
-                MediaItem.fromUri(Session.url(hls.playlist_url)),
-                timeline.attachPositionMs,
-            )
-            player.prepare()
-            playbackTelemetry.prepared(attempt)
-            player.playWhenReady = true
-            armTrackSelections()
         }
     }
 
@@ -890,7 +1240,10 @@ class Controller(
      * without spending its own budget. False means today's path, unchanged —
      * which is the branch every node in the fleet takes.
      */
-    private fun applyStallVerdict(verdict: ControlAction): Boolean = when (verdict.type) {
+    private fun applyStallVerdict(
+        verdict: ControlAction,
+        event: OpenPlaybackStallTracker.Event,
+    ): Boolean = when (verdict.type) {
         "terminal" -> {
             // Ruling D1: the verdict is armed, not executed. This player is
             // stalled with nothing left to render, so the only thing the
@@ -904,16 +1257,19 @@ class Controller(
             // against a server that already knows better, and it must not
             // spend the budget either.
             //
-            // And unlike web and Apple, this one says nothing to the viewer,
-            // because of what this detector actually is. `sampleStall` emits
-            // a measurement when a stall ENDS — the playhead has moved again
-            // by the time control reaches here — so the viewer is watching,
-            // not staring at a frozen picture. A banner reading "the server is
-            // busy" over playback that just resumed is noise, and the case the
-            // banner exists for on the other two platforms cannot reach this
-            // function at all: during an open-ended freeze `sampleStall`
-            // returns null forever.
-            true
+            // Control may defer the first recovery, never own the frozen
+            // picture. The absolute twenty-second deadline fires again with
+            // controlMayDefer=false and falls through to the client recovery.
+            if (!event.controlMayDefer || !openStallTracker.defer(monotonicNowMs())) {
+                false
+            } else {
+                playbackNotice = if (verdict.type == "hold") {
+                    "Waiting briefly for the server. Your place is saved."
+                } else {
+                    "The server asked playback to retry shortly. Your place is saved."
+                }
+                true
+            }
         }
         else -> false
     }
@@ -928,55 +1284,78 @@ class Controller(
      * stopped early.  Once the budget is exhausted at the ladder floor the
      * session stays on that rung without further reopen attempts.
      */
-    private suspend fun onStall(positionMs: Long) {
-        if (sessionId == null) return
+    private suspend fun onStall(event: OpenPlaybackStallTracker.Event) {
+        if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
+        val positionMs = event.positionMs
         // The ask goes before the budget is consulted, and before anything
         // else this function does. The evidence is published from INSIDE it,
         // after it has read the sequence floor — publishing first lets the
         // pump start the next request before that read lands, which makes the
         // floor one too high and rejects the very exchange that carried this
         // stall's evidence.
-        //
-        // The limit this does not close: the detector that got us here cannot
-        // fire during an open-ended freeze at all, so a frozen playhead stays
-        // invisible to the control plane either way.
         val session = sessionId
-        // The token is taken BEFORE the ask, not after, and it is the token
-        // the reopen goes on to use. A VOD seek or an in-place subtitle change
-        // invalidates through `stallGuard` and changes no session id, so a
-        // token minted after the wait would not merely miss the viewer's
-        // action — `beginRequest` increments the version, so it would
-        // overwrite the invalidation and make a stale stall current again.
-        val requestVersion = stallGuard.beginRequest()
+        // Capture media AND transport ownership before the ask. Pause must
+        // reject this evidence even after Resume, but must not revoke an
+        // already admitted replacement carrying the viewer's recipe.
+        val observation = stallGuard.observeStall()
         // Measured before the wait, so the stall-recovery beacon includes the
         // time this ask itself costs. M5.5 exists to measure exactly that, and
         // an instrument that excludes it cannot.
         val observedAtMs = monotonicNowMs()
-        val verdict = playbackControl.askForAction(
-            boundMs = CONTROL_ASK_MS,
-            capMs = CONTROL_ASK_CAP_MS,
-            publish = {
-                reportControlEvidence(
-                    ClientObservation(decoderState = DecoderState.STARVED),
-                    render = RenderState.STALLED,
-                )
-            },
-        )
+        val verdict = if (event.controlMayDefer) {
+            playbackControl.askForAction(
+                boundMs = CONTROL_ASK_MS,
+                capMs = CONTROL_ASK_CAP_MS,
+                publish = {
+                    reportControlEvidence(
+                        ClientObservation(decoderState = DecoderState.STARVED),
+                        render = RenderState.STALLED,
+                    )
+                },
+            )
+        } else {
+            // The hard deadline is recovery time, not another control window.
+            // A terminal verdict already accepted for this unchanged intent is
+            // still authoritative; hold/retry cannot move the deadline again.
+            playbackControl.terminalVerdict?.takeIf { it.type == "terminal" }
+        }
         // Seconds passed, and one session-id comparison is not enough to
         // notice. The predicate that let control in here was
         // `playWhenReady && establishedPlayback`; a viewer who paused, or a
         // transport failover that started on the same session, or any seek
         // that invalidated the guard, all leave the id alone.
-        if (sessionId != session || sessionId == null) return
-        if (!stallGuard.isCurrent(requestVersion)) return
-        if (!player.playWhenReady || !establishedPlayback) return
-        if (verdict != null && applyStallVerdict(verdict)) return
+        if (sessionId != session) return
+        if (!stallGuard.isCurrent(observation)) return
+        if (!playbackControlBootstrapFence.isActive() || !presentationForeground) return
+        if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
+        if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
+        if (verdict != null && applyStallVerdict(verdict, event)) return
+        // A reopen is a new recovery episode. If the replacement freezes at
+        // the same playhead, it must receive its own bounded deadline rather
+        // than inheriting the fired latch from the item it replaced.
+        openStallTracker.reset()
+        if (session == null) {
+            if (sessionlessStallRecoveryUsed) {
+                onError("Playback stopped responding after retrying this stream.")
+                return
+            }
+            sessionlessStallRecoveryUsed = true
+            sessionlessStallRecoveryPositionMs = positionMs
+            restartAt(positionMs, "stall", observedAtMs)
+            return
+        }
         // If we have already exhausted the budget at the current floor rung,
-        // stop reopening — the server cannot step further down and the client
-        // must not churn forever.
-        if (!stallReopenBudget.canReopen()) return
+        // stop reopening — but do not leave the viewer on a frozen picture.
+        // The server cannot step further down, so this is a visible terminal
+        // failure with a retry affordance rather than silent infinite wait.
+        if (!stallReopenBudget.canReopen()) {
+            onError("Playback stopped responding after exhausting recovery attempts.")
+            return
+        }
         val reason = "stall"
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
+        val recipe = currentRecipe()
+        val requestVersion = stallGuard.beginRequest()
         // Use the stall-specific session body that carries the predecessor
         // info. `sessionBody` is also called for seeks and track switches;
         // those paths must NOT carry stall fields.
@@ -989,118 +1368,128 @@ class Controller(
         // server validates previous_session_id against a live session
         // map.  Session creation supersedes and kills the predecessor
         // atomically.
+        endPlaybackControl()
         sessionId = null
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
         scope.launch {
-            val body = bindDecisionPlan(
-                body = subtitleSessionBody(
-                    playbackId = playbackId,
-                    requestId = UUID.randomUUID().toString(),
-                    controlSequence = playbackControl.controlSequence(),
-                    startSeconds = positionMs / 1000.0,
-                    delivery = subtitleDelivery,
-                    subtitleIndex = selectedSubtitle,
-                    copyableVideo = planMode != "transcode",
-                    aac = plan.aac,
-                    preserveDolbyVision = plan.preserveDolbyVision,
-                    audioIndex = selectedAudio,
-                    audioOffsetMs = audioOffsetMs,
-                    quality = vm.preferences.value.playbackQuality,
-                    sourceHeight = plan.sourceHeight,
-                    deliveredDynamicRange = deliveredRange,
-                    previousSessionId = prevId,
-                    reopenReason = ReopenReason.Stall,
-                ),
-                caps = decisionCaps,
-                requestHDR10 = sessionHDR10Request(
-                    decisionMode = plan.mode,
-                    deliveredDynamicRange = plan.deliveredDynamicRange,
-                    compatibilityTranscode = forceCompatibilityTranscode,
-                    delivery = subtitleDelivery,
-                ),
-            )
-            val hls = try {
-                sessionCreateCoordinator.reopenAfterStall(
-                    body = body,
-                    isCurrent = { stallGuard.isCurrent(requestVersion) },
-                ) ?: return@launch
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                if (stallGuard.isCurrent(requestVersion)) {
-                    playbackTelemetry.report(
-                        event = "playback_error",
-                        level = "error",
-                        message = "session reopen failed before Media3 started",
-                        code = (error as? HttpException)?.code(),
-                        detail = redactedFailureDetail("session_reopen", error),
-                        attempt = attempt,
-                    )
-                    playbackTelemetry.cancel(attempt)
-                    Log.w(
-                        "PlurxPlayback",
-                        "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
-                    )
-                    onError(
-                        playbackControl.terminalVerdict?.message
-                            ?: "The stream stalled and recovery failed.",
-                    )
+            try {
+                val body = bindDecisionPlan(
+                    body = subtitleSessionBody(
+                        playbackId = playbackIntent.playbackId,
+                        requestId = UUID.randomUUID().toString(),
+                        controlSequence = playbackIntent.orderedControlSequence(
+                            playbackControl.controlSequence(),
+                        ),
+                        startSeconds = positionMs / 1000.0,
+                        delivery = recipe.recipe.subtitleDelivery,
+                        subtitleIndex = recipe.recipe.subtitleIndex,
+                        copyableVideo = recipe.recipe.mode != "transcode",
+                        aac = plan.aac,
+                        preserveDolbyVision = plan.preserveDolbyVision,
+                        audioIndex = recipe.recipe.audioIndex,
+                        audioOffsetMs = recipe.recipe.audioOffsetMs,
+                        quality = recipe.recipe.quality,
+                        sourceHeight = plan.sourceHeight,
+                        deliveredDynamicRange = deliveredRange,
+                        previousSessionId = prevId,
+                        reopenReason = ReopenReason.Stall,
+                    ),
+                    caps = decisionCaps,
+                    requestHDR10 = sessionHDR10Request(
+                        decisionMode = plan.mode,
+                        deliveredDynamicRange = plan.deliveredDynamicRange,
+                        compatibilityTranscode = recipe.recipe.compatibilityTranscode,
+                        delivery = recipe.recipe.subtitleDelivery,
+                    ),
+                )
+                val hls = try {
+                    sessionCreateCoordinator.reopenAfterStall(
+                        body = body,
+                        isCurrent = { stallGuard.isCurrent(requestVersion) },
+                    ) ?: return@launch
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (stallGuard.isCurrent(requestVersion)) {
+                        playbackTelemetry.report(
+                            event = "playback_error",
+                            level = "error",
+                            message = "session reopen failed before Media3 started",
+                            code = (error as? HttpException)?.code(),
+                            detail = redactedFailureDetail("session_reopen", error),
+                            attempt = attempt,
+                        )
+                        playbackTelemetry.cancel(attempt)
+                        Log.w(
+                            "PlurxPlayback",
+                            "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
+                        )
+                        onError(
+                            playbackControl.terminalVerdict?.message
+                                ?: "The stream stalled and recovery failed.",
+                        )
+                    }
+                    return@launch
                 }
-                return@launch
+                sessionCreateCoordinator.attachIfCurrent(hls, { stallGuard.isCurrent(requestVersion) }) { hls ->
+                    // Update the same-rung budget: the budget counts consecutive
+                    // reopen responses that do NOT resolve a strictly lower rung than
+                    // the predecessor (same rung, absent/zero height, or a higher
+                    // rung).  A genuine strict downgrade resets the count.
+                    // Absent or zero height counts as no step down — it is the server
+                    // saying "this session is already at its answer" without a rung
+                    // the client can compare.
+                    stallReopenBudget.record(hls.height)
+                    sessionId = hls.session_id
+                    beginPlaybackControl(hls)
+                    startStatusPolling(hls.session_id)
+                    encoder = hls.encoder
+                    sessionIsVod = hls.vod
+                    adoptSessionDelivery(hls)
+                    val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
+                    baseMs = timeline.baseMs
+                    activeMediaPath = relativeMediaPath(hls.playlist_url)
+                    player.setMediaItem(
+                        MediaItem.fromUri(Session.url(hls.playlist_url)),
+                        timeline.attachPositionMs,
+                    )
+                    attachRecipe(recipe)
+                    player.prepare()
+                    playbackTelemetry.prepared(attempt)
+                    player.playWhenReady = playbackIntent.playbackRequested
+                    armTrackSelections()
+                }
+            } finally {
+                stallGuard.finishRequest(requestVersion)
             }
-            if (!stallGuard.isCurrent(requestVersion)) {
-                vm.endHlsSession(hls.session_id)
-                return@launch
-            }
-            // Update the same-rung budget: the budget counts consecutive
-            // reopen responses that do NOT resolve a strictly lower rung than
-            // the predecessor (same rung, absent/zero height, or a higher
-            // rung).  A genuine strict downgrade resets the count.
-            // Absent or zero height counts as no step down — it is the server
-            // saying "this session is already at its answer" without a rung
-            // the client can compare.
-            stallReopenBudget.record(hls.height)
-            sessionId = hls.session_id
-            beginPlaybackControl(hls)
-            startStatusPolling(hls.session_id)
-            encoder = hls.encoder
-            sessionIsVod = hls.vod
-            adoptSessionDelivery(hls)
-            val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
-            baseMs = timeline.baseMs
-            activeMediaPath = relativeMediaPath(hls.playlist_url)
-            player.setMediaItem(
-                MediaItem.fromUri(Session.url(hls.playlist_url)),
-                timeline.attachPositionMs,
-            )
-            player.prepare()
-            playbackTelemetry.prepared(attempt)
-            player.playWhenReady = true
-            armTrackSelections()
         }
     }
 
-    internal fun sessionBody(ms: Long, controlSequence: Long? = null): CreateSessionReq = bindDecisionPlan(
+    internal fun sessionBody(
+        ms: Long,
+        controlSequence: Long? = null,
+        recipe: PlaybackMediaRecipe = currentRecipe().recipe,
+    ): CreateSessionReq = bindDecisionPlan(
         body = subtitleSessionBody(
-            playbackId = playbackId,
+            playbackId = playbackIntent.playbackId,
             requestId = UUID.randomUUID().toString(),
             controlSequence = controlSequence,
             startSeconds = ms / 1000.0,
-            delivery = subtitleDelivery,
-            subtitleIndex = selectedSubtitle,
+            delivery = recipe.subtitleDelivery,
+            subtitleIndex = recipe.subtitleIndex,
             // A transcode verdict is the only one that forbids copying the video;
             // direct and remux verdicts both mean the source stream is playable
             // as-is, which is what makes the native-rendition session free. The
             // compatibility rescue turns `planMode` into a transcode precisely so
             // it lands here — the copy is the thing the device just refused.
-            copyableVideo = planMode != "transcode",
+            copyableVideo = recipe.mode != "transcode",
             aac = plan.aac,
             preserveDolbyVision = plan.preserveDolbyVision,
-            audioIndex = selectedAudio,
-            audioOffsetMs = audioOffsetMs,
-            quality = vm.preferences.value.playbackQuality,
+            audioIndex = recipe.audioIndex,
+            audioOffsetMs = recipe.audioOffsetMs,
+            quality = recipe.quality,
             sourceHeight = plan.sourceHeight,
             deliveredDynamicRange = deliveredRange,
         ),
@@ -1108,8 +1497,8 @@ class Controller(
         requestHDR10 = sessionHDR10Request(
             decisionMode = plan.mode,
             deliveredDynamicRange = plan.deliveredDynamicRange,
-            compatibilityTranscode = forceCompatibilityTranscode,
-            delivery = subtitleDelivery,
+            compatibilityTranscode = recipe.compatibilityTranscode,
+            delivery = recipe.subtitleDelivery,
         ),
     )
 
@@ -1119,37 +1508,43 @@ class Controller(
     /**
      * Record that the current selections still have to reach the player.
      *
-     * Deliberately does not try to apply them: right after `prepare()` the only
-     * tracks on hand may still be the departing item's, and an override
-     * naming a track group that is about to disappear would be dropped
-     * silently — with the intent already marked as delivered. [listener]
-     * lands them against the tracks that actually arrive.
+     * An in-place switch can use the published tracks immediately. A new
+     * media item keeps each selector armed until its tracks arrive and
+     * Media3 confirms the requested option, rather than acknowledging an
+     * override merely because it was submitted.
      */
-    private fun armTrackSelections() {
+    private fun armTrackSelections(recipe: PlaybackRecipeOwnership.Claim? = recipeOwnership.attached) {
+        if (recipe == null || recipeOwnership.needsMediaReplacement(recipe)) return
+        selectionRecipe = recipe
+        pgsOverlay.select(recipe.recipe.subtitleIndex.takeIf { recipe.recipe.subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         textSelectionArmed = true
         audioSelectionArmed = true
+        applyTextSelection()
+        applyAudioSelection()
+        completeRecipeExecution()
     }
 
     private fun applyTextSelection() {
         if (!textSelectionArmed) return
-        val index = selectedSubtitle
+        val recipe = selectionRecipe?.recipe ?: return
+        val index = recipe.subtitleIndex
         // Off, and a burn, are the same instruction to the renderer: show no
         // text track. A burn's cues are already in the picture, and letting
         // ExoPlayer's own language preference pick something here would put a
         // second subtitle policy in front of the one the server decided.
         if (
             index == null ||
-            subtitleDelivery == SubtitleDelivery.Burn ||
-            subtitleDelivery == SubtitleDelivery.BitmapOverlay
+            recipe.subtitleDelivery == SubtitleDelivery.Burn ||
+            recipe.subtitleDelivery == SubtitleDelivery.BitmapOverlay
         ) {
-            textSelectionArmed = false
+            textSelectionArmed = player.currentTracks.isTypeSelected(C.TRACK_TYPE_TEXT)
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                 .build()
             return
         }
-        val ordinal = if (subtitleDelivery == SubtitleDelivery.NativeSession) {
+        val ordinal = if (recipe.subtitleDelivery == SubtitleDelivery.NativeSession) {
             nativeSubtitleOrdinal(index, plan.subtitles)
         } else {
             embeddedTextTrackIndex(index, plan.subtitles, embeddedTextLanguages())
@@ -1157,7 +1552,9 @@ class Controller(
         // Nothing to select yet — the media is still being prepared, or this
         // source genuinely lacks the track. Stay armed; onTracksChanged retries.
         val target = ordinal?.let(::textTrackAt) ?: return
-        textSelectionArmed = false
+        textSelectionArmed = !player.currentTracks.groups.any {
+            it.mediaTrackGroup == target.first && it.isTrackSelected(target.second)
+        }
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(target.first, target.second))
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
@@ -1182,7 +1579,7 @@ class Controller(
      */
     private fun applyAudioSelection() {
         if (!audioSelectionArmed) return
-        val index = selectedAudio
+        val index = selectionRecipe?.recipe?.audioIndex
         if (index == null || !directTransport) {
             audioSelectionArmed = false
             return
@@ -1193,7 +1590,9 @@ class Controller(
         // onTracksChanged retry; ExoPlayer's own pick is the honest fallback
         // for a track that is genuinely not there.
         val target = ordinal?.let { trackAt(C.TRACK_TYPE_AUDIO, it) } ?: return
-        audioSelectionArmed = false
+        audioSelectionArmed = !player.currentTracks.groups.any {
+            it.mediaTrackGroup == target.first && it.isTrackSelected(target.second)
+        }
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(target.first, target.second))
             .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
@@ -1225,6 +1624,7 @@ class Controller(
 
     private fun leaveSessionPlayback() {
         stallGuard.invalidateForUserAction()
+        endPlaybackControl()
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
         clearStatusPolling()
@@ -1281,8 +1681,11 @@ class Controller(
     /** Retry the exact delivery URL through another advertised ingress. The
      * media recipe, session capability, and compatibility flags do not move. */
     private fun retryMediaOnNextNode(error: PlaybackException): Boolean {
+        if (!playbackControlBootstrapFence.isActive()) return false
         val path = activeMediaPath ?: return false
         val next = Session.nextMediaFailoverUrl(path) ?: return false
+        val recipe = recipeOwnership.attached ?: currentRecipe()
+        val presentationSequence = playbackIntent.executedSequence()
         val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
         playbackTelemetry.report(
             event = "playback_transport_failover",
@@ -1291,6 +1694,11 @@ class Controller(
             code = error.errorCode,
             detail = "delivery=$deliveryMode compatibility_ladder=false",
         )
+        // A failover is a new media generation. Any stall owner awaiting a
+        // verdict for the failed item is stale, and the successor needs the
+        // startup deadline rather than the predecessor's established one.
+        stallGuard.invalidateForPlaybackAttempt()
+        beginPlaybackAttempt("node-failover")
         // A progressive remux answers its achieved origin in a response
         // header, and the tracker only accepts a response whose URI it is
         // expecting. Re-arming it here is what keeps every position after a
@@ -1301,8 +1709,12 @@ class Controller(
             progressiveMediaOrigin.begin(next, realPosition())
         }
         player.setMediaItem(MediaItem.fromUri(next), attachPosition)
+        attachRecipe(recipe)
+        presentationSequence?.let { sequence ->
+            markIntentExecuted(sequence, recipe)
+        }
         player.prepare()
-        player.playWhenReady = true
+        player.playWhenReady = playbackIntent.playbackRequested
         armTrackSelections()
         return true
     }
@@ -1338,6 +1750,7 @@ class Controller(
      * does not depend on the control plane and never should.
      */
     private fun beginPlaybackControl(hls: HlsStart) {
+        endPlaybackControl()
         // The override describes the session that just ended. Carrying it into
         // the replacement would make its very first exchange — a session that
         // has rendered nothing yet — report a stall belonging to another.
@@ -1346,9 +1759,9 @@ class Controller(
         controlObservationOverride = null
         controlRenderOverride = null
         controlEvidencePositionMs = null
+        val claim = playbackControlBootstrapFence.claim(hls.session_id)
         val bootstrap = hls.control
         if (bootstrap == null || !bootstrap.isValid) {
-            playbackControl.end()
             return
         }
         // Capabilities are the one input that has to be probed rather than
@@ -1357,12 +1770,18 @@ class Controller(
         // the reporter has nothing complete to say.
         scope.launch {
             controlCapabilityProbe.join()
+            if (!playbackControlBootstrapFence.isCurrent(claim, sessionId)) return@launch
             playbackControl.begin(
                 bootstrap = bootstrap,
                 observe = ::playbackControlObservation,
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
             )
         }
+    }
+
+    private fun endPlaybackControl() {
+        playbackControlBootstrapFence.invalidate()
+        playbackControl.end()
     }
 
     /**
@@ -1373,6 +1792,10 @@ class Controller(
     private fun retryNativeSubtitleAfterReadiness() {
         val index = selectedSubtitle ?: return
         if (subtitleDelivery != SubtitleDelivery.NativeSession) return
+        val session = sessionId ?: return
+        val claim = playbackControlBootstrapFence.snapshot(session)
+        val intentGeneration = playbackIntent.generation()
+        if (!playbackControlBootstrapFence.isCurrent(claim, sessionId)) return
         textSelectionArmed = false
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
@@ -1381,6 +1804,8 @@ class Controller(
         scope.launch {
             kotlinx.coroutines.yield()
             if (
+                playbackControlBootstrapFence.isCurrent(claim, sessionId) &&
+                playbackIntent.generation() == intentGeneration &&
                 selectedSubtitle == index &&
                 subtitleDelivery == SubtitleDelivery.NativeSession
             ) {
@@ -1453,9 +1878,8 @@ class Controller(
             isEnded = player.playbackState == Player.STATE_ENDED,
             // A seek Media3 has accepted but not yet rendered is exactly the
             // discontinuity the protocol calls seeking.
-            isSeeking = player.isCurrentMediaItemSeekable &&
-                player.playbackState == Player.STATE_BUFFERING &&
-                player.currentPosition != player.contentPosition,
+            isSeeking = playbackIntent.pendingSeek != null,
+            seekTargetMs = playbackIntent.pendingSeek?.targetMs,
             hasStarted = establishedPlayback,
             waitingForMs = controlWaitingSince?.let {
                 (monotonicNowMs() - it).coerceAtLeast(0L)
@@ -1494,10 +1918,13 @@ class Controller(
             else -> SubtitleMode.NATIVE
         }
         return ClientSelection(
-            // A picked rung rebuilds this controller rather than being held
-            // as state here, so there is no manual height to report and
-            // inventing one would claim a choice the client is not carrying.
-            quality = QualitySelection.Auto,
+            quality = when (val requested = playbackIntent.desiredQuality) {
+                PlaybackQuality.Auto -> QualitySelection.Auto
+                PlaybackQuality.Original -> QualitySelection.Original
+                else -> requested.rungHeight
+                    ?.let(QualitySelection::Manual)
+                    ?: QualitySelection.Auto
+            },
             audioTrack = selectedAudio?.toInt(),
             subtitle = SubtitleSelection(
                 mode = mode,
@@ -1518,6 +1945,61 @@ class Controller(
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()
         playbackControl.playerChanged()
+    }
+
+    /** Audio-only playback has no video-frame callback; an advancing active clock is presentation. */
+    private fun settleAudioPlaybackIntentIfPresented() {
+        if (plan.videoCodec != null) return
+        if (playbackIntent.presentedAudio(
+                realPosition(),
+                observedAtMs = monotonicNowMs(),
+                playbackActive = player.isPlaying,
+                playbackRate = player.playbackParameters.speed.toDouble(),
+                presentationReady = selectionRecipe?.let(recipeOwnership::canPresent) == true &&
+                    !textSelectionArmed && !audioSelectionArmed,
+            )
+        ) playbackControl.playerChanged()
+    }
+
+    /** STARTED includes visible PiP; stopped/background activities suspend this deadline. */
+    fun setPresentationForeground(foreground: Boolean) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        if (presentationForeground != foreground) stallGuard.invalidateObservation()
+        presentationForeground = foreground
+        sampleTargetPresentationDeadline()
+    }
+
+    private fun sampleTargetPresentationDeadline() {
+        if (!playbackControlBootstrapFence.isActive()) return
+        val now = monotonicNowMs()
+        val event = targetPresentationDeadline.sample(
+            pending = playbackIntent.pendingSeek,
+            playbackRequested = player.playWhenReady && player.playbackState != Player.STATE_ENDED,
+            foreground = presentationForeground,
+            nowMs = now,
+            expectedOwner = targetPresentationOwner,
+        ) ?: return
+        if (!playbackIntent.isCurrent(event.sequence)) return
+        // This deadline is about the requested output. Progress on a departed
+        // timeline cannot cancel it, and a control hold cannot extend it.
+        seekJob?.cancel()
+        mediaMutationEpoch += 1
+        stallGuard.invalidateForPlaybackAttempt()
+        reportControlEvidence(
+            ClientObservation(decoderState = DecoderState.STARVED),
+            render = RenderState.STALLED,
+        )
+        playbackTelemetry.report(
+            event = "playback_target_timeout",
+            level = "warn",
+            message = "The requested playback destination did not present.",
+            detail = "target_ms=${event.targetMs} terminal=${event.terminal}",
+        )
+        if (event.terminal) {
+            onError("Playback couldn't reach the requested position after retrying. Your place is saved.")
+        } else if (targetPresentationDeadline.recover(event, now, expectedOwner = targetPresentationOwner)) {
+            restartAt(event.targetMs, "presentation-recovery", now)
+        }
     }
 
     private fun refreshControlWaiting() {
@@ -1551,6 +2033,7 @@ class Controller(
  */
 internal const val CONTROL_ASK_MS = 1_500L
 internal const val CONTROL_ASK_CAP_MS = 3_000L
+internal const val SEEK_COALESCE_MS = 100L
 
 /**
  * The verdict that ends an unchanged retry, or null to take it anyway.
@@ -1618,6 +2101,7 @@ interface PlanLike {
     val mode: String // "direct" | "remux" | "transcode"
     val durationMs: Long
     val videoCodec: String?
+    val requestedQuality: PlaybackQuality
     val audio: List<AudioTrack>
     val subtitles: List<SubTrack>
 

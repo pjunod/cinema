@@ -132,7 +132,7 @@ command = "make playback-smoke"
 profiles = ["full", "nightly"]
 platforms = ["darwin", "linux"]
 requires = ["cargo", "ffmpeg", "node"]
-missing = "skip"
+missing = "fail"
 timeout_seconds = 3600
 
 # The browser matrix above needs ffmpeg, a server build, and Chrome, so it only
@@ -345,6 +345,16 @@ platforms = ["darwin", "linux"]
 requires = ["cargo", "ffmpeg", "node"]
 missing = "fail"
 timeout_seconds = 7200
+
+[[checks]]
+id = "playback-auto-cliff"
+title = "Auto quality changes seamlessly through the accepted bandwidth cliff"
+command = "make playback-stall-recovery"
+profiles = ["nightly"]
+platforms = ["darwin", "linux"]
+requires = ["cargo", "ffmpeg", "node"]
+missing = "fail"
+timeout_seconds = 1800
 
 [[points]]
 id = "core.media"
@@ -632,7 +642,7 @@ paths = [
   "scripts/vod-probe-stub",
   "tests/playback/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive", "playback-auto-cliff"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]

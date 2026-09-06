@@ -239,14 +239,23 @@ impl Manifest {
     /// given up. An admitted rendition answers `false` by rule — it never
     /// gives a member up — which is exactly the stall worth reporting rather
     /// than retrying.
-    pub fn has_evictable(&self, owed: &[u32]) -> bool {
+    pub fn has_evictable(&self, owed: &[u32], readers: &[ReaderWindow]) -> bool {
         if self.admitted {
             return false;
         }
-        self.states
-            .iter()
-            .enumerate()
-            .any(|(index, state)| state.is_materialized() && !owed.contains(&(index as u32)))
+        self.states.iter().enumerate().any(|(index, state)| {
+            let index = index as u32;
+            state.is_materialized()
+                && !owed.contains(&index)
+                // The same guard [`Self::eviction_candidates`] applies. Asking
+                // whether anything *could* be given up while ignoring what is
+                // protected answers a different question from the one the
+                // sweep will act on: it says yes, the sweep then frees
+                // nothing, and a working set locked inside live reader windows
+                // is reported as a producer that made no progress instead of
+                // as the capacity stall it is.
+                && !readers.iter().any(|reader| reader.covers(index))
+        })
     }
 
     /// May this rendition ever be published as a cache hit?
@@ -469,7 +478,7 @@ mod tests {
     fn an_admitted_rendition_offers_nothing_to_an_eviction_sweep() {
         let mut manifest = manifest(6, 100_000);
         fill(&mut manifest);
-        assert!(manifest.has_evictable(&[]), "before admission");
+        assert!(manifest.has_evictable(&[], &[]), "before admission");
         let budgets = Budgets {
             completed_cache_bytes: 1 << 40,
             admission_share: 1.0,
@@ -478,7 +487,7 @@ mod tests {
         manifest.reserve(&budgets).expect("reserve");
         manifest.complete(&budgets).expect("complete");
         assert!(
-            !manifest.has_evictable(&[]),
+            !manifest.has_evictable(&[], &[]),
             "an admitted rendition never gives a member up, so a sweep that \
              kept asking would spin"
         );
@@ -487,16 +496,16 @@ mod tests {
     #[test]
     fn nothing_materialized_is_nothing_to_evict() {
         let manifest = manifest(40, 100_000);
-        assert!(!manifest.has_evictable(&[]));
+        assert!(!manifest.has_evictable(&[], &[]));
     }
 
     #[test]
     fn a_segment_somebody_is_waiting_on_is_not_a_candidate() {
         let mut manifest = manifest(40, 100_000);
         manifest.materialize(3, 1_000, 0);
-        assert!(manifest.has_evictable(&[]));
+        assert!(manifest.has_evictable(&[], &[]));
         assert!(
-            !manifest.has_evictable(&[3]),
+            !manifest.has_evictable(&[3], &[]),
             "the only materialized segment is the one that is owed"
         );
     }

@@ -369,6 +369,13 @@ playback-smoke-firefox: ## Run the playback smoke matrix in Firefox (needs gecko
 playback-full: ## Run every fixture x quality plus playback restart cases
 	@scripts/playback-lab run --suite full
 
+.PHONY: playback-stall-recovery
+playback-stall-recovery: ## Prove one seamless Auto downshift through the accepted bandwidth cliff
+	@scripts/playback-lab run --suite stall-recovery \
+	  --network-profile 8mbps-to-1.5mbps \
+	  --json target/playback-lab/acceptance/auto-cliff.json \
+	  --junit target/playback-lab/acceptance/auto-cliff.xml
+
 ## ---- Cinema vs Plex benchmark ------------------------------------------
 
 BENCHMARK_CONFIG ?= benchmarks/cinema-plex.example.toml

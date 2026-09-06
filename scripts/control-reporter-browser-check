@@ -87,11 +87,18 @@ const settle = (value) => { window.__settled = value; };
         lease_timeout_ms: 300000,
       },
       clientInstanceId: "22222222-2222-4222-8222-222222222222",
-      // The shape `tests/playback/web-control.test.js` uses, verbatim. The
-      // reporter silently drops a snapshot it does not recognise — `notify`
+      // The shape `tests/playback/web-control.test.js` uses, verbatim, and
+      // through the module's own `capture` wrapper for the same reason: the
+      // reporter silently drops a capture it does not recognise — `notify`
       // returns null and nothing is queued — so a drifted shape here would
       // make this gate pass by never running the reporter at all.
-      snapshot: () => ({
+      //
+      // The option is `capture` and not `snapshot`. That rename is exactly the
+      // kind of thing this gate is for: every Node test passes its own capture
+      // and kept passing, the shipped page was updated, and this — the only
+      // caller that constructs the real reporter in a real browser — was left
+      // on the old name and threw at construction.
+      capture: () => PlurxPlaybackControl.capture({
         demand: "active",
         position_ms: 1000,
         buffered_from_ms: 1000,
@@ -117,7 +124,7 @@ const settle = (value) => { window.__settled = value; };
         },
         observation: null,
         acknowledgement: null,
-      }),
+      }, 0, { lifecycleId: "browser-check", attachmentGeneration: 0 }),
       // A real network round trip is not what broke; the reporter's own
       // runtime was. Resolving here keeps the gate hermetic — but the response
       // has to be *valid*, echoing the request's generation, epoch and

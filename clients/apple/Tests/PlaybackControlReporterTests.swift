@@ -81,6 +81,11 @@ private final class Harness: @unchecked Sendable {
     private var _requests: [ControlRequest] = []
     private var _clock = 0
     private var _snapshot = snapshot()
+    private var _intentGeneration = 0
+    private var _sourceRevision = 0
+    private var _available = true
+    private var _owner = PlaybackControlCaptureOwner(lifecycleId: clientId, attachmentGeneration: 1)
+    private var _afterExchange: (@Sendable () -> Void)?
     private var _outcomes: [Result<ControlResponse, Error>] = []
     private var _exchanges: [PlaybackControlReporter.Exchange] = []
     private var _deadlineFires = false
@@ -94,8 +99,18 @@ private final class Harness: @unchecked Sendable {
         lock.withLock { _sleeps.filter { $0.1 == .pacing }.map(\.0) }
     }
 
-    func setSnapshot(_ value: PlaybackControlSnapshot) { lock.withLock { _snapshot = value } }
+    func setSnapshot(_ value: PlaybackControlSnapshot) { lock.withLock { _snapshot = value; _sourceRevision += 1 } }
+    func setCaptureSource(_ value: PlaybackControlSnapshot, intent: Int, attachment: Int) {
+        lock.withLock {
+            _snapshot = value
+            _sourceRevision += 1
+            _intentGeneration = intent
+            _owner = PlaybackControlCaptureOwner(lifecycleId: clientId, attachmentGeneration: attachment)
+        }
+    }
     func advance(_ ms: Int) { lock.withLock { _clock += ms } }
+    func setAvailable(_ value: Bool) { lock.withLock { _available = value } }
+    func afterNextExchange(_ body: @escaping @Sendable () -> Void) { lock.withLock { _afterExchange = body } }
     func fireDeadlines() { lock.withLock { _deadlineFires = true } }
 
     /// Queue what the next exchanges answer, oldest first. Anything beyond
@@ -145,12 +160,21 @@ private final class Harness: @unchecked Sendable {
     }
 
     var now: @Sendable () -> Int { { [self] in lock.withLock { _clock } } }
-    var takeSnapshot: @Sendable () -> PlaybackControlSnapshot? {
-        { [self] in lock.withLock { _snapshot } }
+    var takeCapture: @Sendable () -> PlaybackControlCapture? {
+        { [self] in lock.withLock {
+            guard _available else { return nil }
+            return PlaybackControlCapture(snapshot: _snapshot, intentGeneration: _intentGeneration,
+                                   owner: _owner, sourceRevision: _sourceRevision)
+        } }
     }
     var onExchange: @Sendable (PlaybackControlReporter.Exchange) -> Void {
         { [self] exchange in
-            lock.withLock { _exchanges.append(exchange) }
+            let after = lock.withLock {
+                _exchanges.append(exchange)
+                let after = _afterExchange; _afterExchange = nil
+                return after
+            }
+            after?()
             gate.signal()
         }
     }
@@ -197,7 +221,8 @@ private func makeReporter(
     PlaybackControlReporter(
         bootstrap: value,
         clientInstanceId: clientId,
-        snapshot: harness.takeSnapshot,
+        owner: PlaybackControlCaptureOwner(lifecycleId: clientId, attachmentGeneration: 1),
+        capture: harness.takeCapture,
         send: harness.send,
         sleep: harness.sleep,
         now: harness.now,
@@ -208,6 +233,160 @@ private func makeReporter(
 // MARK: - Tests
 
 final class PlaybackControlReporterTests: XCTestCase {
+
+    func testNewIntentResumesOnlyAnIntentOwnedTerminalStop() async throws {
+        for transition in ["callback", "ordinary", "urgent", "explicit", "end", "protocol"] {
+            let harness = Harness()
+            var newer = snapshot()
+            newer.positionMs = 9_000; newer.bufferedThroughMs = 19_000
+            let next = newer
+            if transition == "callback" {
+                harness.afterNextExchange { harness.setCaptureSource(next, intent: 1, attachment: 1) }
+            }
+            if transition == "end" {
+                var ended = snapshot(); ended.demand = .end; harness.setSnapshot(ended)
+            }
+            if transition == "protocol" { harness.enqueue([.failure(ControlProtocolError(reason: "body"))]) }
+            else {
+                harness.enqueue([.success(ControlResponse(proto: PlaybackControl.protocolName,
+                    generation: bootstrap().generation, controlEpoch: 7, acceptedSequence: 1,
+                    action: ControlAction(type: "terminal", code: "unsupported", message: "A")))])
+            }
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            await reporter.start()
+            XCTAssertTrue(harness.awaitExchanges(1))
+            if transition != "callback" {
+                var stopped = await reporter.stopped
+                XCTAssertTrue(stopped)
+                await reporter.notify()
+                stopped = await reporter.stopped
+                XCTAssertTrue(stopped, "same intent cannot resume its own terminal stop")
+                if transition == "explicit" { await reporter.stop() }
+                harness.setCaptureSource(next, intent: 1, attachment: 1)
+                if transition == "ordinary" { await reporter.notify() }
+                else { await reporter.notifyUrgently() }
+            }
+            let permanent = ["explicit", "end", "protocol"].contains(transition)
+            if !permanent { XCTAssertTrue(harness.waitUntil { harness.requests.count >= 2 }, transition) }
+            let stopped = await reporter.stopped
+            XCTAssertEqual(stopped, permanent, transition)
+            await reporter.stop()
+            if permanent { XCTAssertEqual(harness.requests.count, 1, transition) }
+            else { XCTAssertEqual(harness.requests[1].positionMs, 9_000, transition) }
+        }
+    }
+
+    func testOwnerResetDuringClearedSourceWaitsForItsOwnAttachmentCapture() async throws {
+        for foreignOwner in [false, true] {
+            let harness = Harness()
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            let nextGeneration = "44444444-4444-4444-8444-444444444444"
+            harness.afterNextExchange { harness.setAvailable(false) }
+            harness.enqueue([.failure(ControlTransportError(status: 409, code: "owner_changed",
+                generation: nextGeneration, controlEpoch: 8))])
+            await reporter.start()
+            XCTAssertTrue(harness.awaitExchanges(1))
+            let stopped = await reporter.stopped
+            XCTAssertFalse(stopped, "a source publication gap is not a terminal protocol error")
+            XCTAssertEqual(harness.requests.count, 1)
+            var newer = snapshot()
+            newer.positionMs = 9_000; newer.bufferedThroughMs = 19_000
+            harness.setCaptureSource(newer, intent: 1, attachment: foreignOwner ? 2 : 1)
+            harness.setAvailable(true)
+            let floor = await reporter.notifyUrgently()
+            if foreignOwner {
+                XCTAssertNil(floor)
+                XCTAssertEqual(harness.requests.count, 1, "old reporter cannot borrow B's body")
+            } else {
+                XCTAssertNotNil(floor)
+                XCTAssertTrue(harness.waitUntil { harness.requests.count >= 2 })
+                XCTAssertEqual(harness.requests[1].generation, nextGeneration)
+                XCTAssertEqual(harness.requests[1].controlEpoch, 8)
+                XCTAssertEqual(harness.requests[1].sequence, 1)
+                XCTAssertEqual(harness.requests[1].positionMs, 9_000)
+            }
+            await reporter.stop()
+        }
+    }
+
+    func testReversedActorEnqueueUsesNewestSourceEvenWhenIntentIsUnchanged() async throws {
+        for sameIntent in [false, true] {
+            let harness = Harness()
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            let older = try XCTUnwrap(harness.takeCapture())
+            var newer = snapshot()
+            newer.positionMs = 9_000; newer.bufferedThroughMs = 19_000
+            harness.setCaptureSource(newer, intent: sameIntent ? 0 : 1, attachment: 1)
+            let captured = try XCTUnwrap(harness.takeCapture())
+            await reporter.notify(captured)
+            await reporter.notify(older) // delayed actor hop from the earlier source turn
+            await reporter.start()
+            XCTAssertTrue(harness.awaitExchanges(1))
+            await reporter.stop()
+            XCTAssertEqual(harness.requests.first?.positionMs, 9_000)
+            XCTAssertEqual(harness.exchanges.first?.capture, captured)
+        }
+    }
+
+    func testClearedSourceAndNewAttachmentCannotAdmitAnOldQueuedCapture() async throws {
+        for replaceOwner in [false, true] {
+            let harness = Harness()
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            let captured = try XCTUnwrap(harness.takeCapture())
+            await reporter.notify(captured)
+            if replaceOwner { harness.setCaptureSource(snapshot(), intent: 0, attachment: 2) }
+            else { harness.setAvailable(false) }
+            await reporter.start()
+            for _ in 0..<10 { await Task.yield() }
+            let floor = await reporter.notifyUrgently(captured)
+            await reporter.stop()
+            XCTAssertNil(floor)
+            XCTAssertTrue(harness.requests.isEmpty, "neither queued work nor cadence may cross the source owner")
+        }
+    }
+
+    func testStartedRetryKeepsTheCapturedPayloadIntentAndAttachment() async throws {
+        let harness = Harness()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        let captured = try XCTUnwrap(harness.takeCapture())
+        var replacement = snapshot()
+        replacement.positionMs = 9_000
+        replacement.bufferedThroughMs = 19_000
+        let newer = replacement
+        harness.afterNextExchange { harness.setCaptureSource(newer, intent: 7, attachment: 1) }
+        harness.enqueue([.failure(ControlTransportError(status: 429, code: "control_rate_limited"))])
+        // Source changes after first failure, before the exact retry.
+        await reporter.notify(captured)
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(2))
+        await reporter.stop()
+        XCTAssertEqual(harness.requests[0], harness.requests[1])
+        XCTAssertEqual(harness.exchanges[0].capture, captured)
+        XCTAssertEqual(harness.exchanges[1].capture, captured)
+        XCTAssertNotEqual(captured.intentGeneration, harness.takeCapture()?.intentGeneration)
+    }
+
+    func testTerminalForOldAttachmentDoesNotStopTheReusedIntentNumber() async throws {
+        let harness = Harness()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        let captured = try XCTUnwrap(harness.takeCapture())
+        harness.afterNextExchange {
+            harness.setCaptureSource(snapshot(), intent: captured.intentGeneration, attachment: 2)
+        }
+        harness.enqueue([.success(ControlResponse(
+            proto: PlaybackControl.protocolName, generation: bootstrap().generation,
+            controlEpoch: 7, acceptedSequence: 1,
+            action: ControlAction(type: "terminal", code: "unsupported", message: "old attachment")
+        ))])
+        await reporter.notify(captured)
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped)
+        await reporter.stop()
+        XCTAssertEqual(harness.exchanges[0].capture, captured)
+        XCTAssertEqual(harness.requests.count, 1, "an old reporter cannot send the replacement's capture")
+    }
     // MARK: bootstrap acceptance
 
     func testAValidBootstrapIsAccepted() {
@@ -271,7 +450,8 @@ final class PlaybackControlReporterTests: XCTestCase {
             PlaybackControlReporter(
                 bootstrap: bootstrap(),
                 clientInstanceId: "not-a-uuid",
-                snapshot: harness.takeSnapshot,
+                owner: PlaybackControlCaptureOwner(lifecycleId: clientId, attachmentGeneration: 1),
+                capture: harness.takeCapture,
                 send: harness.send,
                 sleep: harness.sleep,
                 now: harness.now
@@ -327,6 +507,20 @@ final class PlaybackControlReporterTests: XCTestCase {
         // the pump is free to have completed another exchange between the
         // gate signalling and this assertion, and on a fast machine it does.
         XCTAssertEqual(harness.exchanges.first?.response?.acceptedSequence, 1)
+    }
+
+    func testUrgentIntentReturnsTheNextRequestOrderingFloor() async throws {
+        let harness = Harness()
+        harness.holdExchanges()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.waitUntil { harness.requests.count == 1 })
+
+        harness.setSnapshot(snapshot(position: 9_000, render: .seeking))
+        let floor = await reporter.notifyUrgently()
+
+        XCTAssertEqual(floor, 2)
+        await reporter.stop()
     }
 
     func testUnchangedCapabilitiesAreSentOnceAndAChangeResendsThem() async throws {
@@ -806,6 +1000,16 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertFalse(value.isValid)
         value.selection.quality = .manual(height: 1_080)
         XCTAssertTrue(value.isValid)
+    }
+
+    func testOriginalQualityHasAnExplicitWireRepresentation() throws {
+        var value = snapshot()
+        value.selection.quality = .original
+        XCTAssertTrue(value.isValid)
+        let json = try XCTUnwrap(
+            String(data: try PlaybackControl.encoder.encode(value.selection), encoding: .utf8)
+        )
+        XCTAssertTrue(json.contains("\"mode\":\"original\""))
     }
 
     func testCapabilitiesMustNameAtLeastOneCodecAndRange() {

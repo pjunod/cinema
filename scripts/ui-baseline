@@ -1085,15 +1085,18 @@ def open_player(page, timeout_ms):
         timeout=timeout_ms)
 
 
-# Capture-only instrumentation: keep the first real Activity polling callback,
-# but stop its interval synchronously before another tick can enter the sample.
-# Python/browser round-trip latency must not decide whether the raw request log
-# contains one or two refreshes. Other timers and every actual request remain
-# untouched; the ordinary observation window still detects additional fetches.
+# Capture-only instrumentation: keep the first real callback from each Activity
+# poller, but stop its interval synchronously before another tick can enter the
+# sample. Python/browser round-trip latency must not decide whether the raw
+# request log contains one or two refreshes: on an overloaded runner a 4.5s
+# sleep callback can arrive after *two* ticks of the global 4s interval. Other
+# timers and every actual request remain untouched, so an extra product fetch
+# that did not come from the retained interval callback still fails the golden.
 ACTIVITY_CAPTURE_JS = """
 (() => {
   const schedule = window.setInterval.bind(window);
   window.__plurxActivityCaptureTick = false;
+  window.__plurxGlobalActivityCaptureTick = false;
   window.setInterval = (callback, delay, ...args) => {
     if (typeof callback !== "function") return schedule(callback, delay, ...args);
     const timer = schedule(function (...values) {
@@ -1102,6 +1105,12 @@ ACTIVITY_CAPTURE_JS = """
         clearInterval(timer);
         PAGE_TIMER = null;
         window.__plurxActivityCaptureTick = true;
+      }
+      if (delay === 4000 && location.hash !== "#/activity" &&
+          typeof ACT_TIMER !== "undefined" && ACT_TIMER === timer) {
+        clearInterval(timer);
+        ACT_TIMER = null;
+        window.__plurxGlobalActivityCaptureTick = true;
       }
       return callback.apply(this, values);
     }, delay, ...args);
@@ -1161,6 +1170,7 @@ def pause_activity_polling(page, name, timeout_ms):
 def resume_activity_polling(page):
     """Start one fresh production polling period for the request inventory."""
     page.evaluate("""() => {
+      window.__plurxGlobalActivityCaptureTick = false;
       if (!ACT_TIMER) ACT_TIMER = setInterval(pollActivity, 4000);
     }""")
 
@@ -1410,8 +1420,9 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     page = pw_context.new_page()
-    if name == "activity":
-        page.add_init_script(ACTIVITY_CAPTURE_JS)
+    # Both the route-owned Activity timer and the global Activity status timer
+    # need their observation boundary installed before application code runs.
+    page.add_init_script(ACTIVITY_CAPTURE_JS)
     problems = []
     # The request log. Four documents cite a "request-log invariant" — converting
     # a route, or wearing a different layout, must not change which endpoints it
@@ -1581,6 +1592,16 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # lands on the same steady state instead of on whichever half of the
         # cycle happened to be showing.
         page.wait_for_timeout(settle_ms)
+        if activity_poll_paused and name != "settings":
+            # The wrapper clears ACT_TIMER synchronously before its first real
+            # callback. Requiring that callback (and its request completion)
+            # retains one complete production period without allowing runner
+            # starvation to squeeze a second 4s tick ahead of Python's 4.5s
+            # sleep callback.
+            page.wait_for_function(
+                "() => window.__plurxGlobalActivityCaptureTick === true && !ACT_POLLING",
+                timeout=args.timeout,
+            )
         if name == "activity":
             # The initial render and exactly one shipped timer callback must
             # both finish. Do not normalize counts: an extra application fetch

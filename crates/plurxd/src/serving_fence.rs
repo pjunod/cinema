@@ -6,10 +6,10 @@
 //! monitor. This projection turns that lease into one process-wide watch.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use plurx_core::cluster::migration::status::PassiveRaftMetrics;
+use plurx_core::cluster::migration::status::{PassiveRaftMetrics, ServingProof};
 
 const SERVING_FENCE_POLL: Duration = Duration::from_millis(25);
 
@@ -152,6 +152,14 @@ pub(crate) struct ServingFence {
     transition: Arc<tokio::sync::RwLock<()>>,
     state: tokio::sync::watch::Sender<ServingState>,
     restart_drain: Arc<RestartDrain>,
+    /// The proof this node is currently serving under, captured while it was
+    /// eligible. Only ever read as a fallback, and only ever holds a proof
+    /// this node genuinely earned — see `refresh`.
+    ///
+    /// A `std::sync::Mutex` rather than an atomic because the value is a small
+    /// record, and rather than a `tokio` one because the only holder is the
+    /// 25 ms poller and nothing awaits inside it.
+    retained_proof: Arc<StdMutex<Option<ServingProof>>>,
 }
 
 impl ServingFence {
@@ -173,6 +181,7 @@ impl ServingFence {
             transition,
             state,
             restart_drain: Arc::new(RestartDrain::default()),
+            retained_proof: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -365,6 +374,116 @@ impl ServingFence {
             loss_generation,
         });
     }
+}
+
+/// What the poll should do with the proof it is holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retain {
+    /// Capture the eligible proof this node is serving under now, replacing
+    /// whatever was held. A new eligible proof is always preferred.
+    FromCurrentProof,
+    /// Nothing is being served under it, so nothing may later be.
+    Clear,
+    /// Serving is continuing on it; leave its original deadline alone.
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuthorityOutcome {
+    ready: bool,
+    retain: Retain,
+}
+
+/// The whole serving decision, with the state reads factored out.
+///
+/// Separated so the four rules that matter can be stated and tested directly
+/// rather than inferred from a poller that also owns a snapshot, a mutex, a
+/// watch channel and a generation counter. The rules:
+///
+/// 1. an unmanaged backend is always ready and holds no proof;
+/// 2. a currently eligible node is ready, and captures that proof;
+/// 3. a node that is *already serving* and has lost current eligibility may
+///    continue on the proof it holds, for as long as that proof is valid on
+///    its own original terms;
+/// 4. a node that is **not** already serving may never become ready this way.
+///
+/// Rule 4 is the one that keeps this a continuation rather than a second route
+/// to authority. Once a loss is published the generation has bumped and every
+/// admitted session has been torn down, so returning on a retained proof would
+/// resume service on grounds this node had already declared insufficient.
+/// Recovery is a fresh proof's job, and only a fresh proof's.
+fn decide_authority(
+    unmanaged: bool,
+    authority_is_current: bool,
+    previously_ready: bool,
+    retained_still_valid: impl FnOnce() -> bool,
+) -> AuthorityOutcome {
+    if authority_is_current {
+        return AuthorityOutcome {
+            ready: true,
+            retain: Retain::FromCurrentProof,
+        };
+    }
+    if previously_ready && retained_still_valid() {
+        return AuthorityOutcome {
+            ready: true,
+            retain: Retain::Unchanged,
+        };
+    }
+    AuthorityOutcome {
+        // An unmanaged backend has no quorum to lose and no proof to hold.
+        ready: unmanaged,
+        retain: Retain::Clear,
+    }
+}
+
+impl ServingFence {
+    /// Whether serving may continue on the proof this node already held.
+    ///
+    /// A fallback, reached only when the current snapshot is not eligible, and
+    /// only after that snapshot has been given its chance — a new eligible
+    /// proof is always preferred and always replaces the retained one.
+    ///
+    /// The retained proof keeps its *original* deadline. Nothing here rewrites
+    /// it: a catch-up does not restamp it, the newer watermark that caused
+    /// this path does not extend it, and a sampling error does not refresh it.
+    /// So the window is strictly no longer than the one this node already had,
+    /// and strictly shorter than the newer proof's, which means an isolated
+    /// node still loses authority at exactly the instant it does today. What
+    /// changes is only this: a node that is *in* the quorum, holding a live
+    /// proof, no longer loses serving the moment a newer committed index
+    /// arrives ahead of its local apply — which is a self-inflicted outage on
+    /// a node nothing is actually wrong with.
+    ///
+    /// Every other reason to drop it is still a hard drop, checked against
+    /// live state on each poll rather than trusted from capture time: the
+    /// original expiry, an explicit invalidation, a term or leader or epoch
+    /// that no longer matches the generation the proof was issued in, a stale
+    /// local sample, a lost leader, a regressed committed index.
+    fn continues_on_the_retained_proof(&self) -> bool {
+        let mut retained = self.retained_proof.lock().unwrap_or_else(|poisoned| {
+            // A poisoned lock is a panic somewhere in this poller. Fail closed
+            // rather than serve on a proof whose provenance is now in doubt.
+            poisoned.into_inner()
+        });
+        let Some(proof) = *retained else {
+            return false;
+        };
+        if self.metrics.serving_proof_remains_valid(&proof) {
+            return true;
+        }
+        // Cleared on the way out, so a proof that has died cannot be revived
+        // by anything that happens later.
+        *retained = None;
+        false
+    }
+
+    fn retain(&self, proof: Option<ServingProof>) {
+        *self
+            .retained_proof
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = proof;
+    }
 
     async fn refresh(&self) {
         let snapshot = self.metrics.snapshot();
@@ -376,8 +495,22 @@ impl ServingFence {
                     !snapshot.local_source && watermark.apply_lag_entries.is_none()
                 }
             });
-        let desired = !self.is_quorum_managed() || authority_is_current;
         let previous = self.is_ready();
+        let outcome = decide_authority(
+            !self.is_quorum_managed(),
+            authority_is_current,
+            previous,
+            // Evaluated lazily: the retained proof is only consulted on the
+            // one branch that may use it, so an eligible snapshot never pays
+            // for it and a lost node never resurrects one by reading it.
+            || self.continues_on_the_retained_proof(),
+        );
+        match outcome.retain {
+            Retain::FromCurrentProof => self.retain(self.metrics.eligible_serving_proof()),
+            Retain::Clear => self.retain(None),
+            Retain::Unchanged => {}
+        }
+        let desired = outcome.ready;
         self.publish(desired).await;
         if previous != desired {
             if desired {
@@ -460,6 +593,105 @@ impl Drop for PendingLossTransition {
 mod tests {
     use super::*;
     use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+    /// Continuity sustains an authority this node has; it never restores one
+    /// it has lost, and it never runs on a node that is not managed.
+    ///
+    /// The proof's own validity is `plurx-core`'s question and is tested there
+    /// against real published state and a controllable clock. What is tested
+    /// here is the part that lives in this file: which of the four situations
+    /// the poller can be in are allowed to consult a retained proof at all.
+    ///
+    /// The fourth is the one worth being explicit about. Once a loss has been
+    /// published the generation has bumped and every admitted session has been
+    /// torn down, so returning on a retained proof would resume service on
+    /// grounds this node had already declared insufficient — quietly, with no
+    /// fresh quorum evidence, and with the sessions that were fenced for it
+    /// already gone. Recovery is a fresh proof's job, and only a fresh one's.
+    #[test]
+    fn a_retained_proof_sustains_serving_authority_and_never_restores_it() {
+        let retained_is_valid = || true;
+        let retained_is_gone = || false;
+
+        // A node serving on a current proof keeps it, and captures it.
+        assert_eq!(
+            decide_authority(false, true, true, retained_is_gone),
+            AuthorityOutcome {
+                ready: true,
+                retain: Retain::FromCurrentProof,
+            },
+            "a new eligible proof is always preferred over whatever was held"
+        );
+
+        // The case the change exists for: still serving, no longer currently
+        // eligible, and the proof it holds has not expired.
+        assert_eq!(
+            decide_authority(false, false, true, retained_is_valid),
+            AuthorityOutcome {
+                ready: true,
+                retain: Retain::Unchanged,
+            },
+            "serving continues on the proof it already had, on that proof's terms"
+        );
+
+        // Same node, expired or invalidated proof.
+        assert_eq!(
+            decide_authority(false, false, true, retained_is_gone),
+            AuthorityOutcome {
+                ready: false,
+                retain: Retain::Clear,
+            },
+            "and stops the moment that proof stops being valid"
+        );
+
+        // Already fenced. A retained proof cannot bring it back, however valid
+        // the proof still looks.
+        assert_eq!(
+            decide_authority(false, false, false, retained_is_valid),
+            AuthorityOutcome {
+                ready: false,
+                retain: Retain::Clear,
+            },
+            "a fenced node does not un-fence itself on a proof it kept"
+        );
+
+        // An unmanaged backend has no quorum to lose and holds nothing.
+        assert_eq!(
+            decide_authority(true, false, false, retained_is_gone),
+            AuthorityOutcome {
+                ready: true,
+                retain: Retain::Clear,
+            }
+        );
+    }
+
+    /// The retained proof is consulted only where it may be used.
+    ///
+    /// Not an optimisation. A currently eligible node must not read it, so
+    /// nothing can make eligibility depend on a stale record; and a fenced
+    /// node must not read it, so there is no path on which a lost node
+    /// evaluates its own resurrection.
+    #[test]
+    fn only_a_serving_node_that_lost_eligibility_consults_its_retained_proof() {
+        let consulted = std::cell::Cell::new(0);
+        let consult = || {
+            consulted.set(consulted.get() + 1);
+            true
+        };
+
+        decide_authority(false, true, true, consult);
+        assert_eq!(consulted.get(), 0, "an eligible node does not look");
+        decide_authority(true, false, false, consult);
+        assert_eq!(consulted.get(), 0, "an unmanaged backend does not look");
+        decide_authority(false, false, false, consult);
+        assert_eq!(
+            consulted.get(),
+            0,
+            "a node that is already fenced does not look"
+        );
+        decide_authority(false, false, true, consult);
+        assert_eq!(consulted.get(), 1, "and the one case that may use it, does");
+    }
 
     #[test]
     fn sqlite_is_ready_without_a_quorum_sampler() {

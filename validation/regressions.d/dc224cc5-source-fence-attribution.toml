@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["dc224cc5"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "SourceFence::unchanged returned a bare false for three different situations — a source that was genuinely rewritten, an inode whose metadata moved while its bytes did not, and an fstat that failed — and all three were published under the sentence 'source changed before fragment publication', which is a conclusion the fence had no evidence for. drift() reports the component instead, field by field, so a ctime that moved alone is not reported as a source change and a failed fstat is reported as a failed fstat. a_refusal_names_the_component_that_moved pins each case, including the mismatched-shape guard that would otherwise print field names against the wrong values."
