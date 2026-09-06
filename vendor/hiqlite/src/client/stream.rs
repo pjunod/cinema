@@ -1308,8 +1308,7 @@ async fn drain_client_reader_responses(
     };
     if let Some(response) = pending_response {
         debug!("Answer retained by reader during teardown: {:?}", response);
-        let proxy_refused =
-            try_forward_response(in_flight, in_flight_buf, false, response).await;
+        let proxy_refused = try_forward_response(in_flight, in_flight_buf, false, response).await;
         proxy_handoff |= proxy_mode && proxy_refused;
     }
     proxy_handoff
@@ -2070,8 +2069,8 @@ mod tests {
                         result: ApiStreamResponsePayload::Execute(Err(forward_to_leader_error())),
                     },
                 )
-                    .await
-                    .expect("retain refusing response");
+                .await
+                .expect("retain refusing response");
             }
         });
 
