@@ -843,6 +843,12 @@ impl DecodeCapabilitySnapshotIdentity {
         validate_sha256(&ffmpeg_build_digest)
             .map_err(|_| PlanError::InvalidCapabilityIdentity("ffmpeg build digest"))?;
         let device_class = validated_capability_token(device_class, "device class")?;
+        if !device_class
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+        {
+            return Err(PlanError::InvalidCapabilityIdentity("device class"));
+        }
         if let Some(digest) = driver_environment_digest.as_deref() {
             validate_sha256(digest)
                 .map_err(|_| PlanError::InvalidCapabilityIdentity("driver environment digest"))?;
@@ -1499,6 +1505,8 @@ pub fn resolve_transcode(
     let codec = facts.codec().ok_or(PlanError::MissingCodec)?;
     let mut options = request.options.clone();
     validate_media_options(&options)?;
+    let requested_max_height = u32::try_from(options.target_height)
+        .map_err(|_| PlanError::InvalidMediaOption("target_height"))?;
     if !options.pipeline.pairs_with(request.encoder)
         || !options.pipeline.handles(facts.routing_dynamic_range())
         || request
@@ -1626,7 +1634,7 @@ pub fn resolve_transcode(
         request.encoder,
         subtitle_rendering,
     );
-    let effective_geometry = effective_output_geometry(facts, options.target_height as u32);
+    let effective_geometry = effective_output_geometry(facts, requested_max_height);
     let output_contract = PresentationContract {
         output_grade,
         output_codec: match output_grade {
@@ -1646,7 +1654,7 @@ pub fn resolve_transcode(
         output_matrix: output_grade.matrix().to_owned(),
         output_primaries: output_grade.primaries().to_owned(),
         width_rule: OutputWidthRule::PreserveAspectEven,
-        requested_max_height: options.target_height as u32,
+        requested_max_height,
         effective_width: effective_geometry.map(|geometry| geometry.0),
         effective_height: effective_geometry.map(|geometry| geometry.1),
         audio_channels: options.audio_channels,

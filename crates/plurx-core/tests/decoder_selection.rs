@@ -1101,6 +1101,14 @@ fn capability_snapshot_identity_rejects_unbound_builds_and_drivers() {
             "driver environment digest"
         ))
     ));
+    assert!(matches!(
+        DecodeCapabilitySnapshotIdentity::new(
+            "a".repeat(64),
+            "/dev/dri/renderD128".to_owned(),
+            None
+        ),
+        Err(PlanError::InvalidCapabilityIdentity("device class"))
+    ));
 }
 
 #[test]
@@ -1176,6 +1184,33 @@ fn presentation_geometry_records_the_no_upscale_even_output() {
     assert_eq!(plan.output_contract().requested_max_height(), 1080);
     assert_eq!(plan.output_contract().effective_width(), Some(1280));
     assert_eq!(plan.output_contract().effective_height(), Some(720));
+}
+
+#[test]
+fn presentation_height_outside_the_command_builders_domain_is_refused() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1280,
+        720,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let mut media = options(Pipeline::Cpu);
+    media.target_height = i64::MAX;
+    assert_eq!(
+        resolve_transcode(
+            &TranscodeRequest::new(Encoder::Software, media),
+            &input,
+            &capabilities(vec![]),
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::none(),
+        ),
+        Err(PlanError::InvalidMediaOption("target_height"))
+    );
 }
 
 #[test]
