@@ -196,6 +196,9 @@ impl ProbeLaunchMode {
                     steady_notification_response_interrupts: Some(
                         &STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS,
                     ),
+                    steady_notification_response_deadline_exits: Some(
+                        &STEADY_RESPONSE_DEADLINE_EXITS,
+                    ),
                     ..LinuxBootstrapInterrupts::default()
                 };
             }
@@ -205,6 +208,7 @@ impl ProbeLaunchMode {
                     steady_notification_response_interrupts: Some(
                         &STEADY_RESPONSE_STOP_INTERRUPT_HITS,
                     ),
+                    steady_notification_response_stop_exits: Some(&STEADY_RESPONSE_STOP_EXITS),
                     stop_after_steady_notification_response_interrupt: true,
                     ..LinuxBootstrapInterrupts::default()
                 };
@@ -1024,6 +1028,11 @@ struct LinuxBootstrapInterrupts {
     /// Test-only launch modes attach a mode-local observation counter so the
     /// regression cannot pass merely because some earlier operation stalled.
     steady_notification_response_interrupts: Option<&'static std::sync::atomic::AtomicUsize>,
+    /// Distinct exit observations make deadline and stop mutations fail their
+    /// corresponding regressions even if outer task cleanup eventually stops
+    /// the same supervisor thread.
+    steady_notification_response_deadline_exits: Option<&'static std::sync::atomic::AtomicUsize>,
+    steady_notification_response_stop_exits: Option<&'static std::sync::atomic::AtomicUsize>,
     /// Test-only stop-path injection. Production constructs `false` through
     /// `Default`, so only the explicit regression can request this signal.
     stop_after_steady_notification_response_interrupt: bool,
@@ -1105,13 +1114,23 @@ fn answer_linux_seccomp_notification_until(
     stop: Option<&AtomicBool>,
     injected_interrupts: &mut u8,
     injected_interrupt_observer: Option<&std::sync::atomic::AtomicUsize>,
+    deadline_exit_observer: Option<&std::sync::atomic::AtomicUsize>,
+    stop_exit_observer: Option<&std::sync::atomic::AtomicUsize>,
     stop_after_injected_interrupt: bool,
 ) -> std::io::Result<()> {
     loop {
         if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+            if let Some(observer) = stop_exit_observer {
+                observer.fetch_add(1, Ordering::Release);
+            }
             return Ok(());
         }
-        ensure_linux_probe_deadline(deadline)?;
+        if let Err(error) = ensure_linux_probe_deadline(deadline) {
+            if let Some(observer) = deadline_exit_observer {
+                observer.fetch_add(1, Ordering::Release);
+            }
+            return Err(error);
+        }
         let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
         if injected {
             if let Some(observer) = injected_interrupt_observer {
@@ -1558,6 +1577,8 @@ fn supervise_linux_probe_execs(
             None,
             &mut interrupts.first_notification_response,
             None,
+            None,
+            None,
             false,
         );
         return Err(std::io::Error::new(
@@ -1580,6 +1601,8 @@ fn supervise_linux_probe_execs(
         Some(launch_deadline),
         None,
         &mut interrupts.first_notification_response,
+        None,
+        None,
         None,
         false,
     )?;
@@ -1634,6 +1657,8 @@ fn supervise_linux_probe_execs(
             Some(stop.as_ref()),
             &mut interrupts.steady_notification_response,
             interrupts.steady_notification_response_interrupts,
+            interrupts.steady_notification_response_deadline_exits,
+            interrupts.steady_notification_response_stop_exits,
             interrupts.stop_after_steady_notification_response_interrupt,
         ) {
             Ok(()) => {}
@@ -1797,6 +1822,14 @@ static STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS: std::sync::atomic::AtomicUsize =
 
 #[cfg(all(test, target_os = "linux"))]
 static STEADY_RESPONSE_STOP_INTERRUPT_HITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, target_os = "linux"))]
+static STEADY_RESPONSE_DEADLINE_EXITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, target_os = "linux"))]
+static STEADY_RESPONSE_STOP_EXITS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(unix)]
@@ -3853,6 +3886,7 @@ void probe_main(unsigned long *stack) {
             .expect("production probe identity and version");
         assert_eq!(STEADY_RESPONSE_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
         STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS.store(0, Ordering::Release);
+        STEADY_RESPONSE_DEADLINE_EXITS.store(0, Ordering::Release);
         let ownership = Arc::new(tokio::sync::Semaphore::new(1));
         let started = std::time::Instant::now();
         assert_eq!(
@@ -3870,6 +3904,13 @@ void probe_main(unsigned long *stack) {
             STEADY_RESPONSE_DEADLINE_INTERRUPT_HITS.load(Ordering::Acquire) > 1,
             "the production supervisor must receive the second exec notification and consume persistent response interruptions"
         );
+        tokio::time::timeout(Duration::from_millis(250), async {
+            while STEADY_RESPONSE_DEADLINE_EXITS.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the response loop itself must observe the shared deadline");
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "the caller must detach at the shared launch deadline"
@@ -3900,6 +3941,7 @@ void probe_main(unsigned long *stack) {
             0
         );
         STEADY_RESPONSE_STOP_INTERRUPT_HITS.store(0, Ordering::Release);
+        STEADY_RESPONSE_STOP_EXITS.store(0, Ordering::Release);
         let ownership = Arc::new(tokio::sync::Semaphore::new(1));
         let started = std::time::Instant::now();
         probe_version_with_deadline_on(
@@ -3914,6 +3956,10 @@ void probe_main(unsigned long *stack) {
         assert!(
             STEADY_RESPONSE_STOP_INTERRUPT_HITS.load(Ordering::Acquire) >= 1,
             "the stop-path proof must first consume a steady response interruption"
+        );
+        assert!(
+            STEADY_RESPONSE_STOP_EXITS.load(Ordering::Acquire) >= 1,
+            "the response loop itself must observe the supervisor stop signal"
         );
         assert!(
             started.elapsed() < Duration::from_millis(500),
