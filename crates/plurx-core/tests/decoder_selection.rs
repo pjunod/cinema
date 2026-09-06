@@ -734,6 +734,35 @@ fn rational_values_are_reduced_and_positive_geometry_is_conservative() {
 }
 
 #[test]
+fn one_pixel_dimensions_remain_unknown_instead_of_claiming_no_upscale() {
+    for (width, height) in [(1, 1080), (1920, 1), (1, 1)] {
+        let input = facts(video(
+            0,
+            Some("h264"),
+            Some("high"),
+            width,
+            height,
+            Some("yuv420p"),
+            "24/1",
+            "24/1",
+            Some("bt709"),
+        ));
+        assert_eq!(input.width(), (width >= 2).then_some(width as u32));
+        assert_eq!(input.height(), (height >= 2).then_some(height as u32));
+        let plan = resolve(
+            Encoder::Software,
+            Pipeline::Cpu,
+            &input,
+            &capabilities(vec![]),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("unknown geometry retains a conservative plan");
+        assert_eq!(plan.output_contract().effective_width(), None);
+        assert_eq!(plan.output_contract().effective_height(), None);
+    }
+}
+
+#[test]
 fn pixel_layout_parsing_never_downgrades_unrecognized_high_bit_depth() {
     for (pixel_format, expected_depth, expected_chroma) in [
         ("yuv420p16le", Some(16), Some("420")),
@@ -799,6 +828,64 @@ fn overlapping_equal_specificity_capabilities_are_rejected() {
         ),
         Err(PlanError::AmbiguousCapability)
     ));
+}
+
+#[test]
+fn advertised_detail_cannot_override_rejection_without_stronger_qualification() {
+    let input = facts(video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    let rejected = capability(
+        DecodeBackend::Qsv,
+        "hevc",
+        None,
+        None,
+        CapabilityStatus::Rejected,
+    );
+    let advertised = capability(
+        DecodeBackend::Qsv,
+        "hevc",
+        Some("main 10"),
+        None,
+        CapabilityStatus::Advertised,
+    );
+    let plan = resolve(
+        Encoder::Qsv,
+        Pipeline::Cpu,
+        &input,
+        &capabilities(vec![rejected.clone(), advertised]),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("known rejection falls back to inventoried software");
+    assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+    assert_eq!(plan.decode().reason(), DecodeReason::CapabilityFallback);
+
+    let qualified = exact_capability(
+        DecodeBackend::Qsv,
+        &input,
+        Pipeline::Cpu,
+        Encoder::Qsv,
+        SubtitleRendering::None,
+        CapabilityStatus::Qualified,
+    );
+    let plan = resolve(
+        Encoder::Qsv,
+        Pipeline::Cpu,
+        &input,
+        &capabilities(vec![rejected, qualified]),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
+    )
+    .expect("more-specific qualification supersedes the generic rejection");
+    assert_eq!(plan.decode().backend(), DecodeBackend::Qsv);
+    assert_eq!(plan.decode().evidence(), DecodeEvidence::Qualified);
 }
 
 #[test]
@@ -1158,6 +1245,163 @@ fn catalog_hdr_and_dolby_facts_are_merged_and_contradictions_refused() {
         ),
         Err(PlanError::ConflictingMetadata("dynamic range"))
     );
+}
+
+#[test]
+fn pq_probe_is_refined_by_hdr10plus_and_dolby_catalog_facts() {
+    let stream = video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    );
+    let hdr10plus = DecodeCatalogMetadata::new(
+        Some("hdr10plus"),
+        Some("HDR10+"),
+        DolbyVisionFacts::default(),
+    )
+    .expect("HDR10+ catalog");
+    let refined = DecodeFacts::from_ffprobe_json_with_catalog(
+        &json!({"streams": [stream.clone()]}),
+        identity('7'),
+        &hdr10plus,
+    )
+    .expect("PQ base refines to HDR10+");
+    assert_eq!(refined.dynamic_range(), Some("hdr10plus"));
+
+    let dolby = DolbyVisionFacts {
+        profile: Some(5),
+        level: Some(6),
+        bl_compat_id: Some(0),
+        el_present: Some(false),
+        rpu_present: Some(true),
+    };
+    let catalog = DecodeCatalogMetadata::new(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 5"),
+        dolby,
+    )
+    .expect("Dolby catalog");
+    let refined = DecodeFacts::from_ffprobe_json_with_catalog(
+        &json!({"streams": [stream]}),
+        identity('8'),
+        &catalog,
+    )
+    .expect("PQ base refines to Dolby Vision");
+    assert_eq!(refined.dynamic_range(), Some("dolby_vision"));
+}
+
+#[test]
+fn dolby_compatible_bases_preserve_legacy_routing_and_profile5_needs_rpu_graph() {
+    let pq_stream = video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    );
+    let compatible = DecodeCatalogMetadata::new(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+        DolbyVisionFacts {
+            profile: Some(8),
+            level: Some(6),
+            bl_compat_id: Some(1),
+            el_present: Some(false),
+            rpu_present: Some(true),
+        },
+    )
+    .expect("compatible Dolby catalog");
+    let compatible = DecodeFacts::from_ffprobe_json_with_catalog(
+        &json!({"streams": [pq_stream.clone()]}),
+        identity('9'),
+        &compatible,
+    )
+    .expect("HDR10-compatible Dolby facts");
+    let plan = resolve(
+        Encoder::Qsv,
+        Pipeline::Hdr10Passthrough,
+        &compatible,
+        &capabilities(vec![]),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("HDR10-compatible Dolby source retains the legacy HDR route");
+    assert_eq!(plan.decode().backend(), DecodeBackend::Qsv);
+
+    let hlg_catalog = DecodeCatalogMetadata::new(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 8 (HLG-compatible)"),
+        DolbyVisionFacts {
+            profile: Some(8),
+            level: Some(6),
+            bl_compat_id: Some(4),
+            el_present: Some(false),
+            rpu_present: Some(true),
+        },
+    )
+    .expect("HLG-compatible Dolby catalog");
+    let mut hlg_stream = pq_stream.clone();
+    hlg_stream["color_transfer"] = json!("arib-std-b67");
+    let hlg = DecodeFacts::from_ffprobe_json_with_catalog(
+        &json!({"streams": [hlg_stream]}),
+        identity('a'),
+        &hlg_catalog,
+    )
+    .expect("HLG-compatible Dolby facts");
+    resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &hlg,
+        &capabilities(vec![]),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("HLG-compatible Dolby source retains the legacy CPU route");
+
+    let profile5 = DecodeCatalogMetadata::new(
+        Some("dolby_vision"),
+        Some("Dolby Vision · Profile 5"),
+        DolbyVisionFacts {
+            profile: Some(5),
+            level: Some(6),
+            bl_compat_id: Some(0),
+            el_present: Some(false),
+            rpu_present: Some(true),
+        },
+    )
+    .expect("profile 5 catalog");
+    let profile5 = DecodeFacts::from_ffprobe_json_with_catalog(
+        &json!({"streams": [pq_stream]}),
+        identity('b'),
+        &profile5,
+    )
+    .expect("profile 5 facts");
+    assert_eq!(
+        resolve(
+            Encoder::Software,
+            Pipeline::Cpu,
+            &profile5,
+            &capabilities(vec![]),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        ),
+        Err(PlanError::IncompatibleRenderer)
+    );
+    resolve(
+        Encoder::Software,
+        Pipeline::DoviTonemapx,
+        &profile5,
+        &capabilities(vec![]),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("profile 5 resolves through the RPU-aware graph");
 }
 
 #[test]

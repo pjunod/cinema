@@ -257,6 +257,10 @@ const ACTOR_HARDWARE_STARTUP_BUDGET: Duration = Duration::from_secs(12);
 /// Compatibility mirror of the actor's bounded software startup/retry budget.
 /// Like the hardware mirror, it sizes HTTP patience and owns no timer.
 const ACTOR_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
+/// M1 observes bound decoder facts without allowing that diagnostic probe to
+/// consume the portable producer's startup budget. M2 makes the prepared plan
+/// mandatory and moves this bound into the preparation transaction.
+const NEUTRAL_DECODE_FACT_PROBE_BUDGET: Duration = Duration::from_secs(2);
 /// How long ffmpeg's output timestamp may sit still. It is the actor's
 /// progress budget for every actor-managed rolling producer.
 /// How long a flow evaluation waits for the actor to order its desire.
@@ -8539,6 +8543,10 @@ pub struct BoundPretranscodeSource {
     snapshot: LocalSourceSnapshot,
     path: std::path::PathBuf,
     handle: Arc<std::fs::File>,
+    /// FFprobe and FFmpeg inherit duplicates of the same open-file
+    /// description. One owned permit spans each child lifetime so their seeks
+    /// cannot race, including when a waiting task is cancelled.
+    offset_gate: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn pretranscode_source_snapshot(
@@ -8604,6 +8612,7 @@ pub async fn pretranscode_source_snapshot(
                 snapshot,
                 path,
                 handle: Arc::new(handle),
+                offset_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             })
     }
 }
@@ -12967,43 +12976,6 @@ impl TranscodeManager {
             expected_source_snapshot: _,
             bound_source,
         } = request.clone();
-        if let (Some(source), Some(probe)) =
-            (bound_source.as_ref(), self.decode_probe_identity.as_ref())
-        {
-            match self
-                .decode_facts
-                .get_or_probe(
-                    probe,
-                    Arc::clone(&source.handle),
-                    None,
-                    crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
-                    deadline.saturating_duration_since(Instant::now()),
-                    cancelled,
-                )
-                .await
-            {
-                Ok(facts) => tracing::debug!(
-                    recipe = %hash,
-                    video_stream = facts.input_video_stream(),
-                    codec = facts.codec().unwrap_or("unknown"),
-                    facts_digest = facts.facts_digest(),
-                    "collected bound decoder facts for explicit planning"
-                ),
-                Err(crate::decode_facts::DecodeFactError::Cancelled) => return Ok(None),
-                Err(crate::decode_facts::DecodeFactError::Deadline) => {
-                    tracing::warn!(
-                        recipe = %hash,
-                        "decoder fact collection exhausted the startup deadline"
-                    );
-                    return Ok(None);
-                }
-                Err(error) => tracing::warn!(
-                    recipe = %hash,
-                    %error,
-                    "bound decoder facts are unavailable; retaining the configured legacy decode route"
-                ),
-            }
-        }
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
@@ -13021,6 +12993,60 @@ impl TranscodeManager {
                     "resuming an assembled generation awaiting integrity publication"
                 );
                 return Ok(Some(published));
+            }
+        }
+        if let (Some(source), Some(probe)) =
+            (bound_source.as_ref(), self.decode_probe_identity.as_ref())
+        {
+            let catalog = match plurx_core::transcode::DecodeCatalogMetadata::from_media_file(file)
+            {
+                Ok(catalog) => Some(catalog),
+                Err(error) => {
+                    tracing::warn!(
+                        recipe = %hash,
+                        %error,
+                        "catalog decoder facts are invalid; collecting only bound probe facts"
+                    );
+                    None
+                }
+            };
+            match self
+                .decode_facts
+                .get_or_probe(
+                    probe,
+                    crate::decode_facts::DecodeFactSource::new(
+                        Arc::clone(&source.handle),
+                        Arc::clone(&source.offset_gate),
+                    ),
+                    catalog.as_ref(),
+                    crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(NEUTRAL_DECODE_FACT_PROBE_BUDGET),
+                    cancelled,
+                )
+                .await
+            {
+                Ok(facts) => tracing::debug!(
+                    recipe = %hash,
+                    video_stream = facts.input_video_stream(),
+                    codec = facts.codec().unwrap_or("unknown"),
+                    facts_digest = facts.facts_digest(),
+                    ffprobe_build_digest = probe.build_digest(),
+                    "collected bound decoder facts for explicit planning"
+                ),
+                Err(crate::decode_facts::DecodeFactError::Cancelled) => return Ok(None),
+                Err(crate::decode_facts::DecodeFactError::Deadline) => {
+                    tracing::warn!(
+                        recipe = %hash,
+                        "decoder fact collection reached its neutral observation deadline; retaining the configured legacy decode route"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    recipe = %hash,
+                    %error,
+                    "bound decoder facts are unavailable; retaining the configured legacy decode route"
+                ),
             }
         }
         if !parts.is_empty() {
@@ -13105,6 +13131,31 @@ impl TranscodeManager {
                 software_threads: sw_hold.as_ref().map(|p| p.threads() as u32),
                 ..opts.clone()
             };
+            let source_offset_permit = if let Some(source) = &bound_source {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(None);
+                }
+                Some(tokio::select! {
+                    biased;
+                    _ = async {
+                        match cancelled {
+                            Some(cancelled) => cancelled.cancelled().await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => return Ok(None),
+                    permit = tokio::time::timeout(
+                        remaining,
+                        Arc::clone(&source.offset_gate).acquire_owned(),
+                    ) => {
+                        permit
+                            .map_err(|_| "timed out waiting for bound-source offset ownership")?
+                            .map_err(|_| "bound-source offset owner closed")?
+                    }
+                })
+            } else {
+                None
+            };
             // Unpaced, deliberately. Pacing exists so a live session does not
             // write a film ahead of a playhead that will never reach it; a
             // producer has no playhead and every second it spends holding the
@@ -13159,6 +13210,7 @@ impl TranscodeManager {
             let ended = self
                 .run_part(&mut child, deadline, yield_to_offline, cancelled)
                 .await;
+            drop(source_offset_permit);
             drop(slot); // before anything else: a viewer is probably waiting on it
             drop(sw_hold); // and the pool share with it
             let part = read_part(&part_dir).await;

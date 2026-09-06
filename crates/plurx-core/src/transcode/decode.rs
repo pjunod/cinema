@@ -484,6 +484,18 @@ impl DecodeFacts {
         Self::from_ffprobe_json_inner(json, source_identity, Some(absolute_index), None)
     }
 
+    /// Parse one explicitly selected absolute video stream and merge catalog
+    /// metadata already bound to that same stream. Explicit selection follows
+    /// FFmpeg's stream specifier semantics exactly, including attached video.
+    pub fn from_ffprobe_json_at_with_catalog(
+        json: &Value,
+        source_identity: DecodeSourceIdentity,
+        absolute_index: u32,
+        catalog: &DecodeCatalogMetadata,
+    ) -> Result<Self, PlanError> {
+        Self::from_ffprobe_json_inner(json, source_identity, Some(absolute_index), Some(catalog))
+    }
+
     fn from_ffprobe_json_inner(
         json: &Value,
         source_identity: DecodeSourceIdentity,
@@ -495,9 +507,14 @@ impl DecodeFacts {
             .and_then(Value::as_array)
             .ok_or(PlanError::MissingVideoStream)?;
         let selected = streams.iter().find(|stream| {
-            if stream.get("codec_type").and_then(Value::as_str) != Some("video")
-                || attached_picture(stream)
-            {
+            if stream.get("codec_type").and_then(Value::as_str) != Some("video") {
+                return false;
+            }
+            // The default fact-selection contract chooses the first playable
+            // stream. An explicit absolute index has already been resolved
+            // from the command's stream specifier and must not silently skip
+            // attached pictures, which FFmpeg counts as video streams.
+            if requested_index.is_none() && attached_picture(stream) {
                 return false;
             }
             requested_index.is_none_or(|wanted| stream_index(stream) == Some(wanted))
@@ -522,10 +539,7 @@ impl DecodeFacts {
         let color_transfer = bounded_token(selected, "color_transfer")?;
         let color_primaries = bounded_token(selected, "color_primaries")?;
         let probed_dynamic_range = parse_dynamic_range(selected);
-        let dynamic_range = merge_dynamic_range(
-            probed_dynamic_range,
-            catalog.and_then(|metadata| metadata.dynamic_range),
-        )?;
+        let dynamic_range = merge_dynamic_range(probed_dynamic_range, catalog)?;
         let hdr_format = catalog.and_then(|metadata| metadata.hdr_format.clone());
         let dolby_vision =
             catalog.map_or_else(DolbyVisionFacts::default, |metadata| metadata.dolby_vision);
@@ -628,9 +642,34 @@ impl DecodeFacts {
     }
 
     fn routing_dynamic_range(&self) -> Option<&'static str> {
-        self.dynamic_range
-            .filter(|dynamic_range| dynamic_range.is_hdr())
-            .map(DynamicRangeClass::name)
+        match self.dynamic_range {
+            Some(DynamicRangeClass::DolbyVision) => match self.dolby_vision.bl_compat_id {
+                Some(1 | 6) => Some(DynamicRangeClass::Hdr10.name()),
+                Some(4) => Some(DynamicRangeClass::Hlg.name()),
+                _ if self
+                    .hdr_format
+                    .as_deref()
+                    .is_some_and(|format| format.contains("HDR10-compatible")) =>
+                {
+                    Some(DynamicRangeClass::Hdr10.name())
+                }
+                _ if self
+                    .hdr_format
+                    .as_deref()
+                    .is_some_and(|format| format.contains("HLG-compatible")) =>
+                {
+                    Some(DynamicRangeClass::Hlg.name())
+                }
+                _ => Some(DynamicRangeClass::DolbyVision.name()),
+            },
+            Some(dynamic_range) if dynamic_range.is_hdr() => Some(dynamic_range.name()),
+            _ => None,
+        }
+    }
+
+    fn requires_dolby_rpu_processing(&self) -> bool {
+        self.dynamic_range == Some(DynamicRangeClass::DolbyVision)
+            && self.routing_dynamic_range() == Some(DynamicRangeClass::DolbyVision.name())
     }
 
     pub fn color_range(&self) -> Option<&str> {
@@ -695,7 +734,11 @@ fn bounded_token(stream: &Value, key: &'static str) -> Result<Option<String>, Pl
 fn positive_u32(stream: &Value, key: &str) -> Option<u32> {
     u32::try_from(stream.get(key)?.as_i64()?)
         .ok()
-        .filter(|value| *value > 0)
+        // The presentation contract guarantees an even result without
+        // upscaling. A one-pixel dimension has no positive even
+        // representation and therefore remains unknown rather than becoming
+        // a falsely claimed two-pixel output.
+        .filter(|value| *value >= 2)
 }
 
 fn parse_rational(value: Option<&str>) -> Option<Rational> {
@@ -813,13 +856,37 @@ fn parse_dynamic_range(stream: &Value) -> Option<DynamicRangeClass> {
 
 fn merge_dynamic_range(
     probed: Option<DynamicRangeClass>,
-    catalog: Option<DynamicRangeClass>,
+    catalog: Option<&DecodeCatalogMetadata>,
 ) -> Result<Option<DynamicRangeClass>, PlanError> {
-    match (probed, catalog) {
-        (Some(probed), Some(catalog)) if probed != catalog => {
-            Err(PlanError::ConflictingMetadata("dynamic range"))
+    let catalog_range = catalog.and_then(|metadata| metadata.dynamic_range);
+    match (probed, catalog_range) {
+        (Some(probed), Some(catalog)) if probed == catalog => Ok(Some(probed)),
+        // A selective probe commonly retains only the PQ transfer and omits
+        // the side data that distinguishes HDR10+, or Dolby Vision. The
+        // catalog is a compatible refinement of that common HDR10 base.
+        (
+            Some(DynamicRangeClass::Hdr10),
+            Some(refined @ (DynamicRangeClass::Hdr10Plus | DynamicRangeClass::DolbyVision)),
+        ) => Ok(Some(refined)),
+        (Some(DynamicRangeClass::Hlg), Some(DynamicRangeClass::DolbyVision))
+            if catalog.is_some_and(|metadata| {
+                metadata.dolby_vision.bl_compat_id == Some(4)
+                    || metadata
+                        .hdr_format
+                        .as_deref()
+                        .is_some_and(|format| format.contains("HLG-compatible"))
+            }) =>
+        {
+            Ok(Some(DynamicRangeClass::DolbyVision))
         }
-        (Some(probed), _) => Ok(Some(probed)),
+        // Conversely, a richer probe result must not be downgraded by a
+        // coarser catalog row.
+        (
+            Some(refined @ (DynamicRangeClass::Hdr10Plus | DynamicRangeClass::DolbyVision)),
+            Some(DynamicRangeClass::Hdr10),
+        ) => Ok(Some(refined)),
+        (Some(_), Some(_)) => Err(PlanError::ConflictingMetadata("dynamic range")),
+        (Some(probed), None) => Ok(Some(probed)),
         (None, catalog) => Ok(catalog),
     }
 }
@@ -1025,7 +1092,8 @@ impl DecodeCapabilities {
         let Some(codec) = facts.codec() else {
             return CapabilityStatus::Unavailable;
         };
-        self.capabilities
+        let matching = self
+            .capabilities
             .iter()
             .filter(|entry| {
                 entry.backend == backend
@@ -1058,6 +1126,27 @@ impl DecodeCapabilities {
                         .as_ref()
                         .is_none_or(|expected| expected == surface)
             })
+            .collect::<Vec<_>>();
+        let most_specific_rejection = matching
+            .iter()
+            .filter(|entry| entry.status == CapabilityStatus::Rejected)
+            .map(|entry| capability_specificity(entry))
+            .max();
+        let most_specific_qualification = matching
+            .iter()
+            .filter(|entry| entry.status == CapabilityStatus::Qualified)
+            .map(|entry| capability_specificity(entry))
+            .max();
+        if let Some(rejected) = most_specific_rejection {
+            if most_specific_qualification.is_none_or(|qualified| qualified <= rejected) {
+                return CapabilityStatus::Rejected;
+            }
+        }
+        if most_specific_qualification.is_some() {
+            return CapabilityStatus::Qualified;
+        }
+        matching
+            .into_iter()
             .max_by_key(|entry| capability_specificity(entry))
             .map(|entry| entry.status)
             .unwrap_or(CapabilityStatus::Unavailable)
@@ -1509,6 +1598,11 @@ pub fn resolve_transcode(
         .map_err(|_| PlanError::InvalidMediaOption("target_height"))?;
     if !options.pipeline.pairs_with(request.encoder)
         || !options.pipeline.handles(facts.routing_dynamic_range())
+        || (facts.requires_dolby_rpu_processing()
+            && !matches!(
+                options.pipeline,
+                Pipeline::DoviTonemapx | Pipeline::DoviPassthrough
+            ))
         || request
             .encoder
             .video_codec_for(options.pipeline.output_grade())

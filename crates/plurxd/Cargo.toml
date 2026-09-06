@@ -47,6 +47,7 @@ flate2 = { workspace = true }
 crc32fast = { workspace = true }
 quick-xml = { workspace = true }
 zip = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 # `fixtures` builds plurx-core's shared media-fixture helper for the copyseg
@@ -61,7 +62,6 @@ http-body-util = { workspace = true }
 serde_urlencoded = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
-tempfile = { workspace = true }
 # `test-util` gives tests a pausable clock (`start_paused`), so the lifetime
 # watchdog's suites run in virtual time instead of sleeping out real grace
 # windows. Dev-only: the shipped binary never compiles with it.
