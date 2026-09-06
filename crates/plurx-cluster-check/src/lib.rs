@@ -7229,6 +7229,14 @@ pub struct NodeLaunch {
     /// report happened to claim.
     #[serde(default = "default_read_pool_size")]
     pub read_pool_size: usize,
+    /// Validation-harness-only override for the number of Raft log entries
+    /// between snapshots. The separate-process controller serializes this
+    /// value into the child launch payload; production plurxd configuration
+    /// has no corresponding setting or environment variable.
+    ///
+    /// `None` deliberately retains the daemon-derived production policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_logs_since_last: Option<u64>,
     /// P2f control-arm switch. This field reaches a validation-only hook in
     /// plurx-core; production plurxd builds have no corresponding switch.
     #[serde(default = "instrument_store_operations_by_default")]
@@ -7261,6 +7269,7 @@ impl NodeLaunch {
             nodes,
             listen_addr: default_listen_addr(),
             read_pool_size: default_read_pool_size(),
+            snapshot_logs_since_last: None,
             instrument_store_operations: true,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
@@ -7273,6 +7282,17 @@ impl NodeLaunch {
     #[must_use]
     pub fn as_learner(mut self) -> Self {
         self.role = ClusterRole::Learner;
+        self
+    }
+
+    /// Override the snapshot trigger for a validation-harness child process.
+    ///
+    /// [`node_config`] validates the value before applying it. Production
+    /// daemon launches never construct a [`NodeLaunch`] and therefore cannot
+    /// enable this override.
+    #[must_use]
+    pub fn with_snapshot_logs_since_last(mut self, logs_since_last: u64) -> Self {
+        self.snapshot_logs_since_last = Some(logs_since_last);
         self
     }
 
@@ -12451,6 +12471,19 @@ async fn run_preflight(
 
 /// Build the hiqlite configuration for one voter and create its data dir.
 pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
+    let mut defaults = production_hiqlite_defaults_with_read_pool(launch.read_pool_size);
+    if let Some(logs_since_last) = launch.snapshot_logs_since_last {
+        if logs_since_last == 0 || logs_since_last > u64::MAX / 2 {
+            bail!(
+                "validation snapshot threshold must be in 1..={}, got {logs_since_last}",
+                u64::MAX / 2
+            );
+        }
+        let validation_raft_config = NodeConfig::default_raft_config(logs_since_last);
+        defaults.raft_config.snapshot_policy = validation_raft_config.snapshot_policy;
+        defaults.raft_config.replication_lag_threshold =
+            validation_raft_config.replication_lag_threshold;
+    }
     let data_dir = launch.root.join(format!("node-{}", launch.node_id));
     std::fs::create_dir_all(&data_dir)?;
     Ok(NodeConfig {
@@ -12481,7 +12514,7 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         // Raft, WAL, and read-pool settings come from the daemon's own builder
         // rather than a second copy here, so a harness run cannot measure a
         // configuration production never runs.
-        ..production_hiqlite_defaults_with_read_pool(launch.read_pool_size)
+        ..defaults
     })
 }
 
@@ -12971,6 +13004,7 @@ mod tests {
             }],
             listen_addr: default_listen_addr(),
             read_pool_size,
+            snapshot_logs_since_last: None,
             instrument_store_operations: true,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
@@ -13016,5 +13050,76 @@ mod tests {
         assert_eq!(launch.read_pool_size, default_read_pool_size());
         assert_eq!(launch.read_pool_size, 4);
         assert!(launch.instrument_store_operations);
+    }
+
+    #[test]
+    fn a_legacy_launch_retains_the_production_snapshot_policy() {
+        let root = tempfile::tempdir().expect("config test root");
+        let launch: NodeLaunch = serde_json::from_value(serde_json::json!({
+            "node_id": 1,
+            "root": root.path(),
+            "nodes": [{
+                "id": 1,
+                "raft": "127.0.0.1:19001",
+                "api": "127.0.0.1:19002"
+            }]
+        }))
+        .expect("decode a legacy launch");
+        assert_eq!(launch.snapshot_logs_since_last, None);
+        assert!(
+            serde_json::to_value(&launch)
+                .expect("encode the legacy launch")
+                .get("snapshot_logs_since_last")
+                .is_none(),
+            "an absent override must preserve the legacy launch payload"
+        );
+
+        let config = node_config(&launch).expect("build the voter config");
+        let production = production_hiqlite_defaults_with_read_pool(default_read_pool_size());
+        assert_eq!(
+            config.raft_config.snapshot_policy,
+            production.raft_config.snapshot_policy
+        );
+        assert_eq!(
+            config.raft_config.replication_lag_threshold,
+            production.raft_config.replication_lag_threshold
+        );
+    }
+
+    #[test]
+    fn a_snapshot_threshold_round_trips_and_reaches_the_launched_voter_config() {
+        let root = tempfile::tempdir().expect("config test root");
+        let launch =
+            test_launch(root.path(), default_read_pool_size()).with_snapshot_logs_since_last(37);
+        let encoded = serde_json::to_string(&launch).expect("encode the launch");
+        let decoded: NodeLaunch = serde_json::from_str(&encoded).expect("decode the launch");
+        assert_eq!(decoded.snapshot_logs_since_last, Some(37));
+
+        let config = node_config(&decoded).expect("build the voter config");
+        let expected = NodeConfig::default_raft_config(37);
+        assert_eq!(config.raft_config.snapshot_policy, expected.snapshot_policy);
+        assert_eq!(config.raft_config.replication_lag_threshold, 74);
+        assert_eq!(config.raft_config.install_snapshot_timeout, 120_000);
+        assert_eq!(config.wal_size, HIQLITE_WAL_SIZE_BYTES);
+    }
+
+    #[test]
+    fn an_invalid_snapshot_threshold_is_rejected_without_changing_production() {
+        let root = tempfile::tempdir().expect("config test root");
+        for threshold in [0, u64::MAX] {
+            let mut launch = test_launch(root.path(), default_read_pool_size());
+            launch.snapshot_logs_since_last = Some(threshold);
+            let error = node_config(&launch).expect_err("reject an unsafe snapshot threshold");
+            assert!(
+                error
+                    .to_string()
+                    .contains("validation snapshot threshold must be in"),
+                "unexpected error: {error:#}"
+            );
+            assert!(
+                !root.path().join("node-1").exists(),
+                "an invalid launch must fail before creating voter state"
+            );
+        }
     }
 }

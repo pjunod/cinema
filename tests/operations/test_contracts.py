@@ -1550,6 +1550,22 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn("make cluster-harness-check", jobs["cluster_topology"])
         self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
+        harness_commands = make_dry_run_commands("cluster-harness-check")
+        snapshot_launch_tests = (
+            "a_legacy_launch_retains_the_production_snapshot_policy",
+            "a_snapshot_threshold_round_trips_and_reaches_the_launched_voter_config",
+            "an_invalid_snapshot_threshold_is_rejected_without_changing_production",
+        )
+        for test_name in snapshot_launch_tests:
+            command = next(
+                (command for command in harness_commands if test_name in command),
+                None,
+            )
+            self.assertIsNotNone(
+                command,
+                f"cluster-harness-check does not run {test_name}",
+            )
+            self.assertIn("scripts/require-test-count", command)
         self.assertIn("run: make cluster-wal-check", workflow)
         wal_commands = make_dry_run_commands("cluster-wal-check")
         self.assertTrue(

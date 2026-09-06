@@ -1040,6 +1040,15 @@ cluster-store-check: ## Run the Store contracts against SQLite and three voters
 
 .PHONY: cluster-harness-check
 cluster-harness-check: ## Run replicated growth and topology harness contracts
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  tests::a_legacy_launch_retains_the_production_snapshot_policy \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  tests::a_snapshot_threshold_round_trips_and_reaches_the_launched_voter_config \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  tests::an_invalid_snapshot_threshold_is_rejected_without_changing_production \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  --test harness compacted_growth_gate -- --nocapture
 	$(CARGO) test --locked -p plurx-cluster-check \
