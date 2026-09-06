@@ -1550,7 +1550,19 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $5 AND session_id = $6
                         AND owner_node_id = $7 AND state = 'active')
-                    AND $8 != '' AND incarnation_id = $8",
+                    AND $8 != '' AND incarnation_id = $8
+                    -- The same ask the pointer write is gated on, and it has
+                    -- to be here too. A replicated transaction cannot branch:
+                    -- every statement applies or refuses on its own predicates.
+                    -- Gating only the pointer left this one free to end the
+                    -- predecessor while the pointer stayed put, so a refused
+                    -- activation stopped the viewer's session and started
+                    -- nothing — strictly worse than the race the compare was
+                    -- added to prevent. The three-voter lane caught it; the
+                    -- single-writer backend cannot, because there the refusal
+                    -- is a rollback.
+                    AND ($9 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                      WHERE user_id = $3 AND playback_id = $4 AND revision != $9))",
                 params!(
                     activation.now_ms,
                     MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -1559,7 +1571,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.incarnation_id.as_str(),
                     activation.session_id.as_str(),
                     activation.owner_node_id.as_str(),
-                    predecessor_incarnation
+                    predecessor_incarnation,
+                    activation.expected_desired_revision.unwrap_or(0)
                 ),
             ),
             (

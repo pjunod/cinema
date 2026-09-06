@@ -220,7 +220,12 @@ pub(crate) const MEDIA_PLAYBACK_DESIRED_SCHEMA: &str =
 /// fence.
 macro_rules! pointer_desired_revision_column {
     () => {
-        "ALTER TABLE media_playback_pointers ADD COLUMN desired_revision INTEGER;"
+        // No trailing semicolon. The replicated backend submits this as one
+        // prepared statement and a trailing `;` makes it unpreparable — which
+        // is exactly how the three-voter lane failed every migration test in
+        // the chain while the SQLite batch, where the semicolon was needed,
+        // passed. The batch below adds its own separator instead.
+        "ALTER TABLE media_playback_pointers ADD COLUMN desired_revision INTEGER"
     };
 }
 
@@ -258,7 +263,7 @@ macro_rules! pointer_desired_fence_update_trigger {
 /// guard is the failure every shared schema constant here exists to prevent.
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA: &str = concat!(
     pointer_desired_revision_column!(),
-    "\n",
+    ";\n",
     pointer_desired_fence_insert_trigger!(),
     "\n",
     pointer_desired_fence_update_trigger!(),

@@ -735,6 +735,18 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
 
         // The current ask activates, so the refusal is about the ask and not
         // about anything else this activation carries.
+        //
+        // A fresh incarnation, because a refused activation is not a no-op on
+        // every backend and pretending otherwise is how this test first passed
+        // on one and failed on the other. The replicated transaction cannot
+        // branch: it writes the session row, finds the pointer refused, and
+        // tombstones what it wrote — so that incarnation is spent. SQLite
+        // rolls the whole thing back and leaves it reusable. Retrying with the
+        // same id therefore asks the two backends for different things, and no
+        // real caller does it: an activation attempt is one incarnation, and
+        // the retry is the next one.
+        stale.incarnation_id = "11111111-1111-4111-8111-111111111309".to_owned();
+        stale.session_id = "11111111-1111-4111-8111-111111111310".to_owned();
         stale.expected_desired_revision = Some(second_ask.revision);
         assert!(
             store

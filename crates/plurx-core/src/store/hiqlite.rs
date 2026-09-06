@@ -2079,7 +2079,7 @@ impl HiqliteAuthStore {
                     // does not exist. `ALTER TABLE ... ADD COLUMN` is not
                     // idempotent, which is exactly why the schema-version CAS
                     // below has to be the thing that decides who applied it.
-                    let statements = vec![
+                    let mut statements = vec![
                         (
                             super::MEDIA_PLAYBACK_POINTER_DESIRED_REVISION_COLUMN.to_owned(),
                             params!(),
@@ -2103,6 +2103,21 @@ impl HiqliteAuthStore {
                             ),
                         ),
                     ];
+                    // The `ALTER` is dropped when the column is already there,
+                    // and that is not belt-and-braces. A cluster bootstrapped
+                    // from the current install schema has the column from its
+                    // first moment, because the fresh table declares it — so a
+                    // database whose marker still names an older version has
+                    // the column but not the step, and replaying the chain
+                    // across it meets `duplicate column name` rather than an
+                    // upgrade. `settle_migration_attempt` cannot rescue that:
+                    // it forgives a failure only when *another voter* has
+                    // advanced the marker, and here nobody has. Asking the
+                    // schema what it already holds is the shape the analysis
+                    // component migration uses, for this exact reason.
+                    if self.pointer_desired_revision_column_present().await? {
+                        statements.remove(0);
+                    }
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(
                         POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE,
@@ -2126,6 +2141,23 @@ impl HiqliteAuthStore {
     /// now current. Treat an error as commit/concurrency-unknown, reread the
     /// replicated marker consistently, and suppress it only when another
     /// transaction durably advanced beyond the exact predecessor we tried.
+    /// Whether `media_playback_pointers` already carries `desired_revision`.
+    ///
+    /// A fresh install declares the column in the table; an upgrade adds it.
+    /// Both are correct and both are reachable from the same marker, so the
+    /// migration asks rather than assumes.
+    async fn pointer_desired_revision_column_present(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM pragma_table_info('media_playback_pointers') \
+                 WHERE name = 'desired_revision'",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
     async fn settle_migration_attempt(
         &self,
         predecessor: i64,
