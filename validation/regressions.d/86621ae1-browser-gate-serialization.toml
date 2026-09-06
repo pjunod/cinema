@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["86621ae1"]
+points = ["operations.packaging", "validation.framework"]
+checks = ["operations-contract"]
+reason = "The web-layout and VOD browser gates were scheduled simultaneously onto the two m6 runner VMs, which share one physical host. Under that contention the VOD player advanced at 0.5% speed with 124 visible hitches, while one otherwise-settled layout capture received a transient 500 from the activity endpoint; the same exact capture and all 72 layout cases passed without contention. Both browser-heavy jobs now share one non-canceling concurrency group. The operations contract pins that shared group and policy on both jobs so a workflow edit cannot silently restore concurrent execution."
