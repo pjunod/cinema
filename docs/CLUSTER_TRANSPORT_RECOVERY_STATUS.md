@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | four chronology findings against exact candidate `a54223ed` are fixed in `794a4d30` and `b54f5c2c`; focused regressions are green and the replacement exact-SHA fast lane/reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | exact candidate `195fd781` was rejected; its four transport and credential findings are fixed in `c9ae845f` and `a76860d2`, focused regressions are green, and the replacement exact-SHA fast lane/reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -162,8 +162,20 @@ the completion exception only inside a fingerprint. Runtime correction
 `b54f5c2c` stamps each authenticated public or private response with its own
 process-local monotonic receipt time and ages cached transport evidence from
 that receipt. The permutation-complete web regressions and delayed-peer
-paused-time collector regression pass; exact-candidate requalification and
-three fresh reviews remain.
+paused-time collector regression pass. Three reviews of exact candidate
+`195fd781` then found four final gaps: response transit was absent from the
+chronology uncertainty bound; a predecessor acknowledgement could hide a
+restarted receiver; login could mint a token after the password version it
+authenticated had been replaced; and a rolled-back binary could mutate
+credentials before other nodes refreshed their cached readiness. Correction
+`c9ae845f` compares interval-bounded sample ages and applies attempt chronology
+before completion authority. Correction `a76860d2` makes token insertion
+conditional on the exact authenticated password hash and installs replicated
+transaction-intent triggers that reject legacy user/token mutations as soon as
+v3 has ever been witnessed. The focused browser, paused-time collector,
+rollback-trigger, and three-voter Store regressions pass, as do workspace
+all-target check and denied-warning Clippy. Complete exact-tree focused
+qualification and three fresh reviews remain.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -214,6 +226,7 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 fourteenth-review corrections | fail · exact candidate `cc7fa35a` rejected after green qualification | Stalled age is deadline-relative, planned-outage waiting ends with its exact fence, combined promotion/password/token revocation is atomic, ambiguous cache-admin anti-replay state is one bounded expiration watermark, and all focused regressions are permanently inventoried. Three adversarial reviews still found four completion-freshness, fallback-deadline, revocation-roster, and clustered-Store-coverage gaps. |
 | M4 fifteenth-review corrections | pass · committed `c0725954`, exact review pending | Completion authority is freshness-bounded; deadline-less active state publishes and projects the producer's 30-second fallback; cache-admin revocation covers up to 63 remote committed members with concurrency eight; and a three-voter contract proves missing/wrong/exact claims plus atomic rollback on token deletion failure. Exact regressions, web, 197 operations contracts, workspace and vendored denied-warning Clippy, validation lint, history audit, formatting, and the complete cluster/WAL lane pass; three exact-SHA reviews restart from zero. |
 | M4 chronology total-order correction | pass · committed `794a4d30` and `b54f5c2c`, exact review pending | The selector orders all non-expired attempts before applying fingerprint-local completion authority, uses one clock basis for a mixed-version cohort, handles explicit null attempt ages as absent, and preserves retry chronology across different fingerprints. Per-response monotonic receipts normalize independently sampled ages before selection. Both input-order and all six mixed-cohort permutations plus the delayed-peer collector regression pass. |
+| M4 sixteenth-review corrections | pass · committed `c9ae845f` and `a76860d2`, exact-tree qualification pending | Request-to-receipt transit is retained as an explicit age interval; predecessor completion cannot bypass a newer receiver attempt; token creation is bound to the password hash that login authenticated; and durable replicated transaction-intent triggers close the rollback/readiness-poll interval for credential mutations. Focused browser, Rust, and three-voter Store regressions plus workspace check and denied-warning Clippy pass. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
