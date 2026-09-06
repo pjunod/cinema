@@ -34852,22 +34852,10 @@ pub(crate) mod tests {
 
     #[test]
     fn delivery_wedge_thresholds_are_exact() {
-        assert!(!delivery_wedge(
-            WEDGE_IDLE_MS - 1,
-            Some(WEDGE_GAP_MS),
-            0
-        ));
-        assert!(!delivery_wedge(
-            WEDGE_IDLE_MS,
-            Some(WEDGE_GAP_MS - 1),
-            0
-        ));
+        assert!(!delivery_wedge(WEDGE_IDLE_MS - 1, Some(WEDGE_GAP_MS), 0));
+        assert!(!delivery_wedge(WEDGE_IDLE_MS, Some(WEDGE_GAP_MS - 1), 0));
         assert!(!delivery_wedge(WEDGE_IDLE_MS, None, 0));
-        assert!(delivery_wedge(
-            WEDGE_IDLE_MS,
-            Some(WEDGE_GAP_MS),
-            0
-        ));
+        assert!(delivery_wedge(WEDGE_IDLE_MS, Some(WEDGE_GAP_MS), 0));
     }
 
     #[tokio::test]
