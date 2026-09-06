@@ -15,7 +15,8 @@
 //! encode, and none of the properties under test — GOP structure, box layout,
 //! sample timing — care how big the picture is.
 
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
@@ -101,9 +102,78 @@ fn x265_params(kind: &str) -> &'static str {
     }
 }
 
-/// Serializes generation, so two tests racing for the same fixture do not both
-/// encode it, and neither reads one the other is still writing.
+/// Serializes generation *within one process*, so two tests racing for the
+/// same fixture do not both encode it. It orders nothing between processes —
+/// see [`publish_fixture`], which is what actually makes publication safe.
 static FIXTURE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// Publish a freshly generated fixture without ever replacing one that is
+/// already there.
+///
+/// `rename` was the obvious choice and it was wrong. [`FIXTURE_LOCK`] is a
+/// process-local `Mutex`, so it orders nothing between two test binaries —
+/// and there are always several: `cargo test --workspace` runs one per target,
+/// and CI's cluster lane shares this `target/` with the fast Rust lane. On a
+/// cold `target/` two processes both find a fixture missing, both encode it,
+/// and the second one's `rename` unlinks the inode the first one's tests are
+/// already reading.
+///
+/// The damage is not a torn read. The loser's handle stays open and valid, and
+/// its device, inode, size and mtime are all still correct. What moves is
+/// `ctime`, because unlinking the name decrements the inode's link count — and
+/// `ctime` is a component of the object version a `SourceFence` compares, so
+/// every producer holding a fence over that fixture fails with `source changed
+/// before fragment publication` for a source that did not change. That is
+/// invisible on a warm `target/` and reproducible on a cold one, which is
+/// exactly how it passed here and failed in CI on the same tree.
+///
+/// A link publishes or refuses; it never replaces. Losing the race costs one
+/// wasted encode and nothing else.
+fn publish_fixture(temporary: &Path, destination: &Path) {
+    let published = match std::fs::hard_link(temporary, destination) {
+        Ok(()) => Ok(()),
+        // Another process got there first. Its bytes are generated from the
+        // same deterministic command, so they are ours as much as anyone's.
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        // A filesystem without hard links has no non-replacing publish to
+        // offer. Checking first narrows the window rather than closing it;
+        // this is a fallback for a filesystem CI does not use, and it is
+        // written to be honest about that rather than to look safe.
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::Unsupported
+            ) =>
+        {
+            if destination.exists() {
+                Ok(())
+            } else {
+                std::fs::rename(temporary, destination)
+            }
+        }
+        Err(error) => Err(error),
+    };
+    published.unwrap_or_else(|error| {
+        panic!("publishing {}: {error}", destination.display());
+    });
+    // The link left the bytes under two names; the temporary is ours to drop.
+    // A failure here is not worth failing a test run over — the next run
+    // writes its own.
+    let _ = std::fs::remove_file(temporary);
+}
+
+/// A scratch name no other process will also be writing.
+///
+/// The publish is only non-replacing if the bytes being published are whole.
+/// A per-kind temporary is not: two processes generating the same fixture at
+/// once would interleave into one file and then link whatever that turned out
+/// to be. The pid separates them, and the counter separates repeat generations
+/// within a process that a previous panic left behind.
+fn scratch_path(dir: &Path, stem: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dir.join(format!("{stem}.{}.{n}.tmp", std::process::id()))
+}
 
 /// Path to a source fixture, generating it on first use.
 ///
@@ -117,7 +187,7 @@ pub fn source(kind: &str) -> PathBuf {
         return path;
     }
     std::fs::create_dir_all(&dir).expect("creating target/fixtures");
-    let tmp = dir.join(format!("{kind}.mkv.tmp"));
+    let tmp = scratch_path(&dir, &format!("{kind}.mkv"));
     let mut cmd = Command::new(ffmpeg());
     cmd.args(["-y", "-v", "error"])
         .args([
@@ -162,7 +232,7 @@ pub fn source(kind: &str) -> PathBuf {
         .args(["-f", "matroska"])
         .arg(&tmp);
     run(&mut cmd);
-    std::fs::rename(&tmp, &path).expect("publishing the fixture");
+    publish_fixture(&tmp, &path);
     path
 }
 
@@ -202,9 +272,14 @@ pub fn pipe(kind: &str) -> Vec<u8> {
         .args(["-use_editlist", "0"])
         .args(["-f", "mp4", "pipe:1"]);
     let bytes = run(&mut cmd);
-    let tmp = out.with_extension("tmp");
+    let tmp = scratch_path(
+        &fixture_dir(),
+        &out.file_name()
+            .expect("the pipe cache path always names a file")
+            .to_string_lossy(),
+    );
     std::fs::write(&tmp, &bytes).expect("caching the pipe output");
-    std::fs::rename(&tmp, &out).expect("publishing the pipe output");
+    publish_fixture(&tmp, &out);
     bytes
 }
 
@@ -248,7 +323,7 @@ pub fn source_with_chapters() -> PathBuf {
         chapters.push_str(&format!("title=Chapter {}\n", i + 1));
     }
     std::fs::write(&meta, chapters).expect("writing the chapter metadata");
-    let tmp = dir.join("chaptered.mkv.tmp");
+    let tmp = scratch_path(&dir, "chaptered.mkv");
     run(Command::new(ffmpeg())
         .args(["-y", "-v", "error", "-i"])
         .arg(&src)
@@ -257,7 +332,7 @@ pub fn source_with_chapters() -> PathBuf {
         .args(["-map_metadata", "1", "-map", "0", "-c", "copy"])
         .args(["-f", "matroska"])
         .arg(&tmp));
-    std::fs::rename(&tmp, &path).expect("publishing the chaptered fixture");
+    publish_fixture(&tmp, &path);
     path
 }
 
@@ -435,4 +510,74 @@ fn trailer_at(stream: &[u8]) -> Option<usize> {
         at = at.checked_add(size)?;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Publishing a fixture that is already there must leave a reader holding
+    /// it completely undisturbed — including the parts of its metadata nobody
+    /// thinks of as content.
+    ///
+    /// This is the whole of the defect that turned four `vodserve` resurrection
+    /// tests red in CI on a tree that was green here. `SourceFence::unchanged`
+    /// compares an object version built from device, inode, size, mtime *and
+    /// ctime*, and `rename` moves the ctime of the inode it unlinks even though
+    /// every other component is untouched and the open handle keeps reading the
+    /// same bytes. So the assertion below is deliberately on ctime rather than
+    /// on the bytes: the bytes never were the thing that broke.
+    ///
+    /// A second publisher exists because `FIXTURE_LOCK` is process-local and
+    /// `cargo test --workspace` runs one process per target. This test stands in
+    /// for that second process directly rather than trying to spawn one, which
+    /// would prove the same thing less reliably.
+    #[test]
+    fn republishing_a_fixture_leaves_a_held_reader_undisturbed() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = fixture_dir().join(
+            scratch_path(Path::new(""), "publish-race")
+                .file_name()
+                .expect("a name"),
+        );
+        std::fs::create_dir_all(&dir).expect("a directory of our own");
+        let published = dir.join("fixture.mkv");
+        std::fs::write(&published, b"the bytes a reader already holds").expect("first publish");
+
+        // The reader: an open handle plus the object version recorded from it,
+        // exactly as a fence records one before a producer starts.
+        let held = std::fs::File::open(&published).expect("holding the fixture open");
+        let before = held.metadata().expect("fstat");
+
+        // The second publisher, arriving after the first one finished.
+        let racing = scratch_path(&dir, "fixture.mkv");
+        std::fs::write(&racing, b"bytes a second encode produced").expect("second encode");
+        publish_fixture(&racing, &published);
+
+        let after = held.metadata().expect("fstat");
+        assert_eq!(
+            (before.dev(), before.ino(), before.size(), before.mtime()),
+            (after.dev(), after.ino(), after.size(), after.mtime()),
+            "these components survive a rename too, so they are not the proof"
+        );
+        assert_eq!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec()),
+            "publishing must not unlink the inode a reader is holding: ctime is \
+             part of the object version a SourceFence compares, so moving it \
+             fails a producer with `source changed` for a source that did not"
+        );
+        assert_eq!(
+            std::fs::read(&published).expect("reading the published fixture"),
+            b"the bytes a reader already holds",
+            "the fixture that was already published is the one that stays"
+        );
+        assert!(
+            !racing.exists(),
+            "the losing temporary is cleaned up rather than left in target/fixtures"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleaning up");
+    }
 }
