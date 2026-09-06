@@ -605,6 +605,10 @@ impl StoreMetricsCache {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    /// Fixed-lifetime, digest-only admin proofs for cluster recovery reads.
+    /// Ordinary authentication populates it; cache-only routes never reach
+    /// Store on a miss.
+    pub(crate) cache_only_admin_proofs: crate::http::CacheOnlyAdminProofCache,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
     pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
@@ -616,6 +620,12 @@ pub struct AppState {
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
+    /// Five-second cache for authenticated, bounded cluster-status fan-out.
+    /// This is process-local diagnostics state and never writes to Store.
+    pub(crate) peer_status_cache: crate::http::cluster_operations::PeerStatusCache,
+    /// Five-second, background-refreshed committed-membership projection for
+    /// operations requests. Request handlers cannot reach Store through it.
+    pub(crate) membership_status_cache: crate::http::cluster_operations::MembershipStatusCache,
     /// Fresh, authenticated media-capability snapshots and diagnostics-only
     /// placement offers. P4 observes candidates; it never starts a session.
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
@@ -851,13 +861,18 @@ impl AppState {
             membership.clone(),
             Arc::clone(&store),
         );
+        let cache_only_admin_proofs =
+            crate::http::CacheOnlyAdminProofCache::new(membership.is_replicated());
         AppState {
             store,
+            cache_only_admin_proofs,
             catalogue,
             replication,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
                 membership.clone(),
             ),
+            peer_status_cache: Default::default(),
+            membership_status_cache: Default::default(),
             serving,
             membership,
             media_pool,

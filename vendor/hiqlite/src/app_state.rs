@@ -60,6 +60,7 @@ pub(crate) struct AppState {
     #[cfg(feature = "cache")]
     pub nodes: Vec<crate::Node>,
     pub addr_api: String,
+    pub snapshot_transport: crate::LocalSnapshotTransportStatus,
     #[cfg(feature = "sqlite")]
     pub raft_db: StateRaftDB,
     #[cfg(feature = "cache")]

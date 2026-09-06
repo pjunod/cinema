@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = ["b554ecc8"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "core.media",
+  "identity.access",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "The shipped Cluster panel reduces evidence within each concrete attempt before comparing attempt start ages. The browser membership regression proves that a predecessor's newly published terminal failure cannot hide a more recently started same-fingerprint successor in either input order, while existing completion tests retain the validated causal override."

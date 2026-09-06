@@ -566,13 +566,14 @@ depends_on = ["core.media", "server.api", "library.catalog"]
 [[points]]
 id = "identity.access"
 title = "Accounts, tokens, and authorization boundaries"
-contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate."
+contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate; cache-only recovery authorization is published only from a current Store-backed admin read, is invalidated around credential mutations, and fails closed on every committed peer until its signed begin/end revocation fence is acknowledged or expires at the proof TTL."
 paths = [
   "crates/plurx-core/src/auth.rs",
   "crates/plurx-core/src/secrets.rs",
   "crates/plurx-core/src/store/sqlite/{apikeys,users}.rs",
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurxd/src/http/{auth,keys,users}.rs",
+  "crates/plurxd/src/http/internal_auth_revocation.rs",
   "docs/SECURITY.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "credential-encryption"]

@@ -1412,6 +1412,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         makefile = read("Makefile")
         precommit = read("scripts/pre-commit")
         catalog = tomllib.loads(read("validation/points.toml"))
+        membership_web_tests = read("tests/web/cluster-membership.test.js")
 
         # Forgejo has no GitHub merge-queue event. The single required
         # aggregate workflow fires on main-bound pull requests, while the
@@ -1492,6 +1493,24 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
         self.assertIn("run: make web-check", effort)
+        web_check = makefile.split(".PHONY: web-check", 1)[1].split(".PHONY:", 1)[0]
+        self.assertIn("node tests/web/cluster-membership.test.js", web_check)
+        self.assertIn(
+            'test("transport recovery is attributed only to the receiving node"',
+            membership_web_tests,
+        )
+        self.assertIn(
+            'test("active transport stays visible through its server-projected deadline"',
+            membership_web_tests,
+        )
+        self.assertIn(
+            'test("transport observer age advances the repaint projection"',
+            membership_web_tests,
+        )
+        self.assertIn(
+            'test("rejected public and wrong-observer transport evidence cannot reappear"',
+            membership_web_tests,
+        )
         self.assertNotIn("make ci-rust-gate", effort)
         self.assertNotIn("make cluster-", effort)
         self.assertNotIn("make apple-test", effort)
@@ -1539,6 +1558,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         hiqlite_snapshot_tests = (
             "raw_write_frame_stays_idle_after_transport_recovers_until_an_explicit_flush",
+            "deadline_less_retry_serializes_its_effective_fallback_stall_boundary",
             "real_tls_tail_backpressure_completes_for_every_payload_direction",
             "real_tls_no_backpressure_control_completes_without_an_extra_frame",
             "frame_completion_flushes_the_underlying_transport",
@@ -1564,6 +1584,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "production_api_response_writer_flushes_serialized_response_through_tls",
             "production_api_response_writer_reports_flush_failure_and_closes",
             "production_raft_reader_reports_malformed_frames",
+            "raft_transport_debug_logging_exposes_only_bounded_metadata",
             "production_api_reader_reports_malformed_frames",
             "silent_peer_cannot_hold_the_server_handshake_open",
             "executor_runs_one_queues_one_and_drops_abandoned_queued_work",
@@ -1572,6 +1593,13 @@ for (const startupDelay of [0, 1600, 7000]) {
             "shutdown_before_submission_is_latched_and_admits_no_work",
             "admission_deadline_never_executes_the_timed_out_job",
             "accepted_partial_write_finishes_before_same_offset_retry",
+            "production_snapshot_executor_worker_records_status_around_injected_installer",
+            "production_snapshot_executor_fifo_status_ignores_later_admission_waiter",
+            "production_snapshot_executor_ticket_order_survives_reverse_waiter_polling",
+            "production_snapshot_status_follows_worker_start_after_pre_ticket_deschedule",
+            "admission_waiter_budget_bounds_cancelled_ticket_retention_and_reports_busy",
+            "production_shared_executor_retains_abandoned_other_peer_terminal_status",
+            "inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
             "replacement_socket_drops_cancelled_request_after_consuming_reset",
             "live_request_on_stale_socket_requires_reconnect",
@@ -1586,6 +1614,10 @@ for (const startupDelay of [0, 1600, 7000]) {
             "forced_reset_cleanup_does_not_wait_for_full_writer_queue",
             "dropping_connection_off_runtime_keeps_cleanup_owned",
             "repeated_connection_failures_return_supervised_tasks_to_baseline",
+            "production_connection_supervisor_does_not_invent_snapshot_work",
+            "production_natural_reconnect_advances_physical_socket_epoch_without_reset",
+            "production_snapshot_catch_up_preserves_physical_socket_epoch_during_interleaving",
+            "two_client_churn_cannot_overwrite_the_snapshot_connection_owner",
             "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
             "cache_install_snapshot_preserves_mismatch_for_offset_reset",
             "snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window",
@@ -1596,6 +1628,8 @@ for (const startupDelay of [0, 1600, 7000]) {
             "watchable_snapshot_deadline_switches_to_the_active_phase",
             "simultaneous_final_phase_update_wins_over_stale_transfer_timer",
             "production_final_mismatch_restores_transfer_deadline_before_reread",
+            "production_final_transport_error_retains_final_install_deadline_in_status",
+            "production_higher_vote_response_never_advances_snapshot_acknowledgement",
             "sqlite_full_snapshot_enters_bounded_wrapper",
             "cache_full_snapshot_enters_bounded_wrapper",
             "advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry",
@@ -1604,7 +1638,39 @@ for (const startupDelay of [0, 1600, 7000]) {
             "final_install_may_exceed_chunk_window_but_cannot_renew_install_window",
             "stale_snapshot_guard_cannot_clear_a_newer_attempt",
             "caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately",
+            "aborting_snapshot_owner_publishes_attempt_guarded_terminal_status",
+            "outbound_snapshot_attempt_bounds_identity_before_supervisor_logging",
             "snapshot_deadline_durations_are_bounded_before_instant_arithmetic",
+            "outbound_snapshot_identity_is_bounded_before_retention",
+            "inbound_snapshot_identity_is_bounded_before_retention",
+            "outbound_attempted_offset_never_rolls_back_within_one_snapshot_attempt",
+            "bounded_inbound_display_id_cannot_alias_semantic_snapshot_identity",
+            "snapshot_fingerprint_correlates_raw_identity_across_directions_without_display_aliasing",
+            "snapshot_fingerprint_is_optional_for_rolling_status_deserialization",
+            "local_status_distinguishes_receive_ack_install_retry_and_completion",
+            "receiver_bytes_are_not_reported_as_sender_acknowledgements",
+            "inbound_progress_is_monotonic_and_new_identity_clears_attempt_state",
+            "same_peer_inbound_install_and_outbound_transfer_do_not_collide",
+            "terminal_wrapper_preserves_the_actionable_failure_category",
+            "specific_terminal_failure_replaces_prior_transient_category",
+            "outbound_live_socket_counts_the_first_reconnect",
+            "production_supervisor_start_before_snapshot_attempt_counts_first_reconnect",
+            "stale_inbound_completion_cannot_mutate_newer_snapshot_identity",
+            "abandoned_inbound_admission_does_not_displace_worker_result",
+            "inbound_socket_epoch_and_reconnect_count_are_attempt_local",
+            "configured_inbound_inter_chunk_deadline_uses_minimum_and_maximum",
+            "configured_peer_capacity_covers_both_groups_and_directions",
+            "live_membership_add_remove_churn_rekeys_capacity_and_retired_allowance",
+            "active_observation_remains_visible_through_deadline_then_expires",
+            "live_install_longer_than_five_minutes_remains_visible_through_its_deadline",
+            "configured_chunk_deadline_controls_awaiting_ack_stall_projection",
+            "completed_observation_never_projects_as_stalled_and_eventually_expires",
+            "valid_install_does_not_stall_at_the_chunk_window",
+            "retired_peers_are_bounded",
+            "production_transport_route_enforces_auth_and_returns_memory_only_json",
+            "production_transport_client_uses_exact_authenticated_route_and_accepts_404",
+            "snapshot_transport_peer_tracks_current_raft_membership_for_new_learner",
+            "production_transport_client_rejects_oversized_unframed_response_body",
         )
         for test_name in hiqlite_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1620,11 +1686,94 @@ for (const startupDelay of [0, 1600, 7000]) {
             )
             self.assertIn("--lib -- --exact", command)
 
+        daemon_transport_tests = (
+            "peer_fanout_applies_the_one_second_per_peer_deadline",
+            "peer_fanout_never_exceeds_the_eight_peer_bound",
+            "production_collector_labels_directory_overflow_without_probing_it",
+            "peer_status_cache_is_fresh_for_five_seconds_then_expires",
+            "full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time",
+            "remote_status_freshness_uses_local_monotonic_age_despite_clock_skew",
+            "stale_peer_sample_uses_local_elapsed_time_and_cannot_become_healthy",
+            "absent_and_expired_cache_are_unavailable_never_peer_limited",
+            "membership_status_cache_is_fresh_for_five_seconds_then_expires",
+            "membership_projection_refresh_is_bounded_and_preserves_last_good_sample",
+            "long_install_crosses_to_stalled_then_expires_after_the_post_deadline_window",
+            "cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero",
+            "cached_deadline_less_active_transport_uses_the_producer_fallback_boundary",
+            "cached_terminal_transport_observation_expires_at_five_minutes",
+            "transport_projection_uses_local_monotonic_age_despite_remote_clock_skew",
+            "peer_status_refresh_keeps_strict_cycle_overhead_margin",
+            "aggregate_request_reads_only_node_owned_projections",
+            "production_collector_preserves_private_transport_when_public_listener_is_closed",
+            "slow_public_probe_cannot_discard_completed_private_transport",
+            "identity_mismatch_discards_peer_local_state",
+            "public_transport_fallback_requires_matching_observer_identity",
+            "unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline",
+            "restart_cancellation_cannot_clear_a_maintenance_owned_fence",
+            "delayed_same_owner_cleanup_cannot_clear_a_successor_generation",
+            "overlapping_cleanup_tokens_are_resolved_independently",
+            "confirmed_release_resolves_latch_but_preserves_timed_fence",
+            "confirmed_current_restart_cancel_resolves_a_preexisting_exact_latch",
+            "confirmed_current_restart_cancel_resolves_an_expired_exact_latch",
+            "confirmed_maintenance_exit_resolves_an_expired_exact_latch",
+            "confirmed_maintenance_exit_preserves_a_restart_owned_latch",
+            "stuck_restart_admission_cannot_outlive_the_exact_fence",
+            "mutation_preflight_ages_local_transport_across_peer_collection",
+            "restart_preparation_claims_and_releases_the_replicated_outage_slot",
+            "cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner",
+            "cleanup_retry_backoff_is_capped_and_shutdown_interruptible",
+            "credential_revocation_uses_the_exact_committed_security_roster",
+            "credential_revocation_accepts_more_than_the_diagnostics_probe_limit",
+            "membership_added_between_begin_passes_is_fenced_before_store_admission",
+            "replicated_membership_exclusion_spans_final_roster_read_and_peer_end",
+            "replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew",
+            "cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released",
+            "local_apply_ack_wire_version_rejects_pre_barrier_receivers",
+            "begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply",
+            "cancelled_local_apply_wait_leaves_peer_memory_fence_closed",
+            "origin_waits_for_exact_claim_apply_before_observing_added_member",
+            "automatic_activation_runs_outside_the_membership_projection",
+            "full_roster_projection_activates_without_a_credential_mutation",
+            "permanent_activation_stops_the_one_time_worker",
+            "stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown",
+            "automatic_activation_checks_the_permanent_marker_before_taking_the_gate",
+        )
+        for test_name in daemon_transport_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurxd --bin plurxd", command)
+            self.assertIn("-- --exact", command)
+
         core_snapshot_tests = (
             "snapshot_install_timeout_is_bounded_and_env_values_are_parsed",
             "snapshot_chunk_and_transfer_timeouts_validate_bounds_and_relationship",
             "snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override",
+            "operations_peer_directory_preserves_identities_beyond_the_probe_limit",
+            "operations_peer_query_materializes_only_the_committed_roster",
+            "cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission",
+            "membership_cannot_commit_after_final_roster_read_before_credential_store_write",
+            "definitive_cache_admin_acquire_release_cycles_leave_no_receipts",
+            "definitive_cache_admin_singleton_losers_leave_no_receipts",
+            "zero_after_ambiguous_cache_admin_acquire_advances_watermark",
+            "ambiguous_cache_admin_acquire_advances_watermark_and_cannot_resurrect",
+            "repeated_ambiguous_cache_admin_cleanup_keeps_one_bounded_watermark",
+            "server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively",
+            "cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3",
+            "active_cache_revocation_exclusion_blocks_readiness_without_wall_clock_expiry",
+            "cache_revocation_capability_keeps_a_joiner_closed_until_self_is_committed",
+            "rollback_heartbeat_cannot_republish_retired_cache_revocation_capabilities",
+            "rollback_credential_mutation_is_rejected_before_readiness_refresh",
+            "three_voter_rolling_upgrade_activates_credential_guard_only_after_full_roster",
+            "activated_guard_with_live_mutation_lease_is_not_an_activation_candidate",
+            "status_protocol_query_materializes_only_the_committed_roster",
+            "committed_roster_bound_fails_closed_instead_of_truncating",
+            "released_planned_outage_claim_cannot_be_resurrected_by_a_delayed_write",
+            "maintenance_and_exact_release_are_safe_in_both_commit_orders",
+            "ambiguous_operation_acquire_retries_only_while_its_owned_claim_is_live",
+            "previous_release_lifecycle_writes_cannot_cross_an_outage_lease",
             "production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts",
+            "immediate_watermark_errors_cannot_starve_due_startup_log",
         )
         for test_name in core_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1632,6 +1781,32 @@ for (const startupDelay of [0, 1600, 7000]) {
             command = matching[0]
             self.assertIn("cargo test --locked -p plurx-core", command)
             self.assertIn("--lib -- --exact", command)
+
+        core_store_tests = (
+            "password_and_session_revocation_roll_back_together_on_delete_failure",
+            "failed_combined_promotion_never_authorizes_the_old_session",
+            "concurrent_admin_demote_and_delete_preserve_one_administrator",
+        )
+        for test_name in core_store_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurx-core --lib", command)
+            self.assertIn("-- --exact", command)
+
+        clustered_store_tests = (
+            "clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure",
+        )
+        for test_name in clustered_store_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn(
+                "--features cluster-read-cost-validation,hiqlite-contract-tests",
+                command,
+            )
+            self.assertIn("--test store_contract", command)
+            self.assertIn("-- --exact --test-threads=1", command)
 
         proxy_writer_test = (
             "server::proxy::stream::tests::"

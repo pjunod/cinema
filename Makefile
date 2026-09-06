@@ -187,6 +187,30 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::production_prepares_snapshot_status_before_biased_socket_close_drops_unpolled_work \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::long_lived_socket_derives_a_fresh_admission_deadline_per_request \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::first_snapshot_identity_reports_terminal_status_when_reader_eof_wins \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::changed_snapshot_identity_reports_terminal_status_when_reader_eof_wins \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::queued_snapshot_status_is_prepared_before_biased_reader_eof \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::inbound_snapshot_status_guard_preserves_worker_owned_and_completed_results \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  client::stream::tests::production_api_request_writer_flushes_serialized_request_through_tls \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -251,6 +275,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::raft_transport_debug_logging_exposes_only_bounded_metadata \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  client::stream::tests::production_api_reader_reports_malformed_frames \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -280,6 +308,34 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::snapshot_executor::tests::accepted_partial_write_finishes_before_same_offset_retry \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::production_snapshot_executor_worker_records_status_around_injected_installer \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::production_snapshot_executor_fifo_status_ignores_later_admission_waiter \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::production_snapshot_executor_ticket_order_survives_reverse_waiter_polling \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::production_snapshot_status_follows_worker_start_after_pre_ticket_deschedule \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::admission_waiter_budget_bounds_cancelled_ticket_retention_and_reports_busy \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::production_shared_executor_retains_abandoned_other_peer_terminal_status \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::snapshot_executor::tests::inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -339,6 +395,22 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_connection_supervisor_does_not_invent_snapshot_work \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_natural_reconnect_advances_physical_socket_epoch_without_reset \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_snapshot_catch_up_preserves_physical_socket_epoch_during_interleaving \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::two_client_churn_cannot_overwrite_the_snapshot_connection_owner \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::sqlite_install_snapshot_preserves_mismatch_for_offset_reset \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -379,6 +451,14 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_final_transport_error_retains_final_install_deadline_in_status \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_higher_vote_response_never_advances_snapshot_acknowledgement \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::sqlite_full_snapshot_enters_bounded_wrapper \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -411,6 +491,454 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::aborting_snapshot_owner_publishes_attempt_guarded_terminal_status \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::outbound_snapshot_attempt_bounds_identity_before_supervisor_logging \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::outbound_snapshot_identity_is_bounded_before_retention \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::inbound_snapshot_identity_is_bounded_before_retention \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::outbound_attempted_offset_never_rolls_back_within_one_snapshot_attempt \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::bounded_inbound_display_id_cannot_alias_semantic_snapshot_identity \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::snapshot_fingerprint_correlates_raw_identity_across_directions_without_display_aliasing \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::snapshot_fingerprint_is_optional_for_rolling_status_deserialization \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::local_status_distinguishes_receive_ack_install_retry_and_completion \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::receiver_bytes_are_not_reported_as_sender_acknowledgements \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::inbound_progress_is_monotonic_and_new_identity_clears_attempt_state \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::same_peer_inbound_install_and_outbound_transfer_do_not_collide \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::terminal_wrapper_preserves_the_actionable_failure_category \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::specific_terminal_failure_replaces_prior_transient_category \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::outbound_live_socket_counts_the_first_reconnect \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_supervisor_start_before_snapshot_attempt_counts_first_reconnect \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::stale_inbound_completion_cannot_mutate_newer_snapshot_identity \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::abandoned_inbound_admission_does_not_displace_worker_result \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::terminal_receipt_before_earlier_worker_start_keeps_attempt_ids_monotonic \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::inbound_socket_epoch_and_reconnect_count_are_attempt_local \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::configured_inbound_inter_chunk_deadline_uses_minimum_and_maximum \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::configured_peer_capacity_covers_both_groups_and_directions \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::live_membership_add_remove_churn_rekeys_capacity_and_retired_allowance \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::active_observation_remains_visible_through_deadline_then_expires \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::late_first_snapshot_cannot_resurrect_work_expired_after_its_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::late_first_snapshot_cannot_resurrect_work_without_a_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::deadline_less_retry_serializes_its_effective_fallback_stall_boundary \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::live_install_longer_than_five_minutes_remains_visible_through_its_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::configured_chunk_deadline_controls_awaiting_ack_stall_projection \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::completed_observation_never_projects_as_stalled_and_eventually_expires \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::valid_install_does_not_stall_at_the_chunk_window \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::retired_peers_are_bounded \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::management::transport_route_tests::production_transport_route_enforces_auth_and_returns_memory_only_json \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::mgmt::tests::production_transport_client_uses_exact_authenticated_route_and_accepts_404 \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::mgmt::tests::snapshot_transport_peer_tracks_current_raft_membership_for_new_learner \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::mgmt::tests::production_transport_client_rejects_oversized_unframed_response_body \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::peer_fanout_applies_the_one_second_per_peer_deadline \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::peer_fanout_never_exceeds_the_eight_peer_bound \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::production_collector_labels_directory_overflow_without_probing_it \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::peer_status_cache_is_fresh_for_five_seconds_then_expires \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::remote_status_freshness_uses_local_monotonic_age_despite_clock_skew \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::stale_peer_sample_uses_local_elapsed_time_and_cannot_become_healthy \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::absent_and_expired_cache_are_unavailable_never_peer_limited \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::membership_status_cache_is_fresh_for_five_seconds_then_expires \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::membership_projection_refresh_is_bounded_and_preserves_last_good_sample \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::long_install_crosses_to_stalled_then_expires_after_the_post_deadline_window \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cached_deadline_less_active_transport_uses_the_producer_fallback_boundary \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cached_terminal_transport_observation_expires_at_five_minutes \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::transport_projection_uses_local_monotonic_age_despite_remote_clock_skew \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::peer_status_refresh_keeps_strict_cycle_overhead_margin \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::aggregate_request_reads_only_node_owned_projections \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::unclustered_membership_cache_loop_exits_without_refresh_or_retry \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::mutation_preflight_refreshes_roster_directory_and_bounded_peer_observations \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::mutation_preflight_bounds_the_current_membership_read \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::mutation_preflight_ages_local_transport_across_peer_collection \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::planned_outage_lease_blocks_membership_mutation_during_fresh_preflight \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::failed_fresh_preflight_releases_its_planned_outage_lease \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::aborted_fresh_preflight_releases_the_exact_planned_outage_claim \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cancelled_acquisition_waiter_releases_only_after_ambiguous_outcome_is_known \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::abort_during_drain_cancels_the_guard_owned_local_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::restart_cancellation_cannot_clear_a_maintenance_owned_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::delayed_same_owner_cleanup_cannot_clear_a_successor_generation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::overlapping_cleanup_tokens_are_resolved_independently \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::confirmed_release_resolves_latch_but_preserves_timed_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::confirmed_current_restart_cancel_resolves_a_preexisting_exact_latch \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::confirmed_current_restart_cancel_resolves_an_expired_exact_latch \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::confirmed_maintenance_exit_resolves_an_expired_exact_latch \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::confirmed_maintenance_exit_preserves_a_restart_owned_latch \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::stuck_restart_admission_cannot_outlive_the_exact_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::restart_preparation_claims_and_releases_the_replicated_outage_slot \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cancelled_maintenance_waiter_does_not_cancel_the_owned_commit \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cleanup_retry_backoff_is_capped_and_shutdown_interruptible \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
+	  cluster::membership::tests::planned_outage_lease_excludes_a_concurrent_production_removal_attempt \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::released_planned_outage_claim_cannot_be_resurrected_by_a_delayed_write \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::maintenance_and_exact_release_are_safe_in_both_commit_orders \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::ambiguous_operation_acquire_retries_only_while_its_owned_claim_is_live \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::previous_release_lifecycle_writes_cannot_cross_an_outage_lease \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
+	  cluster::membership::tests::cache_revocation_capability_covers_the_exact_committed_roster_and_rollback \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::membership_cannot_commit_after_final_roster_read_before_credential_store_write \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::definitive_cache_admin_acquire_release_cycles_leave_no_receipts \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::definitive_cache_admin_singleton_losers_leave_no_receipts \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::zero_after_ambiguous_cache_admin_acquire_advances_watermark \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::ambiguous_cache_admin_acquire_advances_watermark_and_cannot_resurrect \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::repeated_ambiguous_cache_admin_cleanup_keeps_one_bounded_watermark \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3 \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::active_cache_revocation_exclusion_blocks_readiness_without_wall_clock_expiry \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::cache_revocation_capability_keeps_a_joiner_closed_until_self_is_committed \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::rollback_heartbeat_cannot_republish_retired_cache_revocation_capabilities \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::rollback_credential_mutation_is_rejected_before_readiness_refresh \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::three_voter_rolling_upgrade_activates_credential_guard_only_after_full_roster \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::activated_guard_with_live_mutation_lease_is_not_an_activation_candidate \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::cache_only_admin_proofs_honor_digest_and_user_invalidation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::active_revocation_blocks_ticket_publication_until_guard_drop \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::commit_ambiguous_local_mutation_retains_one_bounded_fail_closed_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::replicated_capability_loss_clears_proofs_and_invalidates_in_flight_publication \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::capability_refresh_error_and_rollback_clear_cache_only_admin_authority \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::automatic_activation_runs_outside_the_membership_projection \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::full_roster_projection_activates_without_a_credential_mutation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::permanent_activation_stops_the_one_time_worker \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  startup_tests::console_password_reset_fails_closed_before_any_store_mutation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::remote_revocation_fence_expires_bounded_and_reinvalidates \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::remote_revocation_fences_have_a_hard_capacity \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::poisoned_proof_cache_fails_closed_for_authentication_and_revocation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::digest_and_user_revocation_on_a_invalidate_primed_b_before_success \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::credential_revocation_uses_the_exact_committed_security_roster \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::credential_revocation_accepts_more_than_the_diagnostics_probe_limit \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::membership_added_between_begin_passes_is_fenced_before_store_admission \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::replicated_membership_exclusion_spans_final_roster_read_and_peer_end \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::local_apply_ack_wire_version_rejects_pre_barrier_receivers \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::cancelled_local_apply_wait_leaves_peer_memory_fence_closed \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::origin_waits_for_exact_claim_apply_before_observing_added_member \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::automatic_activation_checks_the_permanent_marker_before_taking_the_gate \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --lib \
+	  store::sqlite::users::tests::password_and_session_revocation_roll_back_together_on_delete_failure \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --lib \
+	  store::sqlite::users::tests::failed_combined_promotion_never_authorizes_the_old_session \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
+	  --test store_contract \
+	  clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure \
+	  -- --exact --test-threads=1
+	$(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
+	  --test store_contract \
+	  login_token_insert_requires_the_verified_password_version \
+	  -- --exact --test-threads=1
+	$(CARGO) test --locked -p plurx-core --lib \
+	  store::sqlite::users::tests::concurrent_admin_demote_and_delete_preserve_one_administrator \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::cache_only_admin_proofs_have_a_hard_capacity \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::logout_revocation_generation_rejects_an_in_flight_store_result \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::user_revocation_generation_rejects_all_in_flight_store_results \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::authentication_and_revocation_callers_bracket_store_work_with_generations \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::production_collector_preserves_private_transport_when_public_listener_is_closed \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::peer_transport_age_retains_request_to_receipt_uncertainty \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::slow_public_probe_cannot_discard_completed_private_transport \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::identity_mismatch_discards_peer_local_state \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::public_transport_fallback_requires_matching_observer_identity \
+	  -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  config::tests::snapshot_deadline_durations_are_bounded_before_instant_arithmetic \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core \
@@ -423,7 +951,25 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  config::tests::snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::operations_peer_directory_preserves_identities_beyond_the_probe_limit \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::operations_peer_query_materializes_only_the_committed_roster \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::status_protocol_query_materializes_only_the_committed_roster \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::committed_roster_bound_fails_closed_instead_of_truncating \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::migration::tests::production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::migration::startup_wait_logging_tests::immediate_watermark_errors_cannot_starve_due_startup_log \
 	  --lib -- --exact
 	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
 	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \

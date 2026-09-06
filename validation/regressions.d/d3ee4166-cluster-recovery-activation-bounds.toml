@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = ["d3ee4166", "fc54e84f", "aecda98d", "10f7356c", "dcde8059", "02e429d3"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "identity.access",
+  "server.api",
+  "validation.framework",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "catalog-contract",
+  "history-regressions",
+]
+reason = "The automatic activation task is independent of membership publication and shutdown-aware, so an indefinitely ambiguous exclusion cleanup cannot expire recovery diagnostics. A paused-time regression holds activation pending while membership refreshes remain fresh, then proves shutdown completes. The marker-aware quorum preflight rejects reactivation while an ordinary credential lease is live after the permanent transition, avoiding one losing replicated claim per node. Static wiring and lane inventories pin both production paths."

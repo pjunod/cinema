@@ -1179,7 +1179,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and the task starts no worker or process.
 # 391 -> 393: the serving-loss regression owns and joins/cancels its HTTP
 # waiter and serving-loss task. No new production task owner is introduced.
-expected_occurrences = 393
+# 393 -> 408 with M4 transport status and cache-recovery safety. Three shipped
+# node-owned tasks refresh the two bounded status projections and perform the
+# one-time exact-roster activation; a fourth shipped task owns a cancellation-
+# safe Store result. The remaining eleven are joined Rust test tasks (including
+# two std::thread fixtures) that drive cancellation, publication, and poisoned-
+# cache races. Every shipped loop has an explicit shutdown token and every
+# fixture handle is awaited or cancelled before its test returns.
+expected_occurrences = 408
 
 [[module_structures]]
 id = "method-spawn"
@@ -1190,7 +1197,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
 # cancellation token and deadline; the child is kill-on-drop and always reaped
 # on the explicit oversize and ordinary completion paths.
-expected_occurrences = 41
+# 41 -> 43 with M4: planned-outage and cache-revocation Drop each hand an exact
+# replicated cleanup claim plus its process gate to the node runtime. Retry is
+# shutdown-aware and bounded; the gate remains owned until cleanup is definitive.
+expected_occurrences = 43
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1300,7 +1310,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 571 -> 577: admission capacity gets one inherited-deadline timeout;
 # takeover cleanup gets one existing-reconciliation-deadline timeout. The
 # remaining net four constructors belong to bounded settlement regressions.
-expected_occurrences = 577
+# 577 -> 602 with M4. Shipped timers bound peer-directory/status reads, status
+# refresh cadence, exact-claim apply, activation retry, and replicated cleanup;
+# none launches a process. Test-only paused-time waits exercise those deadlines,
+# cancellation, chronology, and cache expiry, and remain owned by their tests.
+expected_occurrences = 602
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1402,7 +1416,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 after the second adversarial review: the internal-relay preparation replay
 # regression reads the in-process response status before asserting its retained
 # canonical body. It launches no child and owns no process.
-expected_occurrences = 217
+# 217 -> 226 with M4: seven net additions are in-process membership or HTTP
+# response `status()` reads used by maintenance/status handlers and acceptance
+# tests. The other two are the node-runtime cleanup spawns inventoried under
+# `method-spawn` above. None constructs, launches, or owns an
+# operating-system process.
+expected_occurrences = 226
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1427,7 +1446,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # calls coordinate test tasks before the leading fetch is released. They are
 # in-process synchronization and do not address or reap an operating-system
 # process.
-expected_occurrences = 306
+# 306 -> 310 with M4: four Barrier::wait calls coordinate the test-only
+# in-flight authentication publication race. They are joined in-process test
+# synchronization and are not child-process lifecycle actions.
+expected_occurrences = 310
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

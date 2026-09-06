@@ -153,6 +153,256 @@
     if(!ops||ops.unavailable) return null;
     return (ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId)||null;
   }
+  function clusterTransportObservation(ops,raftId,clientElapsedMs=0){
+    if(!ops||ops.unavailable||raftId===null||raftId===undefined) return null;
+    // The aggregate's timestamp belongs to the daemon's wall clock. An admin
+    // browser may be ahead or behind that clock, so it cannot safely measure
+    // retained age. The shell passes only elapsed monotonic time since this
+    // exact response was received; direct/model callers default to no added
+    // age rather than inventing a cross-machine clock relationship.
+    clientElapsedMs=Number(clientElapsedMs);
+    const elapsed=Number.isFinite(clientElapsedMs)?Math.max(0,clientElapsedMs):0;
+    const ageByElapsed=value=>value===null||value===undefined
+      ?value:Number(value)+elapsed;
+    const projectAgeAndDeadline=observation=>{
+      const sourceAge=Number(observation.sample_age_ms||0);
+      const serializedRemaining=observation.active_deadline_remaining_ms===null||
+        observation.active_deadline_remaining_ms===undefined
+        ?null:Number(observation.active_deadline_remaining_ms);
+      const stalledPhases=["connecting","transferring","awaiting_acknowledgement",
+        "installing","retrying"];
+      const fallbackBoundary=serializedRemaining===null&&stalledPhases.includes(observation.phase);
+      const remaining=fallbackBoundary?Math.max(0,30000-sourceAge):serializedRemaining;
+      const deadlineStillActive=remaining!==null&&remaining>elapsed;
+      const deadlineCrossed=remaining!==null&&remaining<=elapsed&&
+        stalledPhases.includes(observation.phase);
+      const stalledAge=fallbackBoundary
+        ?Math.max(0,sourceAge+elapsed-30000):Math.max(0,elapsed-remaining);
+      const projectedStalledRetention=deadlineCrossed&&stalledAge<=300000;
+      if(sourceAge+elapsed>300000&&!deadlineStillActive&&!projectedStalledRetention)
+        return null;
+      if(!elapsed&&!deadlineCrossed) return observation;
+      const projected=Object.assign({},observation,{
+        sample_age_ms:deadlineCrossed?stalledAge:sourceAge+elapsed,
+      });
+      for(const field of ["attempt_age_ms","last_acknowledgement_age_ms",
+        "last_local_receive_age_ms"])
+        projected[field]=ageByElapsed(observation[field]);
+      if(remaining!==null)
+        projected.active_deadline_remaining_ms=Math.max(0,remaining-elapsed);
+      if(deadlineCrossed){
+        projected.phase="stalled";
+        projected.last_error_category="snapshot_stalled";
+      }
+      return projected;
+    };
+    const candidates=[];
+    (ops.nodes||[]).forEach(row=>{
+      // The private cluster listener remains available while a learner's
+      // public daemon listener is intentionally closed during catch-up. The
+      // server exposes one sanitized transport projection on the row; never
+      // fall back to the unsanitized public-status payload.
+      const transport=row&&row.transport;
+      (transport&&transport.observations||[]).forEach(observation=>{
+        if(Number(observation.observing_node_id)!==Number(transport.observing_node_id)) return;
+        if(observation.raft_group!=="sqlite") return;
+        const receiverId=observation.direction==="inbound"
+          ?observation.observing_node_id
+          :observation.direction==="outbound"
+            ?observation.peer_node_id:null;
+        if(Number(receiverId)!==Number(raftId)) return;
+        const projected=projectAgeAndDeadline(observation);
+        if(projected) candidates.push(projected);
+      });
+    });
+    const priority={stalled:8,installing:7,awaiting_acknowledgement:6,retrying:5,
+      transferring:4,connecting:3,failed:2,complete:1};
+    const age=observation=>Number(observation.sample_age_ms||0);
+    const ageUncertainty=observation=>{
+      if(observation.age_uncertainty_ms===null||
+        observation.age_uncertainty_ms===undefined) return 1000;
+      const value=Number(observation.age_uncertainty_ms);
+      return Number.isFinite(value)&&value>=0?value:1000;
+    };
+    const attemptAge=observation=>{
+      if(observation.attempt_age_ms===null||observation.attempt_age_ms===undefined)
+        return null;
+      const value=Number(observation.attempt_age_ms);
+      return Number.isFinite(value)&&value>=0?value:null;
+    };
+    const fingerprint=observation=>typeof observation.snapshot_fingerprint==="string"&&
+      /^[0-9a-f]{64}$/.test(observation.snapshot_fingerprint)
+      ?observation.snapshot_fingerprint:null;
+    const attemptIdentity=observation=>
+      `attempt:${observation.observing_node_id}:${observation.boot_id||""}:`+
+      `${observation.direction}:${observation.peer_node_id}:`+
+      `${observation.attempt_id}:${observation.socket_epoch}`;
+    // snapshot_id is a bounded display label. It can be the digest rendering
+    // of a long ID or an ordinary short ID with the same spelling, so it is
+    // never semantic identity. Older peers have no fingerprint and remain
+    // attempt-local rather than gaining unsafe cross-observer correlation.
+    const identity=observation=>fingerprint(observation)
+      ?`snapshot:${fingerprint(observation)}`:attemptIdentity(observation);
+    const textCompare=(left,right)=>{
+      const stable=value=>value===undefined?"0:undefined":value===null?"1:null":
+        `${typeof value}:${String(value)}`;
+      left=stable(left);right=stable(right);
+      return left<right?-1:left>right?1:0;
+    };
+    const acknowledgedComplete=observation=>observation.phase==="complete"&&
+      observation.direction==="outbound"&&observation.acknowledged_offset!==null&&
+      observation.acknowledged_offset!==undefined;
+    const tieBreak=(left,right)=>{
+      const acknowledged=Number(acknowledgedComplete(right))-Number(acknowledgedComplete(left));
+      if(acknowledged) return acknowledged;
+      for(const field of ["direction","observing_node_id","peer_node_id","raft_group",
+        "boot_id","attempt_id","socket_epoch","snapshot_id","snapshot_fingerprint",
+        "attempted_offset","acknowledged_offset","locally_received_bytes","total_bytes",
+        "attempt_age_ms","age_uncertainty_ms","last_acknowledgement_age_ms","last_local_receive_age_ms",
+        "active_deadline_remaining_ms","reconnect_count","retry_count",
+        "last_error_category","operation_owns_work"]){
+        const compared=textCompare(left[field],right[field]);
+        if(compared) return compared;
+      }
+      return 0;
+    };
+    const withinIdentity=(left,right)=>
+      (priority[right.phase]||0)-(priority[left.phase]||0)||
+      age(left)-age(right)||tieBreak(left,right);
+    const chronologyOrder=observations=>{
+      // A remote age was sampled at an unknown instant between this process's
+      // request start and receipt. Sort only non-overlapping local-monotonic
+      // intervals. Each rank is the non-dominated frontier: an observation is
+      // excluded whenever another interval is provably newer. Do not merge
+      // connected overlap components; a broad uncertain interval can overlap
+      // two intervals that are themselves provably ordered.
+      const useAttemptAge=observations.length>0&&
+        observations.every(observation=>attemptAge(observation)!==null);
+      const range=observation=>{
+        const upper=useAttemptAge?attemptAge(observation):age(observation);
+        return {lower:Math.max(0,upper-ageUncertainty(observation)),upper};
+      };
+      let remaining=observations.map(observation=>({observation,...range(observation)}));
+      const ranks=new Map();
+      let rank=0;
+      while(remaining.length){
+        const frontier=remaining.filter(entry=>!remaining.some(other=>
+          other!==entry&&other.upper<entry.lower));
+        frontier.forEach(entry=>ranks.set(entry.observation,rank));
+        const frontierSet=new Set(frontier);
+        remaining=remaining.filter(entry=>!frontierSet.has(entry));
+        rank+=1;
+      }
+      return {
+        rank:observation=>ranks.get(observation)||0,
+        compare:(left,right)=>(ranks.get(left)||0)-(ranks.get(right)||0)||
+          (priority[right.phase]||0)-(priority[left.phase]||0)||
+          age(left)-age(right)||tieBreak(left,right),
+      };
+    };
+    const groups=new Map();
+    candidates.forEach(observation=>{
+      const key=identity(observation);
+      if(!groups.has(key)) groups.set(key,{
+        fingerprint:fingerprint(observation),observations:[],
+      });
+      groups.get(key).observations.push(observation);
+    });
+    const representatives=[];
+    groups.forEach(group=>{
+      // Reduce concrete attempts and establish successor chronology before
+      // considering either sender or receiver completion authority. A former
+      // leader may publish a real acknowledgement after the receiver has
+      // restarted into a newer attempt for the same snapshot.
+      const attempts=new Map();
+      group.observations.forEach(observation=>{
+        const key=attemptIdentity(observation);
+        if(!attempts.has(key)) attempts.set(key,[]);
+        attempts.get(key).push(observation);
+      });
+      const attemptRepresentatives=[];
+      attempts.forEach(observations=>{
+        observations.sort(withinIdentity);
+        attemptRepresentatives.push(observations[0]);
+      });
+      const chronology=chronologyOrder(attemptRepresentatives);
+      attemptRepresentatives.sort(chronology.compare);
+      const newestAttempts=new Set(attemptRepresentatives
+        .filter(observation=>chronology.rank(observation)===0)
+        .map(attemptIdentity));
+      const sampleRange=observation=>({
+        lower:Math.max(0,age(observation)-ageUncertainty(observation)),
+        upper:age(observation),
+      });
+      const freshest=Math.min(...group.observations.map(observation=>sampleRange(observation).lower));
+      const completionCohort=group.observations.filter(
+        observation=>newestAttempts.has(attemptIdentity(observation))&&
+          sampleRange(observation).upper<=freshest+5000);
+      // A flushed sender acknowledgement is causally later than every
+      // contemporaneous receiver-side phase for the same exact snapshot: the
+      // receiver had to finish the install and return that response before the
+      // sender could publish Complete. Apply that authority only to a validated
+      // fingerprint and this identity's five-second freshness cohort. An old
+      // leader's retained acknowledgement must not hide a newer attempt after a
+      // receiver restart or leadership change; legacy and malformed identities
+      // remain attempt-local.
+      const nonComplete=completionCohort.filter(observation=>observation.phase!=="complete");
+      const completionCanSupersede=observation=>nonComplete.every(other=>
+        sampleRange(observation).upper<=sampleRange(other).lower);
+      const acknowledged=group.fingerprint
+        ?completionCohort.filter(observation=>
+          acknowledgedComplete(observation)&&completionCanSupersede(observation)):[];
+      if(acknowledged.length){
+        acknowledged.sort((left,right)=>age(left)-age(right)||tieBreak(left,right));
+        representatives.push(acknowledged[0]);
+        return;
+      }
+      // A receiver that durably completed this exact fingerprint disproves
+      // every unacknowledged sender-side predecessor: the sender may still say
+      // installing, waiting, retrying, stalled, or failed because the reply did
+      // not reach it. An acknowledged sender Complete is causally stronger and
+      // already returned above. Apply this exception once at the group boundary;
+      // it does not cover inbound failures or unrelated fingerprints.
+      const receiverComplete=completionCohort.some(observation=>observation.phase==="complete"&&
+        observation.direction==="inbound"&&completionCanSupersede(observation));
+      if(group.fingerprint&&receiverComplete){
+        const completed=completionCohort.filter(observation=>
+          observation.phase==="complete"&&observation.direction==="inbound"&&
+          completionCanSupersede(observation));
+        completed.sort((left,right)=>age(left)-age(right)||tieBreak(left,right));
+        representatives.push(completed[0]);
+        return;
+      }
+      representatives.push(attemptRepresentatives[0]);
+    });
+    // Completion authority stays fingerprint-local above. Every surviving
+    // identity representative shares one total chronology order here, so a
+    // former leader's late terminal event cannot hide a successor snapshot.
+    representatives.sort(chronologyOrder(representatives).compare);
+    return representatives[0]||null;
+  }
+  function clusterTransportExplanation(ops,raftId,boundedReadReady,clientElapsedMs=0){
+    const observation=clusterTransportObservation(ops,raftId,clientElapsedMs);
+    if(!observation)
+      return boundedReadReady
+        ? {code:"idle",text:"transport idle; bounded-read proof ready",observation:null}
+        : {code:"unavailable",text:"progress unavailable",observation:null};
+    const labels={
+      connecting:"connecting snapshot transport",
+      transferring:observation.direction==="inbound"
+        ?"receiving snapshot":"transferring snapshot",
+      awaiting_acknowledgement:"waiting for snapshot acknowledgement",
+      installing:"installing snapshot",
+      retrying:"retrying snapshot",
+      stalled:"snapshot stalled",
+      failed:"snapshot failed",
+      complete:observation.direction==="inbound"&&observation.acknowledged_offset==null
+        ?(boundedReadReady?"snapshot recovered":"snapshot received; sender acknowledgement unconfirmed")
+        :(boundedReadReady?"snapshot recovered":"waiting for startup watermark"),
+    };
+    const code=observation.phase==="complete"&&!boundedReadReady?"startup_watermark":observation.phase;
+    return {code,text:labels[observation.phase]||"progress unavailable",observation};
+  }
   function clusterMaintenanceEntryVerdict(ops,nodeId){
     if(!ops||ops.unavailable) return null;
     return (ops.maintenance||[]).find(verdict=>verdict.node_id===nodeId)||null;
@@ -404,6 +654,9 @@
     identity_mismatch:"the answer came back under a different node identity",
     raft_identity_mismatch:"the answer came back under a different Raft id",
     stale_peer_sample:"its answer was older than one refresh window",
+    unavailable:"no cache-backed direct observation is available yet",
+    cache_unavailable:"the background direct-observation cache is not ready yet",
+    cache_stale:"the background direct-observation cache has expired",
     peer_limit:"the roster is larger than one refresh may sample",
     not_observed:"this refresh has not sampled it",
   };
@@ -570,6 +823,8 @@
   // themselves: the aggregate's and each status's `observed_at_unix_ms`, the
   // per-node `sample_age_ms`, and the Raft sample and watermark ages. Those are
   // what the "Reading age" row reports, and it is patched in place instead.
+  // A transport observation's `sample_age_ms` stays in the projection: its
+  // observer age is rendered in the recovery ledger and has no separate patch.
   // `last_seen_at` on the embedded membership record goes too: the roster owns
   // that reading and the panel never renders it from here, so a heartbeat is not
   // a reason to rewrite the screen.
@@ -600,9 +855,11 @@
     const walk=value=>{
       if(Array.isArray(value)) return value.map(walk);
       if(!value||typeof value!=="object") return value;
+      const transportObservation=(value.direction==="inbound"||value.direction==="outbound")
+        &&typeof value.raft_group==="string"&&Object.prototype.hasOwnProperty.call(value,"observing_node_id");
       const out={};
       for(const key of Object.keys(value).sort()){
-        if(clusterOpsSelfTicking(key)) continue;
+        if(clusterOpsSelfTicking(key)&&!(transportObservation&&key==="sample_age_ms")) continue;
         out[key]=walk(value[key]);
       }
       return out;
@@ -655,6 +912,8 @@
     membershipRefusalText,
     clusterDirectMaintenanceStatus,
     clusterDirectOperationRow,
+    clusterTransportObservation,
+    clusterTransportExplanation,
     clusterMaintenanceEntryVerdict,
     clusterMaintenanceReady,
     clusterMaintenanceResumeReady,

@@ -313,10 +313,12 @@ the replicated write but before the local marker rewrite replays only the
 marker write on the next boot. Do not restart a v5, v6, v7, or v8 binary after v9
 commits: its strict compatibility check correctly refuses the newer schema. If
 a node fails during the maintenance window, leave the v9 quorum authoritative
-and roll that node forward with the same v9-or-newer binary. `reset-password`,
-`refresh-metadata`, and other maintenance clients do not own migration and
-will refuse until the running daemon has completed it. Replicated v4 has no
-supported direct path to v9 and remains refused.
+and roll that node forward with the same v9-or-newer binary. `refresh-metadata`
+and other Store-backed maintenance clients do not own migration and will refuse
+until the running daemon has completed it. `reset-password` is stricter: it
+currently refuses before connecting to any activated Store because a sidecar
+writer cannot invalidate process-local admin recovery proofs. Replicated v4 has
+no supported direct path to v9 and remains refused.
 
 Every Ansible redeploy stops the Plurx Compose stack long enough to copy the
 closed SQLite database. The three newest copies stay on each node under
@@ -1759,6 +1761,168 @@ derives the grace from both resolved stage settings plus 135 seconds. That
 matters most when one or both deadlines live in a bind-mounted production TOML,
 where `.env` has no reason to mention readiness.
 
+Snapshot transport progress is process-local diagnostic evidence, never
+serving authority. Each embedded Hiqlite node retains a bounded record per
+Raft group and configured peer, plus a small expiring allowance for retired
+peers. Recording a frame or chunk performs no SQL transaction, roster update,
+WAL append, or quorum read. Sender acknowledgement offsets and receiver-local
+bytes are separate fields because a receiver may have accepted bytes whose
+reply has not reached the sender.
+
+For inbound work, a different snapshot identity becomes visible only when the
+node-owned FIFO executor actually admits that exact request. A queued request
+or later admission waiter cannot displace the running install's identity. This
+keeps `operation_owns_work` tied to the future that currently owns the durable
+state-machine operation, including while an older socket is disappearing.
+If the Raft server's reader or writer ends while socket-owned submission work
+is pending, a synchronous cleanup owner records `snapshot_connection_closed`;
+that cleanup cannot overwrite a worker-owned or completed result, and dropping
+the socket future cannot cancel work the node executor already accepted.
+Admission tickets are reserved synchronously when a socket task calls the
+executor and released or skipped on cancellation, so reverse future polling
+cannot reorder callers that have reached that boundary. Receipt and submit
+remain separate task steps, so the public status attempt ID is assigned under
+the status lock at actual worker start; the order of real durable installs is
+therefore authoritative even if an earlier receiver task was descheduled before
+submission. At most two socket tasks may wait behind the executor's one running
+and one queued request; additional callers receive the explicit retryable
+`snapshot_admission_busy` outcome, and cancelled ticket retention stays bounded.
+The bounded `snapshot_id` remains display text only;
+cross-observer correlation uses a separate 64-hex SHA-256 fingerprint of the
+original ID. Older peers that omit it stay attempt-local instead of acquiring
+unsafe identity from a potentially colliding display label.
+Cross-observer completion can supersede a predecessor only inside the same
+fingerprint's five-second freshness cohort. A retained acknowledgement or
+receiver completion outside that cohort cannot hide a newer retry, install, or
+failure after a receiver restart or leadership change.
+
+The existing private Hiqlite cluster listener serves
+`GET /cluster/transport/sqlite` with the same `X-API-SECRET` authentication as
+the adjacent cluster metrics route. The response is JSON and reads only the
+node-owned in-memory snapshot, so it remains usable while startup is waiting
+and before port 32400 opens. Query only a peer address from the committed
+Hiqlite roster; never send the cluster API secret to an operator-supplied URL.
+During a rolling update, HTTP 404 means that peer does not expose transport
+progress yet and must be rendered as unavailable.
+
+The Cluster panel joins each node's authenticated operations status with the
+roster using at most eight concurrent peer refreshes, a one-second deadline
+per peer, and five-second process-local peer and membership caches. Separate
+background refreshes run every three seconds; the page, support bundle, and
+metrics request paths read those node-owned projections and perform no Store
+call or peer network request. An absent or expired membership projection fails
+closed instead of rendering a guessed roster. Standalone SQLite installs do
+not start the replicated-membership refresh loop, so an unavailable membership
+backend cannot fill the bounded diagnostics log with periodic warnings.
+
+The public status and support routes also avoid a hidden Store call in their
+admin extractor. Successful ordinary authentication publishes a process-local
+proof containing only the SHA-256 token digest, user ID, and fixed five-minute
+expiry. Recovery reads do not renew it, at most 64 proofs are retained, and a
+miss, expiry, non-admin result, or cache failure returns `401` without falling
+back to Store. Store-backed authentication captures the cache revocation
+generation before its read and publishes proof only if that generation is
+unchanged. On replicated nodes, publication and cache-only authentication start
+disabled. A separate node-owned background activation pass enables them only
+after every member in the exact committed Raft configuration carries a
+`cache_admin_revocation_v3`
+row whose timestamp equals that node's current heartbeat. The pass takes the
+replicated membership exclusion, waits for its exact claim to apply locally,
+and globally clears cached proofs with the same bounded Begin/End fanout used
+for credential mutations before publishing readiness. It cannot block the
+independent membership-status publisher while an exclusion cleanup waits for
+quorum. Version 3 means the node
+supports the replicated credential-mutation exclusion, exact Store-write
+predicate, and local-applied claim acknowledgement described below. Version 1
+and version 2 capability heartbeats are retired by the replicated schema so a
+rolled-back process cannot silently restore the weaker contract. A joining
+member, missing
+row, refresh failure, or heartbeat from a rolled-back binary closes the gate and
+clears every proof; reopening requires a new ordinary authentication. Logout,
+demotion, password reset, and user deletion invalidate proof and advance the
+generation both before and after their Store mutation; an in-flight stale read
+therefore cannot republish a revoked credential. These mutations first acquire
+a separate replicated singleton lease that blocks join, promotion, removal,
+and planned-outage acquisition. They then bracket the Store write with signed
+begin/end messages to every member of a stable exact committed roster under one
+two-second aggregate bound. The Store mutation names the exact lease claim, so
+a delayed write cannot commit after cancellation has released it. The lease
+remains owned until the terminal peer invalidation; heartbeat expiry creates a
+permanent receipt before cleanup after a crash.
+The peer wire contains only the random lease-claim UUID and phase, never a token
+digest or user ID. A peer installs its process-local fence before polling its
+local-applied SQLite view and acknowledges begin only after that exact claim is
+visible. Cache readiness independently remains false while any such lease is
+present; the ordered local application of its release is the only event that
+can reopen readiness after a restart or local fence expiry. A peer clears its
+bounded proof cache and refuses all cache-only recovery authorization while any
+fence is active; at most 128
+remote fences are retained, and an end that is lost or whose commit outcome is
+unknown expires no later than the existing non-sliding five-minute proof TTL.
+The origin retains the same global five-minute fence when a Store mutation or
+peer end returns ambiguously; dropping a request future cannot reopen recovery
+authorization while a delayed Raft write may still commit.
+An unreachable peer, missing HTTP claim, oversized roster, non-204 response,
+or invalid signature fails the caller closed with a typed `503`; success is
+reported only after all begin and end acknowledgements. A cold process
+therefore needs one successful ordinary authentication
+before these public recovery reads; the private authenticated cluster-listener
+transport route remains the pre-listener/startup path.
+
+There is currently no safe forgotten-last-admin console recovery command.
+`plurxd reset-password` refuses before Store connection or mutation because a
+separate process cannot participate in the daemon-owned begin/end proof
+invalidation protocol. Do not work around that refusal with direct Hiqlite or
+SQLite writes: use a still-authenticated admin session to create or reset
+another admin. A daemon-owned authenticated local control path is required
+before unattended last-admin recovery can be re-enabled.
+
+Directory and membership SQL
+receive the exact committed Raft IDs as a bounded parameter, so abandoned join
+rows are never materialized; a committed roster above the explicit 64-member
+diagnostics bound is unavailable rather than truncated. The directory lookup
+is bounded to 500 milliseconds, leaving a strict 500-millisecond completion
+margin even when a public probe consumes its full deadline. Cache availability
+begins when that refresh completes; embedded status and transport ages still
+advance from their node-owned source timestamps. If a browser retains the last
+aggregate across failed refreshes, it advances those server-projected durations
+from a browser-local monotonic receipt baseline; browser and daemon wall-clock
+skew therefore cannot renew or prematurely expire the evidence. The projection
+crosses to `stalled` at zero and expires after the same five-minute diagnostic
+window. Automatic and manual refresh failures pay a preserving repaint so
+those projected transport fields change on screen while the unavailable
+verdict remains visible. If a Cluster decision dialog is open, the page keeps
+that dialog intact, patches only the independent reading-age cell, and pays the
+transport repaint after the dialog closes. Each peer refresh probes the
+public and private listeners concurrently, so up to sixteen bounded HTTP
+requests may be in flight. Roster members beyond the eight-probe bound remain
+visible as `peer_limit` instead of disappearing. A healthy sender can therefore
+report outbound evidence for a learner whose public listener is still closed.
+Safety-changing maintenance-entry and restart-preparation requests do not use
+those five-second peer projections: they first claim the replicated
+planned-outage lifecycle lease, then reread committed membership and the peer
+directory and perform current authenticated probes under one absolute
+two-second preflight deadline. Collection failure or an unsafe/candidate-mismatch
+verdict releases that exact claim. A cancellation-safe owner retains it across
+preflight, admission drain, and the final restart-preparation or maintenance
+commit; every error or aborted request releases the exact claim, and only a
+successful commit disarms cleanup. While present it prevents a concurrent
+join, promotion, maintenance, or removal from invalidating the safety proof. A roster or directory read that does not finish
+inside its own 500-millisecond share fails closed before mutation.
+Inactive status older than five minutes expires instead of continuing to claim
+work. An observation with an active monotonic deadline remains visible past
+five minutes through that deadline and for the producer's five-minute stalled
+diagnostic window. That window is anchored to the actual deadline (or the
+producer's last update plus the stall threshold when no deadline exists), so a
+late first read cannot resurrect expired work. A cached pre-stall sample projects that one transition
+without resetting an already-stalled sample's age; the five-second cache
+decreases its reported deadline remainder rather than granting more time. The
+panel reports observer and sample age and keeps
+`bounded_read_ready` separate: receiving, waiting for acknowledgement,
+installing, retrying, or stalled transport never grants reads. While port
+32400 is still closed, the daemon also emits one bounded startup-wait record
+every ten seconds with target/applied indexes when known.
+
 Set the variable only to choose a grace deliberately. Whether anybody chose is
 answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
 that is anything other than the interpolation default in
@@ -2166,7 +2330,8 @@ symlink. There is no raw-token argument. Use `--json` when another tool needs
 the exact API document.
 
 Restart preparation acquires one replicated, expiring planned-outage lease
-before the target fences local admissions. Maintenance uses the same lease, so
+before it collects the fresh safety preflight and before the target fences local
+admissions. Maintenance uses the same lease, so
 two safe observations on different nodes cannot turn into two simultaneous
 reboots. Cancellation releases the restart claim; a failed maintenance request
 releases its exact claim; normal heartbeats remove expired claims after a
