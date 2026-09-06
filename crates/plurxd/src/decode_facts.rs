@@ -207,6 +207,30 @@ async fn collect(
     use std::os::fd::AsRawFd;
 
     let source_fd = source.as_raw_fd();
+    let source_offset = unsafe { libc::lseek(source_fd, 0, libc::SEEK_CUR) };
+    if source_offset == -1 {
+        return Err(DecodeFactError::SourceMetadata(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    // A duplicated descriptor shares its open-file offset. FFprobe is allowed
+    // to seek while inspecting the held inode, but the later FFmpeg spawn must
+    // inherit the same offset the preparation owner held before probing.
+    struct RestoreOffset {
+        fd: std::os::fd::RawFd,
+        offset: libc::off_t,
+    }
+    impl Drop for RestoreOffset {
+        fn drop(&mut self) {
+            unsafe {
+                libc::lseek(self.fd, self.offset, libc::SEEK_SET);
+            }
+        }
+    }
+    let _restore_offset = RestoreOffset {
+        fd: source_fd,
+        offset: source_offset,
+    };
     let mut command = tokio::process::Command::new(ffprobe);
     command.args([
         "-v",
@@ -343,6 +367,12 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
             .await
             .expect("bound facts");
         assert_eq!(first.input_video_stream(), 4);
+        let mut offset_view = source.try_clone().expect("clone source descriptor");
+        assert_eq!(
+            std::io::Seek::stream_position(&mut offset_view).expect("source offset"),
+            0,
+            "fact collection must restore the held descriptor's file offset"
+        );
         std::fs::remove_file(&probe).expect("remove executable to prove cache hit");
         let cached = cache
             .get_or_probe("missing-probe", &build, source, Some(4))
