@@ -36,7 +36,9 @@ change.
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
 
-The current M4 integration work is based on final M3 PR tip `2c018809`.
+The current M4 integration tree is rebased onto merged M3 effort tip
+`f5c688a9`; its replayed head is `6faebf61`. The moved-base history audit
+passes with explicit current-check mappings for every corrective M4 commit.
 Candidates `7e220e0c` and `d1472a55` passed their pre-review fast lanes but
 failed exact-SHA adversarial review; neither candidate will be pushed or opened
 as a pull request. Their findings were corrected and committed on a replacement
@@ -296,14 +298,16 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 
-M1/M2 are merged into the effort at `5f96469a94`. The first exact-SHA M3 review
+M1/M2 are merged into the effort at `5f96469a94`, and M3 is merged at
+`f5c688a9` after three clean exact-candidate reviews and the green effort gate.
+The first exact-SHA M3 review
 found eight boundary gaps: final mismatch restored T too late, a stale T timer
 could beat a ready final-stage update, standalone durations could overflow
 `Instant`, both production wrappers lacked direct pins, hard TTL below C was
 untested, numeric overflow evidence was missing, the Dockerfile comment was
 stale, and receiver admission still used the old fixed timeout. All eight are
 fixed and the focused fast lane is green. The replacement SHA passed the same
-three adversarial tracks and is now in PR !60. The first replacement
+three adversarial tracks and merged through PR !60. The first replacement
 review also caught a cache-only denied-warning lint in a helper's oversized
 `Result`; the helper now performs only the phase restoration and the trait
 implementations retain error mapping. All three prescribed standalone Clippy
