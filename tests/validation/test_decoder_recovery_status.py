@@ -19,7 +19,7 @@ FORGEJO_TASK_BASE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "adce1125"
-M1_REPAIR_HEAD = "29dd8e88"
+M1_REPAIR_HEAD = "31dc5d26"
 
 
 def normalized(text: str) -> str:

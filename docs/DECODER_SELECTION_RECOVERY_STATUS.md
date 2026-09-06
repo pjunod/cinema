@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 fourth-review repairs validated locally · **Updated:** 2026-09-06 ·
+**Status:** M1 fourth-review repair awaiting exact-head review · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -23,17 +23,17 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Working tree after `adce1125`: macOS collector 17/17, pinned Linux 1.97.1 collector 27/27, neutral legacy route 1/1, cross-platform all-target Clippy with warnings denied, status/ownership contracts 13/13, catalog 24/30/1,437, history 1,361, and operations 211/211. Linux composes production discovery, sealed-FD execution, one-shot supervised `execveat`, deny-all path execution, pidfd-before-reap cleanup, bound source FD 3, JSON parsing, direct and `/proc/self/fd` second-memfd denial, FD-reuse denial, session-escape denial, executable-source refusal, and injected pidfd failure ownership |
+| Focused validation | Exact code head `31dc5d26`: macOS collector 17/17, pinned Linux 1.97.1 collector 27/27, neutral legacy route 1/1, cross-platform all-target Clippy with warnings denied, status/ownership contracts 13/13, catalog 24/30/1,438, history 1,362, and operations 211/211. Linux composes production discovery, sealed-FD execution, one-shot supervised `execveat`, deny-all path execution, pidfd-before-reap cleanup, bound source FD 3, JSON parsing, direct and `/proc/self/fd` second-memfd denial, FD-reuse denial, session-escape denial, executable-source refusal, and injected pidfd failure ownership |
 | Exact receipt | `adce1125`: exact post-map history audit 1,361, catalog 24/30/1,437, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass. Both exact-head reviews requested the fourth repair; this receipt is not approval evidence |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
-| Blocker | Commit the fourth-review repairs and obtain new exact-head adversarial approval before the one clean full-suite qualification |
+| Blocker | Commit and audit the `31dc5d26` evidence mapping, then obtain new exact-head adversarial approval before the one clean full-suite qualification |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Fourth-review repair validated locally | The working tree replaces the bypassable stateless exec allow rule with one-shot supervision, denies session/group escape, and retains ownership through injected pidfd failures; mandatory Linux collector regressions pass 27/27 |
+| M1 · explicit plan and facts | Exact-head repair review pending | `31dc5d26` replaces the bypassable stateless exec allow rule with one-shot supervision, denies session/group escape, and retains ownership through injected pidfd failures; mandatory Linux collector regressions pass 27/27 |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -613,6 +613,8 @@ lane and focused tests provide earlier feedback.
 | `adce1125` | Exact planner and subprocess adversarial reviews | Changes requested · both reviewers demonstrated the stateless FD-4 `execveat` rule could execute an absolute `/proc/self/fd` memfd; the subprocess review additionally found session/group escape and pidfd-open/readiness ownership gaps |
 | Working tree after `adce1125` | pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · 27/27, including one-shot exec supervision, absolute proc-memfd and FD-reuse attempts, session-escape denial, and injected pidfd-open/readiness cleanup ownership |
 | Working tree after `adce1125` | macOS focused tests, cross-platform all-target Clippy, repository contracts, and policy audits | Pass · macOS collector 17/17, neutral legacy routing 1/1, no Clippy warnings on macOS or pinned Linux, status/ownership 13/13, catalog 24/30/1,437, history 1,361, operations 211/211, formatting, and diff check |
+| `31dc5d26` source tree | Effort hook and focused validation | Pass · the commit hook reran catalog 24/30/1,437, history 1,361, operations 211/211, formatting, status contract, and pinned all-target workspace compile after the focused macOS 17/17, Linux 27/27, neutral-route 1/1, and cross-platform denied-warning Clippy passes |
+| Working tree after `31dc5d26` | Corrective-history and evidence-map audits | Pass · catalog 24/30/1,438 and history 1,362 with the supervised-probe mapping present; status/ownership contracts remain 13/13 and formatting/diff checks are clean |
 
 ## Remaining evidence before release
 
