@@ -9459,6 +9459,11 @@ pub struct TranscodeManager {
     caps: EncoderCaps,
     /// Portable decoder names inventoried from this exact ffmpeg at boot.
     decoders: Vec<String>,
+    /// Descriptor-bound per-source decode facts, scoped to the configured
+    /// FFprobe build rather than to a mutable pathname.
+    decode_facts: crate::decode_facts::DecodeFactCache,
+    decode_ffprobe: String,
+    decode_ffprobe_build_digest: Option<String>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
@@ -9799,6 +9804,9 @@ impl TranscodeManager {
             rate_control_update: Mutex::new(()),
             caps,
             decoders: Vec::new(),
+            decode_facts: crate::decode_facts::DecodeFactCache::new(),
+            decode_ffprobe: crate::ffmpeg::ffprobe_bin(),
+            decode_ffprobe_build_digest: None,
             pipeline,
             admissions: Admissions::new(),
             cache: None,
@@ -9914,6 +9922,12 @@ impl TranscodeManager {
 
     pub fn with_decoders(mut self, decoders: Vec<String>) -> Self {
         self.decoders = decoders;
+        self
+    }
+
+    pub fn with_decode_probe(mut self, ffprobe: String, build_digest: Option<String>) -> Self {
+        self.decode_ffprobe = ffprobe;
+        self.decode_ffprobe_build_digest = build_digest;
         self
     }
 
@@ -12953,6 +12967,34 @@ impl TranscodeManager {
             expected_source_snapshot: _,
             bound_source,
         } = request.clone();
+        if let (Some(source), Some(build_digest)) = (
+            bound_source.as_ref(),
+            self.decode_ffprobe_build_digest.as_deref(),
+        ) {
+            match self
+                .decode_facts
+                .get_or_probe(
+                    &self.decode_ffprobe,
+                    build_digest,
+                    Arc::clone(&source.handle),
+                    None,
+                )
+                .await
+            {
+                Ok(facts) => tracing::debug!(
+                    recipe = %hash,
+                    video_stream = facts.input_video_stream(),
+                    codec = facts.codec().unwrap_or("unknown"),
+                    facts_digest = facts.facts_digest(),
+                    "collected bound decoder facts for explicit planning"
+                ),
+                Err(error) => tracing::warn!(
+                    recipe = %hash,
+                    %error,
+                    "bound decoder facts are unavailable; retaining the configured legacy decode route"
+                ),
+            }
+        }
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.

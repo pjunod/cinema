@@ -12,12 +12,21 @@
 //! graphs that keeps frames on the GPU. Which a node uses is decided by probe,
 //! not by version (PERF-PLAN §5).
 
+mod decode;
 pub mod dvconvert;
 mod encoder;
 pub mod manifest;
 mod pipeline;
 mod recipe;
 
+pub use decode::{
+    resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCapabilities,
+    DecodeCapability, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
+    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, FrameDomain, FrameRate,
+    FrameRateProvenance, OutputWidthRule, PlanError, PresentationContract, Rational,
+    ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
+    SubtitleRendering, TranscodeMediaOptions, TranscodeRequest,
+};
 pub use encoder::{
     detect_encoders, detect_video_decoders, validate_quality_rate_control,
     validate_quality_rate_control_yielding, EffectiveRateControl, Encoder, EncoderCaps,

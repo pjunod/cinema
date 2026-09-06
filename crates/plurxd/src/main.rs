@@ -1,6 +1,7 @@
 mod admission;
 mod cachekeep;
 mod copyseg;
+mod decode_facts;
 mod delivery;
 mod dv_disk;
 mod dvpipe;
@@ -65,6 +66,7 @@ use plurx_core::metadata::{self, AniListClient, TmdbClient};
 use plurx_core::store::SqliteStore;
 use plurx_core::store::{keys, Store};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tracing_subscriber::EnvFilter;
 
 use crate::job_lease::acquire_cluster_job;
@@ -1834,6 +1836,7 @@ async fn probe_system(
     transcode_dir: &std::path::Path,
 ) -> anyhow::Result<(plurx_core::transcode::EncoderCaps, SystemInfo)> {
     let ffmpeg = crate::ffmpeg::ffmpeg_bin();
+    let ffprobe = crate::ffmpeg::ffprobe_bin();
     // Detect available hardware encoders once at startup.
     let encoder_caps = plurx_core::transcode::detect_encoders(&ffmpeg).await;
     let decoders = plurx_core::transcode::detect_video_decoders(&ffmpeg).await;
@@ -1848,6 +1851,7 @@ async fn probe_system(
     let tone_map = pipeprobe::probe(transcode_dir, encoder_caps.choose(&probe_pref)).await;
     let measured = Measured {
         ffmpeg_version: ffmpeg_version(&ffmpeg).await,
+        ffprobe_build_digest: tool_build_digest(&ffprobe).await,
         pacing: crate::ffmpeg::pacing_caps().await,
         dovi_rpu: crate::ffmpeg::has_dovi_rpu().await,
         dovi_reshape: crate::ffmpeg::has_dovi_reshape().await,
@@ -1868,13 +1872,21 @@ async fn probe_system(
         tone_map,
         dv_disk: crate::dv_disk::probe_capabilities().await,
     };
-    let system = system_info(config, ffmpeg, hwaccel_pref, encoder_caps.clone(), measured);
+    let system = system_info(
+        config,
+        ffmpeg,
+        ffprobe,
+        hwaccel_pref,
+        encoder_caps.clone(),
+        measured,
+    );
     Ok((encoder_caps, system))
 }
 
 /// What the boot probes learned about this machine's ffmpeg.
 struct Measured {
     ffmpeg_version: Option<String>,
+    ffprobe_build_digest: Option<String>,
     pacing: crate::ffmpeg::PacingCaps,
     dovi_rpu: bool,
     dovi_reshape: bool,
@@ -1897,6 +1909,7 @@ struct Measured {
 fn system_info(
     config: &Config,
     ffmpeg: String,
+    ffprobe: String,
     hwaccel_pref: String,
     encoders: plurx_core::transcode::EncoderCaps,
     measured: Measured,
@@ -1904,8 +1917,9 @@ fn system_info(
     SystemInfo {
         data_dir: config.storage.data_dir.display().to_string(),
         ffmpeg_version: measured.ffmpeg_version,
+        ffprobe_build_digest: measured.ffprobe_build_digest,
         ffmpeg,
-        ffprobe: crate::ffmpeg::ffprobe_bin(),
+        ffprobe,
         hwaccel_pref,
         encoders,
         decoders: measured.decoders,
@@ -2774,6 +2788,61 @@ async fn ffmpeg_version(bin: &str) -> Option<String> {
         .await
         .ok()?;
     first_version_line(&out.stdout)
+}
+
+/// Stable build identity for the node-local decode-fact cache. FFprobe's
+/// bounded full version output contains its configure flags and linked library
+/// versions, so two builds sharing a headline version do not share facts.
+async fn tool_build_digest(bin: &str) -> Option<String> {
+    const MAX_VERSION_BYTES: usize = 64 * 1024;
+    const VERSION_DEADLINE: Duration = Duration::from_secs(5);
+    let mut command = tokio::process::Command::new(bin);
+    command
+        .arg("-version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let outcome = tokio::time::timeout(VERSION_DEADLINE, async {
+        let (stdout, status) =
+            tokio::join!(read_bounded_stdout(stdout, MAX_VERSION_BYTES), child.wait());
+        (stdout, status)
+    })
+    .await;
+    let (stdout, status) = match outcome {
+        Ok((stdout, status)) => (stdout.ok()?, status.ok()?),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return None;
+        }
+    };
+    if !status.success() || stdout.0.is_empty() || stdout.1 {
+        return None;
+    }
+    Some(hex::encode(Sha256::digest(&stdout.0)))
+}
+
+async fn read_bounded_stdout<R>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt as _;
+
+    let mut retained = Vec::with_capacity(limit.min(8 * 1024));
+    let mut scratch = [0_u8; 8 * 1024];
+    let mut overflow = false;
+    loop {
+        let count = reader.read(&mut scratch).await?;
+        if count == 0 {
+            return Ok((retained, overflow));
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&scratch[..count.min(remaining)]);
+        overflow |= count > remaining;
+    }
 }
 
 /// The banner's first line, or nothing.
@@ -3985,6 +4054,18 @@ mod startup_tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_probe_build_digest_covers_the_complete_bounded_banner() {
+        assert_eq!(
+            tool_build_digest("/bin/echo").await,
+            Some(hex::encode(Sha256::digest(b"-version\n")))
+        );
+        assert_eq!(
+            tool_build_digest("plurxd-no-such-binary-anywhere").await,
+            None
+        );
+    }
+
     /// A server that never appears has to leave a trail without filling the
     /// log with one line every two seconds.
     #[test]
@@ -5037,10 +5118,12 @@ mod startup_tests {
         let system = system_info(
             &config_in(tmp.path()),
             "/opt/jellyfin-ffmpeg/ffmpeg".to_owned(),
+            "/opt/jellyfin-ffmpeg/ffprobe".to_owned(),
             "auto".to_owned(),
             caps.clone(),
             Measured {
                 ffmpeg_version: Some("ffmpeg version 7.1.1".to_owned()),
+                ffprobe_build_digest: Some("a".repeat(64)),
                 pacing: crate::ffmpeg::PacingCaps {
                     readrate: true,
                     initial_burst: true,
