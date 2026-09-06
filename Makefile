@@ -894,6 +894,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::production_collector_preserves_private_transport_when_public_listener_is_closed \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::peer_transport_age_is_normalized_from_each_monotonic_receipt \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::slow_public_probe_cannot_discard_completed_private_transport \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
