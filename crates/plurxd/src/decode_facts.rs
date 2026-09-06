@@ -80,6 +80,8 @@ enum ProbeLaunchMode {
     #[cfg(all(test, target_os = "linux"))]
     ProductionBootstrapInterrupted,
     #[cfg(all(test, target_os = "linux"))]
+    ProductionBootstrapInterruptedUntilDeadline(LinuxBootstrapPhase),
+    #[cfg(all(test, target_os = "linux"))]
     ProductionFdExport(std::os::fd::RawFd),
 }
 
@@ -95,6 +97,7 @@ impl ProbeLaunchMode {
             | Self::ProductionSupervisorDelay
             | Self::ProductionSupervisorReceiveFailure
             | Self::ProductionBootstrapInterrupted
+            | Self::ProductionBootstrapInterruptedUntilDeadline(_)
             | Self::ProductionFdExport(_) => true,
         }
     }
@@ -145,13 +148,40 @@ impl ProbeLaunchMode {
     #[cfg(target_os = "linux")]
     fn bootstrap_interrupts(self) -> LinuxBootstrapInterrupts {
         #[cfg(test)]
-        if self == Self::ProductionBootstrapInterrupted {
-            return LinuxBootstrapInterrupts {
-                ready_send: 1,
-                acknowledgement_send: 1,
-                first_notification_receive: 1,
-                first_notification_response: 1,
-            };
+        match self {
+            Self::ProductionBootstrapInterrupted => {
+                return LinuxBootstrapInterrupts {
+                    ready_send: 1,
+                    acknowledgement_send: 1,
+                    first_notification_receive: 1,
+                    first_notification_response: 1,
+                };
+            }
+            Self::ProductionBootstrapInterruptedUntilDeadline(phase) => {
+                let mut interrupts = LinuxBootstrapInterrupts::default();
+                *match phase {
+                    LinuxBootstrapPhase::ReadySend => &mut interrupts.ready_send,
+                    LinuxBootstrapPhase::AcknowledgementSend => {
+                        &mut interrupts.acknowledgement_send
+                    }
+                    LinuxBootstrapPhase::FirstNotificationReceive => {
+                        &mut interrupts.first_notification_receive
+                    }
+                    LinuxBootstrapPhase::FirstNotificationInvalidated => {
+                        interrupts.invalidate_first_notification_on_interrupt = true;
+                        &mut interrupts.first_notification_receive
+                    }
+                    LinuxBootstrapPhase::FirstNotificationResponse => {
+                        &mut interrupts.first_notification_response
+                    }
+                } = if phase == LinuxBootstrapPhase::FirstNotificationInvalidated {
+                    1
+                } else {
+                    u8::MAX
+                };
+                return interrupts;
+            }
+            _ => {}
         }
         LinuxBootstrapInterrupts::default()
     }
@@ -163,9 +193,22 @@ impl ProbeLaunchMode {
             Self::ProductionPidfdReadFailure => Some(&PIDFD_READ_SUPERVISOR_OWNERS),
             Self::ProductionSupervisorDelay => Some(&DELAYED_SUPERVISOR_OWNERS),
             Self::ProductionSupervisorReceiveFailure => Some(&FAILED_SUPERVISOR_OWNERS),
+            Self::ProductionBootstrapInterruptedUntilDeadline(_) => {
+                Some(&INTERRUPTED_SUPERVISOR_OWNERS)
+            }
             _ => None,
         }
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxBootstrapPhase {
+    ReadySend,
+    AcknowledgementSend,
+    FirstNotificationReceive,
+    FirstNotificationInvalidated,
+    FirstNotificationResponse,
 }
 
 /// A held source descriptor and the exclusive ownership lane for every child
@@ -943,6 +986,8 @@ struct LinuxBootstrapInterrupts {
     acknowledgement_send: u8,
     first_notification_receive: u8,
     first_notification_response: u8,
+    invalidate_first_notification_on_interrupt: bool,
+    first_notification_invalidated: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -950,7 +995,12 @@ fn consume_linux_bootstrap_interrupt(remaining: &mut u8) -> bool {
     if *remaining == 0 {
         false
     } else {
-        *remaining -= 1;
+        // `u8::MAX` is the test-only persistent mode. It exercises expiry of
+        // the shared absolute launch deadline without process-global signals
+        // or errno mutation.
+        if *remaining != u8::MAX {
+            *remaining -= 1;
+        }
         true
     }
 }
@@ -980,45 +1030,29 @@ const fn linux_ioctl_read_write<T>(number: u8) -> libc::c_ulong {
 #[cfg(target_os = "linux")]
 fn receive_linux_seccomp_notification(
     listener: std::os::fd::RawFd,
-) -> std::io::Result<LinuxSeccompNotification> {
-    let mut interrupts = 0;
-    receive_linux_seccomp_notification_until(listener, None, &mut interrupts)
-}
-
-#[cfg(target_os = "linux")]
-fn receive_linux_seccomp_notification_until(
-    listener: std::os::fd::RawFd,
-    deadline: Option<std::time::Instant>,
     injected_interrupts: &mut u8,
 ) -> std::io::Result<LinuxSeccompNotification> {
     let mut notification = LinuxSeccompNotification::default();
-    loop {
-        ensure_linux_probe_deadline(deadline)?;
-        let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
-        let received = if injected {
-            -1
-        } else {
-            unsafe {
-                libc::ioctl(
-                    listener,
-                    linux_ioctl_read_write::<LinuxSeccompNotification>(0),
-                    &raw mut notification,
-                )
-            }
-        };
-        if received == 0 {
-            return Ok(notification);
+    let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
+    let received = if injected {
+        -1
+    } else {
+        unsafe {
+            libc::ioctl(
+                listener,
+                linux_ioctl_read_write::<LinuxSeccompNotification>(0),
+                &raw mut notification,
+            )
         }
-        let error = if injected {
-            // A just-consumed test injection represents EINTR without
-            // mutating process-global errno.
-            std::io::Error::from_raw_os_error(libc::EINTR)
-        } else {
-            std::io::Error::last_os_error()
-        };
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error);
-        }
+    };
+    if received == 0 {
+        Ok(notification)
+    } else if injected {
+        // A just-consumed test injection represents EINTR without mutating
+        // process-global errno.
+        Err(std::io::Error::from_raw_os_error(libc::EINTR))
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -1218,17 +1252,35 @@ fn wait_for_linux_fd(
 fn receive_linux_seccomp_notification_before(
     listener: std::os::fd::RawFd,
     deadline: std::time::Instant,
-    injected_interrupts: &mut u8,
+    interrupts: &mut LinuxBootstrapInterrupts,
 ) -> std::io::Result<LinuxSeccompNotification> {
     loop {
         wait_for_linux_fd(listener, libc::POLLIN, deadline)?;
-        match receive_linux_seccomp_notification_until(
-            listener,
-            Some(deadline),
-            injected_interrupts,
-        ) {
+        let received = if interrupts.first_notification_invalidated {
+            Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+        } else {
+            receive_linux_seccomp_notification(listener, &mut interrupts.first_notification_receive)
+        };
+        match received {
             Ok(notification) => return Ok(notification),
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::Interrupted
+                    && interrupts.invalidate_first_notification_on_interrupt =>
+            {
+                // Model the kernel race where target interruption invalidates
+                // the ready notification. Every retry must return to poll and
+                // the absolute deadline rather than blocking in RECV.
+                interrupts.first_notification_invalidated = true;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::Interrupted
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(libc::ENOENT) | Some(libc::EAGAIN)
+                    ) =>
+            {
+                continue;
+            }
             Err(error) => return Err(error),
         }
     }
@@ -1438,7 +1490,7 @@ fn supervise_linux_probe_execs(
     let first = receive_linux_seccomp_notification_before(
         listener.as_raw_fd(),
         launch_deadline,
-        &mut interrupts.first_notification_receive,
+        &mut interrupts,
     )?;
     if first.flags != 0
         || first.data.arch != LINUX_AUDIT_ARCH
@@ -1501,11 +1553,21 @@ fn supervise_linux_probe_execs(
             // exec failed closed by the kernel.
             break;
         }
-        let request = match receive_linux_seccomp_notification(listener.as_raw_fd()) {
-            Ok(request) => request,
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
-            Err(error) => return Err(error),
-        };
+        let mut no_interrupts = 0;
+        let request =
+            match receive_linux_seccomp_notification(listener.as_raw_fd(), &mut no_interrupts) {
+                Ok(request) => request,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::Interrupted
+                        || matches!(
+                            error.raw_os_error(),
+                            Some(libc::ENOENT) | Some(libc::EAGAIN)
+                        ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
         let mut denied = LinuxSeccompResponse {
             id: request.id,
             error: -libc::EPERM,
@@ -1655,6 +1717,9 @@ static DELAYED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(all(test, target_os = "linux"))]
 static FAILED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, target_os = "linux"))]
+static INTERRUPTED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(unix)]
@@ -3120,7 +3185,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_pre_exec_call_graph_avoids_allocating_error_construction() {
+    fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_forms() {
         fn item_body<'a>(source: &'a str, needle: &str) -> &'a str {
             let start = source
                 .find(needle)
@@ -3148,11 +3213,16 @@ mod tests {
         let source = include_str!("decode_facts.rs");
         for item in [
             "command.pre_exec(move ||",
+            "fn is_production(self)",
+            "fn bootstrap_interrupts(self)",
+            "fn export_socket_fd(self)",
             "fn start_probe_session(",
             "fn duplicate_child_fd(",
             "fn assign_child_fd(",
             "fn install_child_fd(",
             "fn install_probe_child_fds(",
+            "fn consume_linux_bootstrap_interrupt(",
+            "fn ensure_linux_probe_deadline(",
             "fn confirm_linux_probe_fork(",
             "fn wait_for_linux_fd(",
             "fn mark_unrelated_fds_close_on_exec(",
@@ -3169,6 +3239,19 @@ mod tests {
                 "format!(",
                 "to_owned(",
                 "to_string(",
+                "to_vec(",
+                "Box::new(",
+                "Vec::new(",
+                "Vec::with_capacity(",
+                "String::new(",
+                "String::from(",
+                "CString::new(",
+                "OsString::from(",
+                "vec![",
+                ".push(",
+                ".extend(",
+                ".collect(",
+                ".collect::<",
                 "panic!(",
                 "assert!(",
                 "assert_eq!(",
@@ -3625,6 +3708,54 @@ void probe_main(unsigned long *stack) {
             started.elapsed() < Duration::from_secs(5),
             "ready send, acknowledgement, first receive, and first response retries remain bounded"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn persistent_bootstrap_eintr_expires_and_reclaims_supervisor_ownership() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("static-ffprobe");
+        build_static_probe(&probe, 0);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production probe identity and version");
+
+        for phase in [
+            LinuxBootstrapPhase::ReadySend,
+            LinuxBootstrapPhase::AcknowledgementSend,
+            LinuxBootstrapPhase::FirstNotificationReceive,
+            LinuxBootstrapPhase::FirstNotificationInvalidated,
+            LinuxBootstrapPhase::FirstNotificationResponse,
+        ] {
+            assert_eq!(INTERRUPTED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+            let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+            let started = std::time::Instant::now();
+            let result = probe_version_with_deadline_on(
+                &identity.executable_snapshot,
+                identity.executable(),
+                ProbeLaunchMode::ProductionBootstrapInterruptedUntilDeadline(phase),
+                Duration::from_millis(100),
+                Arc::clone(&ownership),
+            )
+            .await;
+            assert_eq!(result, Err(DecodeFactError::Deadline), "phase {phase:?}");
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "phase {phase:?} must fail at its absolute deadline"
+            );
+            let _ownership = tokio::time::timeout(
+                Duration::from_secs(2),
+                Arc::clone(&ownership).acquire_owned(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("phase {phase:?} cleanup did not return ownership"))
+            .expect("version ownership semaphore remains open");
+            assert_eq!(
+                INTERRUPTED_SUPERVISOR_OWNERS.load(Ordering::Acquire),
+                0,
+                "phase {phase:?} supervisor is reclaimed only after cleanup"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
