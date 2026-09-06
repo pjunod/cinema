@@ -185,12 +185,13 @@ impl DecodeFactSource {
         self
     }
 
+    #[cfg(test)]
     fn identity_delay(&self) -> Duration {
-        #[cfg(test)]
-        {
-            return self.identity_delay;
-        }
-        #[cfg(not(test))]
+        self.identity_delay
+    }
+
+    #[cfg(not(test))]
+    fn identity_delay(&self) -> Duration {
         Duration::ZERO
     }
 }
@@ -1244,6 +1245,9 @@ fn supervise_linux_probe_execs(
     launch_mode: ProbeLaunchMode,
     launch_deadline: std::time::Instant,
 ) -> std::io::Result<()> {
+    #[cfg(not(test))]
+    let _ = launch_mode;
+
     struct ReceiverCleanup {
         receiver: Arc<LinuxProbeReceiver>,
         fork_confirmed: bool,
@@ -2424,10 +2428,11 @@ impl DecodeFactCache {
             let _source_offset_permit = source_offset_permit;
             let result = collect(
                 &owned_probe,
-                Arc::clone(&source.handle),
-                bound_identity,
-                bound_source.executable,
-                source.identity_delay(),
+                DecodeFactCollectionSource {
+                    handle: Arc::clone(&source.handle),
+                    observation: bound_source,
+                    identity_delay: source.identity_delay(),
+                },
                 owned_catalog.as_ref(),
                 selected_stream,
                 remaining,
@@ -2564,6 +2569,13 @@ struct DecodeSourceObservation {
     executable: bool,
 }
 
+#[derive(Debug)]
+struct DecodeFactCollectionSource {
+    handle: Arc<std::fs::File>,
+    observation: DecodeSourceObservation,
+    identity_delay: Duration,
+}
+
 #[cfg(unix)]
 fn source_observation(source: &std::fs::File) -> Result<DecodeSourceObservation, DecodeFactError> {
     use std::os::unix::fs::MetadataExt;
@@ -2593,12 +2605,6 @@ fn source_observation(source: &std::fs::File) -> Result<DecodeSourceObservation,
         identity,
         executable: metadata.permissions().mode() & 0o111 != 0,
     })
-}
-
-#[cfg(unix)]
-#[cfg(test)]
-fn source_identity(source: &std::fs::File) -> Result<DecodeSourceIdentity, DecodeFactError> {
-    Ok(source_observation(source)?.identity)
 }
 
 #[cfg(unix)]
@@ -2679,11 +2685,6 @@ async fn source_observation_with_probe_gate(
     Err(DecodeFactError::UnsupportedPlatform)
 }
 
-#[cfg(not(unix))]
-fn source_identity(_source: &std::fs::File) -> Result<DecodeSourceIdentity, DecodeFactError> {
-    Err(DecodeFactError::UnsupportedPlatform)
-}
-
 async fn read_bounded<R>(mut reader: R, limit: usize) -> Result<(Vec<u8>, bool), DecodeFactError>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -2709,10 +2710,7 @@ where
 #[cfg(unix)]
 async fn collect(
     probe: &DecodeProbeIdentity,
-    source: Arc<std::fs::File>,
-    before: DecodeSourceIdentity,
-    source_executable: bool,
-    source_identity_delay: Duration,
+    source: DecodeFactCollectionSource,
     catalog: Option<&DecodeCatalogMetadata>,
     selected_stream: ProbeStreamSelection,
     budget: Duration,
@@ -2723,8 +2721,8 @@ async fn collect(
 
     let started = std::time::Instant::now();
     let launch_deadline = started + budget.min(PROBE_DEADLINE);
-    let source_fd = source.as_raw_fd();
-    if probe.launch_mode.is_production() && source_executable {
+    let source_fd = source.handle.as_raw_fd();
+    if probe.launch_mode.is_production() && source.observation.executable {
         return Err(DecodeFactError::SourceMetadata(
             "bound media source must not have executable mode bits".to_owned(),
         ));
@@ -2897,13 +2895,14 @@ async fn collect(
             .collect();
         return Err(DecodeFactError::Failed(status.code(), reason));
     }
-    if source_observation_owned(Arc::clone(&source), source_identity_delay)
+    if source_observation_owned(Arc::clone(&source.handle), source.identity_delay)
         .await?
         .identity
-        != before
+        != source.observation.identity
     {
         return Err(DecodeFactError::SourceChanged);
     }
+    let before = source.observation.identity.clone();
     let json: serde_json::Value = serde_json::from_slice(&stdout.0)
         .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?;
     match selected_stream {
@@ -2967,10 +2966,7 @@ fn first_playable_video_index(json: &serde_json::Value) -> Option<u32> {
 #[cfg(not(unix))]
 async fn collect(
     _probe: &DecodeProbeIdentity,
-    _source: Arc<std::fs::File>,
-    _before: DecodeSourceIdentity,
-    _source_executable: bool,
-    _source_identity_delay: Duration,
+    _source: DecodeFactCollectionSource,
     _catalog: Option<&DecodeCatalogMetadata>,
     _selected_stream: ProbeStreamSelection,
     _budget: Duration,
@@ -3944,13 +3940,14 @@ if test "$1" = "-version"; then printf '%s\n' 'ffprobe version transient-b'; exi
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 "###,
         );
-        let before = source_identity(&source).expect("source identity");
+        let observation = source_observation(&source).expect("source identity");
         let facts = collect(
             &identity,
-            Arc::new(source),
-            before,
-            false,
-            Duration::ZERO,
+            DecodeFactCollectionSource {
+                handle: Arc::new(source),
+                observation,
+                identity_delay: Duration::ZERO,
+            },
             None,
             ProbeStreamSelection::FirstPlayable,
             Duration::from_secs(2),
@@ -3993,13 +3990,14 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             std::fs::rename(&snapshot_path, &held_path).is_err(),
             "the immutable snapshot path must refuse replacement"
         );
-        let before = source_identity(&source).expect("source identity");
+        let observation = source_observation(&source).expect("source identity");
         let facts = collect(
             &identity,
-            Arc::new(source),
-            before,
-            false,
-            Duration::ZERO,
+            DecodeFactCollectionSource {
+                handle: Arc::new(source),
+                observation,
+                identity_delay: Duration::ZERO,
+            },
             None,
             ProbeStreamSelection::FirstPlayable,
             Duration::from_secs(2),
