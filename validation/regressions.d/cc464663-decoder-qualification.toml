@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cc464663"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate keeps the M1 test fixture warning-free and retains the snapshot pathname as an explicit lifetime guard on every target. The catalog contract separately exercises the module-wide ownership sentinel and status ledger, preserving every reviewed task, timer, process, lifecycle, and kill-on-drop occurrence and the honest rejected-qualification record."
