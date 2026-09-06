@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 implementation complete; exact-head re-review pending · **Updated:** 2026-09-06 ·
+**Status:** M1 final repairs qualified; exact-head re-review pending · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -23,16 +23,17 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and its one full-suite run |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | M1 corrected code head `19827c87`: selector matrix 34/34, bound FFprobe collector 14/14, and neutral observation policy 1/1 pass; default-feature Clippy denies warnings; validation catalog and history audit pass |
+| Focused validation | M1 code head `c03a98b3`: selector matrix 34/34, macOS bound FFprobe collector 14/14, Linux collector 15/15, and neutral observation policy 1/1 pass; default-feature Clippy denies warnings |
+| Effort receipt | `fa334c20`: history 1,352, catalog 24/30/1,430, operations 211/211, formatting, and pinned all-target workspace compile pass |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0; Historical pre-rebase head `01368ce1` remains history only; the M1 full suite waits until all fresh review findings are closed |
-| Blocker | None; both adversarial change requests are implemented and await exact-head verification before the single M1 full suite |
+| Blocker | None; the latest adversarial change requests are implemented and await exact-head verification before the single M1 full suite |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Final re-review | Code head `19827c87`: pure selector 34/34, bound fact collector 14/14, neutral observation policy 1/1, Clippy, validation lint, and history audit pass; exact-head approvals and the single full suite remain |
+| M1 · explicit plan and facts | Final re-review | Code head `c03a98b3` and validation receipt `fa334c20`: planner 34/34, macOS collector 14/14, Linux collector 15/15, neutral policy 1/1, Clippy, operations, compile, validation lint, and history audit pass; exact-head approvals and the single full suite remain |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -55,9 +56,11 @@ The daemon collector discovers and fingerprints the configured FFprobe binary,
 then executes a private snapshot of those validated bytes: Linux launches the
 retained descriptor and macOS protects the snapshot inode from mutation and
 replacement before launching its path. Every probe owns a process session so
-timeout or cancellation terminates wrapper descendants before releasing the
-already-held source descriptor's exclusive offset lease. Lease admission is
-charged to the same end-to-end deadline. Legacy video ordinals are resolved to
+timeout or cancellation signals the complete wrapper process group and reaps
+the direct child before releasing the already-held source descriptor's
+exclusive offset lease. The supported configured wrapper contract requires
+probe descendants to remain in that assigned process session. Lease admission
+is charged to the same end-to-end deadline. Legacy video ordinals are resolved to
 absolute input indices, and file-level catalog metadata is merged only when the
 selection is the catalog's first non-attached playable stream. The fact digest
 binds source and selected-stream facts; the bounded cache key additionally
@@ -68,34 +71,45 @@ The global hash worker and probe singleflight retain their owned admission when
 a waiter times out or cancels, preventing detached work from fanning out.
 Deadlines, oversize output, changed source identity, and replaced probe binaries
 fail closed. Because M1 only observes facts, its two-second subdeadline logs and
-continues the unchanged legacy production route; already assembled output is
-checked before probing. Command construction remains an M2 migration.
+continues the unchanged legacy production route, and the time spent observing
+is added back to the producer deadline so it cannot consume the legacy FFmpeg
+startup budget. Already assembled output is checked before probing. Command
+construction remains an M2 migration.
 
-Current focused evidence on corrected M1 code head `19827c87`:
+Current focused code evidence on M1 code head `c03a98b3`:
 
 - `cargo test -p plurx-core --test decoder_selection`: 34 passed.
-- `cargo test -p plurxd decode_facts::tests:: -- --nocapture`: 14 passed.
+- macOS `cargo test -p plurxd decode_facts::tests:: -- --nocapture`: 14 passed.
+- pinned Linux 1.97.1 container `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture`: 15 passed, including descriptor-exec and crossed-fd assignment.
 - `cargo test -p plurxd transcode::tests::neutral_decoder_fact_deadline_retains_the_legacy_route -- --nocapture`: 1 passed.
 - `cargo clippy -p plurxd --all-targets -- -D warnings`: passed.
-- `make validation-lint`: 24 points, 30 checks, and 1,430 audited files pass.
-- `make history-check`: 1,351 corrective commits pass.
 - `cargo fmt --all -- --check` and the working-tree whitespace diff pass.
+
+Exact validation receipt `fa334c20` adds:
+
+- `make validation-lint`: 24 points, 30 checks, and 1,430 audited files pass.
+- `make history-check`: 1,352 corrective commits pass.
+- `make operations-check`: 211 passed.
+- `cargo check --workspace --locked --all-targets` on Rust 1.97.1: passed.
 
 The corrected head closes both independent reviews: selected-stream catalog
 binding, first-playable catalog provenance, typed Dolby compatibility,
 PQ/Dolby refinement, Dolby-compatible legacy routing, RPU-aware profile-5
 refusal, negative-capability precedence, one-pixel geometry, neutral probe
-timeout behavior, descriptor-bound or immutable probe execution, process-group
-termination, end-to-end probe deadlines, final source fencing,
+timeout behavior and budget retention, descriptor-bound or immutable probe
+execution, collision-safe child-fd assignment, process-group signalling,
+end-to-end probe deadlines, final source fencing,
 cancellation-safe hash admission, and source-offset lifecycle ownership now
 have regressions. The no-default-feature `-D warnings` Clippy profile still
 reports the same 116 pre-existing dead-code diagnostics on the exact M0 base;
 M1's no-default `cargo check` passes, while default-feature Clippy is clean.
 
 Fresh independent reviews cover the pure planner and the bound probe/cache
-owner separately. Their original change requests and the corrective code head
-are recorded here; both reviewers are being asked to verify the exact receipt
-head before the single corrected-head full suite and Forgejo PR.
+owner separately. Their latest requests exposed incomplete Profile 5
+compatibility validation, neutral observation budget erosion, Linux snapshot
+writer ownership, and crossed fixed descriptors. Code head `c03a98b3` closes
+those gaps; both reviewers are being asked to verify the exact status head over
+validation receipt `fa334c20` before the single full suite and Forgejo PR.
 
 ## M0 frozen source inventory
 
