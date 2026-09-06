@@ -74,7 +74,15 @@ pub async fn logout(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let hash = auth::hash_token(&token);
     let proof_revocation = ClusterCacheRevocation::begin_digest(&state, &hash).await?;
-    state.store.delete_token(&hash).await?;
+    if !state
+        .store
+        .delete_token_with_cache_admin_claim(&hash, proof_revocation.mutation_claim())
+        .await?
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "logout lost its cache-revocation exclusion; retry the request".into(),
+        ));
+    }
     proof_revocation.finish(&state).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

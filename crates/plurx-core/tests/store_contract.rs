@@ -244,13 +244,17 @@ const USER_METHODS: &[&str] = &[
     "list_users",
     "list_users_page",
     "delete_user",
+    "delete_user_preserving_admin",
     "count_admins",
     "set_password",
+    "reset_password_and_revoke_tokens",
     "set_admin",
+    "demote_user_preserving_admin",
     "delete_tokens_for_user",
     "create_token",
     "user_for_token",
     "delete_token",
+    "delete_token_with_cache_admin_claim",
 ];
 const LIBRARY_METHODS: &[&str] = &[
     "create_library",
@@ -15030,7 +15034,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 290, "review the Store method count");
+    assert_eq!(declared.len(), 294, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -20506,7 +20510,32 @@ async fn user_contract_runs_through_dyn_store() {
             viewer.id,
             "backend {backend}"
         );
-        assert!(store.delete_token("token-one").await.expect("delete token"));
+        assert!(store
+            .delete_token_with_cache_admin_claim("token-one", None)
+            .await
+            .expect("delete token through revocation boundary"));
+        assert!(store
+            .reset_password_and_revoke_tokens(viewer.id, "hash-4", None)
+            .await
+            .expect("atomic password reset"));
+        assert_eq!(
+            store
+                .get_user(viewer.id)
+                .await
+                .expect("get reset user")
+                .expect("reset user")
+                .password_hash,
+            "hash-4"
+        );
+        assert!(store
+            .user_for_token("token-two")
+            .await
+            .expect("revoked token lookup")
+            .is_none());
+        store
+            .create_token("token-three", viewer.id, None)
+            .await
+            .expect("replacement token");
         assert_eq!(
             store
                 .delete_tokens_for_user(viewer.id)
@@ -20514,7 +20543,34 @@ async fn user_contract_runs_through_dyn_store() {
                 .expect("delete user tokens"),
             1
         );
-        assert!(store.delete_user(admin.id).await.expect("delete user"));
+        assert!(store
+            .demote_user_preserving_admin(admin.id, None)
+            .await
+            .expect("demote with second admin"));
+        assert!(!store
+            .demote_user_preserving_admin(viewer.id, None)
+            .await
+            .expect("refuse last admin demotion"));
+        assert!(store
+            .set_admin(admin.id, true)
+            .await
+            .expect("restore admin"));
+        assert!(store
+            .delete_user_preserving_admin(admin.id, None)
+            .await
+            .expect("delete with second admin"));
+        assert!(!store
+            .delete_user_preserving_admin(viewer.id, None)
+            .await
+            .expect("refuse last admin delete"));
+        let disposable = store
+            .create_user("Disposable", "hash-5", false)
+            .await
+            .expect("create disposable user");
+        assert!(store
+            .delete_user(disposable.id)
+            .await
+            .expect("raw user delete"));
     })
     .await;
 }

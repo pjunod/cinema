@@ -93,8 +93,18 @@ trigger, makes local fences operation-owned, and uses a dedicated exact committe
 revocation roster that fails closed on missing members or endpoints. Its complete
 focused cluster/WAL lane, 197 operations contracts, web and validation suites,
 workspace check and denied-warning Clippy, all four prescribed vendored matrices,
-formatting, and diff hygiene pass on Rust 1.97.1. Three fresh exact-head reviews
-are the next gate.
+formatting, and diff hygiene pass on Rust 1.97.1. Three fresh reviews rejected
+exact candidate `d0daa67f` with eleven planned-outage, credential-mutation,
+roster-churn, and clock-aging findings. The first replacement implemented all
+eleven, mapped their regressions into the persistent focused lane, and passed
+that lane from the beginning plus the complete pre-review matrix. Pre-commit
+audit then found that roster stability alone left a final membership TOCTOU and
+that direct restart cancellation could leave the exact preparation token
+latched. The current replacement adds a replicated exclusion with claim-bound
+Store writes, resolves both cancellation tokens, and retains permanent
+anti-resurrection receipts only for ambiguous acquisitions. The complete
+focused lane, pre-review matrix, formatting, and diff hygiene pass before the
+new exact commit.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -138,7 +148,9 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 seventh-review corrections | fail · `95247348` rejected after green focused requalification | The three exact-SHA tracks found first-select and first-identity snapshot teardown gaps, cancellation windows around both the replicated outage claim and local serving fence, cache authorization gaps on ambiguous writes plus console and mixed-version writers, a manual-refresh/modal race, and stale sender phases outranking durable receiver completion. All findings are assigned to bounded implementation tracks; the corrected tree must repeat focused qualification and three reviews from zero. |
 | M4 eighth-review corrections | fail · `cd344bd1` rejected after green qualification | Every finding against `95247348` was implemented and the complete lane plus compile/lint matrices passed, but fresh exact review found five snapshot-status, clock, deadline, and planned-outage ordering defects. This exact tree is not a release candidate. |
 | M4 ninth-review corrections | fail · exact head `7130f456` rejected | The transport reviewer was clean, but the other exact-head tracks found a heartbeat/delete-trigger deadlock, a cross-operation local-fence cancellation race, and a pending-removal credential-revocation omission. This exact tree is not a release candidate. |
-| M4 tenth-review corrections | pass · awaiting exact-head review | Heartbeat expiry is owned only by the intent-aware schema trigger; restart and maintenance have distinct timed and unresolved local-fence ownership; and credential revocation materializes every exact committed remote member, including pending removals. The complete focused lane and compiler/lint matrices pass; three fresh exact-head reviews remain. |
+| M4 tenth-review corrections | fail · `d0daa67f` rejected after green qualification | Exact review found two remote/local-age projection gaps; five planned-outage compatibility, ABA, cancellation, overlap, and reconciliation failures; unbounded detached release retries; two non-atomic credential mutations; and a membership-add revocation window. The replacement is active and must repeat focused qualification plus all three reviews. |
+| M4 eleventh-review corrections | pass · superseded before commit | Local monotonic receipt age includes collection dwell; legacy heartbeats reach trusted receipt-owning expiry; local outage fences and cleanup are generation-scoped and serialized; retries are deduplicated, backed off, and shutdown-aware; password/session and last-admin mutations are atomic; and revocation requires a stable twice-observed exact committed roster. The complete focused lane and pre-review matrix passed, but pre-commit audit found two remaining races. |
+| M4 twelfth-review corrections | pass · awaiting exact-head review | A dedicated replicated cache-admin lease excludes membership and planned-outage changes across the claim-bound Store mutation; a definitive direct restart cancellation resolves both its synthetic token and the exact preparation latch it clears; 256 definitive credential cycles leave no receipts while ambiguous acquisition retains its permanent receipt. The complete focused lane and pre-review matrix pass. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -235,6 +247,33 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
     state and unresolved-release latches retain their owner, so restart
     cancellation cannot clear an in-flight or outcome-unknown maintenance fence,
     and maintenance exit cannot clear restart preparation.
+18. **Keep old heartbeats live without trusting old release statements.** The
+    final delete trigger ignores an unproved legacy row deletion, allowing the
+    old heartbeat transaction to continue to its authenticated node update.
+    That update owns expiry, writes the permanent release receipt, and removes
+    the expired lease; legacy maintenance transitions still roll back.
+19. **Make every local outage owner generation-scoped.** A process-local gate
+    serializes prepare and cancel, while unique fence tokens and independent
+    unresolved-release ownership prevent delayed same-operation cleanup, ABA,
+    or overlapping operation types from clearing a successor. One detached
+    cleanup owner retries with capped backoff and stops on process shutdown.
+20. **Commit credential safety atomically behind a replicated exclusion.** Password
+    replacement and token deletion share one Store transaction; demotion and
+    deletion enforce the last-admin predicate in the mutation itself. A distinct
+    singleton cache-admin lease blocks join, promotion, removal, and planned
+    outage changes while a stable exact roster is fenced. Each credential Store
+    write names that exact claim, so neither a late member nor a delayed write
+    can cross the mutation boundary.
+21. **Resolve every token covered by a definitive direct cancellation.** A
+    direct restart cancel owns its own synthetic token, but it can also clear a
+    guard-owned exact preparation. Both tokens are resolved in the same locked
+    transition so a delayed redundant cleanup cannot strand local admission.
+22. **Retain credential-mutation receipts only when ambiguity requires them.**
+    Acquisition starts conservatively receipt-bearing and becomes disposable
+    only through a separate exact transaction after the first response is
+    definitive. Normal logout/password/admin churn removes its temporary
+    receipt; cancellation, response loss, or ambiguous acquisition preserves
+    the permanent anti-resurrection record.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 

@@ -74,6 +74,26 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Exact replicated exclusion claim required by clustered credential writes.
+///
+/// Only the membership coordinator can mint one. Store implementations use
+/// the opaque value as a transaction predicate so a credential proposal that
+/// arrives after cancellation cleanup cannot commit outside its membership
+/// exclusion interval. Standalone SQLite passes no claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CacheAdminMutationClaim(String);
+
+#[cfg(feature = "hiqlite-store")]
+impl CacheAdminMutationClaim {
+    pub(crate) fn new(claim_id: String) -> Self {
+        Self(claim_id)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Keeps the request claim and the route publication fence in one database
 /// write. Hiqlite transactions do not expose an application-level rollback
 /// after affected-row counts are returned, so this trigger is the common
@@ -1126,11 +1146,33 @@ pub trait UserStore: Send + Sync + 'static {
     /// merely to inspect a small prediction rail.
     async fn list_users_page(&self, after_id: i64, limit: i64) -> Result<Vec<User>, StoreError>;
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError>;
+    /// Delete a user only when doing so leaves at least one administrator.
+    /// The predicate and delete must be one Store mutation so concurrent admin
+    /// requests cannot both pass a separate count preflight.
+    async fn delete_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
     async fn count_admins(&self) -> Result<i64, StoreError>;
     /// Replace a user's password hash. Callers should also revoke the user's
     /// tokens so old sessions die with the old password.
     async fn set_password(&self, id: i64, password_hash: &str) -> Result<bool, StoreError>;
+    /// Atomically replace a password and revoke every existing login token.
+    async fn reset_password_and_revoke_tokens(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError>;
+    /// Revoke admin status only when another administrator exists in the same
+    /// Store mutation.
+    async fn demote_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
     /// Revoke every login token for one user; returns how many were dropped.
     async fn delete_tokens_for_user(&self, user_id: i64) -> Result<u64, StoreError>;
 
@@ -1144,6 +1186,13 @@ pub trait UserStore: Send + Sync + 'static {
     /// Resolve a token hash to its user (touching `last_seen_at`).
     async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError>;
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError>;
+    /// Delete a login token only while the exact clustered cache-revocation
+    /// exclusion claim is still live. Standalone SQLite passes no claim.
+    async fn delete_token_with_cache_admin_claim(
+        &self,
+        token_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
 }
 
 #[async_trait]

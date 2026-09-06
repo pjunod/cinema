@@ -1,13 +1,17 @@
 //! Bounded authenticated propagation for process-local recovery auth proofs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use futures_util::{stream, StreamExt};
-use plurx_core::cluster::membership::{ActivityPeer, MAX_OPERATIONS_PEERS};
+use plurx_core::cluster::membership::{
+    ActivityPeer, CacheAdminRevocationCleanupOutcome, CacheAdminRevocationLease, MembershipManager,
+    MAX_OPERATIONS_PEERS,
+};
+use plurx_core::store::CacheAdminMutationClaim;
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
@@ -19,6 +23,144 @@ pub(crate) const PATH: &str = "/api/v1/internal/auth/cache-revocation";
 pub(crate) const MAX_REQUEST_BYTES: usize = 256;
 const FANOUT_TIMEOUT: Duration = Duration::from_secs(2);
 const FANOUT_CONCURRENCY: usize = 8;
+const MAX_STABLE_ROSTER_PASSES: usize = MAX_OPERATIONS_PEERS + 2;
+const MEMBERSHIP_EXCLUSION_DURATION: Duration = Duration::from_secs(15);
+const EXCLUSION_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(50);
+const EXCLUSION_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(2);
+
+type PeerIdentity = (String, u64, Option<String>);
+
+fn peer_identity(peer: &ActivityPeer) -> PeerIdentity {
+    (peer.node_id.clone(), peer.raft_id, peer.http_base.clone())
+}
+
+fn merge_peers<'a>(peers: impl IntoIterator<Item = &'a ActivityPeer>) -> Vec<ActivityPeer> {
+    peers
+        .into_iter()
+        .map(|peer| (peer_identity(peer), peer.clone()))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect()
+}
+
+/// Requires the exact committed roster to be observed unchanged after every
+/// member in it has acknowledged Begin. Membership can move while the first
+/// fanout is in flight; Store mutation is not admitted until a subsequent
+/// consistent read has no unfenced identity.
+#[derive(Default)]
+struct StableBeginRoster {
+    previous: Option<BTreeSet<PeerIdentity>>,
+    acknowledged: BTreeMap<PeerIdentity, ActivityPeer>,
+}
+
+/// Cancellation-safe owner of the replicated membership exclusion. A Store
+/// mutation carries the embedded exact claim, so a proposal that reaches Raft
+/// only after Drop cleanup becomes a no-op rather than crossing the exclusion.
+struct CacheAdminMembershipExclusion {
+    lease: Option<CacheAdminRevocationLease>,
+    membership: MembershipManager,
+    shutdown: tokio_util::sync::CancellationToken,
+    release_runtime: tokio::runtime::Handle,
+}
+
+impl CacheAdminMembershipExclusion {
+    fn prepare(state: &AppState) -> Result<Self, ApiError> {
+        let lease = state
+            .membership
+            .is_replicated()
+            .then(|| {
+                MembershipManager::prepare_cache_admin_revocation_claim(
+                    &state.node_id,
+                    MEMBERSHIP_EXCLUSION_DURATION,
+                )
+            })
+            .transpose()
+            .map_err(|_| propagation_error())?;
+        Ok(Self {
+            lease,
+            membership: state.membership.clone(),
+            shutdown: state.shutdown.clone(),
+            release_runtime: tokio::runtime::Handle::current(),
+        })
+    }
+
+    async fn commit(&mut self) -> Result<(), ApiError> {
+        let Some(lease) = self.lease.as_mut() else {
+            return Ok(());
+        };
+        self.membership
+            .commit_cache_admin_revocation_lease(lease)
+            .await
+            .map_err(|_| propagation_error())
+    }
+
+    fn mutation_claim(&self) -> Option<&CacheAdminMutationClaim> {
+        self.lease
+            .as_ref()
+            .map(CacheAdminRevocationLease::mutation_claim)
+    }
+
+    async fn release(&mut self) -> Result<(), ApiError> {
+        let Some(lease) = self.lease.as_ref() else {
+            return Ok(());
+        };
+        release_membership_exclusion_with_retry(&self.membership, lease, &self.shutdown).await?;
+        self.lease.take();
+        Ok(())
+    }
+}
+
+impl Drop for CacheAdminMembershipExclusion {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        if self.shutdown.is_cancelled() {
+            // Replicated heartbeat expiry is the bounded crash cleanup.
+            return;
+        }
+        let membership = self.membership.clone();
+        let shutdown = self.shutdown.clone();
+        self.release_runtime.spawn(async move {
+            if let Err(error) =
+                release_membership_exclusion_with_retry(&membership, &lease, &shutdown).await
+            {
+                tracing::warn!(?error, "cache-admin membership exclusion cleanup stopped");
+            }
+        });
+    }
+}
+
+impl StableBeginRoster {
+    fn observe(&mut self, peers: Vec<ActivityPeer>) -> (Vec<ActivityPeer>, bool) {
+        let current = peers
+            .into_iter()
+            .map(|peer| (peer_identity(&peer), peer))
+            .collect::<BTreeMap<_, _>>();
+        let identities = current.keys().cloned().collect::<BTreeSet<_>>();
+        let additions = current
+            .into_iter()
+            .filter(|(identity, _)| !self.acknowledged.contains_key(identity))
+            .map(|(_, peer)| peer)
+            .collect::<Vec<_>>();
+        let stable = self.previous.as_ref() == Some(&identities);
+        self.previous = Some(identities);
+        (additions, stable)
+    }
+
+    fn acknowledge(&mut self, peers: &[ActivityPeer]) {
+        self.acknowledged
+            .extend(peers.iter().map(|peer| (peer_identity(peer), peer.clone())));
+    }
+
+    fn peers(&self) -> Vec<ActivityPeer> {
+        self.acknowledged.values().cloned().collect()
+    }
+
+    fn len(&self) -> usize {
+        self.acknowledged.len()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +183,7 @@ struct Request {
 /// clearing them while the Store commit outcome is unknown would be unsafe.
 pub(crate) struct ClusterCacheRevocation {
     local: Option<CacheOnlyAdminRevocation>,
+    membership_exclusion: CacheAdminMembershipExclusion,
     operation_id: String,
     peers: Vec<ActivityPeer>,
     transport: PeerTransport,
@@ -63,7 +206,8 @@ impl ClusterCacheRevocation {
         state: &AppState,
         mut local: CacheOnlyAdminRevocation,
     ) -> Result<Self, ApiError> {
-        let peers = peer_directory(state).await?;
+        let mut membership_exclusion = CacheAdminMembershipExclusion::prepare(state)?;
+        membership_exclusion.commit().await?;
         let transport = PeerTransport::new(state.membership.clone());
         let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
         let request = Request {
@@ -71,55 +215,119 @@ impl ClusterCacheRevocation {
             operation_id: operation_id.clone(),
             phase: Phase::Begin,
         };
-        if let Err(error) = fanout(&transport, &peers, &request).await {
-            let cleanup = Request {
-                phase: Phase::End,
-                ..request
+        let deadline = deadline_after(FANOUT_TIMEOUT);
+        let mut roster = StableBeginRoster::default();
+        for _ in 0..MAX_STABLE_ROSTER_PASSES {
+            let current = match peer_directory(state, deadline).await {
+                Ok(peers) => peers,
+                Err(error) => {
+                    cleanup_begin(&transport, &roster.peers(), &request).await;
+                    membership_exclusion.release().await?;
+                    return Err(error);
+                }
             };
-            let _ = fanout(&transport, &peers, &cleanup).await;
-            return Err(error);
+            let (unfenced, stable) = roster.observe(current);
+            if !unfenced.is_empty() {
+                if let Err(error) = fanout(&transport, &unfenced, &request, deadline).await {
+                    let cleanup = merge_peers(roster.peers().iter().chain(unfenced.iter()));
+                    cleanup_begin(&transport, &cleanup, &request).await;
+                    membership_exclusion.release().await?;
+                    return Err(error);
+                }
+                roster.acknowledge(&unfenced);
+                if roster.len() > MAX_OPERATIONS_PEERS {
+                    cleanup_begin(&transport, &roster.peers(), &request).await;
+                    membership_exclusion.release().await?;
+                    return Err(propagation_error());
+                }
+            }
+            if stable {
+                // No Store mutation can start before every peer in two
+                // consecutive committed-roster reads has acknowledged Begin.
+                local.arm_ambiguity();
+                return Ok(Self {
+                    local: Some(local),
+                    membership_exclusion,
+                    operation_id,
+                    peers: roster.peers(),
+                    transport,
+                });
+            }
         }
-        // No Store mutation can start before every peer has acknowledged the
-        // begin phase. Once this object reaches the handler, however, any
-        // cancellation or error may hide a committed Raft write.
-        local.arm_ambiguity();
-        Ok(Self {
-            local: Some(local),
-            operation_id,
-            peers,
-            transport,
-        })
+        cleanup_begin(&transport, &roster.peers(), &request).await;
+        membership_exclusion.release().await?;
+        Err(propagation_error())
     }
 
     /// End only after the caller's durable Store mutation. Unioning a fresh
     /// roster with the begin roster gives concurrently added members the final
     /// global invalidation before the API reports success.
     pub(crate) async fn finish(mut self, state: &AppState) -> Result<(), ApiError> {
-        let current = match peer_directory(state).await {
+        let deadline = deadline_after(FANOUT_TIMEOUT);
+        let current = match peer_directory(state, deadline).await {
             Ok(peers) => peers,
             Err(error) => {
-                let _ = fanout(&self.transport, &self.peers, &self.request(Phase::End)).await;
+                let _ = fanout(
+                    &self.transport,
+                    &self.peers,
+                    &self.request(Phase::End),
+                    deadline_after(FANOUT_TIMEOUT),
+                )
+                .await;
                 return Err(error);
             }
         };
-        let peers = self
+        let acknowledged = self
             .peers
             .iter()
-            .chain(current.iter())
-            .map(|peer| (peer.node_id.clone(), peer.clone()))
-            .collect::<BTreeMap<_, _>>()
-            .into_values()
+            .map(peer_identity)
+            .collect::<BTreeSet<_>>();
+        let late = current
+            .iter()
+            .filter(|peer| !acknowledged.contains(&peer_identity(peer)))
+            .cloned()
             .collect::<Vec<_>>();
+        let peers = merge_peers(self.peers.iter().chain(current.iter()));
         if peers.len() > MAX_OPERATIONS_PEERS {
-            let _ = fanout(&self.transport, &self.peers, &self.request(Phase::End)).await;
+            let _ = fanout(
+                &self.transport,
+                &self.peers,
+                &self.request(Phase::End),
+                deadline_after(FANOUT_TIMEOUT),
+            )
+            .await;
             return Err(propagation_error());
         }
-        fanout(&self.transport, &peers, &self.request(Phase::End)).await?;
+        // A member that appeared after begin stabilization still receives a
+        // Begin before the terminal invalidation. This does not replace the
+        // pre-Store stability barrier; it closes authority immediately if a
+        // membership commit raced the Store call itself.
+        if !late.is_empty() {
+            fanout(
+                &self.transport,
+                &late,
+                &self.request(Phase::Begin),
+                deadline,
+            )
+            .await?;
+        }
+        fanout(&self.transport, &peers, &self.request(Phase::End), deadline).await?;
+        // Membership remains excluded until the committed Store mutation has
+        // completed and every fenced member has cleared its cached proof. An
+        // exact release failure leaves both this lease and the local ambiguity
+        // fence armed for bounded fail-closed cleanup.
+        self.membership_exclusion.release().await?;
         self.local
             .take()
             .expect("cluster cache revocation owns its local fence")
             .complete();
         Ok(())
+    }
+
+    /// Exact Store predicate for the credential mutation inside this guard.
+    /// Standalone SQLite has no membership writer and therefore returns None.
+    pub(crate) fn mutation_claim(&self) -> Option<&CacheAdminMutationClaim> {
+        self.membership_exclusion.mutation_claim()
     }
 
     fn request(&self, phase: Phase) -> Request {
@@ -131,11 +339,45 @@ impl ClusterCacheRevocation {
     }
 }
 
-async fn peer_directory(state: &AppState) -> Result<Vec<ActivityPeer>, ApiError> {
-    let peers = state
-        .membership
-        .cache_admin_revocation_peers()
+async fn cleanup_begin(transport: &PeerTransport, peers: &[ActivityPeer], request: &Request) {
+    let cleanup = Request {
+        phase: Phase::End,
+        ..request.clone()
+    };
+    let _ = fanout(transport, peers, &cleanup, deadline_after(FANOUT_TIMEOUT)).await;
+}
+
+async fn release_membership_exclusion_with_retry(
+    membership: &MembershipManager,
+    lease: &CacheAdminRevocationLease,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<(), ApiError> {
+    let mut delay = EXCLUSION_CLEANUP_RETRY_INITIAL;
+    loop {
+        match membership
+            .release_cache_admin_revocation_lease(lease)
+            .await
+            .map_err(|_| propagation_error())?
+        {
+            CacheAdminRevocationCleanupOutcome::Confirmed => return Ok(()),
+            CacheAdminRevocationCleanupOutcome::Ambiguous => {
+                tokio::select! {
+                    () = shutdown.cancelled() => return Err(propagation_error()),
+                    () = tokio::time::sleep(delay) => {}
+                }
+                delay = delay.saturating_mul(2).min(EXCLUSION_CLEANUP_RETRY_MAX);
+            }
+        }
+    }
+}
+
+async fn peer_directory(
+    state: &AppState,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<ActivityPeer>, ApiError> {
+    let peers = tokio::time::timeout_at(deadline, state.membership.cache_admin_revocation_peers())
         .await
+        .map_err(|_| propagation_error())?
         .map_err(|_| propagation_error())?;
     if peers.len() > MAX_OPERATIONS_PEERS {
         return Err(propagation_error());
@@ -147,9 +389,9 @@ async fn fanout(
     transport: &PeerTransport,
     peers: &[ActivityPeer],
     request: &Request,
+    deadline: tokio::time::Instant,
 ) -> Result<(), ApiError> {
     let body = serde_json::to_vec(request).map_err(|_| propagation_error())?;
-    let deadline = deadline_after(FANOUT_TIMEOUT);
     let outcomes = stream::iter(peers.iter().cloned().map(|peer| {
         let transport = transport.clone();
         let body = body.clone();
@@ -235,9 +477,10 @@ fn validate(request: &Request) -> Result<(), StatusCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply, Phase, Request};
+    use super::{apply, Phase, Request, StableBeginRoster};
     use crate::http::extract::CacheOnlyAdminProofCache;
     use plurx_core::auth;
+    use plurx_core::cluster::membership::ActivityPeer;
     use plurx_core::domain::User;
 
     #[test]
@@ -251,6 +494,42 @@ mod tests {
             .0;
         assert!(source.contains("cache_admin_revocation_peers()"));
         assert!(!source.contains("operations_peers()"));
+    }
+
+    #[test]
+    fn replicated_membership_exclusion_spans_final_roster_read_and_peer_end() {
+        let source = include_str!("internal_auth_revocation.rs");
+        let begin = source
+            .split_once("async fn begin(")
+            .expect("cluster revocation begin")
+            .1
+            .split_once("pub(crate) async fn finish")
+            .expect("cluster revocation begin end")
+            .0;
+        assert!(
+            begin
+                .find("membership_exclusion.commit().await?")
+                .expect("replicated exclusion commit")
+                < begin
+                    .find("peer_directory(state, deadline).await")
+                    .expect("committed roster read")
+        );
+        assert!(begin.contains("membership_exclusion,"));
+
+        let finish = source
+            .split_once("pub(crate) async fn finish")
+            .expect("cluster revocation finish")
+            .1
+            .split_once("fn request(&self")
+            .expect("cluster revocation finish end")
+            .0;
+        assert!(
+            finish.find("self.request(Phase::End)").expect("peer end")
+                < finish
+                    .rfind("self.membership_exclusion.release().await?")
+                    .expect("replicated exclusion release")
+        );
+        assert!(source.contains("release_membership_exclusion_with_retry"));
     }
 
     fn admin(id: i64) -> User {
@@ -272,6 +551,57 @@ mod tests {
         let encoded = serde_json::to_vec(&request).expect("encode peer fence");
         let decoded = serde_json::from_slice(&encoded).expect("decode peer fence");
         apply(cache, &decoded).expect("peer acknowledgement");
+    }
+
+    fn peer(node_id: &str, raft_id: u64) -> ActivityPeer {
+        ActivityPeer {
+            node_id: node_id.to_owned(),
+            raft_id,
+            http_base: Some(format!("http://{node_id}:32400")),
+            reachable: true,
+        }
+    }
+
+    #[test]
+    fn membership_added_between_begin_passes_is_fenced_before_store_admission() {
+        let node_b = CacheOnlyAdminProofCache::default();
+        let node_c = CacheOnlyAdminProofCache::default();
+        let digest = auth::hash_token("admin-token");
+        let user = admin(45);
+        record(&node_b, &digest, &user);
+        record(&node_c, &digest, &user);
+        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        let begin = Request {
+            schema_version: 1,
+            operation_id,
+            phase: Phase::Begin,
+        };
+        let peer_b = peer("node-b", 2);
+        let peer_c = peer("node-c", 3);
+        let mut roster = StableBeginRoster::default();
+
+        let (first, stable) = roster.observe(vec![peer_b.clone()]);
+        assert!(!stable, "one observation cannot admit the Store mutation");
+        assert_eq!(first, vec![peer_b.clone()]);
+        wire(&node_b, begin.clone());
+        roster.acknowledge(&first);
+        assert!(!node_b.authenticate(&digest));
+        assert!(node_c.authenticate(&digest));
+
+        // C commits into membership after B's Begin acknowledgement. The next
+        // production roster pass must discover and fence C, not treat a final
+        // End as sufficient revocation coverage.
+        let (second, stable) = roster.observe(vec![peer_b.clone(), peer_c.clone()]);
+        assert!(!stable, "membership movement must postpone Store admission");
+        assert_eq!(second, vec![peer_c.clone()]);
+        wire(&node_c, begin);
+        roster.acknowledge(&second);
+        assert!(!node_b.authenticate(&digest));
+        assert!(!node_c.authenticate(&digest));
+
+        let (third, stable) = roster.observe(vec![peer_b, peer_c]);
+        assert!(third.is_empty());
+        assert!(stable, "only an unchanged fully fenced roster admits Store");
     }
 
     #[test]

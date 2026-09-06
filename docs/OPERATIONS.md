@@ -1824,15 +1824,22 @@ back to Store. Store-backed authentication captures the cache revocation
 generation before its read and publishes proof only if that generation is
 unchanged. On replicated nodes, publication and cache-only authentication start
 disabled. A background projection enables them only after every member in the
-exact committed Raft configuration carries a `cache_admin_revocation_v1` row
-whose timestamp equals that node's current heartbeat. A joining member, missing
+exact committed Raft configuration carries a `cache_admin_revocation_v2` row
+whose timestamp equals that node's current heartbeat. Version 2 means the node
+supports the replicated credential-mutation exclusion and exact Store-write
+predicate described below. A joining member, missing
 row, refresh failure, or heartbeat from a rolled-back binary closes the gate and
 clears every proof; reopening requires a new ordinary authentication. Logout,
 demotion, password reset, and user deletion invalidate proof and advance the
 generation both before and after their Store mutation; an in-flight stale read
-therefore cannot republish a revoked credential. These mutations also bracket
-the Store write with signed
-begin/end messages to every committed peer under one two-second fanout bound.
+therefore cannot republish a revoked credential. These mutations first acquire
+a separate replicated singleton lease that blocks join, promotion, removal,
+and planned-outage acquisition. They then bracket the Store write with signed
+begin/end messages to every member of a stable exact committed roster under one
+two-second aggregate bound. The Store mutation names the exact lease claim, so
+a delayed write cannot commit after cancellation has released it. The lease
+remains owned until the terminal peer invalidation; heartbeat expiry creates a
+permanent receipt before cleanup after a crash.
 The peer wire contains only a random operation UUID and phase, never a token
 digest or user ID. A peer clears its bounded proof cache and refuses all
 cache-only recovery authorization while any fence is active; at most 128

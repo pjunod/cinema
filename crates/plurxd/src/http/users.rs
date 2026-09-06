@@ -73,7 +73,7 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(req): Json<UpdateUser>,
 ) -> Result<Json<UserDto>, ApiError> {
-    let target = state
+    state
         .store
         .get_user(id)
         .await?
@@ -90,25 +90,52 @@ pub async fn update(
         }
         None => None,
     };
-    if req.is_admin == Some(false) && target.is_admin && state.store.count_admins().await? <= 1 {
-        return Err(ApiError::Conflict(
-            "cannot remove admin from the last admin account".into(),
-        ));
-    }
     let needs_revocation = req.is_admin == Some(false) || password_hash.is_some();
-    let proof_revocation = if needs_revocation {
+    let mut proof_revocation = if needs_revocation {
         Some(ClusterCacheRevocation::begin_user(&state, id).await?)
     } else {
         None
     };
 
     if let Some(is_admin) = req.is_admin {
-        state.store.set_admin(id, is_admin).await?;
+        if is_admin {
+            state.store.set_admin(id, true).await?;
+        } else if !state
+            .store
+            .demote_user_preserving_admin(
+                id,
+                proof_revocation
+                    .as_ref()
+                    .and_then(ClusterCacheRevocation::mutation_claim),
+            )
+            .await?
+        {
+            proof_revocation
+                .take()
+                .expect("demotion owns a cache revocation fence")
+                .finish(&state)
+                .await?;
+            return Err(ApiError::Conflict(
+                "cannot remove admin from the last admin account".into(),
+            ));
+        }
     }
     if let Some(hash) = password_hash {
-        state.store.set_password(id, &hash).await?;
-        // Old sessions die with the old password.
-        state.store.delete_tokens_for_user(id).await?;
+        let changed = state
+            .store
+            .reset_password_and_revoke_tokens(
+                id,
+                &hash,
+                proof_revocation
+                    .as_ref()
+                    .and_then(ClusterCacheRevocation::mutation_claim),
+            )
+            .await?;
+        if !changed {
+            return Err(ApiError::ServiceUnavailable(
+                "password reset lost its cache-revocation exclusion; retry the request".into(),
+            ));
+        }
     }
     if let Some(proof_revocation) = proof_revocation {
         proof_revocation.finish(&state).await?;
@@ -139,12 +166,19 @@ pub async fn delete(
             "you cannot delete the account you are signed in with".into(),
         ));
     }
-    if target.is_admin && state.store.count_admins().await? <= 1 {
-        return Err(ApiError::Conflict("cannot delete the last admin".into()));
-    }
     // Tokens and watch state go with the user (ON DELETE CASCADE).
     let proof_revocation = ClusterCacheRevocation::begin_user(&state, id).await?;
-    state.store.delete_user(id).await?;
+    if !state
+        .store
+        .delete_user_preserving_admin(id, proof_revocation.mutation_claim())
+        .await?
+    {
+        proof_revocation.finish(&state).await?;
+        if state.store.get_user(id).await?.is_none() {
+            return Err(ApiError::NotFound("user"));
+        }
+        return Err(ApiError::Conflict("cannot delete the last admin".into()));
+    }
     proof_revocation.finish(&state).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

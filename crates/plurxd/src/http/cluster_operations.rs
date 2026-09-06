@@ -16,8 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
-    ActivityPeer, ClusterNodeRecord, ClusterOperationLease, MembershipManager, MembershipStatus,
-    NodeRole, MAX_OPERATIONS_PEERS,
+    ActivityPeer, ClusterNodeRecord, ClusterOperationCleanupOutcome, ClusterOperationLease,
+    MembershipError, MembershipManager, MembershipStatus, NodeRole, MAX_OPERATIONS_PEERS,
 };
 use plurx_core::cluster::migration::status::{
     DbSnapshotMetricsSnapshot, SnapshotTransportPhase, SnapshotTransportStatus, WalRuntimeState,
@@ -35,6 +35,7 @@ use super::peer_transport::{
     deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport, PeerTransportError,
 };
 use super::{ReadinessEvaluation, ReadinessFailure};
+use crate::serving_fence::PlannedOutageFenceToken;
 use crate::state::AppState;
 
 pub(crate) const INTERNAL_PATH: &str = "/api/v1/internal/cluster/operations-status";
@@ -331,8 +332,8 @@ pub(crate) struct PlannedOutageLeaseGuard {
     lease: Option<ClusterOperationLease>,
     membership: MembershipManager,
     serving: crate::serving_fence::ServingFence,
-    operation: PlannedOutageOperation,
-    local_fence_armed: bool,
+    local_fence: Option<PlannedOutageFenceToken>,
+    shutdown: tokio_util::sync::CancellationToken,
     release_runtime: tokio::runtime::Handle,
 }
 
@@ -341,26 +342,29 @@ impl PlannedOutageLeaseGuard {
         lease: ClusterOperationLease,
         membership: MembershipManager,
         serving: crate::serving_fence::ServingFence,
-        operation: PlannedOutageOperation,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
             lease: Some(lease),
             membership,
             serving,
-            operation,
-            local_fence_armed: false,
+            local_fence: None,
+            shutdown,
             release_runtime: tokio::runtime::Handle::current(),
         }
     }
 
     #[cfg(test)]
-    fn local_fence_only_for_test(serving: crate::serving_fence::ServingFence) -> Self {
+    fn local_fence_only_for_test(
+        serving: crate::serving_fence::ServingFence,
+        local_fence: PlannedOutageFenceToken,
+    ) -> Self {
         Self {
             lease: None,
             membership: MembershipManager::unavailable(),
             serving,
-            operation: PlannedOutageOperation::Restart,
-            local_fence_armed: true,
+            local_fence: Some(local_fence),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             release_runtime: tokio::runtime::Handle::current(),
         }
     }
@@ -369,33 +373,22 @@ impl PlannedOutageLeaseGuard {
         self.lease.as_ref().expect("armed planned-outage lease")
     }
 
-    pub(crate) fn arm_local_fence(&mut self) {
-        self.local_fence_armed = true;
+    pub(crate) fn arm_local_fence(&mut self, token: PlannedOutageFenceToken) {
+        self.local_fence = Some(token);
     }
 
     fn retain_local_fence(&self) {
-        match self.operation {
-            PlannedOutageOperation::Restart => {
-                self.serving.retain_restart_preparation_until_cancelled()
-            }
-            PlannedOutageOperation::Maintenance => self
-                .serving
-                .retain_maintenance_preparation_until_cancelled(),
+        if let Some(token) = self.local_fence {
+            self.serving
+                .retain_planned_outage_preparation_until_cancelled(token);
         }
     }
 
     async fn cancel_local_fence(&self, active_sessions: usize) {
-        match self.operation {
-            PlannedOutageOperation::Restart => {
-                self.serving
-                    .cancel_restart_preparation(active_sessions)
-                    .await;
-            }
-            PlannedOutageOperation::Maintenance => {
-                self.serving
-                    .cancel_maintenance_preparation(active_sessions)
-                    .await;
-            }
+        if let Some(token) = self.local_fence {
+            self.serving
+                .cancel_planned_outage_preparation(token, active_sessions)
+                .await;
         }
     }
 
@@ -407,43 +400,52 @@ impl PlannedOutageLeaseGuard {
         let Some(lease) = self.lease.as_ref() else {
             return Ok(());
         };
-        if self.local_fence_armed {
+        if self.local_fence.is_some() {
             // Maintenance calls this lower-level barrier directly. Latch here,
             // before the release await, so every caller remains fail-closed
             // across an ambiguous response and the original lease deadline.
             self.retain_local_fence();
         }
-        self.membership
-            .release_cluster_operation_lease(lease)
-            .await
-            .map_err(api_error)?;
+        release_exact_claim_with_retry(&self.membership, lease, &self.shutdown).await?;
+        if let Some(token) = self.local_fence {
+            // The exact replicated response is now definitive. Keep the timed
+            // fence for maintenance reconciliation, but remove only this
+            // attempt's ambiguity latch.
+            self.serving.resolve_planned_outage_release(token);
+        }
         self.lease.take();
         Ok(())
     }
 
     pub(crate) async fn release(mut self) {
-        if self.local_fence_armed {
+        if self.local_fence.is_some() {
             self.retain_local_fence();
         }
         if let Err(error) = self.release_replicated_claim().await {
             tracing::warn!(
                 ?error,
-                "planned-outage release failed definitively; Drop will retry the exact claim"
+                "planned-outage release ended before a definitive response"
             );
-            if self.local_fence_armed {
-                self.cancel_local_fence(0).await;
-                self.local_fence_armed = false;
+            if !self.shutdown.is_cancelled() {
+                // A non-ambiguous failure did not apply the deletion. Remove
+                // the ambiguity latch but retain the bounded timed fence; the
+                // replicated lease expires through heartbeat ownership.
+                if let Some(token) = self.local_fence {
+                    self.serving.resolve_planned_outage_release(token);
+                }
             }
+            self.local_fence = None;
+            self.lease.take();
             return;
         }
-        if self.local_fence_armed {
+        if self.local_fence.is_some() {
             self.cancel_local_fence(0).await;
-            self.local_fence_armed = false;
+            self.local_fence = None;
         }
     }
 
     pub(crate) fn disarm(mut self) {
-        self.local_fence_armed = false;
+        self.local_fence = None;
         self.lease.take();
     }
 }
@@ -451,46 +453,113 @@ impl PlannedOutageLeaseGuard {
 impl Drop for PlannedOutageLeaseGuard {
     fn drop(&mut self) {
         let lease = self.lease.take();
-        let cancel_local_fence = std::mem::take(&mut self.local_fence_armed);
-        if lease.is_none() && !cancel_local_fence {
+        let local_fence = self.local_fence.take();
+        if lease.is_none() && local_fence.is_none() {
             return;
         }
-        if cancel_local_fence {
+        if let Some(token) = local_fence {
             // Latch synchronously: the configured deadline could expire
             // before the async Drop cleanup first runs.
-            self.retain_local_fence();
+            self.serving
+                .retain_planned_outage_preparation_until_cancelled(token);
+        }
+        if self.shutdown.is_cancelled() {
+            // The process is already draining. Leave any local latch closed;
+            // spawning an immortal retry during runtime teardown cannot make
+            // the replicated outcome safer.
+            return;
         }
         let membership = self.membership.clone();
         let serving = self.serving.clone();
-        let operation = self.operation;
+        let shutdown = self.shutdown.clone();
         self.release_runtime.spawn(async move {
+            let _operation_guard = serving.planned_outage_operation_guard().await;
             if let Some(lease) = lease {
-                if let Err(error) = membership.release_cluster_operation_lease(&lease).await {
-                    tracing::warn!(%error, "cancelled planned-outage release failed definitively after ambiguous results were exhausted");
-                    if cancel_local_fence {
-                        match operation {
-                            PlannedOutageOperation::Restart => {
-                                serving.cancel_restart_preparation(0).await;
-                            }
-                            PlannedOutageOperation::Maintenance => {
-                                serving.cancel_maintenance_preparation(0).await;
-                            }
+                if let Err(error) =
+                    release_exact_claim_with_retry(&membership, &lease, &shutdown).await
+                {
+                    tracing::warn!(
+                        ?error,
+                        "cancelled planned-outage release ended without a definitive response"
+                    );
+                    if !shutdown.is_cancelled() {
+                        if let Some(token) = local_fence {
+                            serving.resolve_planned_outage_release(token);
                         }
                     }
                     return;
                 }
             }
-            if cancel_local_fence {
-                match operation {
-                    PlannedOutageOperation::Restart => {
-                        serving.cancel_restart_preparation(0).await;
-                    }
-                    PlannedOutageOperation::Maintenance => {
-                        serving.cancel_maintenance_preparation(0).await;
-                    }
-                }
+            if let Some(token) = local_fence {
+                serving.resolve_planned_outage_release(token);
+                serving.cancel_planned_outage_preparation(token, 0).await;
             }
         });
+    }
+}
+
+const PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL: Duration = Duration::from_millis(50);
+const PLANNED_OUTAGE_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(2);
+
+fn next_planned_outage_cleanup_delay(current: Duration) -> Duration {
+    current
+        .saturating_mul(2)
+        .min(PLANNED_OUTAGE_CLEANUP_RETRY_MAX)
+}
+
+async fn wait_for_planned_outage_cleanup_retry(
+    shutdown: &tokio_util::sync::CancellationToken,
+    delay: Duration,
+) -> Result<(), ApiError> {
+    tokio::select! {
+        () = shutdown.cancelled() => Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "planned_outage_cleanup_shutdown",
+            "planned-outage cleanup stopped because this process is shutting down",
+        )),
+        () = tokio::time::sleep(delay) => Ok(()),
+    }
+}
+
+async fn release_exact_claim_with_retry(
+    membership: &MembershipManager,
+    lease: &ClusterOperationLease,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<(), ApiError> {
+    let mut delay = PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL;
+    loop {
+        match membership
+            .release_cluster_operation_lease(lease)
+            .await
+            .map_err(api_error)?
+        {
+            ClusterOperationCleanupOutcome::Confirmed => return Ok(()),
+            ClusterOperationCleanupOutcome::Ambiguous => {
+                wait_for_planned_outage_cleanup_retry(shutdown, delay).await?;
+                delay = next_planned_outage_cleanup_delay(delay);
+            }
+        }
+    }
+}
+
+async fn release_current_restart_with_retry(
+    membership: &MembershipManager,
+    node_id: &str,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<(), ApiError> {
+    let mut delay = PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL;
+    loop {
+        match membership
+            .release_restart_preparation(node_id)
+            .await
+            .map_err(api_error)?
+        {
+            ClusterOperationCleanupOutcome::Confirmed => return Ok(()),
+            ClusterOperationCleanupOutcome::Ambiguous => {
+                wait_for_planned_outage_cleanup_retry(shutdown, delay).await?;
+                delay = next_planned_outage_cleanup_delay(delay);
+            }
+        }
     }
 }
 
@@ -514,6 +583,26 @@ where
             "the planned-outage ownership task ended before reporting its replicated outcome",
         ))
     })
+}
+
+/// Acquire the one process-local prepare/cancel lane before detaching accepted
+/// ownership. Waiters that disconnect while queued create no background task;
+/// once work starts, its gate survives the HTTP waiter until every replicated
+/// and local outcome is definitive.
+pub(crate) async fn run_serialized_planned_outage_task<T, Work>(
+    serving: &crate::serving_fence::ServingFence,
+    work: Work,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    Work: std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
+{
+    let operation_guard = serving.planned_outage_operation_guard().await;
+    run_planned_outage_task(async move {
+        let _operation_guard = operation_guard;
+        work.await
+    })
+    .await
 }
 
 /// Claim the replicated membership-lifecycle exclusion before collecting the
@@ -542,18 +631,40 @@ pub(crate) async fn acquire_planned_outage_preflight(
         prepared_lease,
         state.membership.clone(),
         state.serving.clone(),
-        operation,
+        state.shutdown.clone(),
     );
     let membership = state.membership.clone();
     let lease = run_planned_outage_task(async move {
-        membership
+        match membership
             .commit_cluster_operation_lease(lease.claim())
             .await
-            .map_err(api_error)?;
-        Ok(lease)
+        {
+            Ok(()) => Ok(lease),
+            Err(error @ MembershipError::ClusterOperationPending) => {
+                // A definitive zero-row compare-and-swap never submitted this
+                // claim. Do not create a permanent receipt for every rejected
+                // operator retry.
+                lease.disarm();
+                Err(api_error(error))
+            }
+            Err(error) => {
+                let error = api_error(error);
+                // An expired ambiguous acquire still needs its exact one-shot
+                // receipt. Resolve it under this detached owner rather than
+                // leaving a new cleanup task per disconnected waiter.
+                lease.release().await;
+                Err(error)
+            }
+        }
     })
     .await?;
-    let evidence = collect_current_aggregate(state).await?;
+    let evidence = match collect_current_aggregate(state).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            lease.release().await;
+            return Err(error);
+        }
+    };
     Ok((lease, evidence))
 }
 
@@ -695,12 +806,15 @@ where
             })?;
 
         let local_status = local_read().await;
+        let peer_collection_started = tokio::time::Instant::now();
         let remote = collect_peers(peers, deadline).await;
+        let peer_observation_age =
+            tokio::time::Instant::now().saturating_duration_since(peer_collection_started);
         Ok(assemble_aggregate(
             local_node_id,
             membership,
             local_status,
-            PeerStatusCacheRead::Fresh(remote, Duration::ZERO),
+            PeerStatusCacheRead::Fresh(remote, peer_observation_age),
         ))
     };
 
@@ -888,62 +1002,70 @@ pub(crate) async fn prepare_restart(
             "restart preparation must be sent directly to the node named in the route",
         ));
     }
-    let duration = Duration::from_secs(request.expires_in_seconds.unwrap_or(900).clamp(60, 3_600));
-    let (mut lease, preflight) = acquire_planned_outage_preflight(
-        &state,
-        &node_id,
-        duration,
-        PlannedOutageOperation::Restart,
-    )
-    .await?;
-    if !preflight.verdict.safe_to_restart_one {
-        lease.release().await;
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "restart_preparation_unsafe",
-            "the current cluster rollout verdict does not permit preparing a voter",
-        ));
-    }
-    if preflight.verdict.candidate_node_id.as_deref() != Some(state.node_id.as_str()) {
-        lease.release().await;
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "restart_preparation_candidate_mismatch",
-            "open the candidate node directly; this node is not the current safe restart candidate",
-        ));
-    }
-    let local_expiry = lease.claim().preparation_expiry_unix_ms(duration);
-    if local_expiry.is_none()
-        || !state
-            .serving
-            .begin_restart_preparation_until(local_expiry.unwrap_or_default())
-            .await
-    {
-        lease.release().await;
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "restart_preparation_expired",
-            "restart preparation expired while the replicated lease was being committed; run preflight again",
-        ));
-    }
-    lease.arm_local_fence();
-    state.serving.wait_for_restart_admissions().await;
-    let active_sessions = local_owned_media_sessions(&state).await;
-    let drain = state.serving.restart_drain_status(active_sessions).await;
-    if !drain.new_admissions_blocked {
-        lease.release().await;
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "restart_preparation_expired",
-            "restart preparation expired before pre-existing admissions settled; run preflight again",
-        ));
-    }
-    lease.disarm();
-    Ok(Json(restart_preparation_response(
-        &state.node_id,
-        active_sessions,
-        drain,
-    )))
+    let serving = state.serving.clone();
+    run_serialized_planned_outage_task(&serving, async move {
+        let duration =
+            Duration::from_secs(request.expires_in_seconds.unwrap_or(900).clamp(60, 3_600));
+        let (mut lease, preflight) = acquire_planned_outage_preflight(
+            &state,
+            &node_id,
+            duration,
+            PlannedOutageOperation::Restart,
+        )
+        .await?;
+        if !preflight.verdict.safe_to_restart_one {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "restart_preparation_unsafe",
+                "the current cluster rollout verdict does not permit preparing a voter",
+            ));
+        }
+        if preflight.verdict.candidate_node_id.as_deref() != Some(state.node_id.as_str()) {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "restart_preparation_candidate_mismatch",
+                "open the candidate node directly; this node is not the current safe restart candidate",
+            ));
+        }
+        let local_expiry = lease.claim().preparation_expiry_unix_ms(duration);
+        let local_fence = if let Some(local_expiry) = local_expiry {
+            state
+                .serving
+                .begin_restart_preparation_until(local_expiry)
+                .await
+        } else {
+            None
+        };
+        let Some(local_fence) = local_fence else {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "restart_preparation_expired",
+                "restart preparation expired while the replicated lease was being committed; run preflight again",
+            ));
+        };
+        lease.arm_local_fence(local_fence);
+        state.serving.wait_for_restart_admissions().await;
+        let active_sessions = local_owned_media_sessions(&state).await;
+        let drain = state.serving.restart_drain_status(active_sessions).await;
+        if !drain.new_admissions_blocked {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "restart_preparation_expired",
+                "restart preparation expired before pre-existing admissions settled; run preflight again",
+            ));
+        }
+        lease.disarm();
+        Ok(Json(restart_preparation_response(
+            &state.node_id,
+            active_sessions,
+            drain,
+        )))
+    })
+    .await
 }
 
 pub(crate) async fn cancel_restart(
@@ -958,33 +1080,32 @@ pub(crate) async fn cancel_restart(
             "restart preparation cancellation must be sent directly to the node named in the route",
         ));
     }
-    // Latch before the first await so neither the configured lease deadline nor
-    // HTTP cancellation can reopen admissions while exact cleanup is unknown.
-    state.serving.retain_restart_preparation_until_cancelled();
-    let cleanup_state = state.clone();
-    let cleanup_node_id = node_id.clone();
-    let (active_sessions, drain) = run_planned_outage_task(async move {
-        if let Err(error) = cleanup_state
-            .membership
-            .release_restart_preparation(&cleanup_node_id)
-            .await
+    let serving = state.serving.clone();
+    run_serialized_planned_outage_task(&serving, async move {
+        // This attempt has its own latch. Exact preparation guards use their
+        // own generations, so overlapping cleanup cannot overwrite or erase
+        // either owner.
+        let cancellation = state.serving.retain_restart_cancellation();
+        if let Err(error) =
+            release_current_restart_with_retry(&state.membership, &node_id, &state.shutdown).await
         {
-            cleanup_state.serving.cancel_restart_preparation(0).await;
-            return Err(api_error(error));
+            if !state.shutdown.is_cancelled() {
+                state.serving.resolve_planned_outage_release(cancellation);
+            }
+            return Err(error);
         }
-        let active_sessions = local_owned_media_sessions(&cleanup_state).await;
-        let drain = cleanup_state
+        let active_sessions = local_owned_media_sessions(&state).await;
+        let drain = state
             .serving
-            .cancel_restart_preparation(active_sessions)
+            .cancel_current_restart_preparation(cancellation, active_sessions)
             .await;
-        Ok((active_sessions, drain))
+        Ok(Json(restart_preparation_response(
+            &state.node_id,
+            active_sessions,
+            drain,
+        )))
     })
-    .await?;
-    Ok(Json(restart_preparation_response(
-        &state.node_id,
-        active_sessions,
-        drain,
-    )))
+    .await
 }
 
 fn restart_preparation_response(
@@ -1244,6 +1365,9 @@ pub(crate) struct PeerStatusCache {
 
 #[derive(Clone)]
 struct CachedPeerStatuses {
+    /// Conservative lower bound for when any result in this refresh could
+    /// have been observed locally. Starting age at collection entry includes
+    /// time an early response spends waiting for the other bounded probes.
     stored_at: tokio::time::Instant,
     statuses: BTreeMap<String, PeerStatusOutcome>,
 }
@@ -1274,12 +1398,22 @@ impl PeerStatusCache {
         }
     }
 
+    #[cfg(test)]
     async fn store(&self, statuses: &BTreeMap<String, PeerStatusOutcome>) {
+        self.store_observed_at(statuses, tokio::time::Instant::now())
+            .await;
+    }
+
+    async fn store_observed_at(
+        &self,
+        statuses: &BTreeMap<String, PeerStatusOutcome>,
+        observed_at: tokio::time::Instant,
+    ) {
         *self.inner.lock().await = Some(CachedPeerStatuses {
-            // Availability and transport aging start when this authenticated
-            // refresh becomes locally usable. A peer's Unix timestamp remains
-            // diagnostic metadata and never participates in freshness.
-            stored_at: tokio::time::Instant::now(),
+            // A peer's Unix timestamp remains diagnostic metadata and never
+            // participates in freshness. Use a local monotonic lower bound so
+            // collection dwell cannot renew evidence or its active deadline.
+            stored_at: observed_at,
             statuses: statuses.clone(),
         });
     }
@@ -1301,9 +1435,10 @@ where
     let peers = tokio::time::timeout_at(directory_deadline, directory())
         .await
         .map_err(|_| "peer directory timed out".to_owned())??;
+    let collection_started = tokio::time::Instant::now();
     let deadline = deadline_after(AGGREGATE_TIMEOUT);
     let statuses = collect(peers, deadline).await;
-    cache.store(&statuses).await;
+    cache.store_observed_at(&statuses, collection_started).await;
     Ok(())
 }
 
@@ -1679,7 +1814,7 @@ fn join_observations<Remote>(
 where
     Remote: Into<PeerStatusCacheRead>,
 {
-    let (mut remote, missing_state, missing_error_class, transport_cache_age_ms) =
+    let (mut remote, missing_state, missing_error_class, remote_observation_age_ms) =
         match remote.into() {
             PeerStatusCacheRead::Fresh(statuses, cache_age) => (
                 statuses,
@@ -1727,10 +1862,10 @@ where
                     .flatten()
             });
             let private_transport = outcome.transport.and_then(|transport| {
-                sanitize_transport(transport, member.raft_id, transport_cache_age_ms)
+                sanitize_transport(transport, member.raft_id, remote_observation_age_ms)
             });
             let fallback_transport = fallback_transport.and_then(|transport| {
-                sanitize_transport(transport, member.raft_id, transport_cache_age_ms)
+                sanitize_transport(transport, member.raft_id, remote_observation_age_ms)
             });
             (
                 outcome.state,
@@ -1754,9 +1889,17 @@ where
             status = None;
             error_class = Some("raft_identity_mismatch".to_owned());
         }
-        let sample_age_ms = status
-            .as_ref()
-            .map(|status| aggregate_observed_ms.saturating_sub(status.observed_at_unix_ms));
+        let sample_age_ms = status.as_ref().map(|status| {
+            if member.node_id == local_node_id {
+                aggregate_observed_ms.saturating_sub(status.observed_at_unix_ms)
+            } else {
+                // The response was produced on another machine. Its Unix
+                // timestamp is useful metadata but cannot establish age:
+                // clock skew would make current evidence look stale or
+                // future-dated evidence look permanently fresh.
+                remote_observation_age_ms
+            }
+        });
         if sample_age_ms.is_some_and(|age| age > MAX_FRESH_AGE_MS) {
             state = ObservationState::InvalidResponse;
             error_class = Some("stale_peer_sample".to_owned());
@@ -2742,8 +2885,8 @@ mod tests {
             source_observed_ms + PEER_STATUS_CACHE_TTL.as_millis() as u64,
         );
         let observation = &projected.observations[0];
-        assert_eq!(observation.sample_age_ms, 501);
-        assert_eq!(observation.active_deadline_remaining_ms, Some(9_499));
+        assert_eq!(observation.sample_age_ms, 1_501);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(8_499));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3281,9 +3424,18 @@ mod tests {
             .find("retain_local_fence()")
             .expect("synchronous unresolved-release latch");
         let replicated_release = exact_release
-            .find("release_cluster_operation_lease(lease)")
-            .expect("replicated exact release");
+            .find("release_exact_claim_with_retry(&self.membership, lease, &self.shutdown)")
+            .expect("bounded replicated exact release owner");
         assert!(local_latch < replicated_release);
+        let release_retry = source
+            .split_once("async fn release_exact_claim_with_retry(")
+            .expect("exact-release retry owner")
+            .1
+            .split_once("async fn release_current_restart_with_retry(")
+            .expect("exact-release retry owner end")
+            .0;
+        assert!(release_retry.contains("release_cluster_operation_lease(lease)"));
+        assert!(release_retry.contains("wait_for_planned_outage_cleanup_retry"));
         let current_collector = source
             .split_once("pub(crate) async fn collect_current_aggregate(")
             .expect("current preflight collector")
@@ -3306,7 +3458,8 @@ mod tests {
             .0;
         assert!(restart.contains("acquire_planned_outage_preflight("));
         assert!(restart.contains("PlannedOutageOperation::Restart"));
-        assert!(restart.contains("lease.arm_local_fence()"));
+        assert!(restart.contains("lease.arm_local_fence(local_fence)"));
+        assert!(restart.contains("run_serialized_planned_outage_task"));
         assert!(restart.contains("lease.release().await"));
         assert!(restart.contains("lease.disarm()"));
         let maintenance_source = include_str!("cluster.rs");
@@ -3319,8 +3472,8 @@ mod tests {
             .0;
         assert!(maintenance.contains("acquire_planned_outage_preflight("));
         assert!(maintenance.contains("PlannedOutageOperation::Maintenance"));
-        assert!(maintenance.contains("lease.arm_local_fence()"));
-        assert!(maintenance.contains("run_planned_outage_task(async move"));
+        assert!(maintenance.contains("lease.arm_local_fence(local_fence)"));
+        assert!(maintenance.contains("run_serialized_planned_outage_task"));
         assert!(maintenance.contains("reconcile_local_maintenance_commit()"));
         assert!(maintenance.contains("lease.release().await"));
         assert!(maintenance.contains("lease.disarm()"));
@@ -3345,11 +3498,10 @@ mod tests {
 
         let serving =
             crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
-        assert!(
-            serving
-                .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
-                .await
-        );
+        let local_fence = serving
+            .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+            .await
+            .expect("restart fence token");
         let acquisition_started = std::sync::Arc::new(tokio::sync::Notify::new());
         let publish_outcome = std::sync::Arc::new(tokio::sync::Notify::new());
         let waiter = tokio::spawn(run_planned_outage_task({
@@ -3359,7 +3511,10 @@ mod tests {
             async move {
                 acquisition_started.notify_one();
                 publish_outcome.notified().await;
-                Ok(PlannedOutageLeaseGuard::local_fence_only_for_test(serving))
+                Ok(PlannedOutageLeaseGuard::local_fence_only_for_test(
+                    serving,
+                    local_fence,
+                ))
             }
         }));
         acquisition_started.notified().await;
@@ -3381,17 +3536,17 @@ mod tests {
 
         let serving =
             crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
-        assert!(
-            serving
-                .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
-                .await
-        );
+        let local_fence = serving
+            .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+            .await
+            .expect("restart fence token");
         let drain_started = std::sync::Arc::new(tokio::sync::Notify::new());
         let drain = tokio::spawn({
             let serving = serving.clone();
             let drain_started = drain_started.clone();
             async move {
-                let _guard = PlannedOutageLeaseGuard::local_fence_only_for_test(serving);
+                let _guard =
+                    PlannedOutageLeaseGuard::local_fence_only_for_test(serving, local_fence);
                 drain_started.notify_one();
                 std::future::pending::<()>().await;
             }
@@ -3435,6 +3590,78 @@ mod tests {
         })
         .await
         .expect("detached maintenance owner must finish after HTTP cancellation");
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let serving =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let first_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let finish_first = std::sync::Arc::new(tokio::sync::Notify::new());
+        let second_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let first_waiter = tokio::spawn({
+            let serving = serving.clone();
+            let first_started = first_started.clone();
+            let finish_first = finish_first.clone();
+            async move {
+                run_serialized_planned_outage_task(&serving, async move {
+                    first_started.notify_one();
+                    finish_first.notified().await;
+                    Ok::<_, ApiError>(())
+                })
+                .await
+            }
+        });
+        first_started.notified().await;
+        first_waiter.abort();
+        assert!(first_waiter
+            .await
+            .expect_err("HTTP waiter is cancelled")
+            .is_cancelled());
+
+        let second_waiter = tokio::spawn({
+            let serving = serving.clone();
+            let second_started = second_started.clone();
+            async move {
+                run_serialized_planned_outage_task(&serving, async move {
+                    second_started.store(true, std::sync::atomic::Ordering::Release);
+                    Ok::<_, ApiError>(())
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !second_started.load(std::sync::atomic::Ordering::Acquire),
+            "a later cancel/prepare must not cross the detached first owner"
+        );
+
+        finish_first.notify_one();
+        second_waiter
+            .await
+            .expect("second waiter task")
+            .expect("second serialized operation");
+        assert!(second_started.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cleanup_retry_backoff_is_capped_and_shutdown_interruptible() {
+        let mut delay = PLANNED_OUTAGE_CLEANUP_RETRY_INITIAL;
+        for _ in 0..16 {
+            delay = next_planned_outage_cleanup_delay(delay);
+        }
+        assert_eq!(delay, PLANNED_OUTAGE_CLEANUP_RETRY_MAX);
+
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        shutdown.cancel();
+        assert!(
+            wait_for_planned_outage_cleanup_retry(&shutdown, Duration::from_secs(60))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -3654,9 +3881,9 @@ mod tests {
         assert!(claim < bound && bound < local_fence && local_fence < commands);
         assert!(source.contains("lease.release().await"));
         assert!(source.contains("lease.disarm()"));
-        assert!(source.contains("retain_restart_preparation_until_cancelled"));
-        assert!(source.contains("run_planned_outage_task(async move"));
-        assert!(source.contains("release_restart_preparation(&cleanup_node_id)"));
+        assert!(source.contains("retain_restart_cancellation"));
+        assert!(source.contains("run_serialized_planned_outage_task"));
+        assert!(source.contains("release_current_restart_with_retry"));
     }
 
     #[test]
@@ -3826,10 +4053,52 @@ mod tests {
     }
 
     #[test]
-    fn stale_peer_sample_is_explicit_and_cannot_become_healthy() {
+    fn remote_status_freshness_uses_local_monotonic_age_despite_clock_skew() {
+        let membership = test_membership("node-1", 2);
+        let aggregate_observed_ms = unix_ms();
+
+        for observed_at_unix_ms in [
+            aggregate_observed_ms.saturating_sub(60_000),
+            aggregate_observed_ms.saturating_add(60_000),
+        ] {
+            let mut peer = test_local_status("node-2", Some(2));
+            peer.observed_at_unix_ms = observed_at_unix_ms;
+            let remote = BTreeMap::from([(
+                "node-2".to_owned(),
+                PeerStatusOutcome {
+                    node_id: "node-2".to_owned(),
+                    state: ObservationState::Answered,
+                    status: Some(peer),
+                    transport: None,
+                },
+            )]);
+
+            let rows = join_observations(
+                &membership,
+                "node-1",
+                test_local_status("node-1", Some(1)),
+                PeerStatusCacheRead::Fresh(remote, Duration::from_millis(250)),
+                aggregate_observed_ms,
+            );
+
+            assert_eq!(rows[1].observation, ObservationState::Answered);
+            assert_eq!(rows[1].sample_age_ms, Some(250));
+            assert_eq!(
+                rows[1]
+                    .status
+                    .as_ref()
+                    .map(|status| status.observed_at_unix_ms),
+                Some(observed_at_unix_ms),
+                "the peer timestamp remains diagnostic metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_peer_sample_uses_local_elapsed_time_and_cannot_become_healthy() {
         let membership = test_membership("node-1", 2);
         let mut peer = test_local_status("node-2", Some(2));
-        peer.observed_at_unix_ms = unix_ms().saturating_sub(MAX_FRESH_AGE_MS + 1);
+        peer.observed_at_unix_ms = unix_ms().saturating_add(60_000);
         let mut remote = BTreeMap::new();
         remote.insert(
             "node-2".to_owned(),
@@ -3845,7 +4114,10 @@ mod tests {
             &membership,
             "node-1",
             test_local_status("node-1", Some(1)),
-            remote,
+            PeerStatusCacheRead::Fresh(
+                remote,
+                Duration::from_millis(MAX_FRESH_AGE_MS.saturating_add(1)),
+            ),
             unix_ms(),
         );
 

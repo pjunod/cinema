@@ -25,8 +25,8 @@ use sha2::{Digest, Sha256};
 use super::replicated::ReplicatedSql;
 use super::telemetry::NodeLocalTelemetry;
 use super::{
-    keys, ApiKeyStore, ArtworkRepairFence, MetricsStore, NetworkPriorStore, PlaybackTelemetryStore,
-    PrometheusStoreSnapshot, SettingsStore, UserStore,
+    keys, ApiKeyStore, ArtworkRepairFence, CacheAdminMutationClaim, MetricsStore,
+    NetworkPriorStore, PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, UserStore,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -3115,6 +3115,44 @@ impl UserStore for HiqliteAuthStore {
             > 0)
     }
 
+    async fn delete_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let changed = match claim {
+            Some(claim) => {
+                self.execute(
+                    "DELETE FROM users
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))
+                       AND EXISTS (
+                         SELECT 1 FROM cluster_cache_admin_revocation_leases
+                         WHERE claim_id = $2
+                       )",
+                    params!(id, claim.as_str()),
+                )
+                .await?
+            }
+            None => {
+                self.execute(
+                    "DELETE FROM users
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))",
+                    params!(id),
+                )
+                .await?
+            }
+        };
+        Ok(changed > 0)
+    }
+
     async fn count_admins(&self) -> Result<i64, StoreError> {
         let sql = "SELECT COUNT(*) AS count FROM users WHERE is_admin = 1";
         validate_sql(sql)?;
@@ -3138,6 +3176,58 @@ impl UserStore for HiqliteAuthStore {
             > 0)
     }
 
+    async fn reset_password_and_revoke_tokens(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let results = match claim {
+            Some(claim) => {
+                self.client()
+                    .txn([
+                        (
+                            "UPDATE users SET password_hash = $1
+                             WHERE id = $2 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $3
+                             )",
+                            params!(password_hash, id, claim.as_str()),
+                        ),
+                        (
+                            "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $2
+                             )",
+                            params!(id, claim.as_str()),
+                        ),
+                    ])
+                    .await?
+            }
+            None => {
+                self.client()
+                    .txn([
+                        (
+                            "UPDATE users SET password_hash = $1 WHERE id = $2",
+                            params!(password_hash, id),
+                        ),
+                        ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
+                    ])
+                    .await?
+            }
+        };
+        let mut results = results.into_iter();
+        let changed = results
+            .next()
+            .ok_or_else(|| StoreError::Database("password transaction returned no result".into()))?
+            .map_err(database_error)?;
+        results
+            .next()
+            .ok_or_else(|| StoreError::Database("token transaction returned no result".into()))?
+            .map_err(database_error)?;
+        Ok(changed > 0)
+    }
+
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError> {
         Ok(self
             .execute(
@@ -3146,6 +3236,44 @@ impl UserStore for HiqliteAuthStore {
             )
             .await?
             > 0)
+    }
+
+    async fn demote_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let changed = match claim {
+            Some(claim) => {
+                self.execute(
+                    "UPDATE users SET is_admin = 0
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))
+                       AND EXISTS (
+                         SELECT 1 FROM cluster_cache_admin_revocation_leases
+                         WHERE claim_id = $2
+                       )",
+                    params!(id, claim.as_str()),
+                )
+                .await?
+            }
+            None => {
+                self.execute(
+                    "UPDATE users SET is_admin = 0
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))",
+                    params!(id),
+                )
+                .await?
+            }
+        };
+        Ok(changed > 0)
     }
 
     async fn delete_tokens_for_user(&self, user_id: i64) -> Result<u64, StoreError> {
@@ -3198,6 +3326,33 @@ impl UserStore for HiqliteAuthStore {
             )
             .await?
             > 0)
+    }
+
+    async fn delete_token_with_cache_admin_claim(
+        &self,
+        token_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let changed = match claim {
+            Some(claim) => {
+                self.execute(
+                    "DELETE FROM tokens WHERE token_hash = $1 AND EXISTS (
+                       SELECT 1 FROM cluster_cache_admin_revocation_leases
+                       WHERE claim_id = $2
+                     )",
+                    params!(token_hash, claim.as_str()),
+                )
+                .await?
+            }
+            None => {
+                self.execute(
+                    "DELETE FROM tokens WHERE token_hash = $1",
+                    params!(token_hash),
+                )
+                .await?
+            }
+        };
+        Ok(changed > 0)
     }
 }
 

@@ -881,14 +881,19 @@ mod tests {
             logout
                 .find("ClusterCacheRevocation::begin_digest")
                 .expect("logout revocation guard")
-                < logout.find("delete_token").expect("logout Store mutation")
+                < logout
+                    .find("delete_token_with_cache_admin_claim")
+                    .expect("logout Store mutation")
         );
         assert!(
-            logout.find("delete_token").expect("logout Store mutation")
+            logout
+                .find("delete_token_with_cache_admin_claim")
+                .expect("logout Store mutation")
                 < logout
                     .find("proof_revocation.finish")
                     .expect("logout peer revocation end")
         );
+        assert!(logout.contains("proof_revocation.mutation_claim()"));
 
         let setup = include_str!("system.rs")
             .split_once("pub async fn setup(")
@@ -915,16 +920,27 @@ mod tests {
             update
                 .find("ClusterCacheRevocation::begin_user")
                 .expect("demotion revocation guard")
-                < update.find("set_admin").expect("admin Store mutation")
+                < update
+                    .find("demote_user_preserving_admin")
+                    .expect("conditional admin Store mutation")
         );
+        assert!(!update.contains("count_admins"));
         assert!(
             update
-                .find("delete_tokens_for_user")
-                .expect("token revocation")
+                .find("reset_password_and_revoke_tokens")
+                .expect("atomic password and token revocation")
                 < update
-                    .find("proof_revocation.finish")
+                    .rfind("proof_revocation.finish")
                     .expect("user peer revocation end"),
             "demotion and password reset must stay inside one peer bracket"
+        );
+        assert!(!update.contains("set_password(id"));
+        assert!(!update.contains("delete_tokens_for_user"));
+        assert!(
+            update
+                .matches("ClusterCacheRevocation::mutation_claim")
+                .count()
+                >= 2
         );
         let delete = users
             .split_once("pub async fn delete(")
@@ -934,10 +950,16 @@ mod tests {
             delete
                 .find("ClusterCacheRevocation::begin_user")
                 .expect("delete revocation guard")
-                < delete.find("delete_user").expect("delete Store mutation")
+                < delete
+                    .find("delete_user_preserving_admin")
+                    .expect("conditional delete Store mutation")
         );
+        assert!(!delete.contains("count_admins"));
+        assert!(delete.contains("proof_revocation.mutation_claim()"));
         assert!(
-            delete.find("delete_user").expect("delete Store mutation")
+            delete
+                .find("delete_user_preserving_admin")
+                .expect("conditional delete Store mutation")
                 < delete
                     .find("proof_revocation.finish")
                     .expect("delete peer revocation end")

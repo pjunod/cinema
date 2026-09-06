@@ -1689,6 +1689,8 @@ for (const startupDelay of [0, 1600, 7000]) {
             "production_collector_labels_directory_overflow_without_probing_it",
             "peer_status_cache_is_fresh_for_five_seconds_then_expires",
             "full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time",
+            "remote_status_freshness_uses_local_monotonic_age_despite_clock_skew",
+            "stale_peer_sample_uses_local_elapsed_time_and_cannot_become_healthy",
             "absent_and_expired_cache_are_unavailable_never_peer_limited",
             "membership_status_cache_is_fresh_for_five_seconds_then_expires",
             "membership_projection_refresh_is_bounded_and_preserves_last_good_sample",
@@ -1704,8 +1706,16 @@ for (const startupDelay of [0, 1600, 7000]) {
             "public_transport_fallback_requires_matching_observer_identity",
             "unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline",
             "restart_cancellation_cannot_clear_a_maintenance_owned_fence",
+            "delayed_same_owner_cleanup_cannot_clear_a_successor_generation",
+            "overlapping_cleanup_tokens_are_resolved_independently",
+            "confirmed_release_resolves_latch_but_preserves_timed_fence",
+            "confirmed_current_restart_cancel_resolves_a_preexisting_exact_latch",
             "restart_preparation_claims_and_releases_the_replicated_outage_slot",
+            "cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner",
+            "cleanup_retry_backoff_is_capped_and_shutdown_interruptible",
             "credential_revocation_uses_the_exact_committed_security_roster",
+            "membership_added_between_begin_passes_is_fenced_before_store_admission",
+            "replicated_membership_exclusion_spans_final_roster_read_and_peer_end",
         )
         for test_name in daemon_transport_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1721,6 +1731,13 @@ for (const startupDelay of [0, 1600, 7000]) {
             "operations_peer_directory_preserves_identities_beyond_the_probe_limit",
             "operations_peer_query_materializes_only_the_committed_roster",
             "cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission",
+            "membership_cannot_commit_after_final_roster_read_before_credential_store_write",
+            "definitive_cache_admin_acquire_release_cycles_leave_no_receipts",
+            "ambiguous_cache_admin_acquire_keeps_receipt_and_cannot_resurrect",
+            "server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively",
+            "cache_admin_exclusion_is_separate_rolling_safe_and_capability_v2",
+            "cache_revocation_capability_keeps_a_joiner_closed_until_self_is_committed",
+            "rollback_heartbeat_advances_but_cannot_republish_retired_cache_revocation_v1",
             "status_protocol_query_materializes_only_the_committed_roster",
             "committed_roster_bound_fails_closed_instead_of_truncating",
             "released_planned_outage_claim_cannot_be_resurrected_by_a_delayed_write",
@@ -1736,6 +1753,17 @@ for (const startupDelay of [0, 1600, 7000]) {
             command = matching[0]
             self.assertIn("cargo test --locked -p plurx-core", command)
             self.assertIn("--lib -- --exact", command)
+
+        core_store_tests = (
+            "password_and_session_revocation_roll_back_together_on_delete_failure",
+            "concurrent_admin_demote_and_delete_preserve_one_administrator",
+        )
+        for test_name in core_store_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurx-core --lib", command)
+            self.assertIn("-- --exact", command)
 
         proxy_writer_test = (
             "server::proxy::stream::tests::"

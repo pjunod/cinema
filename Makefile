@@ -645,6 +645,12 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::remote_status_freshness_uses_local_monotonic_age_despite_clock_skew \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::stale_peer_sample_uses_local_elapsed_time_and_cannot_become_healthy \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::absent_and_expired_cache_are_unavailable_never_peer_limited \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
@@ -702,10 +708,28 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  serving_fence::tests::restart_cancellation_cannot_clear_a_maintenance_owned_fence \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::delayed_same_owner_cleanup_cannot_clear_a_successor_generation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::overlapping_cleanup_tokens_are_resolved_independently \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::confirmed_release_resolves_latch_but_preserves_timed_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::confirmed_current_restart_cancel_resolves_a_preexisting_exact_latch \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::restart_preparation_claims_and_releases_the_replicated_outage_slot \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::cancelled_maintenance_waiter_does_not_cancel_the_owned_commit \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::cleanup_retry_backoff_is_capped_and_shutdown_interruptible \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
 	  cluster::membership::tests::planned_outage_lease_excludes_a_concurrent_production_removal_attempt \
@@ -725,6 +749,27 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
 	  cluster::membership::tests::cache_revocation_capability_covers_the_exact_committed_roster_and_rollback \
 	  -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::membership_cannot_commit_after_final_roster_read_before_credential_store_write \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::definitive_cache_admin_acquire_release_cycles_leave_no_receipts \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::ambiguous_cache_admin_acquire_keeps_receipt_and_cannot_resurrect \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::cache_admin_exclusion_is_separate_rolling_safe_and_capability_v2 \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::cache_revocation_capability_keeps_a_joiner_closed_until_self_is_committed \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::rollback_heartbeat_advances_but_cannot_republish_retired_cache_revocation_v1 \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
 	  -- --exact
@@ -760,6 +805,18 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::internal_auth_revocation::tests::credential_revocation_uses_the_exact_committed_security_roster \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::membership_added_between_begin_passes_is_fenced_before_store_admission \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::replicated_membership_exclusion_spans_final_roster_read_and_peer_end \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --lib \
+	  store::sqlite::users::tests::password_and_session_revocation_roll_back_together_on_delete_failure \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --lib \
+	  store::sqlite::users::tests::concurrent_admin_demote_and_delete_preserve_one_administrator \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_have_a_hard_capacity \

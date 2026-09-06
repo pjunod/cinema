@@ -12,8 +12,8 @@ use plurx_core::cluster::membership::{
 use serde::Deserialize;
 
 use super::cluster_operations::{
-    acquire_planned_outage_preflight, local_owned_media_sessions, run_planned_outage_task,
-    PlannedOutageOperation,
+    acquire_planned_outage_preflight, local_owned_media_sessions,
+    run_serialized_planned_outage_task, PlannedOutageOperation,
 };
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
@@ -184,77 +184,81 @@ pub async fn enter_maintenance(
             "open the target node directly; maintenance must be prepared by the process being fenced",
         ));
     }
-    if state.membership.local_maintenance_active() {
-        return state.membership.status().await.map(Json).map_err(api_error);
-    }
-    let (mut lease, preflight) = acquire_planned_outage_preflight(
-        &state,
-        &node_id,
-        MAINTENANCE_PREPARATION_DURATION,
-        PlannedOutageOperation::Maintenance,
-    )
-    .await?;
-    let preflight_failure = preflight
-        .maintenance
-        .iter()
-        .find(|verdict| verdict.node_id == state.node_id)
-        .map_or_else(
-            || Some("the target is absent from the direct cluster observations".to_owned()),
-            |readiness| {
-                (!readiness.safe_to_enter).then(|| {
-                    let reason = readiness
-                        .blockers
-                        .first()
-                        .map(|finding| finding.message.as_str())
-                        .unwrap_or(
-                            "the direct maintenance preflight did not prove this target safe",
-                        );
-                    format!("maintenance is not safe for this target: {reason}")
-                })
-            },
-        );
-    if let Some(message) = preflight_failure {
-        lease.release().await;
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "maintenance_preflight_unsafe",
-            message,
-        ));
-    }
-    let local_expiry = lease
-        .claim()
-        .preparation_expiry_unix_ms(MAINTENANCE_PREPARATION_DURATION);
-    if local_expiry.is_none()
-        || !state
-            .serving
-            .begin_maintenance_preparation_until(local_expiry.unwrap_or_default())
-            .await
-    {
-        lease.release().await;
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "maintenance_preparation_expired",
-            "maintenance preparation expired while the replicated lease was being committed; run preflight again",
-        ));
-    }
-    lease.arm_local_fence();
-    state.serving.wait_for_restart_admissions().await;
-    let active_sessions = local_owned_media_sessions(&state).await;
-    let drain = state.serving.restart_drain_status(active_sessions).await;
-    if !drain.new_admissions_blocked {
-        lease.release().await;
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "maintenance_preparation_expired",
-            "maintenance preparation expired before pre-existing admissions settled; run preflight again",
-        ));
-    }
-    let membership = state.membership.clone();
-    let status = run_planned_outage_task(async move {
+    let serving = state.serving.clone();
+    run_serialized_planned_outage_task(&serving, async move {
+        if state.membership.local_maintenance_active() {
+            return state.membership.status().await.map(Json).map_err(api_error);
+        }
+        let (mut lease, preflight) = acquire_planned_outage_preflight(
+            &state,
+            &node_id,
+            MAINTENANCE_PREPARATION_DURATION,
+            PlannedOutageOperation::Maintenance,
+        )
+        .await?;
+        let preflight_failure = preflight
+            .maintenance
+            .iter()
+            .find(|verdict| verdict.node_id == state.node_id)
+            .map_or_else(
+                || Some("the target is absent from the direct cluster observations".to_owned()),
+                |readiness| {
+                    (!readiness.safe_to_enter).then(|| {
+                        let reason = readiness
+                            .blockers
+                            .first()
+                            .map(|finding| finding.message.as_str())
+                            .unwrap_or(
+                                "the direct maintenance preflight did not prove this target safe",
+                            );
+                        format!("maintenance is not safe for this target: {reason}")
+                    })
+                },
+            );
+        if let Some(message) = preflight_failure {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "maintenance_preflight_unsafe",
+                message,
+            ));
+        }
+        let local_expiry = lease
+            .claim()
+            .preparation_expiry_unix_ms(MAINTENANCE_PREPARATION_DURATION);
+        let local_fence = if let Some(local_expiry) = local_expiry {
+            state
+                .serving
+                .begin_maintenance_preparation_until(local_expiry)
+                .await
+        } else {
+            None
+        };
+        let Some(local_fence) = local_fence else {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "maintenance_preparation_expired",
+                "maintenance preparation expired while the replicated lease was being committed; run preflight again",
+            ));
+        };
+        lease.arm_local_fence(local_fence);
+        state.serving.wait_for_restart_admissions().await;
+        let active_sessions = local_owned_media_sessions(&state).await;
+        let drain = state.serving.restart_drain_status(active_sessions).await;
+        if !drain.new_admissions_blocked {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "maintenance_preparation_expired",
+                "maintenance preparation expired before pre-existing admissions settled; run preflight again",
+            ));
+        }
+        let membership = state.membership.clone();
         match membership.enter_maintenance(&node_id, lease.claim()).await {
             Ok(status) => {
                 lease.disarm();
-                Ok(status)
+                Ok(Json(status))
             }
             Err(error) => {
                 let error = api_error(error);
@@ -286,18 +290,18 @@ pub async fn enter_maintenance(
                     Err(release_error) => {
                         tracing::warn!(
                             ?release_error,
-                            "maintenance claim release is unresolved; retaining local and replicated fences while Drop retries"
+                            "maintenance claim release is unresolved; retaining local and replicated fences"
                         );
-                        // Leave the guard armed. Drop retries the exact ordered
-                        // release and only then removes the local fence.
+                        // Leave the exact token armed. Shutdown keeps it
+                        // closed; other definitive failures retain the bounded
+                        // local fence until its replicated lease expires.
                     }
                 }
                 Err(error)
             }
         }
     })
-    .await?;
-    Ok(Json(status))
+    .await
 }
 
 pub async fn exit_maintenance(
@@ -313,40 +317,44 @@ pub async fn exit_maintenance(
             "maintenance can be cleared only by the running target process",
         ));
     }
-    if !state.membership.local_maintenance_active() {
-        let status = state.membership.status().await.map_err(api_error)?;
-        if status
-            .nodes
-            .iter()
-            .any(|node| node.node_id == node_id && node.maintenance)
-        {
+    let serving = state.serving.clone();
+    run_serialized_planned_outage_task(&serving, async move {
+        if !state.membership.local_maintenance_active() {
+            let status = state.membership.status().await.map_err(api_error)?;
+            if status
+                .nodes
+                .iter()
+                .any(|node| node.node_id == node_id && node.maintenance)
+            {
+                return Err(ApiError::typed(
+                    StatusCode::CONFLICT,
+                    "maintenance_resume_unsafe",
+                    "the running target has not acknowledged its maintenance fence",
+                ));
+            }
+            return Ok(Json(status));
+        }
+        let active_sessions = local_owned_media_sessions(&state).await;
+        let drain = state.serving.restart_drain_status(active_sessions).await;
+        if !drain.drained {
             return Err(ApiError::typed(
                 StatusCode::CONFLICT,
                 "maintenance_resume_unsafe",
-                "the running target has not acknowledged its maintenance fence",
+                "the running target still has local media work or an admission in flight",
             ));
         }
-        return Ok(Json(status));
-    }
-    let active_sessions = local_owned_media_sessions(&state).await;
-    let drain = state.serving.restart_drain_status(active_sessions).await;
-    if !drain.drained {
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "maintenance_resume_unsafe",
-            "the running target still has local media work or an admission in flight",
-        ));
-    }
-    let status = state
-        .membership
-        .exit_maintenance(&node_id)
-        .await
-        .map_err(api_error)?;
-    state
-        .serving
-        .cancel_maintenance_preparation(active_sessions)
-        .await;
-    Ok(Json(status))
+        let status = state
+            .membership
+            .exit_maintenance(&node_id)
+            .await
+            .map_err(api_error)?;
+        state
+            .serving
+            .cancel_current_maintenance_preparation(active_sessions)
+            .await;
+        Ok(Json(status))
+    })
+    .await
 }
 
 pub async fn force_election(
@@ -679,7 +687,7 @@ mod tests {
             "local direct streams and offline work must drain before the durable fence clears"
         );
         assert!(exit.contains("node_id != state.node_id"));
-        assert!(exit.contains("cancel_maintenance_preparation"));
+        assert!(exit.contains("cancel_current_maintenance_preparation"));
 
         let inventory = include_str!("cluster_operations.rs")
             .split_once("pub(crate) async fn local_owned_media_sessions")
