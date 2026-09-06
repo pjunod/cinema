@@ -475,13 +475,6 @@ jobs:
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
     runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
-    # The eligible m6 runners are separate VMs on one physical host. Running
-    # both Chromium-heavy gates together starved one player to 0.5% speed and
-    # made a settled layout capture see a transient activity-endpoint failure.
-    # One at a time keeps either verdict about the browser, not its neighbour.
-    concurrency:
-      group: plurx-browser-heavy
-      cancel-in-progress: false
     timeout-minutes: 30
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
@@ -521,12 +514,14 @@ jobs:
 
   vod_web:
     name: film-addressed VOD browser acceptance
-    needs: [scope, preflight]
+    # The eligible m6 runners are separate VMs on one physical host. Running
+    # both Chromium-heavy gates together starved one player to 0.5% speed and
+    # made a settled layout capture see a transient activity-endpoint failure.
+    # A dependency is deliberate: Forgejo 16 accepted the same job-level
+    # concurrency group on both siblings but still executed them together.
+    needs: [scope, preflight, web_layout]
     if: needs.scope.outputs.web_layout == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
-    concurrency:
-      group: plurx-browser-heavy
-      cancel-in-progress: false
     timeout-minutes: 25
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4

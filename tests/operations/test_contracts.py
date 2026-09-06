@@ -967,10 +967,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         vod_web = workflow.split("\n  vod_web:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
-        self.assertIn("group: plurx-browser-heavy", web_layout)
-        self.assertIn("cancel-in-progress: false", web_layout)
-        self.assertIn("group: plurx-browser-heavy", vod_web)
-        self.assertIn("cancel-in-progress: false", vod_web)
+        self.assertIn("needs: [scope, preflight, web_layout]", vod_web)
+        self.assertNotIn("group: plurx-browser-heavy", web_layout)
+        self.assertNotIn("group: plurx-browser-heavy", vod_web)
         self.assertIn("--case suspend-resume", vod_web)
         self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
         self.assertIn(
