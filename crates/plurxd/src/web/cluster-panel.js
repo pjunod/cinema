@@ -170,21 +170,23 @@
         observation.active_deadline_remaining_ms===undefined
         ?null:Number(observation.active_deadline_remaining_ms);
       const deadlineStillActive=remaining!==null&&remaining>elapsed;
-      const deadlineCrossed=remaining!==null&&remaining<=elapsed&&observation.phase!=="stalled";
+      const stalledPhases=["connecting","transferring","awaiting_acknowledgement",
+        "installing","retrying"];
+      const deadlineCrossed=remaining!==null&&remaining<=elapsed&&
+        stalledPhases.includes(observation.phase);
       const projectedStalledRetention=deadlineCrossed&&elapsed-remaining<=300000;
       if(sourceAge+elapsed>300000&&!deadlineStillActive&&!projectedStalledRetention)
         return null;
       if(!elapsed&&!deadlineCrossed) return observation;
       const projected=Object.assign({},observation,{
-        sample_age_ms:sourceAge+elapsed,
+        sample_age_ms:deadlineCrossed?Math.max(0,elapsed-remaining):sourceAge+elapsed,
       });
       for(const field of ["attempt_age_ms","last_acknowledgement_age_ms",
         "last_local_receive_age_ms"])
         projected[field]=ageByElapsed(observation[field]);
       if(remaining!==null)
         projected.active_deadline_remaining_ms=Math.max(0,remaining-elapsed);
-      if(deadlineCrossed&&["connecting","transferring","awaiting_acknowledgement",
-        "installing","retrying"].includes(observation.phase)){
+      if(deadlineCrossed){
         projected.phase="stalled";
         projected.last_error_category="snapshot_stalled";
       }

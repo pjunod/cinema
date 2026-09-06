@@ -271,10 +271,21 @@ impl ServingFence {
         })
     }
 
-    /// Serialize direct prepare/cancel handlers before their detached owner is
-    /// created. A disconnected waiter therefore cannot release this gate while
-    /// its accepted work is still resolving a replicated claim.
-    pub(crate) async fn planned_outage_operation_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
+    /// Admit one direct prepare/cancel handler without queuing request futures.
+    /// Once accepted, its detached owner retains this guard until every
+    /// replicated and local outcome is definitive.
+    pub(crate) fn try_planned_outage_operation_guard(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, &'static str> {
+        Arc::clone(&self.restart_drain.operation_gate)
+            .try_lock_owned()
+            .map_err(|_| "planned-outage operation already in progress")
+    }
+
+    /// Cleanup created by an already-admitted owner may wait behind that one
+    /// owner. External requests use the fail-fast acquire above, so this queue
+    /// has at most the cleanup belonging to the accepted operation.
+    pub(crate) async fn planned_outage_cleanup_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.restart_drain.operation_gate)
             .lock_owned()
             .await
@@ -408,20 +419,35 @@ impl ServingFence {
         self.restart_drain.changed.notify_waiters();
     }
 
-    /// Wait until every admission that won before the drain flag has either
-    /// failed or published its owned-work lifetime. Once this returns, the
-    /// caller can sample the owned registries without a start slipping
-    /// entirely between that sample and the drain linearization point.
-    pub(crate) async fn wait_for_restart_admissions(&self) {
+    /// Wait until every admission that won before this exact drain flag has
+    /// either failed or published its owned-work lifetime. The wait cannot
+    /// outlive that fence or process shutdown, so a stuck handler cannot own
+    /// the serialized planned-outage lane forever.
+    pub(crate) async fn wait_for_restart_admissions_until(
+        &self,
+        token: PlannedOutageFenceToken,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> bool {
         loop {
+            let expires_at = {
+                let mut state = self.restart_drain.state.lock().await;
+                expire_restart_drain(&mut state);
+                if state.token != Some(token) {
+                    return false;
+                }
+                let Some(expires_at) = state.expires_at else {
+                    return false;
+                };
+                expires_at
+            };
             if self.restart_drain.admissions.load(Ordering::Acquire) == 0 {
-                return;
+                return true;
             }
-            let changed = self.restart_drain.changed.notified();
-            if self.restart_drain.admissions.load(Ordering::Acquire) == 0 {
-                return;
+            let wake_at = expires_at.min(tokio::time::Instant::now() + SERVING_FENCE_POLL);
+            tokio::select! {
+                () = shutdown.cancelled() => return false,
+                () = tokio::time::sleep_until(wake_at) => {}
             }
-            changed.await;
         }
     }
 
@@ -698,10 +724,10 @@ mod tests {
             .try_restart_admission()
             .await
             .expect("admit before preparation");
-        assert!(fence
+        let token = fence
             .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
             .await
-            .is_some());
+            .expect("restart fence token");
         let preparing = fence.restart_drain_status(0).await;
         assert!(preparing.new_admissions_blocked);
         assert_eq!(preparing.admissions_in_flight, 1);
@@ -710,15 +736,65 @@ mod tests {
 
         let waiting = {
             let fence = fence.clone();
-            tokio::spawn(async move { fence.wait_for_restart_admissions().await })
+            tokio::spawn(async move {
+                fence
+                    .wait_for_restart_admissions_until(
+                        token,
+                        &tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+            })
         };
         tokio::task::yield_now().await;
         assert!(!waiting.is_finished());
         drop(admission);
-        waiting.await.expect("admission settlement waiter");
+        assert!(waiting.await.expect("admission settlement waiter"));
         let drained = fence.restart_drain_status(0).await;
         assert!(drained.drained);
         assert_eq!(drained.admissions_in_flight, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stuck_restart_admission_cannot_outlive_the_exact_fence() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let admission = fence
+            .try_restart_admission()
+            .await
+            .expect("admit before preparation");
+        let token = fence
+            .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+            .await
+            .expect("restart fence token");
+        let operation_guard = fence
+            .try_planned_outage_operation_guard()
+            .expect("first operation owns the lane");
+        assert!(
+            fence.try_planned_outage_operation_guard().is_err(),
+            "a concurrent planned-outage request must fail fast"
+        );
+        let waiting = {
+            let fence = fence.clone();
+            tokio::spawn(async move {
+                let _operation_guard = operation_guard;
+                fence
+                    .wait_for_restart_admissions_until(
+                        token,
+                        &tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+            })
+        };
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            !waiting.await.expect("bounded admission settlement waiter"),
+            "the exact fence deadline must end a drain even while an admission is stuck"
+        );
+        assert!(
+            fence.try_planned_outage_operation_guard().is_ok(),
+            "the expired drain cannot retain the serialized operation lane"
+        );
+        drop(admission);
     }
 
     #[tokio::test(start_paused = true)]

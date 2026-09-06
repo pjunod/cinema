@@ -732,6 +732,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  serving_fence::tests::confirmed_maintenance_exit_preserves_a_restart_owned_latch \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::stuck_restart_admission_cannot_outlive_the_exact_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::restart_preparation_claims_and_releases_the_replicated_outage_slot \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
@@ -771,10 +774,13 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  cluster::membership::tests::definitive_cache_admin_singleton_losers_leave_no_receipts \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
-	  cluster::membership::tests::zero_after_ambiguous_cache_admin_acquire_keeps_release_receipt \
+	  cluster::membership::tests::zero_after_ambiguous_cache_admin_acquire_advances_watermark \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
-	  cluster::membership::tests::ambiguous_cache_admin_acquire_keeps_receipt_and_cannot_resurrect \
+	  cluster::membership::tests::ambiguous_cache_admin_acquire_advances_watermark_and_cannot_resurrect \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::repeated_ambiguous_cache_admin_cleanup_keeps_one_bounded_watermark \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively \
@@ -850,6 +856,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::password_and_session_revocation_roll_back_together_on_delete_failure \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --lib \
+	  store::sqlite::users::tests::failed_combined_promotion_never_authorizes_the_old_session \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::concurrent_admin_demote_and_delete_preserve_one_administrator \

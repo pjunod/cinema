@@ -1165,6 +1165,15 @@ pub trait UserStore: Send + Sync + 'static {
         password_hash: &str,
         claim: Option<&CacheAdminMutationClaim>,
     ) -> Result<bool, StoreError>;
+    /// Atomically grant administrator status, replace the password, and revoke
+    /// every existing token. A failed combined update must never leave an old
+    /// session newly authorized as an administrator.
+    async fn promote_user_and_reset_password(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError>;
     /// Revoke admin status only when another administrator exists in the same
     /// Store mutation.

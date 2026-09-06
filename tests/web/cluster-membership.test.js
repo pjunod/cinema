@@ -634,6 +634,7 @@ test("retained transport evidence ages, stalls, and expires while refreshes fail
 
   current = ui.clusterTransportExplanation(active, 2, false, 1_000);
   assert.equal(current.code, "stalled");
+  assert.equal(current.observation.sample_age_ms, 0);
   assert.equal(current.observation.active_deadline_remaining_ms, 0);
   assert.equal(current.observation.last_error_category, "snapshot_stalled");
 
@@ -647,6 +648,23 @@ test("retained transport evidence ages, stalls, and expires while refreshes fail
     "unavailable",
   );
   assert.equal(activeObservation.phase, "installing", "projection must not rewrite cached evidence");
+
+  const serverProjectedStall = transportOps([
+    transportObservation("stalled", {
+      sample_age_ms: 0,
+      active_deadline_remaining_ms: 0,
+      operation_owns_work: true,
+    }),
+  ]);
+  assert.equal(
+    ui.clusterTransportExplanation(serverProjectedStall, 2, false, 300_000).code,
+    "stalled",
+    "a server-projected stall keeps its complete post-deadline diagnostic window",
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(serverProjectedStall, 2, false, 300_001).code,
+    "unavailable",
+  );
 });
 
 test("client-local receipt time ignores browser clocks ahead or behind the daemon", () => {

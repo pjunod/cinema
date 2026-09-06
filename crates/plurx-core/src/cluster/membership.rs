@@ -516,17 +516,19 @@ const EXPIRE_CACHE_ADMIN_LEASE_FROM_HEARTBEAT_SQL: &str =
          SELECT claim_id FROM cluster_cache_admin_revocation_leases \
          WHERE expires_at <= NEW.last_seen_at \
          ON CONFLICT(claim_id) DO NOTHING; \
-       INSERT INTO cluster_cache_admin_revocation_lease_releases (claim_id) \
-         SELECT claim_id FROM cluster_cache_admin_revocation_leases \
+       INSERT INTO cluster_cache_admin_revocation_release_watermark \
+         (singleton, expires_through) \
+         SELECT 1, MAX(expires_at) FROM cluster_cache_admin_revocation_leases \
          WHERE expires_at <= NEW.last_seen_at AND retain_release_receipt = 1 \
-         ON CONFLICT(claim_id) DO NOTHING; \
+         HAVING COUNT(*) > 0 \
+         ON CONFLICT(singleton) DO UPDATE SET expires_through = MAX(\
+           cluster_cache_admin_revocation_release_watermark.expires_through, \
+           excluded.expires_through); \
        DELETE FROM cluster_cache_admin_revocation_leases \
          WHERE expires_at <= NEW.last_seen_at; \
        DELETE FROM cluster_cache_admin_revocation_lease_intents \
-         WHERE claim_id IN (SELECT claim_id \
-           FROM cluster_cache_admin_revocation_lease_releases) \
-           AND claim_id NOT IN (SELECT claim_id \
-             FROM cluster_cache_admin_revocation_leases); \
+         WHERE claim_id NOT IN (SELECT claim_id \
+           FROM cluster_cache_admin_revocation_leases); \
      END";
 const REQUIRE_CACHE_ADMIN_LEASE_INSERT_INTENT_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_cache_admin_lease_insert_intent_guard \
@@ -696,10 +698,16 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          expires_at INTEGER NOT NULL, \
          retain_release_receipt INTEGER NOT NULL \
            CHECK (retain_release_receipt IN (0, 1))) STRICT",
-    // A permanent exact release prevents an acquire request whose response
-    // was cancelled from materializing after its cleanup transaction.
+    // Legacy exact receipts remain readable during rolling upgrade. Current
+    // binaries compact anti-replay ownership into the single watermark below.
     "CREATE TABLE IF NOT EXISTS cluster_cache_admin_revocation_lease_releases (\
          claim_id TEXT PRIMARY KEY) STRICT",
+    // Every claim carries an absolute expiry. Advancing one global upper bound
+    // makes all earlier delayed acquire requests no-ops without retaining one
+    // permanent UUID row per cancelled HTTP request.
+    "CREATE TABLE IF NOT EXISTS cluster_cache_admin_revocation_release_watermark (\
+         singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+         expires_through INTEGER NOT NULL) STRICT",
     // Transaction-local authority for all insert/update/delete operations.
     // Persisted triggers make rollback to a pre-exclusion binary fail closed.
     "CREATE TABLE IF NOT EXISTS cluster_cache_admin_revocation_lease_intents (\
@@ -2168,6 +2176,8 @@ const ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
        AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
        AND NOT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_lease_releases released \
          WHERE released.claim_id = $2) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_release_watermark released \
+         WHERE released.singleton = 1 AND released.expires_through >= $3) \
      ON CONFLICT(singleton) DO UPDATE SET \
        node_id = excluded.node_id, claim_id = excluded.claim_id, \
        expires_at = excluded.expires_at, \
@@ -2181,9 +2191,12 @@ const RELEASE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
     "DELETE FROM cluster_cache_admin_revocation_leases \
      WHERE singleton = 1 AND node_id = $1 AND claim_id = $2";
 
-const TOMBSTONE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
-    "INSERT INTO cluster_cache_admin_revocation_lease_releases (claim_id) VALUES ($1) \
-     ON CONFLICT(claim_id) DO NOTHING";
+const ADVANCE_CACHE_ADMIN_REVOCATION_RELEASE_WATERMARK_SQL: &str =
+    "INSERT INTO cluster_cache_admin_revocation_release_watermark \
+       (singleton, expires_through) VALUES (1, $1) \
+     ON CONFLICT(singleton) DO UPDATE SET expires_through = MAX(\
+       cluster_cache_admin_revocation_release_watermark.expires_through, \
+       excluded.expires_through)";
 const MARK_CACHE_ADMIN_REVOCATION_ACQUIRE_DEFINITIVE_SQL: &str =
     "UPDATE cluster_cache_admin_revocation_leases \
      SET retain_release_receipt = 0 \
@@ -2341,7 +2354,8 @@ pub struct ClusterOperationLease {
 /// Exact replicated membership exclusion for one cache-admin credential
 /// mutation. The embedded Store claim is intentionally opaque to the daemon:
 /// only a committed lease can make a clustered credential statement change
-/// rows, and exact release permanently tombstones this attempt.
+/// rows, and an ambiguous exact release advances the bounded anti-replay
+/// expiration watermark past this attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheAdminRevocationLease {
     node_id: String,
@@ -3061,6 +3075,14 @@ impl MembershipManager {
                 ),
                 (
                     REQUIRE_CACHE_ADMIN_LEASE_DELETE_INTENT_SQL.to_owned(),
+                    params!(),
+                ),
+                (
+                    "DROP TRIGGER IF EXISTS cluster_cache_admin_lease_heartbeat_expiry".to_owned(),
+                    params!(),
+                ),
+                (
+                    EXPIRE_CACHE_ADMIN_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
                     params!(),
                 ),
             ])
@@ -4978,23 +5000,27 @@ impl MembershipManager {
         }
     }
 
-    /// Tombstone and release exactly one cache-admin exclusion attempt.
+    /// Release exactly one cache-admin exclusion attempt. An ambiguous acquire
+    /// advances one bounded expiration watermark, making this and every older
+    /// delayed request a no-op without growing a UUID receipt table forever.
     pub async fn release_cache_admin_revocation_lease(
         &self,
         lease: &CacheAdminRevocationLease,
     ) -> Result<CacheAdminRevocationCleanupOutcome, MembershipError> {
         let inner = self.replicated_inner()?;
-        let mut statements = vec![
-            (
-                "INSERT INTO cluster_cache_admin_revocation_lease_intents \
-                     (claim_id) VALUES ($1) ON CONFLICT(claim_id) DO NOTHING"
-                    .to_owned(),
-                params!(lease.claim.as_str()),
-            ),
-            (
-                TOMBSTONE_CACHE_ADMIN_REVOCATION_LEASE_SQL.to_owned(),
-                params!(lease.claim.as_str()),
-            ),
+        let mut statements = vec![(
+            "INSERT INTO cluster_cache_admin_revocation_lease_intents \
+                 (claim_id) VALUES ($1) ON CONFLICT(claim_id) DO NOTHING"
+                .to_owned(),
+            params!(lease.claim.as_str()),
+        )];
+        if lease.retain_release_receipt {
+            statements.push((
+                ADVANCE_CACHE_ADMIN_REVOCATION_RELEASE_WATERMARK_SQL.to_owned(),
+                params!(lease.expires_at_unix_ms),
+            ));
+        }
+        statements.extend([
             (
                 RELEASE_CACHE_ADMIN_REVOCATION_LEASE_SQL.to_owned(),
                 params!(lease.node_id.as_str(), lease.claim.as_str()),
@@ -5005,8 +5031,10 @@ impl MembershipManager {
                     .to_owned(),
                 params!(lease.claim.as_str()),
             ),
-        ];
+        ]);
         if !lease.retain_release_receipt {
+            // A rolling predecessor may have written the legacy exact row for
+            // this claim before the definitive response reached this process.
             statements.push((
                 "DELETE FROM cluster_cache_admin_revocation_lease_releases \
                  WHERE claim_id = $1"
@@ -10321,6 +10349,9 @@ mod tests {
                      CHECK (retain_release_receipt IN (0, 1))); \
                  CREATE TABLE cluster_cache_admin_revocation_lease_releases (\
                    claim_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_cache_admin_revocation_release_watermark (\
+                   singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                   expires_through INTEGER NOT NULL); \
                  CREATE TABLE cluster_cache_admin_revocation_lease_intents (\
                    claim_id TEXT PRIMARY KEY); \
                  CREATE TABLE users (id INTEGER PRIMARY KEY, password_hash TEXT NOT NULL); \
@@ -10350,6 +10381,15 @@ mod tests {
         claim_id: &str,
         retain_release_receipt: bool,
     ) -> usize {
+        acquire_guarded_cache_admin_lease_until(connection, claim_id, retain_release_receipt, 1_000)
+    }
+
+    fn acquire_guarded_cache_admin_lease_until(
+        connection: &mut rusqlite::Connection,
+        claim_id: &str,
+        retain_release_receipt: bool,
+        expires_at: i64,
+    ) -> usize {
         let transaction = connection.transaction().expect("acquire transaction");
         transaction
             .execute(
@@ -10364,7 +10404,7 @@ mod tests {
                 rusqlite::params![
                     "node-a",
                     claim_id,
-                    1_000_i64,
+                    expires_at,
                     if retain_release_receipt { 1_i64 } else { 0_i64 }
                 ],
             )
@@ -10384,6 +10424,7 @@ mod tests {
         connection: &mut rusqlite::Connection,
         claim_id: &str,
         retain_release_receipt: bool,
+        expires_at: i64,
     ) {
         let transaction = connection.transaction().expect("release transaction");
         transaction
@@ -10393,12 +10434,14 @@ mod tests {
                 rusqlite::params![claim_id],
             )
             .expect("authorize cache-admin release");
-        transaction
-            .execute(
-                TOMBSTONE_CACHE_ADMIN_REVOCATION_LEASE_SQL,
-                rusqlite::params![claim_id],
-            )
-            .expect("tombstone cache-admin claim");
+        if retain_release_receipt {
+            transaction
+                .execute(
+                    ADVANCE_CACHE_ADMIN_REVOCATION_RELEASE_WATERMARK_SQL,
+                    rusqlite::params![expires_at],
+                )
+                .expect("advance cache-admin release watermark");
+        }
         transaction
             .execute(
                 RELEASE_CACHE_ADMIN_REVOCATION_LEASE_SQL,
@@ -10617,7 +10660,7 @@ mod tests {
             1
         );
 
-        release_guarded_cache_admin_lease(&mut connection, claim_id, true);
+        release_guarded_cache_admin_lease(&mut connection, claim_id, true, 1_000);
         assert_eq!(
             acquire_guarded_cache_admin_lease(&mut connection, claim_id, true),
             0,
@@ -10658,7 +10701,7 @@ mod tests {
                 1
             );
             mark_guarded_cache_admin_acquire_definitive(&mut connection, &claim_id);
-            release_guarded_cache_admin_lease(&mut connection, &claim_id, false);
+            release_guarded_cache_admin_lease(&mut connection, &claim_id, false, 1_000);
         }
         assert_eq!(
             connection
@@ -10692,7 +10735,7 @@ mod tests {
             // A first-attempt, definite zero-row result has no delayed acquire
             // to suppress, so production disarms receipt retention before its
             // exact cleanup runs.
-            release_guarded_cache_admin_lease(&mut connection, &claim_id, false);
+            release_guarded_cache_admin_lease(&mut connection, &claim_id, false, 1_000);
         }
 
         assert_eq!(
@@ -10709,34 +10752,82 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_cache_admin_acquire_keeps_receipt_and_cannot_resurrect() {
+    fn ambiguous_cache_admin_acquire_advances_watermark_and_cannot_resurrect() {
         let mut connection = guarded_cache_admin_lease_fixture();
         let claim_id = "ambiguous-acquire";
         assert_eq!(
             acquire_guarded_cache_admin_lease(&mut connection, claim_id, true),
             1
         );
-        release_guarded_cache_admin_lease(&mut connection, claim_id, true);
+        release_guarded_cache_admin_lease(&mut connection, claim_id, true, 1_000);
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT COUNT(*) FROM cluster_cache_admin_revocation_lease_releases \
-                     WHERE claim_id = $1",
-                    rusqlite::params![claim_id],
+                    "SELECT expires_through FROM cluster_cache_admin_revocation_release_watermark \
+                     WHERE singleton = 1",
+                    [],
                     |row| row.get::<_, i64>(0),
                 )
-                .expect("count ambiguous release receipt"),
-            1
+                .expect("ambiguous release watermark"),
+            1_000
         );
         assert_eq!(
             acquire_guarded_cache_admin_lease(&mut connection, claim_id, true),
             0,
-            "the delayed acquire must lose to its permanent exact receipt"
+            "the delayed acquire must lose to the expiration watermark"
+        );
+        assert_eq!(
+            acquire_guarded_cache_admin_lease_until(&mut connection, "newer-acquire", true, 1_001,),
+            1,
+            "the watermark must not refuse a newer bounded claim"
         );
     }
 
     #[test]
-    fn zero_after_ambiguous_cache_admin_acquire_keeps_release_receipt() {
+    fn repeated_ambiguous_cache_admin_cleanup_keeps_one_bounded_watermark() {
+        let mut connection = guarded_cache_admin_lease_fixture();
+        for attempt in 0..1_024 {
+            let claim_id = format!("cancelled-logout-{attempt}");
+            release_guarded_cache_admin_lease(&mut connection, &claim_id, true, 1_000 + attempt);
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_cache_admin_revocation_release_watermark",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count bounded watermark rows"),
+            1,
+            "cancelled credential churn must retain one watermark, not one UUID row per request"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT expires_through FROM cluster_cache_admin_revocation_release_watermark \
+                     WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("latest bounded watermark"),
+            2_023,
+            "the single row must retain the newest expiration boundary"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_cache_admin_revocation_lease_releases",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count legacy exact receipts"),
+            0,
+            "current cleanup must not grow the legacy exact-receipt table"
+        );
+    }
+
+    #[test]
+    fn zero_after_ambiguous_cache_admin_acquire_advances_watermark() {
         assert!(cache_admin_rejection_requires_release_receipt(true));
         let mut connection = guarded_cache_admin_lease_fixture();
         assert_eq!(
@@ -10751,12 +10842,12 @@ mod tests {
             0,
             "the retry observes a competing singleton after an earlier ambiguous submission"
         );
-        release_guarded_cache_admin_lease(&mut connection, delayed_claim, true);
-        release_guarded_cache_admin_lease(&mut connection, "owner", false);
+        release_guarded_cache_admin_lease(&mut connection, delayed_claim, true, 1_000);
+        release_guarded_cache_admin_lease(&mut connection, "owner", false, 1_000);
         assert_eq!(
             acquire_guarded_cache_admin_lease(&mut connection, delayed_claim, true),
             0,
-            "the retained receipt must defeat the earlier delayed acquire after the owner leaves"
+            "the watermark must defeat the earlier delayed acquire after the owner leaves"
         );
     }
 
@@ -10794,13 +10885,13 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT COUNT(*) FROM cluster_cache_admin_revocation_lease_releases \
-                     WHERE claim_id = $1",
-                    rusqlite::params![claim_id],
+                    "SELECT expires_through FROM cluster_cache_admin_revocation_release_watermark \
+                     WHERE singleton = 1",
+                    [],
                     |row| row.get::<_, i64>(0),
                 )
-                .expect("cache-admin tombstone"),
-            1
+                .expect("cache-admin expiry watermark"),
+            1_000
         );
         assert_eq!(
             acquire_guarded_cache_admin_lease(&mut connection, claim_id, true),
@@ -10810,13 +10901,13 @@ mod tests {
 
         let definitive_claim = "definitive-owner-crash";
         assert_eq!(
-            acquire_guarded_cache_admin_lease(&mut connection, definitive_claim, true),
+            acquire_guarded_cache_admin_lease_until(&mut connection, definitive_claim, true, 2_000,),
             1
         );
         mark_guarded_cache_admin_acquire_definitive(&mut connection, definitive_claim);
         connection
             .execute(
-                "UPDATE cluster_nodes SET last_seen_at = 1_002 WHERE node_id = 'node-b'",
+                "UPDATE cluster_nodes SET last_seen_at = 2_001 WHERE node_id = 'node-b'",
                 [],
             )
             .expect("legacy heartbeat expires definite lease");
@@ -10831,6 +10922,18 @@ mod tests {
                 .expect("definitive expiry receipt"),
             0,
             "a definitive acquire has no delayed proposal to tombstone"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT expires_through FROM cluster_cache_admin_revocation_release_watermark \
+                     WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("definitive expiry preserves prior watermark"),
+            1_000,
+            "definitive expiry must not expand the ambiguous anti-replay boundary"
         );
     }
 
@@ -10851,6 +10954,7 @@ mod tests {
         for table in [
             "cluster_cache_admin_revocation_leases",
             "cluster_cache_admin_revocation_lease_releases",
+            "cluster_cache_admin_revocation_release_watermark",
             "cluster_cache_admin_revocation_lease_intents",
         ] {
             assert!(MEMBERSHIP_SCHEMA.iter().any(

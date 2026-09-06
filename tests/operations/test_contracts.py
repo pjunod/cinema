@@ -1595,6 +1595,8 @@ for (const startupDelay of [0, 1600, 7000]) {
             "production_snapshot_executor_worker_records_status_around_injected_installer",
             "production_snapshot_executor_fifo_status_ignores_later_admission_waiter",
             "production_snapshot_executor_ticket_order_survives_reverse_waiter_polling",
+            "production_snapshot_status_follows_worker_start_after_pre_ticket_deschedule",
+            "admission_waiter_budget_bounds_cancelled_ticket_retention_and_reports_busy",
             "production_shared_executor_retains_abandoned_other_peer_terminal_status",
             "inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
@@ -1713,6 +1715,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "confirmed_current_restart_cancel_resolves_an_expired_exact_latch",
             "confirmed_maintenance_exit_resolves_an_expired_exact_latch",
             "confirmed_maintenance_exit_preserves_a_restart_owned_latch",
+            "stuck_restart_admission_cannot_outlive_the_exact_fence",
             "mutation_preflight_ages_local_transport_across_peer_collection",
             "restart_preparation_claims_and_releases_the_replicated_outage_slot",
             "cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner",
@@ -1743,8 +1746,9 @@ for (const startupDelay of [0, 1600, 7000]) {
             "membership_cannot_commit_after_final_roster_read_before_credential_store_write",
             "definitive_cache_admin_acquire_release_cycles_leave_no_receipts",
             "definitive_cache_admin_singleton_losers_leave_no_receipts",
-            "zero_after_ambiguous_cache_admin_acquire_keeps_release_receipt",
-            "ambiguous_cache_admin_acquire_keeps_receipt_and_cannot_resurrect",
+            "zero_after_ambiguous_cache_admin_acquire_advances_watermark",
+            "ambiguous_cache_admin_acquire_advances_watermark_and_cannot_resurrect",
+            "repeated_ambiguous_cache_admin_cleanup_keeps_one_bounded_watermark",
             "server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively",
             "cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3",
             "active_cache_revocation_exclusion_blocks_readiness_without_wall_clock_expiry",
@@ -1768,6 +1772,7 @@ for (const startupDelay of [0, 1600, 7000]) {
 
         core_store_tests = (
             "password_and_session_revocation_roll_back_together_on_delete_failure",
+            "failed_combined_promotion_never_authorizes_the_old_session",
             "concurrent_admin_demote_and_delete_preserve_one_administrator",
         )
         for test_name in core_store_tests:

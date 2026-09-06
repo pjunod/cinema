@@ -3228,6 +3228,58 @@ impl UserStore for HiqliteAuthStore {
         Ok(changed > 0)
     }
 
+    async fn promote_user_and_reset_password(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let results = match claim {
+            Some(claim) => {
+                self.client()
+                    .txn([
+                        (
+                            "UPDATE users SET password_hash = $1, is_admin = 1
+                             WHERE id = $2 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $3
+                             )",
+                            params!(password_hash, id, claim.as_str()),
+                        ),
+                        (
+                            "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $2
+                             )",
+                            params!(id, claim.as_str()),
+                        ),
+                    ])
+                    .await?
+            }
+            None => {
+                self.client()
+                    .txn([
+                        (
+                            "UPDATE users SET password_hash = $1, is_admin = 1 WHERE id = $2",
+                            params!(password_hash, id),
+                        ),
+                        ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
+                    ])
+                    .await?
+            }
+        };
+        let mut results = results.into_iter();
+        let changed = results
+            .next()
+            .ok_or_else(|| StoreError::Database("promotion transaction returned no result".into()))?
+            .map_err(database_error)?;
+        results
+            .next()
+            .ok_or_else(|| StoreError::Database("token transaction returned no result".into()))?
+            .map_err(database_error)?;
+        Ok(changed > 0)
+    }
+
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError> {
         Ok(self
             .execute(

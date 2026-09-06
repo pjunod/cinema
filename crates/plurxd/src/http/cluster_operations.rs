@@ -473,7 +473,7 @@ impl Drop for PlannedOutageLeaseGuard {
         let serving = self.serving.clone();
         let shutdown = self.shutdown.clone();
         self.release_runtime.spawn(async move {
-            let _operation_guard = serving.planned_outage_operation_guard().await;
+            let _operation_guard = serving.planned_outage_cleanup_guard().await;
             if let Some(lease) = lease {
                 if let Err(error) =
                     release_exact_claim_with_retry(&membership, &lease, &shutdown).await
@@ -586,9 +586,9 @@ where
 }
 
 /// Acquire the one process-local prepare/cancel lane before detaching accepted
-/// ownership. Waiters that disconnect while queued create no background task;
-/// once work starts, its gate survives the HTTP waiter until every replicated
-/// and local outcome is definitive.
+/// ownership. Contending requests fail fast instead of building an unbounded
+/// Tokio mutex queue; once work starts, its gate survives the HTTP waiter until
+/// every replicated and local outcome is definitive.
 pub(crate) async fn run_serialized_planned_outage_task<T, Work>(
     serving: &crate::serving_fence::ServingFence,
     work: Work,
@@ -597,7 +597,13 @@ where
     T: Send + 'static,
     Work: std::future::Future<Output = Result<T, ApiError>> + Send + 'static,
 {
-    let operation_guard = serving.planned_outage_operation_guard().await;
+    let operation_guard = serving.try_planned_outage_operation_guard().map_err(|_| {
+        ApiError::typed(
+            StatusCode::CONFLICT,
+            "planned_outage_operation_pending",
+            "another restart or maintenance operation is still resolving; retry after it completes",
+        )
+    })?;
     run_planned_outage_task(async move {
         let _operation_guard = operation_guard;
         work.await
@@ -1053,7 +1059,18 @@ pub(crate) async fn prepare_restart(
             ));
         };
         lease.arm_local_fence(local_fence);
-        state.serving.wait_for_restart_admissions().await;
+        if !state
+            .serving
+            .wait_for_restart_admissions_until(local_fence, &state.shutdown)
+            .await
+        {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "restart_preparation_expired",
+                "restart preparation expired before pre-existing admissions settled; run preflight again",
+            ));
+        }
         let active_sessions = local_owned_media_sessions(&state).await;
         let drain = state.serving.restart_drain_status(active_sessions).await;
         if !drain.new_admissions_blocked {
@@ -1508,9 +1525,16 @@ fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_m
         }
         let deadline_still_active =
             source_deadline_remaining_ms.is_some_and(|remaining_ms| remaining_ms > elapsed_ms);
-        let deadline_crossed = source_deadline_remaining_ms
-            .is_some_and(|remaining_ms| remaining_ms <= elapsed_ms)
-            && source_phase != SnapshotTransportPhase::Stalled;
+        let active_phase = matches!(
+            source_phase,
+            SnapshotTransportPhase::Connecting
+                | SnapshotTransportPhase::Transferring
+                | SnapshotTransportPhase::AwaitingAcknowledgement
+                | SnapshotTransportPhase::Installing
+                | SnapshotTransportPhase::Retrying
+        );
+        let deadline_crossed = active_phase
+            && source_deadline_remaining_ms.is_some_and(|remaining_ms| remaining_ms <= elapsed_ms);
         let projected_stalled_retention = deadline_crossed
             && source_deadline_remaining_ms.is_some_and(|remaining_ms| {
                 elapsed_ms.saturating_sub(remaining_ms) <= TRANSPORT_OBSERVATION_TTL_MS
@@ -1518,16 +1542,13 @@ fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_m
         if let Some(remaining_ms) = observation.active_deadline_remaining_ms.as_mut() {
             *remaining_ms = remaining_ms.saturating_sub(elapsed_ms);
         }
-        if deadline_crossed
-            && matches!(
-                source_phase,
-                SnapshotTransportPhase::Connecting
-                    | SnapshotTransportPhase::Transferring
-                    | SnapshotTransportPhase::AwaitingAcknowledgement
-                    | SnapshotTransportPhase::Installing
-                    | SnapshotTransportPhase::Retrying
-            )
-        {
+        if deadline_crossed {
+            // A producer that observes its own deadline starts the stalled
+            // retention age at that boundary. Preserve the same wire meaning
+            // when an aggregator's monotonic cache clock crosses it later.
+            if let Some(source_remaining_ms) = source_deadline_remaining_ms {
+                observation.sample_age_ms = elapsed_ms.saturating_sub(source_remaining_ms);
+            }
             observation.phase = SnapshotTransportPhase::Stalled;
             observation.last_error_category = Some("snapshot_stalled".to_owned());
         }
@@ -2935,6 +2956,7 @@ mod tests {
         let observation = &at_deadline.observations[0];
         assert_eq!(observation.phase, SnapshotTransportPhase::Stalled);
         assert_eq!(observation.active_deadline_remaining_ms, Some(0));
+        assert_eq!(observation.sample_age_ms, 0);
         assert_eq!(
             observation.last_error_category.as_deref(),
             Some("snapshot_stalled")
@@ -2948,6 +2970,10 @@ mod tests {
         assert_eq!(
             just_before_expiry.observations[0].phase,
             SnapshotTransportPhase::Stalled
+        );
+        assert_eq!(
+            just_before_expiry.observations[0].sample_age_ms,
+            TRANSPORT_OBSERVATION_TTL_MS - 1
         );
 
         let mut expired = source;
@@ -2995,6 +3021,7 @@ mod tests {
         let observation = &expired.observations[0];
         assert_eq!(observation.phase, SnapshotTransportPhase::Stalled);
         assert_eq!(observation.active_deadline_remaining_ms, Some(0));
+        assert_eq!(observation.sample_age_ms, 0);
         assert_eq!(
             observation.last_error_category.as_deref(),
             Some("snapshot_stalled")
@@ -3514,7 +3541,10 @@ mod tests {
             .expect("local transport observation");
         assert_eq!(observation.phase, SnapshotTransportPhase::Stalled);
         assert_eq!(observation.active_deadline_remaining_ms, Some(0));
-        assert_eq!(observation.sample_age_ms, 1_000);
+        assert_eq!(
+            observation.sample_age_ms, 500,
+            "stalled retention starts when the 500 ms deadline is crossed, not when collection starts"
+        );
         assert_eq!(
             observation.last_error_category.as_deref(),
             Some("snapshot_stalled")
@@ -3642,16 +3672,19 @@ mod tests {
             crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
         let first_started = std::sync::Arc::new(tokio::sync::Notify::new());
         let finish_first = std::sync::Arc::new(tokio::sync::Notify::new());
+        let first_finished = std::sync::Arc::new(tokio::sync::Notify::new());
         let second_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let first_waiter = tokio::spawn({
             let serving = serving.clone();
             let first_started = first_started.clone();
             let finish_first = finish_first.clone();
+            let first_finished = first_finished.clone();
             async move {
                 run_serialized_planned_outage_task(&serving, async move {
                     first_started.notify_one();
                     finish_first.notified().await;
+                    first_finished.notify_one();
                     Ok::<_, ApiError>(())
                 })
                 .await
@@ -3664,28 +3697,36 @@ mod tests {
             .expect_err("HTTP waiter is cancelled")
             .is_cancelled());
 
-        let second_waiter = tokio::spawn({
-            let serving = serving.clone();
+        for _ in 0..1_024 {
             let second_started = second_started.clone();
-            async move {
-                run_serialized_planned_outage_task(&serving, async move {
-                    second_started.store(true, std::sync::atomic::Ordering::Release);
-                    Ok::<_, ApiError>(())
-                })
-                .await
-            }
-        });
-        tokio::task::yield_now().await;
+            let error = run_serialized_planned_outage_task(&serving, async move {
+                second_started.store(true, std::sync::atomic::Ordering::Release);
+                Ok::<_, ApiError>(())
+            })
+            .await
+            .expect_err("a contending request must fail fast");
+            assert!(matches!(
+                error,
+                ApiError::Typed {
+                    code: "planned_outage_operation_pending",
+                    ..
+                }
+            ));
+        }
         assert!(
             !second_started.load(std::sync::atomic::Ordering::Acquire),
-            "a later cancel/prepare must not cross the detached first owner"
+            "a later cancel/prepare must neither queue nor cross the detached first owner"
         );
 
         finish_first.notify_one();
-        second_waiter
-            .await
-            .expect("second waiter task")
-            .expect("second serialized operation");
+        first_finished.notified().await;
+        let admitted_second = second_started.clone();
+        run_serialized_planned_outage_task(&serving, async move {
+            admitted_second.store(true, std::sync::atomic::Ordering::Release);
+            Ok::<_, ApiError>(())
+        })
+        .await
+        .expect("second serialized operation after owner completion");
         assert!(second_started.load(std::sync::atomic::Ordering::Acquire));
     }
 

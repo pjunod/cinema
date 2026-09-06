@@ -96,8 +96,27 @@ pub async fn update(
     } else {
         None
     };
+    let combined_promotion = req.is_admin == Some(true) && password_hash.is_some();
 
-    if let Some(is_admin) = req.is_admin {
+    if let (Some(true), Some(hash)) = (req.is_admin, password_hash.as_deref()) {
+        let changed = state
+            .store
+            .promote_user_and_reset_password(
+                id,
+                hash,
+                proof_revocation
+                    .as_ref()
+                    .and_then(ClusterCacheRevocation::mutation_claim),
+            )
+            .await?;
+        if !changed {
+            return Err(ApiError::ServiceUnavailable(
+                "combined promotion lost its cache-revocation exclusion; retry the request".into(),
+            ));
+        }
+    }
+
+    if let Some(is_admin) = req.is_admin.filter(|_| !combined_promotion) {
         if is_admin {
             state.store.set_admin(id, true).await?;
         } else if !state
@@ -120,7 +139,7 @@ pub async fn update(
             ));
         }
     }
-    if let Some(hash) = password_hash {
+    if let Some(hash) = password_hash.filter(|_| !combined_promotion) {
         let changed = state
             .store
             .reset_password_and_revoke_tokens(

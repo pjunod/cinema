@@ -243,7 +243,18 @@ pub async fn enter_maintenance(
             ));
         };
         lease.arm_local_fence(local_fence);
-        state.serving.wait_for_restart_admissions().await;
+        if !state
+            .serving
+            .wait_for_restart_admissions_until(local_fence, &state.shutdown)
+            .await
+        {
+            lease.release().await;
+            return Err(ApiError::typed(
+                StatusCode::CONFLICT,
+                "maintenance_preparation_expired",
+                "maintenance preparation expired before pre-existing admissions settled; run preflight again",
+            ));
+        }
         let active_sessions = local_owned_media_sessions(&state).await;
         let drain = state.serving.restart_drain_status(active_sessions).await;
         if !drain.new_admissions_blocked {

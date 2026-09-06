@@ -173,6 +173,27 @@ impl UserStore for SqliteStore {
         .await
     }
 
+    async fn promote_user_and_reset_password(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        require_standalone_claim(claim)?;
+        let password_hash = password_hash.to_owned();
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE users SET password_hash = ?2, is_admin = 1 WHERE id = ?1",
+                params![id, password_hash],
+            )?;
+            transaction.execute("DELETE FROM tokens WHERE user_id = ?1", params![id])?;
+            transaction.commit()?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError> {
         self.with_conn(move |conn| {
             Ok(conn.execute(
@@ -375,6 +396,44 @@ mod tests {
             .await
             .expect("session query")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_combined_promotion_never_authorizes_the_old_session() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let user = store
+            .create_user("viewer", "old-hash", false)
+            .await
+            .expect("create");
+        store
+            .create_token("viewer-session", user.id, None)
+            .await
+            .expect("token");
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TEMP TRIGGER reject_combined_token_revocation
+                     BEFORE DELETE ON tokens
+                     BEGIN
+                       SELECT RAISE(ABORT, 'injected combined update failure');
+                     END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("install fault");
+
+        store
+            .promote_user_and_reset_password(user.id, "new-hash", None)
+            .await
+            .expect_err("token failure must abort promotion and password reset");
+        let session_user = store
+            .user_for_token("viewer-session")
+            .await
+            .expect("session query")
+            .expect("old session remains a viewer");
+        assert!(!session_user.is_admin);
+        assert_eq!(session_user.password_hash, "old-hash");
     }
 
     #[tokio::test]
