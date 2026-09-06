@@ -38,6 +38,10 @@ def build_receipt(
     log_bytes: int,
     tested_sha: str,
     tested_tree: str,
+    evidence_name: str | None = None,
+    evidence_digest: str | None = None,
+    evidence_bytes: int | None = None,
+    evidence_build_sha: str | None = None,
 ) -> dict[str, object]:
     """Bind one selected lane's result and log to the checked-out tree."""
 
@@ -76,7 +80,51 @@ def build_receipt(
             f"GITHUB_SHA {environment['GITHUB_SHA']}"
         )
 
-    return {
+    evidence_values = (
+        evidence_name,
+        evidence_digest,
+        evidence_bytes,
+        evidence_build_sha,
+    )
+    has_evidence = any(value is not None for value in evidence_values)
+    if has_evidence and not all(value is not None for value in evidence_values):
+        raise LaneReceiptError("evidence metadata must be supplied together")
+    if (
+        lane == "cluster-transport-recovery"
+        and result == "success"
+        and not has_evidence
+    ):
+        raise LaneReceiptError(
+            "successful cluster transport recovery requires retained evidence"
+        )
+
+    evidence: dict[str, object] | None = None
+    if has_evidence:
+        assert evidence_name is not None
+        assert evidence_digest is not None
+        assert evidence_bytes is not None
+        assert evidence_build_sha is not None
+        if not evidence_name or Path(evidence_name).name != evidence_name:
+            raise LaneReceiptError("evidence name must be one basename")
+        if len(evidence_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in evidence_digest
+        ):
+            raise LaneReceiptError("evidence digest must be a lowercase SHA-256")
+        if evidence_bytes < 0:
+            raise LaneReceiptError("evidence byte count cannot be negative")
+        if evidence_build_sha != tested_sha:
+            raise LaneReceiptError(
+                f"evidence build sha {evidence_build_sha} does not match "
+                f"tested sha {tested_sha}"
+            )
+        evidence = {
+            "name": evidence_name,
+            "sha256": evidence_digest,
+            "bytes": evidence_bytes,
+            "build_sha": evidence_build_sha,
+        }
+
+    receipt = {
         "schema": 1,
         "kind": "ci-lane",
         "lane": lane,
@@ -95,6 +143,9 @@ def build_receipt(
             "bytes": log_bytes,
         },
     }
+    if evidence is not None:
+        receipt["evidence"] = evidence
+    return receipt
 
 
 def git_object(repository: Path, revision: str) -> str:
@@ -121,6 +172,22 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def read_evidence(path: Path) -> tuple[str, int, str]:
+    """Hash and inspect the same bytes from one retained JSON artifact."""
+
+    try:
+        contents = path.read_bytes()
+        evidence = json.loads(contents)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise LaneReceiptError(f"evidence is not valid JSON: {path}") from exc
+    if not isinstance(evidence, dict):
+        raise LaneReceiptError(f"evidence must be a JSON object: {path}")
+    build_sha = evidence.get("build_sha")
+    if not isinstance(build_sha, str) or not build_sha:
+        raise LaneReceiptError(f"evidence build_sha is missing: {path}")
+    return hashlib.sha256(contents).hexdigest(), len(contents), build_sha
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m validation.ci_lane_receipt",
@@ -128,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--log", required=True, type=Path)
+    parser.add_argument("--evidence", type=Path)
     parser.add_argument("--lane", required=True)
     parser.add_argument("--result", required=True)
     parser.add_argument("--command", action="append", dest="commands", default=[])
@@ -137,6 +205,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.log.is_file():
             raise LaneReceiptError(f"lane log does not exist: {args.log}")
+        evidence_path = (
+            args.evidence if args.evidence and args.evidence.is_file() else None
+        )
+        if args.evidence and evidence_path is None and args.result == "success":
+            raise LaneReceiptError(f"lane evidence does not exist: {args.evidence}")
+        evidence_metadata = read_evidence(evidence_path) if evidence_path else None
         receipt = build_receipt(
             os.environ,
             args.lane,
@@ -147,6 +221,10 @@ def main(argv: list[str] | None = None) -> int:
             args.log.stat().st_size,
             git_object(args.repository, "HEAD^{commit}"),
             git_object(args.repository, "HEAD^{tree}"),
+            evidence_path.name if evidence_path else None,
+            evidence_metadata[0] if evidence_metadata else None,
+            evidence_metadata[1] if evidence_metadata else None,
+            evidence_metadata[2] if evidence_metadata else None,
         )
     except (LaneReceiptError, OSError, subprocess.CalledProcessError) as exc:
         print(f"CI lane receipt failed: {exc}", file=sys.stderr)

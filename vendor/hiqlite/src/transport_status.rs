@@ -108,8 +108,9 @@ pub struct SnapshotTransportObservation {
     pub active_deadline_remaining_ms: Option<u64>,
     pub sample_age_ms: u64,
     pub phase: SnapshotTransportPhase,
-    /// Total snapshot starts plus retry starts observed for this peer and Raft
-    /// group during the retained observation lifetime.
+    /// Snapshot starts plus retry starts represented by this observation.
+    /// Outbound replacements after failure remain in one logical recovery
+    /// series; the first outbound snapshot after completion starts a new one.
     #[serde(default)]
     pub attempt_count: u64,
     pub reconnect_count: u64,
@@ -574,7 +575,28 @@ impl LocalSnapshotTransportStatus {
                     return;
                 }
                 if observation.attempt_id < attempt.attempt_id {
-                    observation.attempt_count = observation.attempt_count.saturating_add(1);
+                    let starts_new_series = observation.attempt_id == 0
+                        || observation.phase == SnapshotTransportPhase::Complete;
+                    if starts_new_series {
+                        observation.attempt_count = 1;
+                        observation.connection_attempt_count =
+                            u64::from(socket.connected || attempt.connection_attempt_sequence > 0);
+                        observation.retry_count = 0;
+                    } else {
+                        observation.attempt_count = observation.attempt_count.saturating_add(1);
+                        let additional_connections = if observation.outbound_connection_id
+                            == Some(attempt.connection_id)
+                        {
+                            attempt
+                                .connection_attempt_sequence
+                                .saturating_sub(observation.outbound_connection_attempt_sequence)
+                        } else {
+                            u64::from(socket.connected || attempt.connection_attempt_sequence > 0)
+                        };
+                        observation.connection_attempt_count = observation
+                            .connection_attempt_count
+                            .saturating_add(additional_connections);
+                    }
                 }
                 observation.attempt_id = attempt.attempt_id;
                 observation.snapshot_id = Some(retained_snapshot_id(snapshot_id));
@@ -594,9 +616,6 @@ impl LocalSnapshotTransportStatus {
                 } else {
                     SnapshotTransportPhase::Connecting
                 };
-                observation.connection_attempt_count =
-                    u64::from(socket.connected || attempt.connection_attempt_sequence > 0);
-                observation.retry_count = 0;
                 observation.last_error_category = None;
                 observation.operation_owns_work = true;
                 observation.outbound_connection_id = Some(attempt.connection_id);
@@ -2053,11 +2072,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn separate_full_snapshot_attempts_accumulate_after_failure() {
+    async fn recovery_series_preserves_failed_retry_and_resets_after_completion() {
         let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
         let deadline = Instant::now() + Duration::from_secs(30);
         let connection_id = status.next_outbound_connection_id();
-        let first = status.next_outbound_attempt("sqlite", 2, connection_id);
+        let mut first = status.next_outbound_attempt("sqlite", 2, connection_id);
+        first.connection_attempt_sequence = 1;
         status.begin_owned_outbound_attempt(
             &first,
             "snapshot-a",
@@ -2067,22 +2087,60 @@ mod tests {
             },
             deadline,
         );
-        status.outbound_failed_owned(&first, "snapshot_attempt_ended");
+        status.outbound_acknowledged_owned(&first, 64, true, None);
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.attempt_count, 1);
+        assert_eq!(completed.retry_count, 0);
+        assert_eq!(completed.reconnect_count, 0);
 
-        let second = status.next_outbound_attempt("sqlite", 2, connection_id);
+        let mut failed = status.next_outbound_attempt("sqlite", 2, connection_id);
+        failed.connection_attempt_sequence = 1;
         status.begin_owned_outbound_attempt(
-            &second,
+            &failed,
             "snapshot-b",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        status.connecting_owned("sqlite", 2, connection_id, 2, 2);
+        status.outbound_retry_owned(&failed, "snapshot_mismatch", Some(deadline));
+        status.outbound_failed_owned(&failed, "snapshot_attempt_ended");
+
+        let mut replacement = status.next_outbound_attempt("sqlite", 2, connection_id);
+        replacement.connection_attempt_sequence = 2;
+        status.begin_owned_outbound_attempt(
+            &replacement,
+            "snapshot-c",
             OutboundSnapshotSocket {
                 epoch: 2,
                 connected: true,
             },
             deadline,
         );
+        status.outbound_acknowledged_owned(&replacement, 64, true, None);
 
-        let observation = &status.snapshot().observations[0];
-        assert_eq!(observation.attempt_count, 2);
-        assert_eq!(observation.retry_count, 0);
+        let recovered = &status.snapshot().observations[0];
+        assert_eq!(recovered.attempt_count, 3);
+        assert_eq!(recovered.retry_count, 1);
+        assert_eq!(recovered.reconnect_count, 1);
+
+        let mut next_recovery = status.next_outbound_attempt("sqlite", 2, connection_id);
+        next_recovery.connection_attempt_sequence = 2;
+        status.begin_owned_outbound_attempt(
+            &next_recovery,
+            "snapshot-d",
+            OutboundSnapshotSocket {
+                epoch: 2,
+                connected: true,
+            },
+            deadline,
+        );
+        let reset = &status.snapshot().observations[0];
+        assert_eq!(reset.attempt_count, 1);
+        assert_eq!(reset.retry_count, 0);
+        assert_eq!(reset.reconnect_count, 0);
     }
 
     #[tokio::test(start_paused = true)]

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from validation.ci_lane_receipt import LaneReceiptError, build_receipt
+from validation.ci_lane_receipt import LaneReceiptError, build_receipt, main
 
 
 class CiLaneReceiptCase(unittest.TestCase):
@@ -29,6 +35,10 @@ class CiLaneReceiptCase(unittest.TestCase):
             "log_bytes": 1234,
             "tested_sha": "a" * 40,
             "tested_tree": "c" * 40,
+            "evidence_name": None,
+            "evidence_digest": None,
+            "evidence_bytes": None,
+            "evidence_build_sha": None,
         }
         arguments.update(overrides)
         return build_receipt(**arguments)  # type: ignore[arg-type]
@@ -70,12 +80,110 @@ class CiLaneReceiptCase(unittest.TestCase):
             lane="cluster-transport-recovery",
             commands=["make cluster-transport-recovery-check"],
             log_name="cluster-transport-recovery.log",
+            evidence_name="cluster-transport-recovery.json",
+            evidence_digest="d" * 64,
+            evidence_bytes=5678,
+            evidence_build_sha="a" * 40,
         )
 
         self.assertEqual(receipt["lane"], "cluster-transport-recovery")
         self.assertEqual(
             receipt["commands"], ["make cluster-transport-recovery-check"]
         )
+        self.assertEqual(
+            receipt["evidence"],
+            {
+                "name": "cluster-transport-recovery.json",
+                "sha256": "d" * 64,
+                "bytes": 5678,
+                "build_sha": "a" * 40,
+            },
+        )
+
+    def test_successful_transport_recovery_requires_exact_tree_evidence(self):
+        environment = self.environment()
+        environment["GITHUB_JOB"] = "cluster_transport_recovery"
+        base = {
+            "environment": environment,
+            "lane": "cluster-transport-recovery",
+            "commands": ["make cluster-transport-recovery-check"],
+            "log_name": "cluster-transport-recovery.log",
+        }
+
+        with self.assertRaisesRegex(LaneReceiptError, "requires retained evidence"):
+            self.receipt(**base)
+        with self.assertRaisesRegex(LaneReceiptError, "does not match tested sha"):
+            self.receipt(
+                **base,
+                evidence_name="cluster-transport-recovery.json",
+                evidence_digest="d" * 64,
+                evidence_bytes=5678,
+                evidence_build_sha="e" * 40,
+            )
+
+    def test_failed_transport_recovery_accepts_an_absent_evidence_artifact(self):
+        environment = self.environment()
+        environment["GITHUB_JOB"] = "cluster_transport_recovery"
+
+        receipt = self.receipt(
+            environment=environment,
+            lane="cluster-transport-recovery",
+            result="failure",
+            commands=["make cluster-transport-recovery-check"],
+            log_name="cluster-transport-recovery.log",
+        )
+
+        self.assertNotIn("evidence", receipt)
+
+    def test_cli_binds_successful_evidence_and_accepts_absent_failure_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "cluster-transport-recovery.log"
+            evidence = root / "cluster-transport-recovery.json"
+            receipt_path = root / "receipt.json"
+            log.write_bytes(b"campaign output\n")
+            evidence_contents = json.dumps(
+                {"build_sha": "a" * 40, "cycles": []}, sort_keys=True
+            ).encode("utf-8")
+            evidence.write_bytes(evidence_contents)
+            common = [
+                "--output",
+                str(receipt_path),
+                "--log",
+                str(log),
+                "--evidence",
+                str(evidence),
+                "--lane",
+                "cluster-transport-recovery",
+                "--command",
+                "make cluster-transport-recovery-check",
+            ]
+
+            with (
+                patch.dict(os.environ, self.environment(), clear=True),
+                patch(
+                    "validation.ci_lane_receipt.git_object",
+                    side_effect=lambda _repository, revision: (
+                        "a" * 40 if revision == "HEAD^{commit}" else "c" * 40
+                    ),
+                ),
+            ):
+                self.assertEqual(main([*common, "--result", "success"]), 0)
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    receipt["evidence"],
+                    {
+                        "name": evidence.name,
+                        "sha256": hashlib.sha256(evidence_contents).hexdigest(),
+                        "bytes": len(evidence_contents),
+                        "build_sha": "a" * 40,
+                    },
+                )
+
+                evidence.unlink()
+                self.assertEqual(main([*common, "--result", "failure"]), 0)
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                self.assertNotIn("evidence", receipt)
 
     def test_receipt_refuses_unknown_lanes_results_or_empty_commands(self):
         for overrides in (
@@ -93,6 +201,7 @@ class CiLaneReceiptCase(unittest.TestCase):
             {"log_name": "target/cluster-store.log"},
             {"log_digest": "B" * 64},
             {"log_bytes": -1},
+            {"evidence_name": "cluster-store.json"},
         ):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(LaneReceiptError):

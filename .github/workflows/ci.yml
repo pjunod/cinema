@@ -449,6 +449,7 @@ jobs:
           python3 -m validation.ci_lane_receipt
           --output target/validation/cluster-transport-recovery-receipt.json
           --log target/validation/cluster-transport-recovery.log
+          --evidence target/validation/cluster-transport-recovery.json
           --lane cluster-transport-recovery
           --result "$LANE_RESULT"
           --command "make cluster-transport-recovery-check"

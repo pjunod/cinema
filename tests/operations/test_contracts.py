@@ -2387,9 +2387,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         recovery = jobs["cluster_transport_recovery"]
         make_commands = make_dry_run_commands("cluster-transport-recovery-check")
 
-        self.assertEqual(len(make_commands), 10)
+        self.assertEqual(len(make_commands), 11)
         self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=20", make_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=21", make_commands[1])
         self.assertIn("scripts/require-test-count", make_commands[1])
         self.assertIn("transport_recovery::tests --lib", make_commands[1])
         exact_regressions = (
@@ -2399,6 +2399,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "whole_recovery_duration_cannot_exceed_the_absolute_deadline",
             "owned_async_task_growth_has_no_resource_slack",
             "owned_async_task_guard_tracks_abort_safe_lifetime",
+            "recovery_series_preserves_failed_retry_and_resets_after_completion",
             "production_snapshot_executor_worker_is_counted_until_joined",
         )
         for offset, regression in enumerate(exact_regressions, start=2):
@@ -2407,9 +2408,10 @@ for (const startupDelay of [0, 1600, 7000]) {
             self.assertIn("--lib -- --exact", make_commands[offset])
         self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[7])
         self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[8])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[9])
         self.assertIn(
             "transport-recovery target/validation/cluster-transport-recovery.json",
-            make_commands[9],
+            make_commands[10],
         )
 
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", recovery)
@@ -2421,6 +2423,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", recovery)
         self.assertIn("cluster-transport-recovery-receipt.json", recovery)
         self.assertIn("target/validation/cluster-transport-recovery.json", recovery)
+        self.assertIn(
+            "--evidence target/validation/cluster-transport-recovery.json", recovery
+        )
         self.assertIn("if-no-files-found: error", recovery)
         self.assertIn(
             "steps.transport_recovery.outcome != 'success'", recovery

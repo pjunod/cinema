@@ -1991,7 +1991,11 @@ samples above the established baseline are a leak, not cleanup evidence.
 
 Main-bound cluster changes run this command in the dedicated
 `cluster_transport_recovery` CI job and retain the evidence, log, and exact
-lane receipt. An effort is not qualified when that selected job is skipped or
+lane receipt. A successful receipt verifies that the artifact's `build_sha`
+equals the tested commit and binds the artifact's SHA-256 and byte count, so a
+different or replaced JSON file is not qualification evidence. A failed run
+can still retain a log-only receipt when the campaign stops before creating
+the artifact. An effort is not qualified when that selected job is skipped or
 fails. Ordinary effort task PRs retain their compile-only development gate;
 the 40-cycle campaign belongs to the final effort-to-main qualification.
 

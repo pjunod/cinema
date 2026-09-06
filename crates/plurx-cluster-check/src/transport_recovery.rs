@@ -708,42 +708,53 @@ async fn exercise_role_campaign(
             .checked_add(RECOVERY_DEADLINE)
             .context("recovery deadline overflow")?;
         let recovery = async {
-            spawn_recovery_node(
-                executable,
-                cluster,
-                recovery_launch(TARGET_NODE, cluster_root, specs, role),
-                recovery_deadline,
-            )
-            .await?;
-            cluster
-                .request(TARGET_NODE, Request::Open)
-                .await?
-                .require_ok()?;
-            if role == RecoveryRole::Learner {
+            let recovery_status = async {
+                spawn_recovery_node(
+                    executable,
+                    cluster,
+                    recovery_launch(TARGET_NODE, cluster_root, specs, role),
+                    recovery_deadline,
+                )
+                .await?;
                 cluster
-                    .request(TARGET_NODE, Request::StartHeartbeatLoop)
+                    .request(TARGET_NODE, Request::Open)
                     .await?
                     .require_ok()?;
-            }
-            let target_status = wait_for_installed_snapshot(
-                cluster,
+                if role == RecoveryRole::Learner {
+                    cluster
+                        .request(TARGET_NODE, Request::StartHeartbeatLoop)
+                        .await?
+                        .require_ok()?;
+                }
+                let target_status = wait_for_installed_snapshot(
+                    cluster,
+                    TARGET_NODE,
+                    snapshot_index,
+                    &source_snapshot.snapshot_id,
+                    recovery_deadline,
+                )
+                .await?;
+                let source_status = wait_for_completed_source_outbound(
+                    cluster,
+                    leader,
+                    TARGET_NODE,
+                    &source_snapshot.snapshot_id,
+                    recovery_deadline,
+                )
+                .await?;
+                Ok::<_, anyhow::Error>((target_status, source_status))
+            };
+            let installed_snapshot = wait_for_installed_snapshot_file(
+                cluster_root,
                 TARGET_NODE,
-                snapshot_index,
-                &source_snapshot.snapshot_id,
+                &source_snapshot,
                 recovery_deadline,
-            )
-            .await?;
-            let source_status = wait_for_completed_source_outbound(
-                cluster,
-                leader,
-                TARGET_NODE,
-                &source_snapshot.snapshot_id,
-                recovery_deadline,
-            )
-            .await?;
-            Ok::<_, anyhow::Error>((target_status, source_status))
+            );
+            let ((target_status, source_status), installed_snapshot) =
+                tokio::try_join!(recovery_status, installed_snapshot)?;
+            Ok::<_, anyhow::Error>((target_status, source_status, installed_snapshot))
         };
-        let (target_status, source_status) = supervise_recovery_writer(
+        let (target_status, source_status, installed_snapshot) = supervise_recovery_writer(
             &mut writer,
             &writer_config,
             ready_acknowledged_at_unix_ms,
@@ -792,13 +803,6 @@ async fn exercise_role_campaign(
         if image != expected_image {
             bail!(
                 "{} cycle {cycle} recovered image digest drifted",
-                role.label()
-            );
-        }
-        let installed_snapshot = snapshot_file(cluster_root, TARGET_NODE)?;
-        if installed_snapshot != source_snapshot {
-            bail!(
-                "{} cycle {cycle} installed snapshot file differs from source",
                 role.label()
             );
         }
@@ -902,7 +906,9 @@ async fn wait_for_installed_snapshot(
 ) -> Result<RecoveryRuntimeStatus> {
     loop {
         let status = request_status(cluster, target).await?;
-        let complete = status.snapshot_index == Some(snapshot_index)
+        let complete = status
+            .snapshot_index
+            .is_some_and(|index| index >= snapshot_index)
             && status
                 .applied_index
                 .is_some_and(|index| index >= snapshot_index)
@@ -1712,6 +1718,14 @@ fn snapshot_file(root: &Path, node_id: u64) -> Result<SnapshotFileEvidence> {
     let snapshot_id = std::fs::read_to_string(snapshots.join("current"))?
         .trim()
         .to_owned();
+    snapshot_file_by_id(root, node_id, &snapshot_id)
+}
+
+fn snapshot_file_by_id(
+    root: &Path,
+    node_id: u64,
+    snapshot_id: &str,
+) -> Result<SnapshotFileEvidence> {
     if snapshot_id.is_empty()
         || snapshot_id.contains('/')
         || snapshot_id.contains('\\')
@@ -1720,7 +1734,10 @@ fn snapshot_file(root: &Path, node_id: u64) -> Result<SnapshotFileEvidence> {
     {
         bail!("invalid current snapshot pointer {snapshot_id:?}");
     }
-    let path = snapshots.join(&snapshot_id);
+    let snapshots = root
+        .join(format!("node-{node_id}"))
+        .join("state_machine/snapshots");
+    let path = snapshots.join(snapshot_id);
     let mut file = File::open(&path).with_context(|| format!("open snapshot {path:?}"))?;
     let bytes = file.metadata()?.len();
     let mut digest = Sha256::new();
@@ -1733,10 +1750,50 @@ fn snapshot_file(root: &Path, node_id: u64) -> Result<SnapshotFileEvidence> {
         digest.update(&buffer[..read]);
     }
     Ok(SnapshotFileEvidence {
-        snapshot_id,
+        snapshot_id: snapshot_id.to_owned(),
         bytes,
         sha256: hex::encode(digest.finalize()),
     })
+}
+
+async fn wait_for_installed_snapshot_file(
+    root: &Path,
+    node_id: u64,
+    source_snapshot: &SnapshotFileEvidence,
+    deadline: Instant,
+) -> Result<SnapshotFileEvidence> {
+    let mut last_mismatch = None;
+    loop {
+        match snapshot_file_by_id(root, node_id, &source_snapshot.snapshot_id) {
+            Ok(installed_snapshot) if &installed_snapshot == source_snapshot => {
+                return Ok(installed_snapshot);
+            }
+            Ok(installed_snapshot) => {
+                last_mismatch = Some(format!(
+                    "last observed {} bytes with sha256 {}",
+                    installed_snapshot.bytes, installed_snapshot.sha256
+                ));
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error).context("read installed snapshot file"),
+        }
+        if Instant::now() >= deadline {
+            if let Some(last_mismatch) = last_mismatch {
+                bail!(
+                    "installed snapshot file {} did not match the source before the recovery deadline; {last_mismatch}",
+                    source_snapshot.snapshot_id
+                );
+            }
+            bail!(
+                "installed snapshot file {} did not appear before the recovery deadline",
+                source_snapshot.snapshot_id
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 fn delete_disposable_target(root: &Path, node_id: u64) -> Result<()> {
@@ -2272,6 +2329,76 @@ mod tests {
     #[test]
     fn complete_twenty_plus_twenty_artifact_is_accepted() {
         validate_transport_recovery_artifact(&artifact()).expect("valid recovery artifact");
+    }
+
+    #[tokio::test]
+    async fn installed_snapshot_evidence_survives_rotation_after_threshold_writes() {
+        let root = tempfile::tempdir().expect("snapshot rotation fixture root");
+        let source_snapshots = root.path().join("node-1").join("state_machine/snapshots");
+        let target_snapshots = root
+            .path()
+            .join(format!("node-{TARGET_NODE}"))
+            .join("state_machine/snapshots");
+        std::fs::create_dir_all(&source_snapshots).expect("create source snapshot fixture");
+        std::fs::create_dir_all(&target_snapshots).expect("create target snapshot fixture");
+        let installed_id = "00000000-0000-7000-8000-000000000001";
+        let rotated_id = "00000000-0000-7000-8000-000000000002";
+        std::fs::write(
+            source_snapshots.join(installed_id),
+            b"installed recovery snapshot",
+        )
+        .expect("write installed snapshot");
+        std::fs::write(source_snapshots.join("current"), installed_id)
+            .expect("point at installed snapshot");
+
+        let source_snapshot = snapshot_file(root.path(), 1).expect("source evidence");
+        let installed_snapshot = wait_for_installed_snapshot_file(
+            root.path(),
+            TARGET_NODE,
+            &source_snapshot,
+            Instant::now() + Duration::from_secs(2),
+        );
+        let rotate_snapshot = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            std::fs::write(target_snapshots.join(installed_id), b"partial snapshot")
+                .expect("write partial target snapshot");
+            std::fs::write(target_snapshots.join("current"), installed_id)
+                .expect("publish partial target snapshot");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            std::fs::write(
+                target_snapshots.join(installed_id),
+                b"installed recovery snapshot",
+            )
+            .expect("install target snapshot");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+
+            let continued_writes = root.path().join("continued-writes");
+            std::fs::create_dir(&continued_writes).expect("create continued-write fixture");
+            for ordinal in 1..=TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST + 1 {
+                std::fs::write(
+                    continued_writes.join(format!("{ordinal:04}")),
+                    ordinal.to_string(),
+                )
+                .expect("record continued write");
+            }
+            std::fs::write(
+                target_snapshots.join(rotated_id),
+                b"later snapshot after continued writes",
+            )
+            .expect("write rotated snapshot");
+            std::fs::write(target_snapshots.join("current"), rotated_id)
+                .expect("rotate current snapshot pointer");
+            std::fs::remove_file(target_snapshots.join(installed_id))
+                .expect("clean up superseded installed snapshot");
+        };
+        let (installed_snapshot, ()) = tokio::join!(installed_snapshot, rotate_snapshot);
+        let installed_snapshot =
+            installed_snapshot.expect("capture installed snapshot at installation");
+
+        let current_snapshot = snapshot_file(root.path(), TARGET_NODE).expect("current evidence");
+        assert_ne!(current_snapshot, source_snapshot);
+        assert_eq!(installed_snapshot, source_snapshot);
+        assert!(!target_snapshots.join(installed_id).exists());
     }
 
     #[test]
