@@ -126,6 +126,12 @@ hiqlite-spike: ## Run the isolated M0 raft/SQLite semantic proof
 	$(CARGO) test --locked --manifest-path spikes/hiqlite-m0/Cargo.toml \
 	  --test hiqlite_m0 -- --nocapture
 
+.PHONY: hiqlite-vendor-clippy
+hiqlite-vendor-clippy: ## Deny warnings in the vendored production snapshot transport
+	$(CARGO) clippy --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --lib --no-default-features --features auto-heal,cache,macros,sqlite \
+	  -- -D warnings
+
 .PHONY: hiqlite-baseline
 hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 	$(CARGO) test --release --manifest-path spikes/hiqlite-m0/Cargo.toml \
@@ -338,6 +344,86 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::cache_install_snapshot_preserves_mismatch_for_offset_reset \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::non_final_snapshot_rpc_uses_hard_ttl_when_it_is_shorter_than_chunk_budget \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::final_install_deadline_latches_once_and_mismatch_restores_transfer_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::final_install_respects_the_first_rpc_hard_cap_and_transfer_expiry \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::mismatch_cannot_reenter_final_install_after_transfer_expiry \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::watchable_snapshot_deadline_switches_to_the_active_phase \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::simultaneous_final_phase_update_wins_over_stale_transfer_timer \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_final_mismatch_restores_transfer_deadline_before_reread \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::sqlite_full_snapshot_enters_bounded_wrapper \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::cache_full_snapshot_enters_bounded_wrapper \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::unanswered_non_final_rpc_expires_at_chunk_budget_and_resets_socket \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::repeated_mismatch_style_resets_expire_at_the_original_transfer_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::final_install_may_exceed_chunk_window_but_cannot_renew_install_window \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::stale_snapshot_guard_cannot_clear_a_newer_attempt \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  config::tests::snapshot_deadline_durations_are_bounded_before_instant_arithmetic \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core \
+	  config::tests::snapshot_install_timeout_is_bounded_and_env_values_are_parsed \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core \
+	  config::tests::snapshot_chunk_and_transfer_timeouts_validate_bounds_and_relationship \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core \
+	  config::tests::snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::migration::tests::production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts \
 	  --lib -- --exact
 	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
 	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \
@@ -701,6 +787,49 @@ docker-up: ## Build + (re)start Compose after its startup budget passes
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
 	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
+
+# Fleet voters consume the already-qualified registry image. Pulling is safe
+# while the old container is running; the replacement still waits for the
+# resolved startup budget proof. That proof reads constants from this checkout,
+# so the pulled runtime's immutable image ID must carry the same revision as a
+# clean HEAD before the checker is allowed to run. Pin both Compose services to
+# that ID for the proof and mutation: neither a moving tag nor an override may
+# swap the artifact after it was inspected.
+.PHONY: docker-image-up
+docker-image-up: ## Pull + (re)start the prebuilt image after its startup budget passes
+	cd deploy && image_ref="$$(docker compose config --images plurxd)" \
+	  && test -n "$$image_ref" \
+	  && docker compose pull plurxd \
+	  && image_id="$$(docker image inspect --format '{{.Id}}' "$$image_ref")" \
+	  && test -n "$$image_id" \
+	  && revision="$$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$$image_id")" \
+	  && source_revision="$$(git rev-parse HEAD)" \
+	  && if test -n "$$(git status --porcelain --untracked-files=no)"; then \
+	       echo >&2 "docker-image-up refuses a tracked-dirty checkout because its source cannot prove a published image"; \
+	       echo >&2 "commit or stash tracked changes, then check out revision $$revision"; \
+	       exit 1; \
+	     fi \
+	  && if test -z "$$revision" || test "$$revision" = '<no value>'; then \
+	       echo >&2 "pulled image $$image_id ($$image_ref) has no org.opencontainers.image.revision label"; \
+	       echo >&2 "choose a qualified Plurx image built with PLURX_BUILD_SHA"; \
+	       exit 1; \
+	     fi \
+	  && if test "$$revision" != "$$source_revision"; then \
+	       echo >&2 "pulled image $$image_id was built from $$revision, but this checkout is $$source_revision"; \
+	       echo >&2 "fetch and check out $$revision, or choose the image published for $$source_revision"; \
+	       exit 1; \
+	     fi \
+	  && resolved_images="$$(PLURX_IMAGE="$$image_id" docker compose config --images plurxd plurx-discovery)" \
+	  && set -- $$resolved_images \
+	  && if test "$$#" -ne 2 || test "$$1" != "$$image_id" || test "$$2" != "$$image_id"; then \
+	       echo >&2 "plurxd and plurx-discovery must both resolve to inspected image $$image_id"; \
+	       echo >&2 "resolved images: $$resolved_images"; \
+	       exit 1; \
+	     fi \
+	  && period="$$(PLURX_IMAGE="$$image_id" python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
+	  && PLURX_IMAGE="$$image_id" PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
+	  && PLURX_IMAGE="$$image_id" PLURX_HEALTH_START_PERIOD="$$period" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --no-build --pull never
+	@echo "image up: $(VERSION)"
 
 .PHONY: release-check
 release-check: ## Verify the tree is ready to tag the current version

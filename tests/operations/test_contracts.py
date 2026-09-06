@@ -422,7 +422,17 @@ for (const startupDelay of [0, 1600, 7000]) {
             "stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}", compose
         )
         self.assertIn(
-            'start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"', compose
+            'start_period: "${PLURX_HEALTH_START_PERIOD:-25m}"', compose
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS:-}"',
+            compose,
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS:-}"',
+            compose,
         )
         self.assertIn(
             'PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: '
@@ -437,6 +447,10 @@ for (const startupDelay of [0, 1600, 7000]) {
     def test_discovery_uses_host_network_without_stealing_it_from_the_server(self):
         compose = read("deploy/docker-compose.yml")
         server, discovery = compose.split("  plurx-discovery:", 1)
+        self.assertEqual(
+            compose.count("image: ${PLURX_IMAGE:-plurx/plurxd:latest}"),
+            2,
+        )
         self.assertNotRegex(server, r"(?m)^    network_mode: host$")
         self.assertIn("network_mode: host", discovery)
         configured_origin = '"http://127.0.0.1:${PLURX_HTTP_PORT:-32400}"'
@@ -444,34 +458,78 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn(f"PLURX_DISCOVERY_SERVER_URL: {configured_origin}", discovery)
         self.assertIn(f"PLURX_BIND: {configured_bind}", discovery)
 
-    def _run_rollout_recipe(self, proof_exit: int) -> tuple[int, Path]:
-        """Run the real `docker-up` recipe with the checker and Docker stubbed."""
+    def _run_rollout_recipe(
+        self,
+        target: str,
+        up_command: str,
+        proof_exit: int,
+        *,
+        image_revision: str = "a" * 40,
+        checkout_revision: str = "a" * 40,
+        tracked_dirty: bool = False,
+        discovery_image: str | None = None,
+    ) -> tuple[int, Path, Path, Path, Path, Path]:
+        """Run a real rollout recipe with the checker and Docker stubbed."""
 
         rollout = [
             line
-            for line in make_dry_run_commands("docker-up")
-            if "docker compose up -d --build" in line
+            for line in make_dry_run_commands(target)
+            if up_command in line
         ][0]
         directory = Path(tempfile.mkdtemp())
-        marker = directory / "compose-up-ran"
+        pull_marker = directory / "compose-pull-ran"
+        derive_marker = directory / "budget-derive-ran"
+        proof_marker = directory / "budget-proof-ran"
+        up_marker = directory / "compose-up-ran"
+        image_marker = directory / "compose-up-image"
         stubs = directory / "bin"
         stubs.mkdir()
         (stubs / "python3").write_text(
             "#!/bin/sh\n"
             'case "$*" in\n'
-            "  *--emit-start-period*) echo 1335s ;;\n"
-            f"  *) exit {proof_exit} ;;\n"
+            f'  *--emit-start-period*) printf derived > "{derive_marker}"; echo 2535s ;;\n'
+            f'  *) printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{proof_marker}"; exit {proof_exit} ;;\n'
             "esac\n",
             encoding="utf-8",
         )
         (stubs / "docker").write_text(
             "#!/bin/sh\n"
-            f'printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{marker}"\n',
+            'case "$*" in\n'
+            '  *"compose config --images plurxd plurx-discovery"*) '
+            'printf "%s\\n%s\\n" "$PLURX_IMAGE" '
+            '"${STUB_DISCOVERY_IMAGE:-$PLURX_IMAGE}" ;;\n'
+            '  *"compose config --images plurxd"*) echo registry.example/plurxd:test ;;\n'
+            f'  *"compose pull plurxd"*) printf pulled > "{pull_marker}" ;;\n'
+            '  *"org.opencontainers.image.revision"*) '
+            'last=; for argument do last="$argument"; done; '
+            'test "$last" = sha256:1111111111111111111111111111111111111111111111111111111111111111 '
+            '|| exit 86; '
+            'printf "%s\\n" "$STUB_IMAGE_REVISION" ;;\n'
+            '  *"image inspect"*) '
+            'echo sha256:1111111111111111111111111111111111111111111111111111111111111111 ;;\n'
+            f'  *"compose up"*) printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{up_marker}"; '
+            f'printf "%s" "$PLURX_IMAGE" > "{image_marker}" ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        (stubs / "git").write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  "status --porcelain --untracked-files=no") '
+            '[ "$STUB_TRACKED_DIRTY" = 1 ] && echo " M Makefile"; exit 0 ;;\n'
+            '  "rev-parse HEAD") printf "%s\\n" "$STUB_CHECKOUT_REVISION" ;;\n'
+            "  *) exit 99 ;;\n"
+            "esac\n",
             encoding="utf-8",
         )
         for stub in stubs.iterdir():
             stub.chmod(0o755)
         environment = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}")
+        environment["STUB_IMAGE_REVISION"] = image_revision
+        environment["STUB_CHECKOUT_REVISION"] = checkout_revision
+        environment["STUB_TRACKED_DIRTY"] = "1" if tracked_dirty else "0"
+        if discovery_image is not None:
+            environment["STUB_DISCOVERY_IMAGE"] = discovery_image
         result = subprocess.run(
             ["sh", "-c", rollout],
             cwd=ROOT,
@@ -481,7 +539,14 @@ for (const startupDelay of [0, 1600, 7000]) {
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        return result.returncode, marker
+        return (
+            result.returncode,
+            pull_marker,
+            derive_marker,
+            proof_marker,
+            up_marker,
+            image_marker,
+        )
 
     def test_a_failed_budget_proof_stops_the_rollout_before_it_touches_a_container(
         self,
@@ -491,17 +556,180 @@ for (const startupDelay of [0, 1600, 7000]) {
         # the guarantee is shell-level and has to be exercised: a `;` here
         # would let a refused budget deploy anyway, and no assertion about the
         # recipe's text catches that.
-        code, marker = self._run_rollout_recipe(proof_exit=2)
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-up", "docker compose up -d --build", proof_exit=2
+            )
+        )
         self.assertNotEqual(code, 0)
+        self.assertFalse(pull_marker.exists())
+        self.assertTrue(derive_marker.exists())
+        self.assertTrue(proof_marker.exists())
         self.assertFalse(
-            marker.exists(), "compose up ran after the budget proof failed"
+            up_marker.exists(), "compose up ran after the budget proof failed"
         )
 
-        code, marker = self._run_rollout_recipe(proof_exit=0)
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-up", "docker compose up -d --build", proof_exit=0
+            )
+        )
         self.assertEqual(code, 0)
-        self.assertTrue(marker.exists())
+        self.assertFalse(pull_marker.exists())
+        self.assertTrue(derive_marker.exists())
+        self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertTrue(up_marker.exists())
         # The period that was proved is the period that gets applied.
-        self.assertEqual(marker.read_text(encoding="utf-8"), "1335s")
+        self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+
+    def test_prebuilt_image_rollout_matching_revision_proves_then_replaces(self):
+        commands = make_dry_run_commands("docker-image-up")
+        rollouts = [
+            line
+            for line in commands
+            if "docker compose up -d --no-build --pull never" in line
+        ]
+        self.assertEqual(len(rollouts), 1)
+        rollout = rollouts[0]
+        self.assertTrue(rollout.startswith("cd deploy && "))
+        self.assertEqual(rollout.count("docker compose pull plurxd"), 1)
+        self.assertEqual(rollout.count("--emit-start-period"), 1)
+        proof = (
+            'PLURX_IMAGE="$image_id" PLURX_HEALTH_START_PERIOD="$period" python3 '
+            "../scripts/validate-docker-startup-budget"
+        )
+        up = "docker compose up -d --no-build --pull never"
+        self.assertIn(proof, rollout)
+        self.assertLess(
+            rollout.index("docker compose pull plurxd"),
+            rollout.index("--emit-start-period"),
+        )
+        self.assertLess(rollout.index("--emit-start-period"), rollout.index(proof))
+        self.assertLess(rollout.index(proof), rollout.index(up))
+        self.assertIn(
+            'PLURX_IMAGE="$image_id" PLURX_HEALTH_START_PERIOD="$period" PLURX_NODE_HOSTNAME=',
+            rollout,
+        )
+        self.assertIn("docker image inspect --format '{{.Id}}'", rollout)
+        self.assertIn('org.opencontainers.image.revision', rollout)
+        self.assertIn('git status --porcelain --untracked-files=no', rollout)
+        self.assertIn('git rev-parse HEAD', rollout)
+        self.assertIn(
+            'PLURX_IMAGE="$image_id" docker compose config --images plurxd plurx-discovery',
+            rollout,
+        )
+        frozen_images = (
+            'PLURX_IMAGE="$image_id" docker compose config --images '
+            "plurxd plurx-discovery"
+        )
+        self.assertLess(
+            rollout.index("org.opencontainers.image.revision"),
+            rollout.index(frozen_images),
+        )
+        self.assertLess(
+            rollout.index(frozen_images), rollout.index("--emit-start-period")
+        )
+        self.assertNotIn("PLURX_BUILD_REF", rollout)
+
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up", up, proof_exit=2
+            )
+        )
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists(), "image was not pulled before the proof")
+        self.assertTrue(derive_marker.exists())
+        self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertFalse(
+            up_marker.exists(), "compose up ran after the budget proof failed"
+        )
+
+        code, pull_marker, derive_marker, proof_marker, up_marker, image_marker = (
+            self._run_rollout_recipe(
+                "docker-image-up", up, proof_exit=0
+            )
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertTrue(derive_marker.exists())
+        self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertTrue(up_marker.exists())
+        self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertEqual(
+            image_marker.read_text(encoding="utf-8"),
+            "sha256:" + "1" * 64,
+        )
+
+        operations = read("docs/OPERATIONS.md")
+        deploy_readme = read("deploy/README.md")
+        for document in (operations, deploy_readme):
+            self.assertIn("org.opencontainers.image.revision", document)
+            self.assertIn("--no-build --pull never", document)
+        self.assertNotIn("Restore `deploy/.env` to `latest`", operations)
+        self.assertIn("restore\n`deploy/.env` to `main`", operations)
+
+    def test_prebuilt_image_rollout_refuses_a_missing_revision_before_proof(self):
+        up = "docker compose up -d --no-build --pull never"
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up", up, proof_exit=0, image_revision=""
+            )
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertFalse(derive_marker.exists())
+        self.assertFalse(proof_marker.exists())
+        self.assertFalse(up_marker.exists())
+
+    def test_prebuilt_image_rollout_refuses_revision_mismatch_before_proof(self):
+        up = "docker compose up -d --no-build --pull never"
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up",
+                up,
+                proof_exit=0,
+                image_revision="a" * 40,
+                checkout_revision="b" * 40,
+            )
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertFalse(derive_marker.exists())
+        self.assertFalse(proof_marker.exists())
+        self.assertFalse(up_marker.exists())
+
+    def test_prebuilt_image_rollout_refuses_dirty_source_before_proof(self):
+        up = "docker compose up -d --no-build --pull never"
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up", up, proof_exit=0, tracked_dirty=True
+            )
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertFalse(derive_marker.exists())
+        self.assertFalse(proof_marker.exists())
+        self.assertFalse(up_marker.exists())
+
+    def test_prebuilt_image_rollout_refuses_divergent_discovery_image(self):
+        up = "docker compose up -d --no-build --pull never"
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up",
+                up,
+                proof_exit=0,
+                discovery_image="registry.example/plurxd:other",
+            )
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertFalse(derive_marker.exists())
+        self.assertFalse(proof_marker.exists())
+        self.assertFalse(up_marker.exists())
 
     def test_docker_up_preserves_override_discovery_and_stamps_the_build(self):
         commands = make_dry_run_commands("docker-up")
@@ -551,6 +779,10 @@ for (const startupDelay of [0, 1600, 7000]) {
         assert runtime_stage is not None
         self.assertEqual(runtime_stage.start(), stages[-1].start())
         runtime = dockerfile[runtime_stage.end() :]
+        self.assertIn('ARG PLURX_BUILD_SHA=""', runtime)
+        self.assertIn(
+            'LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"', runtime
+        )
         healthcheck_instructions = list(
             re.finditer(r"(?im)^[ \t]*healthcheck\b", dockerfile)
         )
@@ -585,12 +817,22 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertEqual(compose_start_seconds, start_period_seconds)
 
         config_source = read("crates/plurx-core/src/config.rs")
-        default_snapshot = re.search(
+        default_transfer = re.search(
+            r"(?m)^pub const DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = "
+            r"([\d_]+);$",
+            config_source,
+        )
+        default_install = re.search(
             r"(?m)^pub const DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = "
             r"([\d_]+);$",
             config_source,
         )
-        source_max_snapshot = re.search(
+        source_max_transfer = re.search(
+            r"(?m)^pub const MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = "
+            r"([\d_]+);$",
+            config_source,
+        )
+        source_max_install = re.search(
             r"(?m)^pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);$",
             config_source,
         )
@@ -607,42 +849,66 @@ for (const startupDelay of [0, 1600, 7000]) {
             )
             for name in phase_names
         }
-        self.assertIsNotNone(default_snapshot)
-        self.assertIsNotNone(source_max_snapshot)
+        self.assertIsNotNone(default_transfer)
+        self.assertIsNotNone(default_install)
+        self.assertIsNotNone(source_max_transfer)
+        self.assertIsNotNone(source_max_install)
         self.assertTrue(all(value is not None for value in phases.values()))
-        assert default_snapshot is not None and source_max_snapshot is not None
+        assert default_transfer is not None and default_install is not None
+        assert source_max_transfer is not None and source_max_install is not None
 
-        # Dockerfile owns the image default. Compose exposes a paired override
-        # for operators who deliberately extend the snapshot deadline.
+        # Dockerfile owns the image default. Compose exposes independent
+        # transfer/install overrides while the startup grace covers both.
         supported_default_startup_seconds = int(
-            default_snapshot.group(1).replace("_", "")
+            default_transfer.group(1).replace("_", "")
+        ) + int(
+            default_install.group(1).replace("_", "")
         ) + sum(int(value.group(1)) for value in phases.values() if value)
         self.assertGreaterEqual(
             start_period_seconds, supported_default_startup_seconds
         )
 
         env_example = read("deploy/.env.example")
-        max_snapshot = re.search(
+        rollout_transfer = re.search(
+            r"# PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS=(\d+)", env_example
+        )
+        rollout_install = re.search(
             r"# PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS=(\d+)", env_example
         )
-        max_health = re.search(
+        rollout_health = re.search(
             r"# PLURX_HEALTH_START_PERIOD=(\d+)([smh])", env_example
         )
-        self.assertIsNotNone(max_snapshot)
-        self.assertIsNotNone(max_health)
-        assert max_snapshot is not None and max_health is not None
-        env_max_snapshot_seconds = int(max_snapshot.group(1))
-        source_max_snapshot_seconds = int(
-            source_max_snapshot.group(1).replace("_", "")
+        self.assertIsNotNone(rollout_transfer)
+        self.assertIsNotNone(rollout_install)
+        self.assertIsNotNone(rollout_health)
+        assert rollout_transfer is not None and rollout_install is not None
+        assert rollout_health is not None
+        rollout_transfer_seconds = int(rollout_transfer.group(1))
+        rollout_install_seconds = int(rollout_install.group(1))
+        self.assertEqual(
+            rollout_transfer_seconds,
+            int(default_transfer.group(1).replace("_", "")),
         )
-        self.assertEqual(env_max_snapshot_seconds, source_max_snapshot_seconds)
-        max_health_seconds = parse_duration(
-            "".join(max_health.groups()), ".env.example maximum health period"
+        self.assertEqual(rollout_install_seconds, 1200)
+        rollout_health_seconds = parse_duration(
+            "".join(rollout_health.groups()), ".env.example rollout health period"
         )
-        supported_max_startup_seconds = source_max_snapshot_seconds + sum(
+        supported_rollout_startup_seconds = (
+            rollout_transfer_seconds
+            + rollout_install_seconds
+            + sum(int(value.group(1)) for value in phases.values() if value)
+        )
+        self.assertGreaterEqual(
+            rollout_health_seconds, supported_rollout_startup_seconds
+        )
+
+        supported_max_startup_seconds = int(
+            source_max_transfer.group(1).replace("_", "")
+        ) + int(source_max_install.group(1).replace("_", "")) + sum(
             int(value.group(1)) for value in phases.values() if value
         )
-        self.assertGreaterEqual(max_health_seconds, supported_max_startup_seconds)
+        self.assertEqual(supported_max_startup_seconds, 18135)
+        self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
@@ -1140,9 +1406,12 @@ for (const startupDelay of [0, 1600, 7000]) {
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
         effort = read(".github/workflows/effort-ci.yml")
+        effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
+        effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
         precommit = read("scripts/pre-commit")
+        catalog = tomllib.loads(read("validation/points.toml"))
 
         # Forgejo has no GitHub merge-queue event. The single required
         # aggregate workflow fires on main-bound pull requests, while the
@@ -1165,7 +1434,61 @@ for (const startupDelay of [0, 1600, 7000]) {
         # release suites; an effort/** -> main PR is expanded above instead.
         self.assertIn('      - "effort/**"', effort)
         self.assertIn("name: Effort development gate", effort)
-        self.assertIn("run: make effort-rust-check", effort)
+        self.assertEqual(
+            list(effort_rust_steps),
+            [
+                "Check out the candidate",
+                "Install the pinned Rust toolchain",
+                "Restore the effort Rust cache",
+                "Compile every Rust target without executing tests",
+                "Enforce persistent Cargo bounds",
+            ],
+        )
+        rust_toolchain = effort_rust_steps["Install the pinned Rust toolchain"]
+        self.assertEqual(
+            workflow_step_scalar(rust_toolchain, "uses"),
+            "https://github.com/dtolnay/rust-toolchain@1.97.1",
+        )
+        self.assertIn("          components: rustfmt, clippy", rust_toolchain)
+        self.assertEqual(
+            workflow_step_literal(
+                effort_rust_steps["Compile every Rust target without executing tests"],
+                "run",
+            ),
+            ["make effort-rust-check", "make hiqlite-vendor-clippy"],
+        )
+        self.assertEqual(
+            make_dry_run_commands("hiqlite-vendor-clippy"),
+            [
+                "cargo clippy --locked --manifest-path vendor/hiqlite/Cargo.toml "
+                "--lib --no-default-features "
+                "--features auto-heal,cache,macros,sqlite -- -D warnings"
+            ],
+        )
+        vendor_clippy = next(
+            check
+            for check in catalog["checks"]
+            if check["id"] == "hiqlite-vendor-clippy"
+        )
+        self.assertEqual(
+            vendor_clippy,
+            {
+                "id": "hiqlite-vendor-clippy",
+                "title": (
+                    "Vendored Hiqlite production snapshot transport "
+                    "denied-warning Clippy"
+                ),
+                "command": "make hiqlite-vendor-clippy",
+                "profiles": ["commit", "ci", "full", "nightly"],
+                "requires": ["cargo", "make"],
+                "missing": "fail",
+                "timeout_seconds": 1800,
+            },
+        )
+        cluster_point = next(
+            point for point in catalog["points"] if point["id"] == "cluster.auth"
+        )
+        self.assertIn("hiqlite-vendor-clippy", cluster_point["checks"])
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
         self.assertIn("run: make web-check", effort)
@@ -1265,6 +1588,23 @@ for (const startupDelay of [0, 1600, 7000]) {
             "repeated_connection_failures_return_supervised_tasks_to_baseline",
             "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
             "cache_install_snapshot_preserves_mismatch_for_offset_reset",
+            "snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window",
+            "non_final_snapshot_rpc_uses_hard_ttl_when_it_is_shorter_than_chunk_budget",
+            "final_install_deadline_latches_once_and_mismatch_restores_transfer_deadline",
+            "final_install_respects_the_first_rpc_hard_cap_and_transfer_expiry",
+            "mismatch_cannot_reenter_final_install_after_transfer_expiry",
+            "watchable_snapshot_deadline_switches_to_the_active_phase",
+            "simultaneous_final_phase_update_wins_over_stale_transfer_timer",
+            "production_final_mismatch_restores_transfer_deadline_before_reread",
+            "sqlite_full_snapshot_enters_bounded_wrapper",
+            "cache_full_snapshot_enters_bounded_wrapper",
+            "advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry",
+            "unanswered_non_final_rpc_expires_at_chunk_budget_and_resets_socket",
+            "repeated_mismatch_style_resets_expire_at_the_original_transfer_deadline",
+            "final_install_may_exceed_chunk_window_but_cannot_renew_install_window",
+            "stale_snapshot_guard_cannot_clear_a_newer_attempt",
+            "caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately",
+            "snapshot_deadline_durations_are_bounded_before_instant_arithmetic",
         )
         for test_name in hiqlite_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1278,6 +1618,19 @@ for (const startupDelay of [0, 1600, 7000]) {
                 "--no-default-features --features auto-heal,cache,macros,sqlite",
                 command,
             )
+            self.assertIn("--lib -- --exact", command)
+
+        core_snapshot_tests = (
+            "snapshot_install_timeout_is_bounded_and_env_values_are_parsed",
+            "snapshot_chunk_and_transfer_timeouts_validate_bounds_and_relationship",
+            "snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override",
+            "production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts",
+        )
+        for test_name in core_snapshot_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurx-core", command)
             self.assertIn("--lib -- --exact", command)
 
         proxy_writer_test = (
@@ -1368,6 +1721,7 @@ for (const startupDelay of [0, 1600, 7000]) {
                 "mkdir -p target/validation",
                 "{",
                 '  if [ "$RUN_CLUSTER_AUTH" = true ]; then',
+                "    make hiqlite-vendor-clippy",
                 "    make cluster-harness-check",
                 "  fi",
                 '  if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
@@ -1388,6 +1742,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn('--result "$LANE_RESULT"', topology_receipt)
         for command in (
+            "make hiqlite-vendor-clippy",
             "make cluster-harness-check",
             "cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml "
             "--tests --no-deps -- -D warnings",

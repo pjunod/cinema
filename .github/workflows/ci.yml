@@ -340,6 +340,7 @@ jobs:
           mkdir -p target/validation
           {
             if [ "$RUN_CLUSTER_AUTH" = true ]; then
+              make hiqlite-vendor-clippy
               make cluster-harness-check
             fi
             if [ "$RUN_HIQLITE_SPIKE" = true ]; then
@@ -365,6 +366,7 @@ jobs:
             --result "$LANE_RESULT"
           )
           if [ "$RUN_CLUSTER_AUTH" = true ]; then
+            receipt+=(--command "make hiqlite-vendor-clippy")
             receipt+=(--command "make cluster-harness-check")
           fi
           if [ "$RUN_HIQLITE_SPIKE" = true ]; then

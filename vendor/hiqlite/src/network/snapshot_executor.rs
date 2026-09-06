@@ -25,6 +25,7 @@ struct Job<Req, Resp> {
 /// starts a request, dropping that receiver cannot cancel the operation.
 pub(crate) struct NodeOwnedExecutor<Req, Resp> {
     tx: flume::Sender<Job<Req, Resp>>,
+    admission_timeout: Duration,
     shutdown: watch::Sender<bool>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -42,7 +43,10 @@ where
     Req: Send + 'static,
     Resp: Send + 'static,
 {
-    pub(crate) fn start<Execute, ExecuteFuture>(mut execute: Execute) -> Self
+    pub(crate) fn start<Execute, ExecuteFuture>(
+        admission_timeout: Duration,
+        mut execute: Execute,
+    ) -> Self
     where
         Execute: FnMut(Req) -> ExecuteFuture + Send + 'static,
         ExecuteFuture: Future<Output = Resp> + Send + 'static,
@@ -71,6 +75,7 @@ where
 
         Self {
             tx,
+            admission_timeout,
             shutdown,
             task: Mutex::new(Some(task)),
         }
@@ -79,7 +84,6 @@ where
     pub(crate) async fn submit(
         &self,
         request: Req,
-        admission_timeout: Duration,
         connection_closed: &mut watch::Receiver<bool>,
     ) -> Result<Resp, SubmitError> {
         if *connection_closed.borrow() {
@@ -96,7 +100,7 @@ where
 
         let (response, response_rx) = oneshot::channel();
         let mut pending = Job { request, response };
-        let admission_deadline = time::Instant::now() + admission_timeout;
+        let admission_deadline = time::Instant::now() + self.admission_timeout;
         loop {
             if *connection_closed.borrow() {
                 return Err(SubmitError::ConnectionClosed);
@@ -170,12 +174,15 @@ where
 pub(crate) type SnapshotExecutor<C> =
     NodeOwnedExecutor<InstallSnapshotRequest<C>, SnapshotResult<C>>;
 
-pub(crate) fn start_snapshot_executor<C>(raft: Raft<C>) -> SnapshotExecutor<C>
+pub(crate) fn start_snapshot_executor<C>(
+    raft: Raft<C>,
+    admission_timeout: Duration,
+) -> SnapshotExecutor<C>
 where
     C: RaftTypeConfig,
     C::SnapshotData: tokio::io::AsyncRead + tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin,
 {
-    NodeOwnedExecutor::start(move |request| {
+    NodeOwnedExecutor::start(admission_timeout, move |request| {
         let raft = raft.clone();
         async move { raft.install_snapshot(request).await }
     })
@@ -201,7 +208,7 @@ mod tests {
         let gate = Arc::new(Semaphore::new(0));
         let started = Arc::new(AtomicUsize::new(0));
         let completed = Arc::new(AtomicUsize::new(0));
-        let executor = Arc::new(NodeOwnedExecutor::start({
+        let executor = Arc::new(NodeOwnedExecutor::start(Duration::from_millis(20), {
             let gate = Arc::clone(&gate);
             let started = Arc::clone(&started);
             let completed = Arc::clone(&completed);
@@ -221,11 +228,7 @@ mod tests {
         let (_close_first, mut first_closed) = watch::channel(false);
         let first = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move {
-                executor
-                    .submit(1, Duration::from_secs(1), &mut first_closed)
-                    .await
-            }
+            async move { executor.submit(1, &mut first_closed).await }
         });
         while started.load(Ordering::SeqCst) != 1 {
             tokio::task::yield_now().await;
@@ -234,11 +237,7 @@ mod tests {
         let (close_second, mut second_closed) = watch::channel(false);
         let second = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move {
-                executor
-                    .submit(2, Duration::from_secs(1), &mut second_closed)
-                    .await
-            }
+            async move { executor.submit(2, &mut second_closed).await }
         });
         while !executor.tx.is_full() {
             tokio::task::yield_now().await;
@@ -246,9 +245,7 @@ mod tests {
 
         let (_close_third, mut third_closed) = watch::channel(false);
         assert_eq!(
-            executor
-                .submit(3, Duration::from_millis(20), &mut third_closed)
-                .await,
+            executor.submit(3, &mut third_closed).await,
             Err(SubmitError::AdmissionTimeout)
         );
 
@@ -269,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_reports_running_work_without_cancelling_it() {
         let gate = Arc::new(Semaphore::new(0));
-        let executor = Arc::new(NodeOwnedExecutor::start({
+        let executor = Arc::new(NodeOwnedExecutor::start(Duration::from_secs(1), {
             let gate = Arc::clone(&gate);
             move |request: usize| {
                 let gate = Arc::clone(&gate);
@@ -282,11 +279,7 @@ mod tests {
         let (_close, mut connection_closed) = watch::channel(false);
         let caller = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move {
-                executor
-                    .submit(1, Duration::from_secs(1), &mut connection_closed)
-                    .await
-            }
+            async move { executor.submit(1, &mut connection_closed).await }
         });
         tokio::task::yield_now().await;
 
@@ -302,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_before_submission_is_latched_and_admits_no_work() {
         let started = Arc::new(AtomicUsize::new(0));
-        let executor = NodeOwnedExecutor::start({
+        let executor = NodeOwnedExecutor::start(Duration::from_secs(1), {
             let started = Arc::clone(&started);
             move |request: usize| {
                 let started = Arc::clone(&started);
@@ -316,9 +309,7 @@ mod tests {
         let (_close, mut connection_closed) = watch::channel(false);
 
         assert_eq!(
-            executor
-                .submit(1, Duration::from_secs(1), &mut connection_closed)
-                .await,
+            executor.submit(1, &mut connection_closed).await,
             Err(SubmitError::ExecutorClosed)
         );
         assert!(executor.tx.is_empty());
@@ -330,7 +321,7 @@ mod tests {
     async fn cancelled_shutdown_wait_retains_the_executor_handle() {
         let gate = Arc::new(Semaphore::new(0));
         let started = Arc::new(Notify::new());
-        let executor = Arc::new(NodeOwnedExecutor::start({
+        let executor = Arc::new(NodeOwnedExecutor::start(Duration::from_secs(1), {
             let gate = Arc::clone(&gate);
             let started = Arc::clone(&started);
             move |request: usize| {
@@ -346,11 +337,7 @@ mod tests {
         let (_close, mut connection_closed) = watch::channel(false);
         let caller = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move {
-                executor
-                    .submit(1, Duration::from_secs(1), &mut connection_closed)
-                    .await
-            }
+            async move { executor.submit(1, &mut connection_closed).await }
         });
         started.notified().await;
 
@@ -380,7 +367,7 @@ mod tests {
     async fn admission_deadline_never_executes_the_timed_out_job() {
         let gate = Arc::new(Semaphore::new(0));
         let started = Arc::new(Mutex::new(Vec::new()));
-        let executor = Arc::new(NodeOwnedExecutor::start({
+        let executor = Arc::new(NodeOwnedExecutor::start(Duration::from_millis(10), {
             let gate = Arc::clone(&gate);
             let started = Arc::clone(&started);
             move |request: usize| {
@@ -397,11 +384,7 @@ mod tests {
         let (_close_first, mut first_closed) = watch::channel(false);
         let first = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move {
-                executor
-                    .submit(1, Duration::from_secs(1), &mut first_closed)
-                    .await
-            }
+            async move { executor.submit(1, &mut first_closed).await }
         });
         while started.lock().await.as_slice() != [1] {
             tokio::task::yield_now().await;
@@ -409,11 +392,7 @@ mod tests {
         let (close_second, mut second_closed) = watch::channel(false);
         let second = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move {
-                executor
-                    .submit(2, Duration::from_secs(1), &mut second_closed)
-                    .await
-            }
+            async move { executor.submit(2, &mut second_closed).await }
         });
         while !executor.tx.is_full() {
             tokio::task::yield_now().await;
@@ -422,11 +401,7 @@ mod tests {
         let (_close_third, mut third_closed) = watch::channel(false);
         let third = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move {
-                executor
-                    .submit(3, Duration::from_millis(10), &mut third_closed)
-                    .await
-            }
+            async move { executor.submit(3, &mut third_closed).await }
         });
         tokio::spawn({
             let gate = Arc::clone(&gate);
@@ -466,7 +441,7 @@ mod tests {
         let file = root.join("received.snapshot");
         let partial_written = Arc::new(Notify::new());
         let release = Arc::new(Semaphore::new(0));
-        let executor = Arc::new(NodeOwnedExecutor::start({
+        let executor = Arc::new(NodeOwnedExecutor::start(Duration::from_secs(1), {
             let file = file.clone();
             let partial_written = Arc::clone(&partial_written);
             let release = Arc::clone(&release);
@@ -520,7 +495,6 @@ mod tests {
                             offset: 0,
                             data: image,
                         },
-                        Duration::from_secs(1),
                         &mut first_closed,
                     )
                     .await
@@ -544,7 +518,6 @@ mod tests {
                             offset: 0,
                             data: image,
                         },
-                        Duration::from_secs(1),
                         &mut retry_closed,
                     )
                     .await
