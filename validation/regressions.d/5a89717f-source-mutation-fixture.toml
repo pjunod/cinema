@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5a89717f"]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The source-change classification test rewrote the process-wide clean-cra media fixture while the Rust test harness ran other VOD tests in parallel. Their producers correctly rejected the resulting metadata change as 'source changed before fragment publication'. The destructive test now copies the fixture into its private temporary directory before indexing or rewriting it, and asserts that the shared fixture remains unchanged. Running the complete vodserve test module with sixteen test threads exercises the four formerly failing resurrection and metering cases alongside the source-change test."
