@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 final review and PR qualification · **Updated:** 2026-09-05 ·
+**Status:** M0 locally qualified; final-head review and publication pending · **Updated:** 2026-09-05 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
 `main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
 
@@ -19,14 +19,14 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | History, 11-case playback, 60-capture UI, reader-browser, warmed cluster, and final unit suites pass |
-| Full PR validation | First pass completed with environment/setup failures fully diagnosed; corrected-head rerun follows final adversarial review |
+| Full PR validation | Corrected head `01368ce1` passed 23/23 runnable checks; Android-device was the sole declared skip because `adb` is unavailable |
 | Blocker | Publishing the reviewed head requires renewed external-transfer approval from the execution sandbox; local qualification continues |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Final review and PR qualification | [PR #915](https://github.com/pjunod/plurx/pull/915); focused gates and corrected-head unit suite pass |
+| M0 · baseline and diagnostic qualification | Locally qualified; final-head review and publication pending | [PR #915](https://github.com/pjunod/plurx/pull/915); focused gates and corrected-head full suite pass |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -391,7 +391,7 @@ lane and focused tests provide earlier feedback.
 | Working tree | the two failed FFmpeg-sensitive tests with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · copy-segment decode equivalence and mid-film generation identity |
 | Working tree | `make unit` with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · 2,785 tests; 3 declared ignores |
 | Working tree | `make playback-smoke` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Pass · 11/11 Chrome cases, including HDR tone-map, copy-HLS, no-MSE, seek, audio switch, and subtitle toggle |
-| Pending reviewed head | `make validate-full` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Not run; begins after the final adversarial re-review |
+| `01368ce1` | `make validate-full` with full FFmpeg 8.1.2, retained x265 ABI 216, Playwright 1.62.0, and anonymous pinned Android container preflight | Pass · 23 runnable checks; Android-device was the sole declared skip because `adb` is unavailable; cluster-auth passed in 1,638.3 s |
 
 ## Remaining evidence before release
 
