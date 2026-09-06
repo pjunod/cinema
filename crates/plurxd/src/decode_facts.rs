@@ -209,7 +209,7 @@ impl ProbeLaunchMode {
                 Some(&INTERRUPTED_SUPERVISOR_OWNERS)
             }
             Self::ProductionSteadyResponseInterruptedUntilDeadline => {
-                Some(&INTERRUPTED_SUPERVISOR_OWNERS)
+                Some(&STEADY_RESPONSE_SUPERVISOR_OWNERS)
             }
             _ => None,
         }
@@ -1739,6 +1739,9 @@ static FAILED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 #[cfg(all(test, target_os = "linux"))]
 static INTERRUPTED_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, target_os = "linux"))]
+static STEADY_RESPONSE_SUPERVISOR_OWNERS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(unix)]
@@ -3793,7 +3796,7 @@ void probe_main(unsigned long *stack) {
         let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
             .await
             .expect("production probe identity and version");
-        assert_eq!(INTERRUPTED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+        assert_eq!(STEADY_RESPONSE_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
         let ownership = Arc::new(tokio::sync::Semaphore::new(1));
         let started = std::time::Instant::now();
         assert_eq!(
@@ -3815,12 +3818,12 @@ void probe_main(unsigned long *stack) {
             Arc::clone(&ownership).try_acquire_owned().is_err(),
             "the version owner remains held during deliberately slow reap"
         );
-        assert_eq!(INTERRUPTED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 1);
+        assert_eq!(STEADY_RESPONSE_SUPERVISOR_OWNERS.load(Ordering::Acquire), 1);
         let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
             .await
             .expect("steady-response cleanup cannot wedge supervisor join")
             .expect("version ownership returns after reap and supervisor teardown");
-        assert_eq!(INTERRUPTED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+        assert_eq!(STEADY_RESPONSE_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     }
 
     #[cfg(target_os = "linux")]
