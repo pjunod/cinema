@@ -29,7 +29,7 @@ change.
 |---|---|---|---|---|
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
-| M3 · recovery budgets | `codex/cluster-transport-m3` | [#916](https://github.com/pjunod/plurx/pull/916) | code tip `f7671683` passed three adversarial reviews and the focused fast lane; the PR tip is under final exact-SHA review and the effort gate | Virtual-time exact bounds · config/env/Compose precedence |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | code tip `f7671683` passed three adversarial reviews and the focused fast lane; the PR tip is under final exact-SHA review and the effort gate | Virtual-time exact bounds · config/env/Compose precedence |
 | M4 · transport status | `codex/cluster-transport-m4` | not opened | combined candidate is undergoing review-finding fixes before exact-SHA re-review | Authenticated pre-HTTP status · zero store calls · stale samples expire |
 | M5 · recovery campaign | isolated review-fix branch | not opened | campaign harness and resource evidence are undergoing review-finding fixes before final integration | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
@@ -103,7 +103,7 @@ could beat a ready final-stage update, standalone durations could overflow
 untested, numeric overflow evidence was missing, the Dockerfile comment was
 stale, and receiver admission still used the old fixed timeout. All eight are
 fixed and the focused fast lane is green. The replacement SHA passed the same
-three adversarial tracks and is now in PR #916. The first replacement
+three adversarial tracks and is now in PR !60. The first replacement
 review also caught a cache-only denied-warning lint in a helper's oversized
 `Result`; the helper now performs only the phase restoration and the trait
 implementations retain error mapping. All three prescribed standalone Clippy
