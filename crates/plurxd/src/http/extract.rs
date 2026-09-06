@@ -84,6 +84,7 @@ pub(crate) struct CacheOnlyAdminAuthenticationTicket(u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CacheOnlyAdminRevocationTarget {
+    All,
     Digest(String),
     User(i64),
 }
@@ -142,6 +143,7 @@ impl CacheOnlyAdminRevocation {
 impl CachedAdminProofState {
     fn invalidate_target(&mut self, target: &CacheOnlyAdminRevocationTarget) {
         match target {
+            CacheOnlyAdminRevocationTarget::All => self.proofs.clear(),
             CacheOnlyAdminRevocationTarget::Digest(digest) => {
                 self.proofs.remove(digest);
             }
@@ -280,6 +282,19 @@ impl CacheOnlyAdminProofCache {
 
     pub(crate) fn begin_user_revocation(&self, user_id: i64) -> CacheOnlyAdminRevocation {
         let target = CacheOnlyAdminRevocationTarget::User(user_id);
+        self.begin_local_revocation(&target);
+        CacheOnlyAdminRevocation {
+            cache: self.clone(),
+            target,
+            retain_ambiguity_on_drop: false,
+        }
+    }
+
+    /// Fence and invalidate every local proof while the cluster permanently
+    /// activates the current revocation protocol. Activation has no Store
+    /// credential target, so its safe scope is the complete bounded cache.
+    pub(crate) fn begin_global_revocation(&self) -> CacheOnlyAdminRevocation {
+        let target = CacheOnlyAdminRevocationTarget::All;
         self.begin_local_revocation(&target);
         CacheOnlyAdminRevocation {
             cache: self.clone(),

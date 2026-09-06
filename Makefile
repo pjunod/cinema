@@ -835,6 +835,12 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::capability_refresh_error_and_rollback_clear_cache_only_admin_authority \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::membership_loop_automatically_activates_full_roster_revocation_protocol \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::full_roster_projection_activates_without_a_credential_mutation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  startup_tests::console_password_reset_fails_closed_before_any_store_mutation \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
@@ -869,6 +875,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::internal_auth_revocation::tests::cancelled_local_apply_wait_leaves_peer_memory_fence_closed \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::origin_waits_for_exact_claim_apply_before_observing_added_member \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::password_and_session_revocation_roll_back_together_on_delete_failure \

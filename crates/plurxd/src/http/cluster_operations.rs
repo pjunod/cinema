@@ -1510,6 +1510,33 @@ where
     }
 }
 
+async fn refresh_and_activate_cache_admin_revocation_with<
+    Refresh,
+    RefreshFuture,
+    Activate,
+    ActivateFuture,
+>(
+    cache: &super::extract::CacheOnlyAdminProofCache,
+    refresh_started: tokio::time::Instant,
+    mut refresh: Refresh,
+    activate: Activate,
+) -> Result<bool, String>
+where
+    Refresh: FnMut() -> RefreshFuture,
+    RefreshFuture: std::future::Future<Output = Result<bool, String>>,
+    Activate: FnOnce() -> ActivateFuture,
+    ActivateFuture: std::future::Future<Output = Result<(), String>>,
+{
+    if refresh_cache_admin_revocation_capability_with(cache, refresh_started, &mut refresh).await? {
+        return Ok(true);
+    }
+    if activate().await.is_err() {
+        return Ok(false);
+    }
+    refresh_cache_admin_revocation_capability_with(cache, tokio::time::Instant::now(), refresh)
+        .await
+}
+
 fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_ms: u64) {
     transport.observations.retain_mut(|observation| {
         let source_phase = observation.phase;
@@ -1587,6 +1614,7 @@ pub(crate) async fn membership_status_cache_loop(
         let refresh_started = tokio::time::Instant::now();
         let status_membership = state.membership.clone();
         let capability_membership = state.membership.clone();
+        let activation_state = state.clone();
         let (status_result, capability_result) = tokio::join!(
             refresh_membership_status_cache_with(
                 &state.membership_status_cache,
@@ -1598,14 +1626,24 @@ pub(crate) async fn membership_status_cache_loop(
                         .map_err(|error| error.to_string())
                 },
             ),
-            refresh_cache_admin_revocation_capability_with(
+            refresh_and_activate_cache_admin_revocation_with(
                 &state.cache_only_admin_proofs,
                 refresh_started,
+                move || {
+                    let capability_membership = capability_membership.clone();
+                    async move {
+                        capability_membership
+                            .cache_admin_revocation_ready()
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
+                },
                 move || async move {
-                    capability_membership
-                        .cache_admin_revocation_ready()
-                        .await
-                        .map_err(|error| error.to_string())
+                    super::internal_auth_revocation::ClusterCacheRevocation::activate_if_ready(
+                        &activation_state,
+                    )
+                    .await
+                    .map_err(|error| format!("{error:?}"))
                 },
             ),
         );
@@ -2818,6 +2856,40 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn membership_loop_automatically_activates_full_roster_revocation_protocol() {
+        let file = include_str!("cluster_operations.rs");
+        let source = file
+            .split_once("pub(crate) async fn membership_status_cache_loop")
+            .expect("membership cache loop")
+            .1
+            .split_once("pub(crate) async fn peer_status_cache_loop")
+            .expect("membership cache loop end")
+            .0;
+        assert!(source.contains("ClusterCacheRevocation::activate_if_ready"));
+        assert!(
+            source
+                .find("cache_admin_revocation_ready()")
+                .expect("initial readiness projection")
+                < source
+                    .find("ClusterCacheRevocation::activate_if_ready")
+                    .expect("automatic guarded activation")
+        );
+        let helper = file
+            .split_once("async fn refresh_and_activate_cache_admin_revocation_with")
+            .expect("activation helper")
+            .1
+            .split_once("fn age_transport_observations")
+            .expect("activation helper end")
+            .0;
+        assert!(
+            helper.find("activate().await").expect("guarded activation")
+                < helper
+                    .rfind("refresh_cache_admin_revocation_capability_with")
+                    .expect("post-activation readiness projection")
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn membership_projection_refresh_is_bounded_and_preserves_last_good_sample() {
         let cache = MembershipStatusCache::default();
@@ -2904,6 +2976,38 @@ mod tests {
         assert!(timeout.contains("timed out"), "{timeout}");
         assert!(!cache.authenticate(&digest));
         assert!(cache.authentication_ticket().is_none());
+    }
+
+    #[tokio::test]
+    async fn full_roster_projection_activates_without_a_credential_mutation() {
+        let cache = crate::http::extract::CacheOnlyAdminProofCache::new(true);
+        let refreshes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let activations = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_refreshes = refreshes.clone();
+        let observed_activations = activations.clone();
+
+        let ready = refresh_and_activate_cache_admin_revocation_with(
+            &cache,
+            tokio::time::Instant::now(),
+            move || {
+                let attempt = observed_refreshes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async move { Ok(attempt == 1) }
+            },
+            move || {
+                observed_activations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async { Ok(()) }
+            },
+        )
+        .await
+        .expect("full-roster activation and verification");
+
+        assert!(ready);
+        assert_eq!(refreshes.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(activations.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(
+            cache.authentication_ticket().is_some(),
+            "cache recovery opens only after the post-activation readiness read"
+        );
     }
 
     #[tokio::test(start_paused = true)]

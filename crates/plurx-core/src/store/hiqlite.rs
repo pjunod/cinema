@@ -1212,9 +1212,9 @@ impl HiqliteAuthStore {
     }
 
     /// Carry a transaction-local proof around credential mutations. Replicated
-    /// triggers start enforcing this as soon as any current v3 heartbeat has
-    /// existed, so a rolled-back binary cannot race another node's readiness
-    /// refresh and mutate authority with legacy SQL.
+    /// triggers start enforcing this after a guarded full-roster activation,
+    /// so a rolled-back binary cannot race another node's readiness refresh
+    /// and mutate authority with legacy SQL.
     async fn credential_mutation(
         &self,
         statements: Vec<(&'static str, Params)>,

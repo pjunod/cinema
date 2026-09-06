@@ -212,6 +212,33 @@ pub(crate) struct ClusterCacheRevocation {
 }
 
 impl ClusterCacheRevocation {
+    /// Permanently activate the current revocation protocol as soon as every
+    /// committed member advertises it. This uses the same exclusion, stable
+    /// roster, and global Begin/End invalidation as a credential mutation, but
+    /// deliberately performs no Store write.
+    pub(crate) async fn activate_if_ready(state: &AppState) -> Result<(), ApiError> {
+        if !state.membership.is_replicated() {
+            return Ok(());
+        }
+        if !state
+            .membership
+            .cache_admin_revocation_activation_ready()
+            .await
+            .map_err(|_| propagation_error())?
+        {
+            return Ok(());
+        }
+        let operation_guard = state
+            .cache_only_admin_proofs
+            .try_acquire_revocation_operation()
+            .map_err(|_| propagation_error())?;
+        let local = state.cache_only_admin_proofs.begin_global_revocation();
+        Self::begin(state, local, operation_guard)
+            .await?
+            .finish(state)
+            .await
+    }
+
     pub(crate) async fn begin_digest(state: &AppState, digest: &str) -> Result<Self, ApiError> {
         let operation_guard = state
             .cache_only_admin_proofs
@@ -245,6 +272,24 @@ impl ClusterCacheRevocation {
         // acknowledges Begin after this same row is visible in its local
         // applied SQL, causally ordering any later absence after the acquire.
         let operation_id = membership_exclusion.operation_id();
+        let membership = state.membership.clone();
+        let claim_id = operation_id.clone();
+        if wait_for_exact_local_claim_with(&state.shutdown, move || {
+            let membership = membership.clone();
+            let claim_id = claim_id.clone();
+            async move {
+                membership
+                    .cache_admin_revocation_claim_applied(&claim_id)
+                    .await
+                    .map_err(|_| "cache-admin exclusion local apply read failed")
+            }
+        })
+        .await
+        .is_err()
+        {
+            membership_exclusion.release().await?;
+            return Err(propagation_error());
+        }
         let request = Request {
             schema_version: WIRE_SCHEMA_VERSION,
             operation_id: operation_id.clone(),
@@ -253,7 +298,7 @@ impl ClusterCacheRevocation {
         let deadline = deadline_after(FANOUT_TIMEOUT);
         let mut roster = StableBeginRoster::default();
         for _ in 0..MAX_STABLE_ROSTER_PASSES {
-            let current = match peer_directory(state, deadline).await {
+            let current = match peer_directory(state, &operation_id, deadline).await {
                 Ok(peers) => peers,
                 Err(error) => {
                     cleanup_begin(&transport, &roster.peers(), &request).await;
@@ -299,7 +344,7 @@ impl ClusterCacheRevocation {
     /// global invalidation before the API reports success.
     pub(crate) async fn finish(mut self, state: &AppState) -> Result<(), ApiError> {
         let deadline = deadline_after(FANOUT_TIMEOUT);
-        let current = match peer_directory(state, deadline).await {
+        let current = match peer_directory(state, &self.operation_id, deadline).await {
             Ok(peers) => peers,
             Err(error) => {
                 let _ = fanout(
@@ -404,12 +449,16 @@ async fn release_membership_exclusion_with_retry(
 
 async fn peer_directory(
     state: &AppState,
+    claim_id: &str,
     deadline: tokio::time::Instant,
 ) -> Result<Vec<ActivityPeer>, ApiError> {
-    let peers = tokio::time::timeout_at(deadline, state.membership.cache_admin_revocation_peers())
-        .await
-        .map_err(|_| propagation_error())?
-        .map_err(|_| propagation_error())?;
+    let peers = tokio::time::timeout_at(
+        deadline,
+        state.membership.cache_admin_revocation_peers(claim_id),
+    )
+    .await
+    .map_err(|_| propagation_error())?
+    .map_err(|_| propagation_error())?;
     if !revocation_peer_count_is_bounded(peers.len()) {
         return Err(propagation_error());
     }
@@ -512,7 +561,7 @@ async fn apply_and_wait_for_local_claim_with<Check, CheckFuture>(
     cache: &super::extract::CacheOnlyAdminProofCache,
     request: &Request,
     shutdown: &tokio_util::sync::CancellationToken,
-    mut check: Check,
+    check: Check,
 ) -> Result<(), &'static str>
 where
     Check: FnMut() -> CheckFuture,
@@ -525,6 +574,17 @@ where
         return Ok(());
     }
 
+    wait_for_exact_local_claim_with(shutdown, check).await
+}
+
+async fn wait_for_exact_local_claim_with<Check, CheckFuture>(
+    shutdown: &tokio_util::sync::CancellationToken,
+    mut check: Check,
+) -> Result<(), &'static str>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<bool, &'static str>>,
+{
     tokio::time::timeout(LOCAL_CLAIM_APPLY_TIMEOUT, async {
         loop {
             if check().await? {
@@ -565,8 +625,8 @@ fn validate(request: &Request) -> Result<(), StatusCode> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply, apply_and_wait_for_local_claim_with, validate, Phase, Request, StableBeginRoster,
-        WIRE_SCHEMA_VERSION,
+        apply, apply_and_wait_for_local_claim_with, validate, wait_for_exact_local_claim_with,
+        Phase, Request, StableBeginRoster, WIRE_SCHEMA_VERSION,
     };
     use crate::http::extract::CacheOnlyAdminProofCache;
     use plurx_core::auth;
@@ -584,7 +644,7 @@ mod tests {
             .split_once("async fn fanout(")
             .expect("revocation peer directory end")
             .0;
-        assert!(source.contains("cache_admin_revocation_peers()"));
+        assert!(source.contains("cache_admin_revocation_peers(claim_id)"));
         assert!(!source.contains("operations_peers()"));
     }
 
@@ -603,7 +663,15 @@ mod tests {
                 .find("membership_exclusion.commit().await?")
                 .expect("replicated exclusion commit")
                 < begin
-                    .find("peer_directory(state, deadline).await")
+                    .find("wait_for_exact_local_claim_with")
+                    .expect("origin exact-claim apply wait")
+        );
+        assert!(
+            begin
+                .find("wait_for_exact_local_claim_with")
+                .expect("origin exact-claim apply wait")
+                < begin
+                    .find("peer_directory(state, &operation_id, deadline).await")
                     .expect("committed roster read")
         );
         assert!(begin.contains("membership_exclusion,"));
@@ -751,6 +819,28 @@ mod tests {
         );
         assert!(cache.authentication_ticket().is_none());
         assert!(!cache.authenticate(&digest));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn origin_waits_for_exact_claim_apply_before_observing_added_member() {
+        let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = checks.clone();
+        wait_for_exact_local_claim_with(&tokio_util::sync::CancellationToken::new(), move || {
+            let attempt = observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move { Ok(attempt == 2) }
+        })
+        .await
+        .expect("the exact exclusion eventually applies after the member addition");
+
+        let mut roster = StableBeginRoster::default();
+        let current = vec![peer("node-b", 2), peer("node-c", 3), peer("node-d", 4)];
+        let (unfenced, stable) = roster.observe(current.clone());
+        assert!(!stable);
+        assert_eq!(
+            unfenced, current,
+            "the post-claim roster must include node-d"
+        );
+        assert_eq!(checks.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
 
     #[test]

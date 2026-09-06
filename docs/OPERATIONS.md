@@ -1823,9 +1823,12 @@ miss, expiry, non-admin result, or cache failure returns `401` without falling
 back to Store. Store-backed authentication captures the cache revocation
 generation before its read and publishes proof only if that generation is
 unchanged. On replicated nodes, publication and cache-only authentication start
-disabled. A background projection enables them only after every member in the
-exact committed Raft configuration carries a `cache_admin_revocation_v3` row
-whose timestamp equals that node's current heartbeat. Version 3 means the node
+disabled. A background activation pass enables them only after every member in
+the exact committed Raft configuration carries a `cache_admin_revocation_v3`
+row whose timestamp equals that node's current heartbeat. The pass takes the
+replicated membership exclusion, waits for its exact claim to apply locally,
+and globally clears cached proofs with the same bounded Begin/End fanout used
+for credential mutations before publishing readiness. Version 3 means the node
 supports the replicated credential-mutation exclusion, exact Store-write
 predicate, and local-applied claim acknowledgement described below. Version 1
 and version 2 capability heartbeats are retired by the replicated schema so a

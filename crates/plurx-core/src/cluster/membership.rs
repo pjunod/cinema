@@ -745,7 +745,7 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          claim_id TEXT PRIMARY KEY) STRICT",
     // Exists only inside one current Store transaction. The table is also in
     // the fresh auth schema; repeating it here upgrades existing clusters
-    // before the first v3 heartbeat can activate the guards below.
+    // before the full-roster activation pass can enable the guards below.
     "CREATE TABLE IF NOT EXISTS cluster_credential_mutation_intents (\
          singleton INTEGER PRIMARY KEY CHECK (singleton = 1)) STRICT",
     // A permanent protocol transition, separate from individual capability
@@ -2085,7 +2085,6 @@ fn committed_capability_unready_nodes_sql(capability: &str) -> String {
 /// Whether every exact committed Raft member has a current capability proof.
 /// Starting from `json_each` is intentional: a configuration member whose SQL
 /// identity row has not applied yet is unready, not silently absent.
-#[cfg(test)]
 fn committed_capability_ready_sql(capability: &str) -> String {
     format!(
         "SELECT COUNT(*) AS count FROM json_each($1) AS committed \
@@ -2105,8 +2104,7 @@ fn committed_capability_ready_sql(capability: &str) -> String {
 fn activate_credential_guard_sql() -> String {
     format!(
         "INSERT INTO cluster_credential_guard_activation (singleton) \
-         SELECT 1 WHERE EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases) \
-           AND EXISTS (SELECT 1 FROM json_each($1)) \
+         SELECT 1 WHERE EXISTS (SELECT 1 FROM json_each($1)) \
            AND NOT EXISTS (SELECT 1 FROM json_each($1) AS committed \
              WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
                JOIN cluster_node_capabilities AS capability \
@@ -2115,6 +2113,8 @@ fn activate_credential_guard_sql() -> String {
                 AND active.removed_at IS NULL \
                 AND capability.capability = '{CACHE_ADMIN_REVOCATION_CAPABILITY}' \
                 AND capability.last_seen_at = active.last_seen_at)) \
+           AND EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases \
+             WHERE claim_id = $2) \
          ON CONFLICT(singleton) DO NOTHING"
     )
 }
@@ -2133,7 +2133,9 @@ fn committed_credential_guard_ready_sql() -> String {
               WHERE active.raft_id = CAST(committed.value AS INTEGER) \
                 AND active.removed_at IS NULL \
                 AND capability.capability = '{CACHE_ADMIN_REVOCATION_CAPABILITY}' \
-                AND capability.last_seen_at = active.last_seen_at))\
+                AND capability.last_seen_at = active.last_seen_at)) \
+           OR NOT EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases \
+             WHERE claim_id = $2)\
          ) AS count"
     )
 }
@@ -5787,7 +5789,10 @@ impl MembershipManager {
     /// A pending removal is still a serving authority until Raft membership no
     /// longer contains it, so omission, missing identity, or missing endpoint
     /// fails the credential mutation closed instead of shortening the fanout.
-    pub async fn cache_admin_revocation_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+    pub async fn cache_admin_revocation_peers(
+        &self,
+        claim_id: &str,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(Vec::new());
         };
@@ -5811,14 +5816,14 @@ impl MembershipManager {
             .client
             .execute(
                 activate_credential_guard_sql(),
-                params!(members_json.clone()),
+                params!(members_json.clone(), claim_id),
             )
             .await?;
         let capability = inner
             .client
             .query_consistent_map::<CountRow, _>(
                 committed_credential_guard_ready_sql(),
-                params!(members_json.clone()),
+                params!(members_json.clone(), claim_id),
             )
             .await?;
         if !capability.first().is_some_and(|row| row.count == 0) {
@@ -6721,6 +6726,36 @@ impl MembershipManager {
             .client
             .query_map::<CountRow, _>(
                 committed_cache_admin_revocation_ready_sql(),
+                params!(members_json),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count == 0))
+    }
+
+    /// Cheap quorum-backed preflight for the automatic activation attempt.
+    /// This is only an optimization that avoids taking the replicated
+    /// exclusion throughout a partial rollout; the claim-bound activation
+    /// statement revalidates the roster after the exclusion commits.
+    pub async fn cache_admin_revocation_activation_ready(&self) -> Result<bool, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(false);
+        };
+        let members = inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .nodes()
+            .map(|(raft_id, _)| *raft_id)
+            .collect::<BTreeSet<_>>();
+        if !cache_admin_roster_admits_local(&members, inner.identity.raft_id) {
+            return Ok(false);
+        }
+        let members_json = bounded_committed_raft_ids_json(&members)?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                committed_capability_ready_sql(CACHE_ADMIN_REVOCATION_CAPABILITY),
                 params!(members_json),
             )
             .await?;
@@ -13522,7 +13557,8 @@ mod tests {
                    node_id TEXT NOT NULL, capability TEXT NOT NULL, \
                    last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability)); \
                  CREATE TABLE cluster_cache_admin_revocation_leases (\
-                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1)); \
+                   singleton INTEGER PRIMARY KEY CHECK(singleton = 1), \
+                   claim_id TEXT NOT NULL UNIQUE); \
                  CREATE TABLE cluster_credential_mutation_intents (\
                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1)); \
                  CREATE TABLE cluster_credential_guard_activation (\
@@ -13537,7 +13573,8 @@ mod tests {
                    ('node-a', 1, 100, NULL), \
                    ('node-b', 2, 100, NULL), \
                    ('node-c', 3, 100, NULL); \
-                 INSERT INTO cluster_cache_admin_revocation_leases VALUES (1); \
+                 INSERT INTO cluster_cache_admin_revocation_leases \
+                   VALUES (1, 'activation-claim'); \
                  INSERT INTO users VALUES (1, 'old-hash', 1);",
             )
             .expect("construct three-voter rolling-upgrade state");
@@ -13565,7 +13602,7 @@ mod tests {
             connection
                 .execute(
                     &activate_credential_guard_sql(),
-                    rusqlite::params!["[1,2,3]"],
+                    rusqlite::params!["[1,2,3]", "activation-claim"],
                 )
                 .expect("attempt exact-roster guard activation")
         };
@@ -13580,6 +13617,15 @@ mod tests {
         };
 
         publish_capability("node-a");
+        assert_eq!(
+            connection
+                .execute(
+                    &activate_credential_guard_sql(),
+                    rusqlite::params!["[1,2,3]", "stale-or-foreign-claim"],
+                )
+                .expect("reject a non-owned activation claim"),
+            0
+        );
         assert_eq!(activate(), 0);
         assert_eq!(activation_count(), 0);
         assert_eq!(
