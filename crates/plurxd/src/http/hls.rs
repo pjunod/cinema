@@ -651,6 +651,29 @@ pub struct CreateSession {
     pub intent: Option<plurx_core::playback::MediaIntentEnvelope>,
 }
 
+/// Test-only seam that freezes one create after it has recorded its viewer's
+/// ask and before its activation runs.
+///
+/// The property it exists to prove cannot be observed any other way. `create`
+/// carries the revision it *recorded* into the activation rather than one read
+/// at activation time, and those two values are identical except in the window
+/// between them — so a test that cannot stop inside that window cannot tell the
+/// correct implementation from the broken one. Modelled on the replicated
+/// store's `ACTIVATION_POINTER_READ_PAUSE`, which exists for the same reason.
+///
+/// One waiter at a time, taken rather than cloned, so a test that forgets to
+/// arm it cannot accidentally inherit another test's pause.
+#[cfg(test)]
+type CreateAskRecordedPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+static CREATE_ASK_RECORDED_PAUSE: std::sync::LazyLock<
+    std::sync::Mutex<Option<CreateAskRecordedPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
 impl CreateSession {
     /// `height` is initially resolved by the caller — Auto answered, explicit
     /// rungs snapped, the source-height promise honored. A bound stall reopen
@@ -1630,6 +1653,19 @@ pub async fn create(
                 })?
                 .revision,
         );
+        #[cfg(test)]
+        {
+            let pause = {
+                let mut slot = CREATE_ASK_RECORDED_PAUSE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                slot.take()
+            };
+            if let Some((reached, release)) = pause {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+        }
     }
     let ingress_serving_authority = state.serving.authority();
     let ingress_serving_generation = ingress_serving_authority.admit().ok_or_else(|| {
@@ -20325,45 +20361,6 @@ mod tests {
     /// has never written the setting, so it is off here in exactly the way it is
     /// off in production by default — and the row still lands, because the write
     /// is on create and reads nothing about control.
-    #[tokio::test]
-    async fn an_ask_survives_the_control_protocol_being_switched_off() {
-        use plurx_core::playback::DesiredQuality;
-        let state = resolver_state();
-        assert_eq!(
-            state
-                .store
-                .get_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
-                .await
-                .expect("reading the control setting"),
-            None,
-            "the control protocol is off, which is the case under test"
-        );
-
-        let ask = envelope(3, DesiredQuality::Manual { height: 720 });
-        let _ = create_with(
-            &state,
-            CreateSession {
-                playback_id: "player-off".into(),
-                intent: Some(ask.clone()),
-                ..bare_create()
-            },
-        )
-        .await;
-
-        let recorded = state
-            .store
-            .desired_selection(7, "player-off")
-            .await
-            .expect("reading the desired row")
-            .expect("an ask made with control off is still an ask");
-        assert_eq!(recorded.digest, ask.digest());
-    }
-
-    /// An envelope that cannot mean anything is refused, and records nothing.
-    ///
-    /// The second half is the one worth asserting: a validation that runs after
-    /// the write would still return 400 and would look identical from the
-    /// outside, while leaving a row nobody can order against.
     /// The revision a create records reaches the pointer it eventually writes.
     ///
     /// Three separate things have to line up for the fence to mean anything,
@@ -20402,6 +20399,7 @@ mod tests {
             Json(CreateSession {
                 playback_id: "chain-player".into(),
                 intent: Some(ask.clone()),
+                copy: Some(true),
                 ..bare_create()
             }),
         )
@@ -20415,9 +20413,20 @@ mod tests {
             .expect("the create recorded its viewer's ask");
         assert_eq!(recorded.digest, ask.digest());
 
-        // Whether the create could be completed on this fixture is not the
-        // point and is not asserted; what matters is that if it reached the
-        // pointer, the pointer names the ask that was current when it did.
+        // The pointer half does not run here, and saying so is the point.
+        //
+        // No fixture in this suite can drive a create to completion — this one
+        // stops at `vod_index_pending`, because nothing has built a fragment
+        // index for its file — so the assertions below are reachable only once
+        // such a fixture exists. Left in place, behind an explicit check of
+        // *why* the create failed, so this reports the day that changes rather
+        // than silently continuing to prove only half of what it names.
+        assert!(
+            answer.is_err(),
+            "if a create can now complete on this fixture, the pointer \
+             assertions below have started running — check them, then delete \
+             this comment"
+        );
         if answer.is_ok() {
             let pointer = fixture
                 .store

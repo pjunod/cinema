@@ -1179,6 +1179,144 @@ async fn media_activation_confirmation_recovers_a_committed_timeout() {
     );
 }
 
+/// The other ordering: B commits first, and C reconciles against B rather than
+/// being discarded.
+///
+/// §1 asks for both, in those words, and only one had a test. "C wins first, B
+/// fails" is the refusal — a successor built for an ask the viewer has left
+/// must not be published. This is the case where nothing went wrong and the
+/// system still has to do the right thing: B's commit lands, the pointer moves
+/// to B, and the newer ask C arrives *after*. C is not stale — it is the
+/// viewer's current wish — so discarding it because the pointer moved would
+/// strand the viewer on the selection they have already replaced, with nothing
+/// anywhere recording that they asked for anything else.
+///
+/// Reconciling means C stages against the pointer as it now is, naming B as its
+/// predecessor, and is admitted. The two orderings therefore have opposite
+/// outcomes from the same pair of facts, which is why proving one says nothing
+/// about the other.
+#[tokio::test]
+async fn a_newer_ask_reconciles_against_a_commit_that_landed_first() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("commit-then-ask", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-commit-then-ask";
+        let predecessor = "11111111-1111-4111-8111-111111111301";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "11111111-1111-4111-8111-111111111302",
+            backend,
+        )
+        .await;
+
+        let first = store
+            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first ask: {error}"));
+
+        // B: staged and committed against the ask that was current.
+        let b = "11111111-1111-4111-8111-111111111303";
+        let mut staged = staged_preparation(
+            user.id,
+            playback,
+            b,
+            "11111111-1111-4111-8111-111111111304",
+            predecessor,
+        );
+        staged.expected_desired_revision = Some(first.revision);
+        store
+            .prepare_media_session(&staged)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stage B: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: B stages against the current ask"));
+        let mut commit = preparation_commit_request(b, 3_000, 900_000);
+        commit.expected_desired_revision = Some(first.revision);
+        store
+            .commit_media_session_preparation(user.id, playback, &commit)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: commit B: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: B's commit lands first"));
+        let after_b = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback points somewhere"));
+        assert_eq!(after_b.incarnation_id, b, "{backend}: B committed first");
+
+        // C: the viewer's newer ask, arriving after B landed.
+        let second = store
+            .record_desired_selection(
+                user.id,
+                playback,
+                &"b".repeat(64),
+                "v1;quality=original",
+                4_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second ask: {error}"));
+        assert_eq!(second.revision, 2, "{backend}: C is a different ask");
+
+        // The stale-predecessor attempt goes first, while the slot is empty.
+        // Run the other way round it passes because the slot is occupied,
+        // which is a different rule entirely.
+        //
+        // Two guards can refuse it — the pointer no longer names that
+        // predecessor, and B's commit ended that session — and disabling
+        // either leaves the other. So this assertion pins the outcome and not
+        // a mechanism, which is the honest thing for it to claim: what must be
+        // true is that the ask cannot be staged against a pointer that has
+        // moved, not which guard happens to say so first.
+        let mut unreconciled = staged_preparation(
+            user.id,
+            playback,
+            "11111111-1111-4111-8111-111111111307",
+            "11111111-1111-4111-8111-111111111308",
+            predecessor,
+        );
+        unreconciled.expected_desired_revision = Some(second.revision);
+        unreconciled.now_ms = 5_000;
+        assert!(
+            store
+                .prepare_media_session(&unreconciled)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale-predecessor stage: {error}"))
+                .is_none(),
+            "{backend}: reconciling means naming the pointer that is there now, \
+             not the one this ask was cut from"
+        );
+
+        let mut reconciled = staged_preparation(
+            user.id,
+            playback,
+            "11111111-1111-4111-8111-111111111305",
+            "11111111-1111-4111-8111-111111111306",
+            // Against B, which is what "reconcile against B" means: the
+            // predecessor C names is the pointer as it now stands.
+            b,
+        );
+        reconciled.expected_desired_revision = Some(second.revision);
+        reconciled.now_ms = 6_000;
+        assert!(
+            store
+                .prepare_media_session(&reconciled)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stage C: {error}"))
+                .is_some(),
+            // This is the load-bearing half. The refusal above has company;
+            // this admission has none — if a commit landing first discarded
+            // the newer ask, nothing else in the suite would notice.
+            "{backend}: the viewer's current ask is not discarded because a \
+             commit landed before it"
+        );
+    })
+    .await;
+}
+
 fn staged_preparation(
     user_id: i64,
     playback_id: &str,
