@@ -459,14 +459,28 @@ outer budget was too small on a loaded development host: the durable-store and
 topology contracts completed successfully, but the runner terminated the
 following activation suite partway through. The activation suite then passed
 7/7 in isolation in 73.83 seconds on the same candidate.
-On POSIX, every check runs under an owned shell. If this outer budget expires,
-the runner recursively discovers and freezes the shell's descendant tree
-before any parent can orphan a child, including descendants that created
-another process group or session. It asks that frozen tree to terminate,
-force-kills survivors, and reaps the owned shell before recording exit 124 or
-starting another check, so Cargo, voter, and daemon children cannot contaminate
-later evidence. Windows uses bounded `taskkill /T /F`; failure to terminate the
-tree aborts validation instead of returning a misleading timeout verdict.
+On POSIX, the runner first proves that its process census is available, then
+starts every check in a new session. If the outer budget expires, one bounded
+cleanup deadline covers discovery, termination, direct-shell reap, and output
+EOF. The runner immediately stops the root process group, discovers both the
+launch session and retained-parent child sessions, stops newly observed groups
+until the same complete stopped closure is seen twice, and sends `SIGKILL`
+deepest-first without resuming the tree. It reaps only its owned shell; it does
+not claim to reap grandchildren. Exit 124 is recorded only when the closure,
+kill, reap, and output drain all succeed. Census, convergence, signal, reap, or
+EOF failure aborts validation as an infrastructure error. Windows uses bounded
+`taskkill /T /F`, and every nonzero, timed-out, or incomplete result likewise
+aborts instead of producing a timeout verdict.
+
+This is ownership for trusted validation checks, not containment for hostile
+code. A check may create process groups and sessions, but every live child
+session must retain a parent in the check tree. Checks must not double-fork,
+daemonize, deliberately orphan a child session, or launch an unowned host
+service. A harness that needs background service behavior must retain and reap
+its controller or use its own kernel/container ownership boundary. The current
+cluster controller's separate process group and the decoder probe's retained
+`setsid()` child obey this contract; arbitrary detached-session containment is
+not claimed on Darwin.
 
 **What a timeout there means.** `Database("replicated store operation timed out")`
 is the host reporting that it could not finish an operation in three seconds.

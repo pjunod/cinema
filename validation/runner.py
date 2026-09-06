@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 import dataclasses
 import datetime as dt
 import json
@@ -92,6 +91,23 @@ class CheckResult:
     message: str
     log_path: str | None
     output: str
+
+
+@dataclasses.dataclass(frozen=True, order=True)
+class _ProcessIdentity:
+    """A process identity that cannot silently follow PID reuse."""
+
+    pid: int
+    started: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _ProcessRecord:
+    identity: _ProcessIdentity
+    parent_pid: int
+    process_group: int
+    session_id: int
+    state: str
 
 
 def _strings(value: object, field: str) -> tuple[str, ...]:
@@ -542,6 +558,9 @@ def _run_shell(
             "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         }
     else:
+        # Refuse to start a check if the inventory needed for bounded cleanup
+        # is already unavailable or malformed.
+        _process_snapshot(time.monotonic() + 5)
         group_options = {"start_new_session": True}
 
     process = subprocess.Popen(
@@ -559,9 +578,17 @@ def _run_shell(
         output, _ = process.communicate(timeout=timeout_seconds)
         return process.returncode, output, time.monotonic() - started
     except subprocess.TimeoutExpired:
-        _terminate_process_tree(process)
+        cleanup_deadline = time.monotonic() + 10
         try:
-            output, _ = process.communicate(timeout=5)
+            _terminate_process_tree(process, cleanup_deadline)
+        except Exception:
+            if process.stdout is not None:
+                process.stdout.close()
+            raise
+        try:
+            output, _ = process.communicate(
+                timeout=_remaining_cleanup_time(cleanup_deadline)
+            )
         except subprocess.TimeoutExpired as error:
             if process.stdout is not None:
                 process.stdout.close()
@@ -572,9 +599,19 @@ def _run_shell(
         return 124, output, time.monotonic() - started
 
 
-def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
-    """Terminate a timed-out check and every process in its owned tree."""
+def _remaining_cleanup_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("validation process-tree cleanup exceeded its deadline")
+    return remaining
 
+
+def _terminate_process_tree(
+    process: subprocess.Popen[str], deadline: float | None = None
+) -> None:
+    """Bound cleanup of a timed-out check or abort without a timeout verdict."""
+
+    cleanup_deadline = deadline if deadline is not None else time.monotonic() + 10
     if os.name == "nt":
         try:
             completed = subprocess.run(
@@ -582,105 +619,204 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
-                timeout=10,
+                timeout=min(10, _remaining_cleanup_time(cleanup_deadline)),
             )
         except subprocess.TimeoutExpired as error:
-            process.kill()
-            process.wait(timeout=5)
+            _kill_and_reap_owned_process(process, cleanup_deadline)
             raise RuntimeError("timed out terminating validation process tree") from error
-        if completed.returncode != 0 and process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
+        if completed.returncode != 0:
+            _kill_and_reap_owned_process(process, cleanup_deadline)
             raise RuntimeError(
                 f"taskkill refused validation process tree with {completed.returncode}"
             )
         if process.poll() is None:
             try:
-                process.wait(timeout=10)
+                process.wait(timeout=_remaining_cleanup_time(cleanup_deadline))
             except subprocess.TimeoutExpired as error:
-                process.kill()
-                process.wait(timeout=5)
+                _kill_and_reap_owned_process(process, cleanup_deadline)
                 raise RuntimeError(
                     "validation process tree remained alive after taskkill"
                 ) from error
         return
 
-    frozen = _freeze_process_tree(process.pid)
-    _signal_processes(frozen, signal.SIGTERM)
-    _signal_processes(frozen, signal.SIGCONT)
-    time.sleep(0.25)
-    _signal_processes(frozen, signal.SIGKILL)
+    frozen_groups = {process.pid: 0}
+    cleanup_error: Exception | None = None
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired as error:
-        process.kill()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired as kill_error:
-            raise RuntimeError(
-                "validation shell remained alive after recursive process-tree kill"
-            ) from kill_error
+        os.killpg(process.pid, signal.SIGSTOP)
+        _freeze_process_tree(process.pid, frozen_groups, cleanup_deadline)
+    except Exception as error:  # fallback still kills every group observed so far
+        cleanup_error = error
+
+    signal_errors = _kill_frozen_groups(frozen_groups)
+    reap_error = _reap_owned_process(process, cleanup_deadline)
+    if cleanup_error is not None:
         raise RuntimeError(
-            "validation shell exceeded the recursive process-tree cleanup deadline"
-        ) from error
+            "could not prove the attached validation process tree was contained"
+        ) from cleanup_error
+    if signal_errors:
+        raise RuntimeError(
+            "could not force-kill every frozen validation process group: "
+            + "; ".join(signal_errors)
+        )
+    if reap_error is not None:
+        raise RuntimeError("could not reap the owned validation shell") from reap_error
 
 
-def _freeze_process_tree(root_pid: int) -> set[int]:
-    """Stop the observed descendant tree before any parent can orphan a child."""
+def _kill_and_reap_owned_process(
+    process: subprocess.Popen[str], deadline: float
+) -> None:
+    if process.poll() is None:
+        process.kill()
+    error = _reap_owned_process(process, deadline)
+    if error is not None:
+        raise RuntimeError("validation shell did not exit after direct kill") from error
 
-    frozen = {root_pid}
+
+def _reap_owned_process(
+    process: subprocess.Popen[str], deadline: float
+) -> Exception | None:
+    if process.poll() is not None:
+        return None
+    try:
+        process.wait(timeout=_remaining_cleanup_time(deadline))
+    except Exception as error:
+        return error
+    return None
+
+
+def _kill_frozen_groups(frozen_groups: dict[int, int]) -> list[str]:
+    """Force-kill groups deepest-first and the owned root group last."""
+
+    errors: list[str] = []
+    ordered_groups = sorted(
+        frozen_groups, key=lambda group: (frozen_groups[group], group), reverse=True
+    )
+    for process_group in ordered_groups:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            errors.append(f"pgid {process_group}: {error}")
+    return errors
+
+
+def _freeze_process_tree(
+    root_pid: int,
+    frozen_groups: dict[int, int],
+    deadline: float,
+) -> None:
+    """Stop an attached descendant closure and prove a stable fixed point."""
+
+    previous_closure: frozenset[_ProcessIdentity] | None = None
     stable_snapshots = 0
-    for _ in range(8):
-        discovered = _descendant_processes(root_pid)
-        new_processes = discovered - frozen
-        frozen.update(discovered)
-        _signal_processes((root_pid,), signal.SIGSTOP)
-        _signal_processes(sorted(frozen - {root_pid}), signal.SIGSTOP)
-        if new_processes:
-            stable_snapshots = 0
-        else:
+    while True:
+        try:
+            _remaining_cleanup_time(deadline)
+        except RuntimeError as error:
+            raise RuntimeError(
+                "validation descendant tree did not reach a frozen fixed point"
+            ) from error
+        snapshot = _process_snapshot(deadline)
+        if root_pid not in snapshot:
+            raise RuntimeError(
+                "validation shell exited before its attached tree could be frozen"
+            )
+        discovered = _owned_processes(root_pid, snapshot)
+        closure = frozenset(record for record, _ in discovered)
+        new_groups: dict[int, int] = {}
+        for record, depth in discovered:
+            if record.process_group not in frozen_groups:
+                new_groups[record.process_group] = max(
+                    depth, new_groups.get(record.process_group, 0)
+                )
+            elif (
+                record.process_group != root_pid
+                and depth > frozen_groups[record.process_group]
+            ):
+                frozen_groups[record.process_group] = depth
+
+        for process_group, depth in sorted(new_groups.items(), key=lambda item: item[1]):
+            os.killpg(process_group, signal.SIGSTOP)
+            frozen_groups[process_group] = depth
+
+        all_stopped = all(
+            record.state.startswith(("T", "Z")) for record, _ in discovered
+        )
+        if not new_groups and all_stopped and closure == previous_closure:
             stable_snapshots += 1
             if stable_snapshots == 2:
-                break
-        time.sleep(0.01)
-    return frozen
+                return
+        else:
+            stable_snapshots = 0
+        previous_closure = closure
+        try:
+            time.sleep(min(0.01, _remaining_cleanup_time(deadline)))
+        except RuntimeError as error:
+            raise RuntimeError(
+                "validation descendant tree did not reach a frozen fixed point"
+            ) from error
 
 
-def _descendant_processes(root_pid: int) -> set[int]:
+def _process_snapshot(deadline: float) -> dict[int, _ProcessRecord]:
     completed = subprocess.run(
-        ["/bin/ps", "-axo", "pid=,ppid="],
+        ["/bin/ps", "-axo", "pid=,ppid=,state=,lstart="],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=5,
+        timeout=min(5, _remaining_cleanup_time(deadline)),
     )
-    children: dict[int, list[int]] = {}
+    snapshot: dict[int, _ProcessRecord] = {}
     for line in completed.stdout.splitlines():
         fields = line.split()
-        if len(fields) != 2:
-            continue
-        pid, parent_pid = (int(field) for field in fields)
-        children.setdefault(parent_pid, []).append(pid)
-
-    descendants = {root_pid}
-    pending = [root_pid]
-    while pending:
-        parent_pid = pending.pop()
-        for child_pid in children.get(parent_pid, ()):
-            if child_pid in descendants:
-                continue
-            descendants.add(child_pid)
-            pending.append(child_pid)
-    return descendants
-
-
-def _signal_processes(process_ids: Iterable[int], sig: signal.Signals) -> None:
-    for pid in process_ids:
+        if len(fields) < 8:
+            raise RuntimeError(f"malformed process inventory row: {line!r}")
         try:
-            os.kill(pid, sig)
+            pid = int(fields[0])
+            parent_pid = int(fields[1])
+        except ValueError as error:
+            raise RuntimeError(f"malformed process inventory row: {line!r}") from error
+        try:
+            process_group = os.getpgid(pid)
+            session_id = os.getsid(pid)
         except ProcessLookupError:
-            pass
+            continue
+        if process_group <= 0 or session_id <= 0 or not fields[2]:
+            raise RuntimeError(f"invalid process inventory row: {line!r}")
+        snapshot[pid] = _ProcessRecord(
+            identity=_ProcessIdentity(pid, " ".join(fields[3:])),
+            parent_pid=parent_pid,
+            process_group=process_group,
+            session_id=session_id,
+            state=fields[2],
+        )
+    return snapshot
+
+
+def _owned_processes(
+    root_pid: int, snapshot: dict[int, _ProcessRecord]
+) -> tuple[tuple[_ProcessRecord, int], ...]:
+    if root_pid not in snapshot:
+        return ()
+
+    depths = {
+        pid: (0 if record.process_group == root_pid else 1)
+        for pid, record in snapshot.items()
+        if record.session_id == root_pid
+    }
+    changed = True
+    while changed:
+        changed = False
+        for pid, record in snapshot.items():
+            if pid in depths or record.parent_pid not in depths:
+                continue
+            depths[pid] = depths[record.parent_pid] + 1
+            changed = True
+    return tuple(
+        (snapshot[pid], depth)
+        for pid, depth in sorted(depths.items(), key=lambda item: item[1])
+    )
 
 
 def execute_checks(

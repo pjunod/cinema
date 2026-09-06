@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,7 @@ import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
 
-from validation import ci_scope
+from validation import ci_scope, runner as validation_runner
 from validation.ci_scope import (
     CI_ROUTING_PATHS,
     all_scope,
@@ -599,6 +600,25 @@ checks = ["baseline"]
         self.assertEqual(results[0].returncode, 124)
         self.assertIn("timed out", results[0].output)
 
+    @unittest.skipIf(os.name == "nt", "POSIX process census contract")
+    def test_process_census_failure_refuses_to_launch_a_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "launched"
+            with (
+                mock.patch.object(
+                    validation_runner,
+                    "_process_snapshot",
+                    side_effect=PermissionError("injected preflight denial"),
+                ),
+                self.assertRaisesRegex(PermissionError, "injected preflight denial"),
+            ):
+                validation_runner._run_shell(
+                    f"printf launched > {shlex.quote(str(marker))}", root, 1
+                )
+
+            self.assertFalse(marker.exists())
+
     @unittest.skipIf(os.name == "nt", "POSIX process-group contract")
     def test_timeout_terminates_descendants_across_sessions(self):
         catalog = self.load()
@@ -663,6 +683,339 @@ time.sleep(30)
                 if wait_after_ready > 0:
                     time.sleep(wait_after_ready)
                 self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX session ownership contract")
+    def test_timeout_terminates_reparented_group_in_launch_session(self):
+        catalog = self.load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready = root / "ready"
+            marker = root / "survived"
+            intermediate = root / "intermediate.py"
+            intermediate.write_text(
+                """\
+from pathlib import Path
+import os
+import signal
+import sys
+import time
+
+os.setpgrp()
+if os.fork() != 0:
+    os._exit(0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+ready = Path(sys.argv[1])
+marker = Path(sys.argv[2])
+ready.write_text("ready", encoding="utf-8")
+time.sleep(1.5)
+marker.write_text("survived", encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
+            parent = root / "parent.py"
+            parent.write_text(
+                """\
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2], sys.argv[3]])
+deadline = time.monotonic() + 5
+while not Path(sys.argv[2]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not Path(sys.argv[2]).exists():
+    raise RuntimeError("reparented group did not become ready")
+time.sleep(30)
+""",
+                encoding="utf-8",
+            )
+            timed_tree = dataclasses.replace(
+                catalog.check_map["baseline"],
+                command=(
+                    f"{shlex.quote(sys.executable)} {shlex.quote(str(parent))} "
+                    f"{shlex.quote(str(intermediate))} {shlex.quote(str(ready))} "
+                    f"{shlex.quote(str(marker))}"
+                ),
+                timeout_seconds=1,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = execute_checks(
+                    (timed_tree,),
+                    root,
+                    root / "artifacts",
+                    strict=True,
+                    fail_fast=True,
+                )
+
+            self.assertEqual(results[0].returncode, 124)
+            self.assertTrue(ready.exists())
+            wait_after_ready = 1.75 - (time.time() - ready.stat().st_mtime)
+            if wait_after_ready > 0:
+                time.sleep(wait_after_ready)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_timeout_cleanup_failure_kills_root_group_and_aborts(self):
+        catalog = self.load()
+        for cleanup_snapshots_before_failure in (0, 1):
+            with (
+                self.subTest(
+                    cleanup_snapshots_before_failure=cleanup_snapshots_before_failure
+                ),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                marker = root / "survived"
+                timed_tree = dataclasses.replace(
+                    catalog.check_map["baseline"],
+                    command=(
+                        f"sleep 1.5; printf survived > {shlex.quote(str(marker))}"
+                    ),
+                    timeout_seconds=1,
+                )
+                original_snapshot = validation_runner._process_snapshot
+                calls = 0
+
+                def fail_discovery(
+                    deadline: float,
+                ) -> dict[int, validation_runner._ProcessRecord]:
+                    nonlocal calls
+                    calls += 1
+                    if calls <= 1 + cleanup_snapshots_before_failure:
+                        return original_snapshot(deadline)
+                    raise PermissionError("injected process discovery denial")
+
+                with (
+                    mock.patch.object(
+                        validation_runner,
+                        "_process_snapshot",
+                        side_effect=fail_discovery,
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "could not prove the attached validation process tree",
+                    ),
+                ):
+                    execute_checks(
+                        (timed_tree,),
+                        root,
+                        root / "artifacts",
+                        strict=True,
+                        fail_fast=True,
+                    )
+
+                time.sleep(0.75)
+                self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_timeout_never_resumes_a_term_handler(self):
+        catalog = self.load()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready = root / "ready"
+            marker = root / "term-handler-ran"
+            child = root / "term_child.py"
+            child.write_text(
+                """\
+from pathlib import Path
+import signal
+import sys
+import time
+
+marker = Path(sys.argv[1])
+ready = Path(sys.argv[2])
+signal.signal(signal.SIGTERM, lambda *_: marker.write_text("ran", encoding="utf-8"))
+ready.write_text("ready", encoding="utf-8")
+time.sleep(30)
+""",
+                encoding="utf-8",
+            )
+            timed_tree = dataclasses.replace(
+                catalog.check_map["baseline"],
+                command=(
+                    f"{shlex.quote(sys.executable)} {shlex.quote(str(child))} "
+                    f"{shlex.quote(str(marker))} {shlex.quote(str(ready))}"
+                ),
+                timeout_seconds=1,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = execute_checks(
+                    (timed_tree,),
+                    root,
+                    root / "artifacts",
+                    strict=True,
+                    fail_fast=True,
+                )
+
+            self.assertEqual(results[0].returncode, 124)
+            self.assertTrue(ready.exists())
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_process_tree_freeze_requires_a_fixed_point(self):
+        calls = 0
+
+        def growing_snapshot(
+            _deadline: float,
+        ) -> dict[int, validation_runner._ProcessRecord]:
+            nonlocal calls
+            calls += 1
+            snapshot = {
+                100: validation_runner._ProcessRecord(
+                    validation_runner._ProcessIdentity(100, "root"),
+                    1,
+                    100,
+                    100,
+                    "T",
+                )
+            }
+            for pid in range(201, 201 + calls):
+                snapshot[pid] = validation_runner._ProcessRecord(
+                    validation_runner._ProcessIdentity(pid, f"child-{pid}"),
+                    100,
+                    pid,
+                    100,
+                    "T",
+                )
+            return snapshot
+
+        frozen_groups = {100: 0}
+        with (
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                side_effect=growing_snapshot,
+            ),
+            mock.patch.object(validation_runner.os, "killpg"),
+            self.assertRaisesRegex(RuntimeError, "did not reach a frozen fixed point"),
+        ):
+            validation_runner._freeze_process_tree(
+                100, frozen_groups, time.monotonic() + 0.03
+            )
+
+        self.assertGreater(len(frozen_groups), 1)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_process_tree_freeze_absorbs_a_new_group_before_converging(self):
+        root = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(100, "root"), 1, 100, 100, "T"
+        )
+        child_running = validation_runner._ProcessRecord(
+            validation_runner._ProcessIdentity(201, "child"), 100, 201, 100, "R"
+        )
+        child_stopped = dataclasses.replace(child_running, state="T")
+        snapshots = [
+            {100: root},
+            {100: root, 201: child_running},
+            {100: root, 201: child_stopped},
+            {100: root, 201: child_stopped},
+            {100: root, 201: child_stopped},
+        ]
+        frozen_groups = {100: 0}
+
+        with (
+            mock.patch.object(
+                validation_runner,
+                "_process_snapshot",
+                side_effect=snapshots,
+            ),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
+            mock.patch.object(validation_runner.time, "sleep"),
+        ):
+            validation_runner._freeze_process_tree(
+                100, frozen_groups, time.monotonic() + 1
+            )
+
+        self.assertEqual(frozen_groups, {100: 0, 201: 1})
+        killpg.assert_called_once_with(201, signal.SIGSTOP)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    def test_frozen_groups_are_killed_deepest_first_without_resume(self):
+        with mock.patch.object(validation_runner.os, "killpg") as killpg:
+            errors = validation_runner._kill_frozen_groups({100: 0, 200: 1, 300: 2})
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(300, signal.SIGKILL),
+                mock.call(200, signal.SIGKILL),
+                mock.call(100, signal.SIGKILL),
+            ],
+        )
+
+    def test_process_snapshot_rejects_a_malformed_row(self):
+        completed = subprocess.CompletedProcess(
+            args=["ps"], returncode=0, stdout="not-a-process-row\n", stderr=""
+        )
+        with (
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            self.assertRaisesRegex(RuntimeError, "malformed process inventory row"),
+        ):
+            validation_runner._process_snapshot(time.monotonic() + 1)
+
+    def test_windows_tree_kill_nonzero_is_always_fatal(self):
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        completed = subprocess.CompletedProcess(
+            args=["taskkill"], returncode=5, stdout="", stderr=""
+        )
+
+        with (
+            mock.patch.object(validation_runner.os, "name", "nt"),
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+            self.assertRaisesRegex(RuntimeError, "taskkill refused.*5"),
+        ):
+            validation_runner._terminate_process_tree(process)
+
+        process.wait.assert_not_called()
+
+    def test_windows_tree_kill_timeout_is_fatal_and_reaps_shell(self):
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        timeout = subprocess.TimeoutExpired(cmd="taskkill", timeout=10)
+
+        with (
+            mock.patch.object(validation_runner.os, "name", "nt"),
+            mock.patch.object(
+                validation_runner.subprocess, "run", side_effect=timeout
+            ),
+            self.assertRaisesRegex(RuntimeError, "timed out terminating"),
+        ):
+            validation_runner._terminate_process_tree(process)
+
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
+
+    def test_windows_tree_kill_success_waits_within_cleanup_deadline(self):
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        completed = subprocess.CompletedProcess(
+            args=["taskkill"], returncode=0, stdout="", stderr=""
+        )
+
+        with (
+            mock.patch.object(validation_runner.os, "name", "nt"),
+            mock.patch.object(
+                validation_runner.subprocess, "run", return_value=completed
+            ),
+        ):
+            validation_runner._terminate_process_tree(process)
+
+        process.kill.assert_not_called()
+        process.wait.assert_called_once()
 
     def test_reports_preserve_point_status_and_parse_as_junit(self):
         catalog = self.load()
