@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 repairs approved; exact qualification pending · **Updated:** 2026-09-06 ·
+**Status:** M1 exact qualification pending · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -24,7 +24,7 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | M1 code head `cc464663`: selector matrix 34/34, macOS bound FFprobe collector 14/14, Linux collector 15/15, neutral observation policy 1/1, ownership inventory 7/7, status 5/5, formatting, diff check, and workspace all-target Clippy with denied warnings pass |
-| Effort receipt | `da1b704e`: history 1,354, catalog 24/30/1,431, operations 211/211, formatting, and pinned all-target workspace compile pass; its validation-framework self-map is staged for the exact receipt |
+| Exact receipt | `d6ecbfb7`: catalog 24/30/1,432, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass; its documentation-only history map is included in the exact successor |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `bb25576c`: 20 passed, 3 failed, 2 declared skips; the rejected run found stale ownership counts and two test-only Clippy findings, then exhausted disk during cluster compilation after all preceding cluster tests passed |
 | Blocker | None; both adversarial reviewers approve exact code head `cc464663`, and only a clean isolated exact-head full-suite run can qualify M1 |
 
@@ -524,6 +524,7 @@ lane and focused tests provide earlier feedback.
 | `bb25576c` | Same full-suite command and environment as the qualified M0 run | Rejected diagnostic · 20 passed, 3 failed, 2 declared skips; ownership inventory had eight stale M1 counts, Rust gate found two test-only Clippy findings, and cluster compilation exhausted disk after its preceding tests passed |
 | `cc464663` | M1 focused tests, workspace all-target Clippy, ownership/status contracts, formatting, and diff check on Rust 1.97.1 | Pass · planner 34/34, macOS collector 14/14, Linux collector 15/15, neutral policy 1/1, ownership 7/7, status 5/5; both adversarial reviewers approve exact code head with no actionable findings |
 | `da1b704e` | Effort commit hook | Pass · history 1,354, catalog 24/30/1,431, operations 211/211, formatting, and pinned all-target workspace compile |
+| `d6ecbfb7` | Exact repair receipt effort hook | Pass · catalog 24/30/1,432, operations 211/211, formatting, status contract, and pinned all-target workspace compile; the parent-only history audit rejected its then-unmapped documentation-only subject, which the exact successor maps |
 
 ## Remaining evidence before release
 

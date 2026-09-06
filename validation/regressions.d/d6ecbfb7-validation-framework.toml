@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["d6ecbfb7"]
+points = []
+checks = []
+reason = "This documentation-only commit records the retained M1 repair receipt and does not change runtime or validation behavior."
+ignore = true
