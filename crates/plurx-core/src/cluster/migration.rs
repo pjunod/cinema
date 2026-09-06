@@ -46,7 +46,7 @@ use crate::store::{
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
 #[cfg(feature = "hiqlite-store")]
-use hiqlite::{Client, Node, NodeConfig};
+use hiqlite::{Client, LocalSnapshotTransportStatus, Node, NodeConfig};
 #[cfg(feature = "hiqlite-store")]
 use serde::{Deserialize, Serialize};
 
@@ -2009,8 +2009,37 @@ async fn start_voter(
         config.cluster.install_snapshot_timeout_secs,
     );
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
+    let local_metrics = match client.local_db_raft_metrics() {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            let _ = shutdown_voter(&client, active_transport).await;
+            return Err(StoreError::Database(format!(
+                "reading target-local startup progress: {error}"
+            )));
+        }
+    };
+    let local_transport = client.local_snapshot_transport_status().ok();
+    let mut next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
     let catchup_target = loop {
-        match tokio::time::timeout_at(catchup_deadline, client.db_quorum_watermark()).await {
+        let watermark = tokio::time::timeout_at(catchup_deadline, client.db_quorum_watermark());
+        tokio::pin!(watermark);
+        let watermark = loop {
+            tokio::select! {
+                biased;
+                result = &mut watermark => break result,
+                () = tokio::time::sleep_until(next_wait_log) => {
+                    log_startup_transport_wait(
+                        &identity.node_id,
+                        identity.raft_id,
+                        None,
+                        local_metrics.snapshot().last_applied_index,
+                        local_transport.as_ref(),
+                    );
+                    next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
+                }
+            }
+        };
+        match watermark {
             Ok(Ok(watermark)) => break watermark.committed_index,
             Ok(Err(error)) if tokio::time::Instant::now() < catchup_deadline => {
                 tracing::debug!(%error, "waiting for startup quorum watermark");
@@ -2034,15 +2063,6 @@ async fn start_voter(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let local_metrics = match client.local_db_raft_metrics() {
-        Ok(metrics) => metrics,
-        Err(error) => {
-            let _ = shutdown_voter(&client, active_transport).await;
-            return Err(StoreError::Database(format!(
-                "reading target-local startup progress: {error}"
-            )));
-        }
-    };
     loop {
         let applied = local_metrics
             .snapshot()
@@ -2059,6 +2079,16 @@ async fn start_voter(
                 identity.node_id
             )));
         }
+        if tokio::time::Instant::now() >= next_wait_log {
+            log_startup_transport_wait(
+                &identity.node_id,
+                identity.raft_id,
+                Some(catchup_target),
+                Some(applied),
+                local_transport.as_ref(),
+            );
+            next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     if role.is_learner() {
@@ -2070,6 +2100,54 @@ async fn start_voter(
         );
     }
     Ok((client, local))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn log_startup_transport_wait(
+    node_id: &str,
+    raft_id: u64,
+    startup_target: Option<u64>,
+    local_applied_index: Option<u64>,
+    transport: Option<&LocalSnapshotTransportStatus>,
+) {
+    let observation = transport
+        .map(LocalSnapshotTransportStatus::snapshot)
+        .and_then(|snapshot| {
+            snapshot
+                .observations
+                .into_iter()
+                .filter(|observation| observation.raft_group == "sqlite")
+                .min_by_key(|observation| observation.sample_age_ms)
+        });
+    tracing::info!(
+        node_id,
+        raft_id,
+        startup_target,
+        local_applied_index,
+        observing_node_id = observation
+            .as_ref()
+            .map(|observation| observation.observing_node_id),
+        peer_node_id = observation
+            .as_ref()
+            .map(|observation| observation.peer_node_id),
+        snapshot_id = observation
+            .as_ref()
+            .and_then(|observation| observation.snapshot_id.as_deref()),
+        phase = ?observation.as_ref().map(|observation| observation.phase),
+        attempted_offset = observation
+            .as_ref()
+            .and_then(|observation| observation.attempted_offset),
+        acknowledged_offset = observation
+            .as_ref()
+            .and_then(|observation| observation.acknowledged_offset),
+        locally_received_bytes = observation
+            .as_ref()
+            .and_then(|observation| observation.locally_received_bytes),
+        sample_age_ms = observation
+            .as_ref()
+            .map(|observation| observation.sample_age_ms),
+        "waiting for cluster startup catch-up"
+    );
 }
 
 /// The Raft, WAL, and read-pool settings every plurx voter runs with.
@@ -5803,11 +5881,13 @@ pub mod status {
 
     pub use hiqlite::{
         BoundedWalError, DbSnapshotHistogram, DbSnapshotLastOutcome, DbSnapshotMetricsSnapshot,
+        SnapshotTransportObservation, SnapshotTransportPhase, SnapshotTransportStatus,
         WalRecoveryObservation, WalRuntimeState, WalStatusSnapshot,
         DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS,
     };
     use hiqlite::{
         Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
+        LocalSnapshotTransportStatus,
     };
     use std::sync::{Arc, Mutex};
 
@@ -6682,6 +6762,7 @@ pub mod status {
         local_metrics: Option<LocalDbRaftMetrics>,
         wal_status: Option<hiqlite::WalStatusHandle>,
         passive_metrics: PassiveRaftMetrics,
+        local_transport: Option<LocalSnapshotTransportStatus>,
         previous: Arc<Mutex<Option<ReplicationStatus>>>,
     }
 
@@ -6695,6 +6776,7 @@ pub mod status {
                 local_metrics: None,
                 wal_status: None,
                 passive_metrics: PassiveRaftMetrics::new(false),
+                local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6705,6 +6787,7 @@ pub mod status {
             let local_metrics = client.local_db_raft_metrics().ok();
             let snapshot_metrics = client.local_db_snapshot_metrics().ok();
             let wal_status = client.local_db_wal_status().ok();
+            let local_transport = client.local_snapshot_transport_status().ok();
             let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
                 .with_snapshot_metrics(snapshot_metrics);
             Self {
@@ -6713,6 +6796,7 @@ pub mod status {
                 local_metrics,
                 wal_status,
                 passive_metrics,
+                local_transport,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6730,6 +6814,7 @@ pub mod status {
                 local_metrics: None,
                 wal_status: None,
                 passive_metrics: PassiveRaftMetrics::remote_authority(),
+                local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6746,6 +6831,15 @@ pub mod status {
             self.wal_status
                 .as_ref()
                 .map(hiqlite::WalStatusHandle::snapshot)
+        }
+
+        /// Copy the embedded node's bounded process-local snapshot transport
+        /// observations without Store, filesystem, or network IO.
+        #[must_use]
+        pub fn transport_status_snapshot(&self) -> Option<SnapshotTransportStatus> {
+            self.local_transport
+                .as_ref()
+                .map(LocalSnapshotTransportStatus::snapshot)
         }
 
         /// Keep the atomics-only metrics projection fresh from the local Raft

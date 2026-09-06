@@ -12764,6 +12764,13 @@ function playbackPanel(settings){
 // on its own tells an operator nothing about whether turning it on will cost
 // them a stream.
 function developerPanel(settings){
+  const transportRecovery=setCard(`${cardHead("Enable cluster transport recovery","The corrected transport is compiled in and activates automatically on clustered nodes; there is no hidden production feature flag.",`<span class="pill" style="color:var(--good);border-color:var(--good)">automatic</span>`)}
+      <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network.</div>
+      <h2 class="section">What must be true first</h2>
+      <div class="tog"><span>Recovery budgets fit the deployment<small>Keep chunk, whole-transfer, final-install, startup, and container health allowances aligned. The defaults are 30 s, 1,200 s, and 120 s; the rollout may use a longer final-install allowance when measured state size requires it.</small></span></div>
+      <div class="tog"><span>Authenticated diagnostics are reachable<small>Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet. Port 32400 may remain closed while a learner catches up.</small></span></div>
+      <div class="tog"><span>The recovery receipt passes<small>Require the real-TLS 3 MiB transport matrix, acknowledged-write verification, and twenty learner plus twenty voter recovery cycles on the supported Linux path before fleet rollout.</small></span></div>
+      <div class="hint"><b>Enable path after those checks pass:</b> use the supported one-node-at-a-time cluster deployment. The recovery code and read-only status route are always present; failed readiness remains fail-closed.</div>`);
   const preview=setCard(`${cardHead("Playback control protocol","The additive control endpoint clients use to report what they are playing and ask for changes. Off by default until every client has a passive reporter.")}
       ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
       <div class="err" id="dverr"></div>
@@ -12779,7 +12786,7 @@ function developerPanel(settings){
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${preview}${prepared}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${preview}${prepared}${experimental}`;
 }
 function usersPanel(users){
   const admins=users.filter(u=>u.is_admin).length;
@@ -13150,10 +13157,16 @@ function clusterNodeOperationsHtml(n,ops){
   const mediaText=`${esc(String(media.local_active_sessions||0))} session${Number(media.local_active_sessions||0)===1?"":"s"} · ${media.drained?"drained":"draining"}`;
   const lastError=wal&&wal.last_error?wal.last_error.message:"None";
   const recovery=wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"None observed";
+  const transport=PlurxClusterPanel.clusterTransportExplanation(ops,n.raft_id,n.bounded_read_ready);
+  const transportObservation=transport.observation;
+  const transportText=transportObservation
+    ? `${esc(transport.text)} · observer ${esc(String(transportObservation.observing_node_id))} · ${esc(PlurxClusterPanel.clusterOperationAge(transportObservation.sample_age_ms))}`
+    : `<span class="muted">${esc(transport.text)}</span>`;
   return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
     <div class="clnodeopmeta"><div><span>Process</span>${process}</div><div><span>Serving</span>${serving}</div>
       <div><span>Raft</span>${raftText}</div><div><span>WAL</span>${walText}</div>
-      <div><span>Snapshot</span>${snapshotText}</div><div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span></div></div>
+      <div><span>Snapshot</span>${snapshotText}</div><div><span>Transport</span>${transportText}</div>
+      <div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span></div></div>
     <details class="clnodedetail"><summary>WAL, snapshot, and protocol details</summary>
       <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
         <dt>Protocol range</dt><dd>${s.protocol_min===undefined?"unknown":esc(String(s.protocol_min))}–${s.protocol_max===undefined?"unknown":esc(String(s.protocol_max))}</dd>
@@ -13165,6 +13178,7 @@ function clusterNodeOperationsHtml(n,ops){
         <dt>Last WAL error</dt><dd>${esc(lastError)}</dd><dt>Last recovery</dt><dd>${esc(recovery)}</dd>
         <dt>Snapshot outcomes</dt><dd>build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error</dd>
         <dt>Last snapshot install</dt><dd>${snap.last_install_outcome?`${esc(snap.last_install_outcome)} ${snap.last_install_unix_ms?esc(fmtAgo(Math.floor(snap.last_install_unix_ms/1000))):"at unknown time"}`:"none observed"}</dd>
+        <dt>Bounded-read recovery evidence</dt><dd>${transportText}</dd>
         <dt>Direct play</dt><dd>Unknown here — drain proxy connections separately.</dd></dl></details>
   </section>`;
 }
@@ -13208,11 +13222,14 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
   const direct=PlurxClusterPanel.clusterDirectMaintenanceStatus(context.operations,n.node_id);
   const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(n.active_media_sessions||0);
   const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
+  const transportProgress=PlurxClusterPanel.clusterTransportExplanation(context.operations,n.raft_id,n.bounded_read_ready);
   const note=n.maintenance
     ? directReady
       ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
       : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
-    : "Maintenance is reversible and does not remove this node from membership.";
+    : !n.bounded_read_ready&&n.role==="learner"
+      ? `Bounded-read permit remains off: ${transportProgress.text}. Transport progress never grants serving authority.`
+      : "Maintenance is reversible and does not remove this node from membership.";
   return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()" onclick="clusterNodeFoldLater(this)">
     <summary><div class="clnodesummary"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
       ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div class="clnodesummaryright">${role}${clusterNodeOperationsBadge(n,context.operations)}</div></div></summary>

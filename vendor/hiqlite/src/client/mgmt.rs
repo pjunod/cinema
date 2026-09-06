@@ -168,6 +168,67 @@ impl Client {
         Ok(crate::LocalDbSnapshotMetrics::new())
     }
 
+    /// Obtain this embedded node's process-local snapshot transport handle.
+    /// Reading it performs no Store or network operation.
+    #[cfg(feature = "sqlite")]
+    pub fn local_snapshot_transport_status(
+        &self,
+    ) -> Result<crate::LocalSnapshotTransportStatus, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("local snapshot transport status requires a local node client".into())
+        })?;
+        Ok(state.snapshot_transport.clone())
+    }
+
+    /// Read one node from this embedded node's validated Hiqlite roster.
+    /// A 404 is expected during rolling upgrades and means unavailable.
+    #[cfg(feature = "sqlite")]
+    pub async fn snapshot_transport_status_sqlite(
+        &self,
+        peer_node_id: NodeId,
+    ) -> Result<Option<crate::SnapshotTransportStatus>, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("peer transport status requires a local node client".into())
+        })?;
+        let peer = state
+            .nodes
+            .iter()
+            .find(|node| node.id == peer_node_id)
+            .ok_or_else(|| {
+                Error::Config("transport status peer is absent from the node roster".into())
+            })?;
+        let scheme = if self.inner.tls_config.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        let response = self
+            .inner
+            .client
+            .as_ref()
+            .ok_or_else(|| Error::Connect("snapshot transport HTTP client is unavailable".into()))?
+            .get(format!(
+                "{scheme}://{}/cluster/transport/sqlite",
+                peer.addr_api
+            ))
+            .header(
+                HEADER_NAME_SECRET,
+                self.inner.api_secret.as_ref().ok_or_else(|| {
+                    Error::Connect("snapshot transport API secret is unavailable".into())
+                })?,
+            )
+            .timeout(Duration::from_secs(1))
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if response.status().is_success() {
+            return Ok(Some(response.json().await?));
+        }
+        Err(response.json::<Error>().await?)
+    }
+
     /// Obtain the process-local database WAL status handle.
     ///
     /// The handle reads only the live log store's owned locks and never opens

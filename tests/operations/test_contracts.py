@@ -1605,6 +1605,13 @@ for (const startupDelay of [0, 1600, 7000]) {
             "stale_snapshot_guard_cannot_clear_a_newer_attempt",
             "caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately",
             "snapshot_deadline_durations_are_bounded_before_instant_arithmetic",
+            "local_status_distinguishes_receive_ack_install_retry_and_completion",
+            "receiver_bytes_are_not_reported_as_sender_acknowledgements",
+            "active_observation_stalls_then_expires_without_renewing_sample_age",
+            "completed_observation_never_projects_as_stalled_and_eventually_expires",
+            "valid_install_does_not_stall_at_the_chunk_window",
+            "retired_peers_are_bounded",
+            "transport_route_contract_is_authenticated_memory_only_and_404_compatible",
         )
         for test_name in hiqlite_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1619,6 +1626,18 @@ for (const startupDelay of [0, 1600, 7000]) {
                 command,
             )
             self.assertIn("--lib -- --exact", command)
+
+        daemon_transport_tests = (
+            "peer_fanout_applies_the_one_second_per_peer_deadline",
+            "peer_status_cache_is_fresh_for_five_seconds_then_expires",
+            "aggregate_request_path_reads_cache_without_peer_network_fanout",
+        )
+        for test_name in daemon_transport_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurxd --bin plurxd", command)
+            self.assertIn("-- --exact", command)
 
         core_snapshot_tests = (
             "snapshot_install_timeout_is_bounded_and_env_values_are_parsed",

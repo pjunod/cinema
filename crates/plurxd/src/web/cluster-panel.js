@@ -153,6 +153,47 @@
     if(!ops||ops.unavailable) return null;
     return (ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId)||null;
   }
+  function clusterTransportObservation(ops,raftId){
+    if(!ops||ops.unavailable||raftId===null||raftId===undefined) return null;
+    const candidates=[];
+    (ops.nodes||[]).forEach(row=>{
+      const status=row&&row.observation==="answered"&&row.status;
+      const transport=status&&status.transport;
+      (transport&&transport.observations||[]).forEach(observation=>{
+        if(observation.raft_group!=="sqlite") return;
+        if(Number(observation.sample_age_ms)>300000) return;
+        if(Number(observation.observing_node_id)!==Number(raftId)&&
+           Number(observation.peer_node_id)!==Number(raftId)) return;
+        candidates.push(observation);
+      });
+    });
+    const priority={stalled:8,installing:7,awaiting_acknowledgement:6,retrying:5,
+      transferring:4,connecting:3,failed:2,complete:1};
+    candidates.sort((left,right)=>
+      (priority[right.phase]||0)-(priority[left.phase]||0)||
+      Number(left.sample_age_ms||0)-Number(right.sample_age_ms||0));
+    return candidates[0]||null;
+  }
+  function clusterTransportExplanation(ops,raftId,boundedReadReady){
+    const observation=clusterTransportObservation(ops,raftId);
+    if(!observation)
+      return boundedReadReady
+        ? {code:"idle",text:"transport idle; bounded-read proof ready",observation:null}
+        : {code:"unavailable",text:"progress unavailable",observation:null};
+    const labels={
+      connecting:"connecting snapshot transport",
+      transferring:Number(observation.observing_node_id)===Number(raftId)
+        ?"receiving snapshot":"transferring snapshot",
+      awaiting_acknowledgement:"waiting for snapshot acknowledgement",
+      installing:"installing snapshot",
+      retrying:"retrying snapshot",
+      stalled:"snapshot stalled",
+      failed:"snapshot failed",
+      complete:boundedReadReady?"snapshot recovered":"waiting for startup watermark",
+    };
+    const code=observation.phase==="complete"&&!boundedReadReady?"startup_watermark":observation.phase;
+    return {code,text:labels[observation.phase]||"progress unavailable",observation};
+  }
   function clusterMaintenanceEntryVerdict(ops,nodeId){
     if(!ops||ops.unavailable) return null;
     return (ops.maintenance||[]).find(verdict=>verdict.node_id===nodeId)||null;
@@ -655,6 +696,8 @@
     membershipRefusalText,
     clusterDirectMaintenanceStatus,
     clusterDirectOperationRow,
+    clusterTransportObservation,
+    clusterTransportExplanation,
     clusterMaintenanceEntryVerdict,
     clusterMaintenanceReady,
     clusterMaintenanceResumeReady,

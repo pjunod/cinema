@@ -257,6 +257,11 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /twenty consecutive commits/);
   assert.match(html, /Android and web remain unqualified/);
   assert.match(html, /no separate hidden server flag/);
+  assert.match(html, /Enable cluster transport recovery/);
+  assert.match(html, /there is no hidden production feature flag/);
+  assert.match(html, /Keep a ready voter majority/);
+  assert.match(html, /\/cluster\/transport\/sqlite/);
+  assert.match(html, /twenty learner plus twenty voter recovery cycles/);
   // The section says what it is for, so a switch that costs something has
   // somewhere honest to land rather than being buried under Streaming.
   assert.match(html, /off on purpose/);

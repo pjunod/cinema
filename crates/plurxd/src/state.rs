@@ -616,6 +616,9 @@ pub struct AppState {
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
+    /// Five-second cache for authenticated, bounded cluster-status fan-out.
+    /// This is process-local diagnostics state and never writes to Store.
+    pub(crate) peer_status_cache: crate::http::cluster_operations::PeerStatusCache,
     /// Fresh, authenticated media-capability snapshots and diagnostics-only
     /// placement offers. P4 observes candidates; it never starts a session.
     pub(crate) media_pool: Arc<crate::media_pool::MediaPool>,
@@ -858,6 +861,7 @@ impl AppState {
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(
                 membership.clone(),
             ),
+            peer_status_cache: Default::default(),
             serving,
             membership,
             media_pool,

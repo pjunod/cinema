@@ -19,7 +19,7 @@ use plurx_core::cluster::membership::{
     ActivityPeer, ClusterNodeRecord, MembershipStatus, NodeRole, MAX_OPERATIONS_PEERS,
 };
 use plurx_core::cluster::migration::status::{
-    DbSnapshotMetricsSnapshot, WalRuntimeState, WalStatusSnapshot,
+    DbSnapshotMetricsSnapshot, SnapshotTransportStatus, WalRuntimeState, WalStatusSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,6 +37,8 @@ use crate::state::AppState;
 
 pub(crate) const INTERNAL_PATH: &str = "/api/v1/internal/cluster/operations-status";
 const AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
+const PEER_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
+const PEER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FRESH_AGE_MS: u64 = 5_000;
 
@@ -55,6 +57,8 @@ pub(crate) struct ClusterNodeOperationsStatus {
     pub raft: RaftStatus,
     pub wal: WalStatus,
     pub snapshot: SnapshotStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<SnapshotTransportStatus>,
     pub media: MediaDrainStatus,
 }
 
@@ -252,18 +256,9 @@ pub(crate) async fn collect_aggregate(
             "the committed cluster roster could not be read",
         )
     })?;
-    let peers = state.membership.operations_peers().await.map_err(|_| {
-        ApiError::typed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cluster_peer_directory_unavailable",
-            "the committed cluster peer directory could not be read",
-        )
-    })?;
     let observed_at_unix_ms = unix_ms();
     let local_status = local_snapshot(state).await;
-    let transport = PeerTransport::new(state.membership.clone());
-    let deadline = deadline_after(AGGREGATE_TIMEOUT);
-    let remote = collect_peer_statuses(peers, transport, deadline).await;
+    let remote = state.peer_status_cache.fresh().await.unwrap_or_default();
     let observations = join_observations(
         &membership,
         &state.node_id,
@@ -531,6 +526,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
             snapshot: wal_snapshot,
         },
         snapshot,
+        transport: state.replication.transport_status_snapshot(),
         media: media_drain_status(active_sessions, drain),
     }
 }
@@ -623,12 +619,74 @@ struct PeerStatusOutcome {
     status: Option<ClusterNodeOperationsStatus>,
 }
 
+/// Five-second, node-owned cache for bounded peer status fan-out.
+///
+/// It caches only authenticated read results. It never creates Store work and
+/// does not survive process restart.
+#[derive(Clone, Default)]
+pub(crate) struct PeerStatusCache {
+    inner: std::sync::Arc<tokio::sync::Mutex<Option<CachedPeerStatuses>>>,
+}
+
+#[derive(Clone)]
+struct CachedPeerStatuses {
+    stored_at: tokio::time::Instant,
+    statuses: BTreeMap<String, PeerStatusOutcome>,
+}
+
+impl PeerStatusCache {
+    async fn fresh(&self) -> Option<BTreeMap<String, PeerStatusOutcome>> {
+        let cache = self.inner.lock().await;
+        cache.as_ref().and_then(|cached| {
+            (tokio::time::Instant::now().saturating_duration_since(cached.stored_at)
+                < PEER_STATUS_CACHE_TTL)
+                .then(|| cached.statuses.clone())
+        })
+    }
+
+    async fn store(&self, statuses: &BTreeMap<String, PeerStatusOutcome>) {
+        *self.inner.lock().await = Some(CachedPeerStatuses {
+            stored_at: tokio::time::Instant::now(),
+            statuses: statuses.clone(),
+        });
+    }
+}
+
+/// Refresh authenticated peer observations away from page renders and
+/// Prometheus scrapes. The request path reads the five-second cache only.
+pub(crate) async fn peer_status_cache_loop(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        match state.membership.operations_peers().await {
+            Ok(peers) => {
+                let deadline = deadline_after(AGGREGATE_TIMEOUT);
+                let statuses = collect_peer_statuses(
+                    peers,
+                    PeerTransport::new(state.membership.clone()),
+                    deadline,
+                )
+                .await;
+                state.peer_status_cache.store(&statuses).await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not refresh bounded cluster operations cache");
+            }
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tokio::time::sleep(Duration::from_secs(4)) => {}
+        }
+    }
+}
+
 async fn collect_peer_statuses(
     peers: Vec<ActivityPeer>,
     transport: PeerTransport,
     deadline: tokio::time::Instant,
 ) -> BTreeMap<String, PeerStatusOutcome> {
-    collect_peer_statuses_with(peers, deadline, move |peer| {
+    collect_peer_statuses_with(peers, deadline, move |peer, peer_deadline| {
         let transport = transport.clone();
         async move {
             let node_id = peer.node_id.clone();
@@ -639,7 +697,7 @@ async fn collect_peer_statuses(
                     status: None,
                 }
             } else if let Some(base) = peer.http_base {
-                fetch_peer_status(&transport, &node_id, &base, deadline).await
+                fetch_peer_status(&transport, &node_id, &base, peer_deadline).await
             } else {
                 PeerStatusOutcome {
                     node_id,
@@ -658,14 +716,15 @@ async fn collect_peer_statuses_with<F, Fut>(
     fetch: F,
 ) -> BTreeMap<String, PeerStatusOutcome>
 where
-    F: Fn(ActivityPeer) -> Fut + Clone,
+    F: Fn(ActivityPeer, tokio::time::Instant) -> Fut + Clone,
     Fut: std::future::Future<Output = PeerStatusOutcome>,
 {
     stream::iter(peers.into_iter().take(MAX_OPERATIONS_PEERS).map(|peer| {
         let fetch = fetch.clone();
         async move {
             let node_id = peer.node_id.clone();
-            let outcome = tokio::time::timeout_at(deadline, fetch(peer))
+            let peer_deadline = deadline.min(tokio::time::Instant::now() + PEER_STATUS_TIMEOUT);
+            let outcome = tokio::time::timeout_at(peer_deadline, fetch(peer, peer_deadline))
                 .await
                 .unwrap_or_else(|_| PeerStatusOutcome {
                     node_id: node_id.clone(),
@@ -1320,7 +1379,7 @@ mod tests {
     use plurx_core::cluster::membership::{ClusterRecoveryStatus, NodeRole};
 
     #[tokio::test(start_paused = true)]
-    async fn peer_fanout_uses_one_shared_deadline() {
+    async fn peer_fanout_applies_the_one_second_per_peer_deadline() {
         let peers = (0..MAX_OPERATIONS_PEERS)
             .map(|index| ActivityPeer {
                 node_id: format!("node-{index}"),
@@ -1330,19 +1389,20 @@ mod tests {
             .collect();
         let started = tokio::time::Instant::now();
         let deadline = started + Duration::from_secs(2);
-        let outcomes = collect_peer_statuses_with(peers, deadline, |peer| async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            PeerStatusOutcome {
-                node_id: peer.node_id,
-                state: ObservationState::Answered,
-                status: None,
-            }
-        })
-        .await;
+        let outcomes =
+            collect_peer_statuses_with(peers, deadline, |peer, _peer_deadline| async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                PeerStatusOutcome {
+                    node_id: peer.node_id,
+                    state: ObservationState::Answered,
+                    status: None,
+                }
+            })
+            .await;
 
         assert_eq!(
             tokio::time::Instant::now() - started,
-            Duration::from_secs(2)
+            Duration::from_secs(1)
         );
         assert_eq!(outcomes.len(), MAX_OPERATIONS_PEERS);
         assert!(outcomes
@@ -1362,7 +1422,7 @@ mod tests {
         let outcomes = collect_peer_statuses_with(
             peers,
             tokio::time::Instant::now() + Duration::from_secs(2),
-            |peer| async move {
+            |peer, _peer_deadline| async move {
                 PeerStatusOutcome {
                     node_id: peer.node_id,
                     state: ObservationState::Answered,
@@ -1374,6 +1434,41 @@ mod tests {
 
         assert_eq!(outcomes.len(), MAX_OPERATIONS_PEERS);
         assert_eq!(MAX_OPERATIONS_PEERS, 8);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_status_cache_is_fresh_for_five_seconds_then_expires() {
+        let cache = PeerStatusCache::default();
+        let statuses = BTreeMap::from([(
+            "node-2".to_owned(),
+            PeerStatusOutcome {
+                node_id: "node-2".to_owned(),
+                state: ObservationState::Answered,
+                status: None,
+            },
+        )]);
+        cache.store(&statuses).await;
+        assert_eq!(cache.fresh().await.expect("fresh cache").len(), 1);
+
+        tokio::time::advance(PEER_STATUS_CACHE_TTL - Duration::from_millis(1)).await;
+        assert!(cache.fresh().await.is_some());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(cache.fresh().await.is_none());
+    }
+
+    #[test]
+    fn aggregate_request_path_reads_cache_without_peer_network_fanout() {
+        let source = include_str!("cluster_operations.rs");
+        let aggregate = source
+            .split("pub(crate) async fn collect_aggregate")
+            .nth(1)
+            .expect("aggregate function")
+            .split("pub(crate) async fn support_bundle")
+            .next()
+            .expect("aggregate body");
+        assert!(aggregate.contains("state.peer_status_cache.fresh().await"));
+        assert!(!aggregate.contains("collect_peer_statuses("));
+        assert!(!aggregate.contains("PeerTransport::new"));
     }
 
     #[test]
@@ -1822,6 +1917,7 @@ mod tests {
                 }),
             },
             snapshot: SnapshotStatus::from(None),
+            transport: None,
             media: MediaDrainStatus {
                 local_active_sessions: 0,
                 drained: true,

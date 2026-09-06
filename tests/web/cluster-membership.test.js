@@ -333,6 +333,104 @@ function operationStatus(membership, { safe = true, unreachable = false } = {}) 
   };
 }
 
+function transportOps(observations) {
+  return {
+    nodes: [
+      {
+        observation: "answered",
+        status: {
+          transport: { observations },
+        },
+      },
+    ],
+  };
+}
+
+function transportObservation(phase, extra = {}) {
+  return {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    raft_group: "sqlite",
+    sample_age_ms: 40,
+    phase,
+    ...extra,
+  };
+}
+
+test("transport recovery phases stay distinct from bounded-read authority", () => {
+  const ui = sandbox();
+  const active = ui.clusterTransportExplanation(
+    transportOps([transportObservation("transferring")]),
+    2,
+    false,
+  );
+  const installing = ui.clusterTransportExplanation(
+    transportOps([transportObservation("installing")]),
+    2,
+    false,
+  );
+  const retrying = ui.clusterTransportExplanation(
+    transportOps([transportObservation("retrying")]),
+    2,
+    false,
+  );
+  const recovered = ui.clusterTransportExplanation(
+    transportOps([transportObservation("complete")]),
+    2,
+    true,
+  );
+  const idle = ui.clusterTransportExplanation(transportOps([]), 2, true);
+  const unavailable = ui.clusterTransportExplanation(transportOps([]), 2, false);
+
+  assert.deepEqual(
+    [active.text, installing.text, retrying.text, recovered.text, idle.text, unavailable.text],
+    [
+      "receiving snapshot",
+      "installing snapshot",
+      "retrying snapshot",
+      "snapshot recovered",
+      "transport idle; bounded-read proof ready",
+      "progress unavailable",
+    ],
+  );
+  assert.equal(active.observation.observing_node_id, 2);
+  assert.equal(active.code, "transferring");
+  assert.equal(idle.code, "idle");
+  assert.equal(unavailable.code, "unavailable");
+});
+
+test("transport status shows outbound evidence and expires stale samples", () => {
+  const ui = sandbox();
+  const outbound = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("awaiting_acknowledgement", {
+        observing_node_id: 1,
+        peer_node_id: 2,
+      }),
+    ]),
+    2,
+    false,
+  );
+  assert.equal(outbound.text, "waiting for snapshot acknowledgement");
+  assert.equal(outbound.observation.observing_node_id, 1);
+
+  const expired = ui.clusterTransportExplanation(
+    transportOps([transportObservation("transferring", { sample_age_ms: 300001 })]),
+    2,
+    false,
+  );
+  assert.equal(expired.code, "unavailable");
+  assert.equal(expired.observation, null);
+
+  const watermark = ui.clusterTransportExplanation(
+    transportOps([transportObservation("complete")]),
+    2,
+    false,
+  );
+  assert.equal(watermark.code, "startup_watermark");
+  assert.equal(watermark.text, "waiting for startup watermark");
+});
+
 // ---- the two-voter state is the point -------------------------------------
 
 test("two voters render as a reconfiguration in progress, never as redundancy", () => {

@@ -30,6 +30,12 @@ pub(crate) struct NodeOwnedExecutor<Req, Resp> {
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
+impl<Req, Resp> NodeOwnedExecutor<Req, Resp> {
+    pub(crate) fn admission_deadline(&self) -> time::Instant {
+        time::Instant::now() + self.admission_timeout
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SubmitError {
     AdmissionTimeout,
@@ -171,20 +177,62 @@ where
     }
 }
 
+pub(crate) struct SnapshotExecutorRequest<C: RaftTypeConfig> {
+    pub(crate) peer_node_id: u64,
+    pub(crate) request: InstallSnapshotRequest<C>,
+}
+
 pub(crate) type SnapshotExecutor<C> =
-    NodeOwnedExecutor<InstallSnapshotRequest<C>, SnapshotResult<C>>;
+    NodeOwnedExecutor<SnapshotExecutorRequest<C>, SnapshotResult<C>>;
 
 pub(crate) fn start_snapshot_executor<C>(
     raft: Raft<C>,
     admission_timeout: Duration,
+    install_timeout: Duration,
+    raft_group: &'static str,
+    snapshot_transport: crate::LocalSnapshotTransportStatus,
 ) -> SnapshotExecutor<C>
 where
-    C: RaftTypeConfig,
+    C: RaftTypeConfig<NodeId = u64>,
     C::SnapshotData: tokio::io::AsyncRead + tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin,
 {
-    NodeOwnedExecutor::start(admission_timeout, move |request| {
+    NodeOwnedExecutor::start(admission_timeout, move |job: SnapshotExecutorRequest<C>| {
         let raft = raft.clone();
-        async move { raft.install_snapshot(request).await }
+        let snapshot_transport = snapshot_transport.clone();
+        async move {
+            let done = job.request.done;
+            let acknowledged_offset = job
+                .request
+                .offset
+                .saturating_add(job.request.data.len() as u64);
+            snapshot_transport.inbound_admitted(
+                raft_group,
+                job.peer_node_id,
+                done,
+                time::Instant::now()
+                    + if done {
+                        install_timeout
+                    } else {
+                        admission_timeout
+                    },
+            );
+            let result = raft.install_snapshot(job.request).await;
+            let error_category = match &result {
+                Ok(_) => None,
+                Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => {
+                    Some("snapshot_mismatch")
+                }
+                Err(_) => Some("snapshot_install_error"),
+            };
+            snapshot_transport.inbound_finished(
+                raft_group,
+                job.peer_node_id,
+                acknowledged_offset,
+                done,
+                error_category,
+            );
+            result
+        }
     })
 }
 

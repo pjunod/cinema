@@ -171,11 +171,15 @@ async fn handle_socket(
     let mut ws = socket.await?;
     ws.set_auto_close(true);
 
-    if let Err(err) = HandshakeSecret::server(&mut ws, state.secret_raft.as_bytes()).await {
-        error!("Error during WebSocket handshake: {}", err);
-        write_socket_close_frame_flushed(&mut ws, Frame::close(1000, b"Invalid Handshake")).await?;
-        return Ok(());
-    }
+    let peer_node_id = match HandshakeSecret::server(&mut ws, state.secret_raft.as_bytes()).await {
+        Ok(peer_node_id) => peer_node_id,
+        Err(err) => {
+            error!("Error during WebSocket handshake: {}", err);
+            write_socket_close_frame_flushed(&mut ws, Frame::close(1000, b"Invalid Handshake"))
+                .await?;
+            return Ok(());
+        }
+    };
 
     let (tx_write, rx_write) = flume::bounded::<WsWriteMsg>(1);
     let (rx, write) = ws.split(tokio::io::split);
@@ -273,7 +277,7 @@ async fn handle_socket(
         }
 
         let mut work_connection_closed = tx_connection_closed.subscribe();
-        let work = execute_raft_request(&state, req, &mut work_connection_closed);
+        let work = execute_raft_request(&state, peer_node_id, req, &mut work_connection_closed);
         tokio::pin!(work);
         let work_result = tokio::select! {
             biased;
@@ -405,6 +409,7 @@ async fn raft_response_writer<S>(
 
 async fn execute_raft_request(
     state: &AppStateExt,
+    peer_node_id: u64,
     request: RaftStreamRequest,
     connection_closed: &mut watch::Receiver<bool>,
 ) -> Result<
@@ -429,10 +434,27 @@ async fn execute_raft_request(
         }
         #[cfg(feature = "sqlite")]
         RaftStreamRequest::SnapshotDB((request_id, request)) => {
+            state.snapshot_transport.inbound_received(
+                crate::transport_status::InboundSnapshotChunk {
+                    raft_group: "sqlite",
+                    peer_node_id,
+                    snapshot_id: &request.meta.snapshot_id,
+                    offset: request.offset,
+                    len: request.data.len(),
+                    done: request.done,
+                    deadline: state.raft_db.snapshot_executor.admission_deadline(),
+                },
+            );
             let result = state
                 .raft_db
                 .snapshot_executor
-                .submit(request, connection_closed)
+                .submit(
+                    crate::network::snapshot_executor::SnapshotExecutorRequest {
+                        peer_node_id,
+                        request,
+                    },
+                    connection_closed,
+                )
                 .await?;
             (request_id, RaftStreamResponsePayload::SnapshotDB(result))
         }
@@ -456,10 +478,27 @@ async fn execute_raft_request(
         }
         #[cfg(feature = "cache")]
         RaftStreamRequest::SnapshotCache((request_id, request)) => {
+            state.snapshot_transport.inbound_received(
+                crate::transport_status::InboundSnapshotChunk {
+                    raft_group: "cache",
+                    peer_node_id,
+                    snapshot_id: &request.meta.snapshot_id,
+                    offset: request.offset,
+                    len: request.data.len(),
+                    done: request.done,
+                    deadline: state.raft_cache.snapshot_executor.admission_deadline(),
+                },
+            );
             let result = state
                 .raft_cache
                 .snapshot_executor
-                .submit(request, connection_closed)
+                .submit(
+                    crate::network::snapshot_executor::SnapshotExecutorRequest {
+                        peer_node_id,
+                        request,
+                    },
+                    connection_closed,
+                )
                 .await?;
             (request_id, RaftStreamResponsePayload::SnapshotCache(result))
         }

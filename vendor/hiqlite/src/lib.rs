@@ -71,6 +71,11 @@ pub use crate::store::state_machine::sqlite::state_machine::{
     validation_register_applied_sql_classes, validation_resume_apply,
 };
 #[cfg(any(feature = "sqlite", feature = "cache"))]
+pub use crate::transport_status::{
+    LocalSnapshotTransportStatus, SnapshotTransportObservation, SnapshotTransportPhase,
+    SnapshotTransportStatus,
+};
+#[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use crate::{client::Client, error::Error};
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 pub use config::{NodeConfig, RaftConfig, RateLimitConfig};
@@ -123,6 +128,8 @@ mod query;
 mod snapshot_metrics;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod split_brain_check;
+#[cfg(any(feature = "sqlite", feature = "cache"))]
+mod transport_status;
 
 #[cfg(feature = "macros")]
 pub mod macros;

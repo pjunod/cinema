@@ -1759,6 +1759,34 @@ derives the grace from both resolved stage settings plus 135 seconds. That
 matters most when one or both deadlines live in a bind-mounted production TOML,
 where `.env` has no reason to mention readiness.
 
+Snapshot transport progress is process-local diagnostic evidence, never
+serving authority. Each embedded Hiqlite node retains a bounded record per
+Raft group and configured peer, plus a small expiring allowance for retired
+peers. Recording a frame or chunk performs no SQL transaction, roster update,
+WAL append, or quorum read. Sender acknowledgement offsets and receiver-local
+bytes are separate fields because a receiver may have accepted bytes whose
+reply has not reached the sender.
+
+The existing private Hiqlite cluster listener serves
+`GET /cluster/transport/sqlite` with the same `X-API-SECRET` authentication as
+the adjacent cluster metrics route. The response is JSON and reads only the
+node-owned in-memory snapshot, so it remains usable while startup is waiting
+and before port 32400 opens. Query only a peer address from the committed
+Hiqlite roster; never send the cluster API secret to an operator-supplied URL.
+During a rolling update, HTTP 404 means that peer does not expose transport
+progress yet and must be rendered as unavailable.
+
+The Cluster panel joins each node's authenticated operations status with the
+roster using at most eight concurrent requests, a one-second deadline per
+peer, and a five-second process-local cache. A healthy sender can therefore
+report outbound evidence for a learner whose public listener is still closed.
+Status older than five minutes expires instead of continuing to claim an
+active transfer. The panel reports observer and sample age and keeps
+`bounded_read_ready` separate: receiving, waiting for acknowledgement,
+installing, retrying, or stalled transport never grants reads. While port
+32400 is still closed, the daemon also emits one bounded startup-wait record
+every ten seconds with target/applied indexes when known.
+
 Set the variable only to choose a grace deliberately. Whether anybody chose is
 answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
 that is anything other than the interpolation default in

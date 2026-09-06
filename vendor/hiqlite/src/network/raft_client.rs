@@ -89,6 +89,7 @@ pub struct NetworkStreaming {
     pub is_raft_stopped: Arc<AtomicBool>,
     pub is_startup_finished: Arc<AtomicBool>,
     pub(crate) snapshot_budgets: SnapshotRpcBudgets,
+    pub(crate) snapshot_transport: crate::LocalSnapshotTransportStatus,
     // pub sender: flume::Sender<RaftRequest>,
 }
 
@@ -117,6 +118,8 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
             self.is_startup_finished.clone(),
             Arc::clone(&reset),
             Arc::clone(&shutdown),
+            self.snapshot_transport.clone(),
+            "cache",
         )));
 
         NetworkConnectionStreaming {
@@ -125,7 +128,9 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
             reset,
             shutdown,
             local_node_id: self.node_id,
+            raft_group: "cache",
             snapshot_budgets: self.snapshot_budgets,
+            snapshot_transport: self.snapshot_transport.clone(),
             snapshot_attempt,
             next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
@@ -159,6 +164,8 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
             self.is_startup_finished.clone(),
             Arc::clone(&reset),
             Arc::clone(&shutdown),
+            self.snapshot_transport.clone(),
+            "sqlite",
         )));
 
         NetworkConnectionStreaming {
@@ -167,7 +174,9 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
             reset,
             shutdown,
             local_node_id: self.node_id,
+            raft_group: "sqlite",
             snapshot_budgets: self.snapshot_budgets,
+            snapshot_transport: self.snapshot_transport.clone(),
             snapshot_attempt,
             next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
@@ -499,6 +508,8 @@ impl NetworkStreaming {
         is_startup_finished: Arc<AtomicBool>,
         reset: Arc<ConnectionResetState>,
         connection_shutdown: Arc<ConnectionShutdownState>,
+        snapshot_transport: crate::LocalSnapshotTransportStatus,
+        raft_group: &'static str,
     ) {
         let mut request_id = 0usize;
         // TODO probably, a Vec<_> is faster here since we would never have too many in flight reqs
@@ -529,6 +540,7 @@ impl NetworkStreaming {
                 break;
             }
 
+            snapshot_transport.connecting(raft_group, node.id, reset.epoch());
             info!("Trying to open WebSocket stream");
             let socket = {
                 let connection = web_socket_connect::try_connect(
@@ -1060,7 +1072,9 @@ pub struct NetworkConnectionStreaming {
     reset: Arc<ConnectionResetState>,
     shutdown: Arc<ConnectionShutdownState>,
     local_node_id: NodeId,
+    raft_group: &'static str,
     snapshot_budgets: SnapshotRpcBudgets,
+    snapshot_transport: crate::LocalSnapshotTransportStatus,
     snapshot_attempt: Arc<StdMutex<Option<Arc<SnapshotAttempt>>>>,
     next_snapshot_attempt: Arc<AtomicU64>,
     runtime: tokio::runtime::Handle,
@@ -1250,6 +1264,14 @@ where
         snapshot.meta.snapshot_id.clone(),
         network.snapshot_budgets,
     );
+    network.snapshot_transport.begin_outbound_attempt(
+        network.raft_group,
+        network.node.id,
+        attempt_id,
+        &attempt.snapshot_id,
+        network.reset.epoch(),
+        attempt.transfer_deadline,
+    );
     {
         let mut slot = network
             .snapshot_attempt
@@ -1272,7 +1294,7 @@ where
         option,
     );
 
-    supervise_snapshot_driver(
+    let result = supervise_snapshot_driver(
         attempt,
         local_node_id,
         target_node_id,
@@ -1280,7 +1302,15 @@ where
         cancel,
         driver,
     )
-    .await
+    .await;
+    if result.is_err() {
+        network.snapshot_transport.outbound_failed(
+            network.raft_group,
+            network.node.id,
+            "snapshot_attempt_ended",
+        );
+    }
+    result
 }
 
 #[cfg(any(feature = "cache", feature = "sqlite"))]
@@ -1380,16 +1410,53 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
+        let done = req.done;
+        let acknowledged_offset = req.offset.saturating_add(req.data.len() as u64);
         let rpc_ttl = self
-            .snapshot_rpc_ttl(req.done, &option)
+            .snapshot_rpc_ttl(done, &option)
             .ok_or_else(|| self.snapshot_timeout_error())?;
+        self.snapshot_transport.outbound_chunk(
+            self.raft_group,
+            self.node.id,
+            req.offset,
+            req.data.len(),
+            done,
+            time::Instant::now() + rpc_ttl,
+        );
         let (ack, rx) = oneshot::channel();
-        match self
+        let payload = match self
             .send(RaftRequest::SnapshotDB((ack, req)), rx, rpc_ttl)
-            .await?
+            .await
         {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.snapshot_transport.outbound_retry(
+                    self.raft_group,
+                    self.node.id,
+                    "transport_unavailable",
+                );
+                return Err(error);
+            }
+        };
+        match payload {
             RaftStreamResponsePayload::SnapshotDB(resp) => {
                 self.restore_transfer_after_snapshot_mismatch(&resp);
+                match &resp {
+                    Ok(_) => self.snapshot_transport.outbound_acknowledged(
+                        self.raft_group,
+                        self.node.id,
+                        acknowledged_offset,
+                        done,
+                    ),
+                    Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => self
+                        .snapshot_transport
+                        .outbound_retry(self.raft_group, self.node.id, "snapshot_mismatch"),
+                    Err(_) => self.snapshot_transport.outbound_failed(
+                        self.raft_group,
+                        self.node.id,
+                        "remote_snapshot_error",
+                    ),
+                }
                 resp.map_err(|error| remote_raft_error(&self.node, error))
             }
             _ => unreachable!(),
@@ -1458,16 +1525,53 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
+        let done = req.done;
+        let acknowledged_offset = req.offset.saturating_add(req.data.len() as u64);
         let rpc_ttl = self
-            .snapshot_rpc_ttl(req.done, &option)
+            .snapshot_rpc_ttl(done, &option)
             .ok_or_else(|| self.snapshot_timeout_error())?;
+        self.snapshot_transport.outbound_chunk(
+            self.raft_group,
+            self.node.id,
+            req.offset,
+            req.data.len(),
+            done,
+            time::Instant::now() + rpc_ttl,
+        );
         let (ack, rx) = oneshot::channel();
-        match self
+        let payload = match self
             .send(RaftRequest::SnapshotCache((ack, req)), rx, rpc_ttl)
-            .await?
+            .await
         {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.snapshot_transport.outbound_retry(
+                    self.raft_group,
+                    self.node.id,
+                    "transport_unavailable",
+                );
+                return Err(error);
+            }
+        };
+        match payload {
             RaftStreamResponsePayload::SnapshotCache(resp) => {
                 self.restore_transfer_after_snapshot_mismatch(&resp);
+                match &resp {
+                    Ok(_) => self.snapshot_transport.outbound_acknowledged(
+                        self.raft_group,
+                        self.node.id,
+                        acknowledged_offset,
+                        done,
+                    ),
+                    Err(RaftError::APIError(InstallSnapshotError::SnapshotMismatch(_))) => self
+                        .snapshot_transport
+                        .outbound_retry(self.raft_group, self.node.id, "snapshot_mismatch"),
+                    Err(_) => self.snapshot_transport.outbound_failed(
+                        self.raft_group,
+                        self.node.id,
+                        "remote_snapshot_error",
+                    ),
+                }
                 resp.map_err(|error| remote_raft_error(&self.node, error))
             }
             _ => unreachable!(),
@@ -1630,11 +1734,16 @@ mod tests {
             reset: Arc::new(ConnectionResetState::default()),
             shutdown: Arc::new(ConnectionShutdownState::default()),
             local_node_id: 1,
+            raft_group: "sqlite",
             snapshot_budgets: SnapshotRpcBudgets {
                 chunk: Duration::from_secs(30),
                 transfer: Duration::from_secs(1_200),
                 install: Duration::from_secs(120),
             },
+            snapshot_transport: crate::LocalSnapshotTransportStatus::new(
+                1,
+                std::collections::BTreeSet::from([2]),
+            ),
             snapshot_attempt: Arc::new(StdMutex::new(None)),
             next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
@@ -2132,7 +2241,12 @@ mod tests {
                 reset: Arc::new(ConnectionResetState::default()),
                 shutdown: Arc::new(ConnectionShutdownState::default()),
                 local_node_id: 1,
+                raft_group: "sqlite",
                 snapshot_budgets: budgets,
+                snapshot_transport: crate::LocalSnapshotTransportStatus::new(
+                    1,
+                    std::collections::BTreeSet::from([2]),
+                ),
                 snapshot_attempt: Arc::new(StdMutex::new(None)),
                 next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
                 runtime: tokio::runtime::Handle::current(),
@@ -2536,7 +2650,12 @@ mod tests {
             reset: Arc::clone(&reset),
             shutdown: Arc::new(ConnectionShutdownState::default()),
             local_node_id: 1,
+            raft_group: "sqlite",
             snapshot_budgets: test_snapshot_budgets(),
+            snapshot_transport: crate::LocalSnapshotTransportStatus::new(
+                1,
+                std::collections::BTreeSet::from([2]),
+            ),
             snapshot_attempt: Arc::new(StdMutex::new(Some(attempt))),
             next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
@@ -2788,11 +2907,16 @@ mod tests {
             reset: Arc::clone(&reset),
             shutdown: Arc::new(ConnectionShutdownState::default()),
             local_node_id: 1,
+            raft_group: "sqlite",
             snapshot_budgets: SnapshotRpcBudgets {
                 chunk: Duration::from_secs(30),
                 transfer: Duration::from_secs(1_200),
                 install: Duration::from_secs(120),
             },
+            snapshot_transport: crate::LocalSnapshotTransportStatus::new(
+                1,
+                std::collections::BTreeSet::from([2]),
+            ),
             snapshot_attempt: Arc::new(StdMutex::new(None)),
             next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
@@ -2877,11 +3001,16 @@ mod tests {
             reset: Arc::clone(&reset),
             shutdown: Arc::new(ConnectionShutdownState::default()),
             local_node_id: 1,
+            raft_group: "cache",
             snapshot_budgets: SnapshotRpcBudgets {
                 chunk: Duration::from_secs(30),
                 transfer: Duration::from_secs(1_200),
                 install: Duration::from_secs(120),
             },
+            snapshot_transport: crate::LocalSnapshotTransportStatus::new(
+                1,
+                std::collections::BTreeSet::from([2]),
+            ),
             snapshot_attempt: Arc::new(StdMutex::new(None)),
             next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),

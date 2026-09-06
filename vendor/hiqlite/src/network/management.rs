@@ -2,11 +2,12 @@ use crate::NodeId;
 use crate::app_state::{AppState, RaftType};
 use crate::network::{AppStateExt, Error, fmt_ok, get_payload, validate_secret};
 use crate::{Node, helpers};
+use axum::Json;
 use axum::body;
 use axum::body::Body;
 use axum::extract::Path;
 use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use openraft::error::{CheckIsLeaderError, ForwardToLeader, RaftError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -413,4 +414,21 @@ pub(crate) async fn metrics(
 
     let metrics = helpers::get_raft_metrics(&state, &raft_type).await;
     fmt_ok(headers, &metrics)
+}
+
+/// Read this process's bounded SQLite snapshot transport observations.
+///
+/// The adjacent metrics route uses the same API secret. This projection reads
+/// only node-owned memory and therefore remains available while the embedding
+/// daemon is still waiting to open its public listener.
+pub(crate) async fn snapshot_transport_sqlite(
+    state: AppStateExt,
+    headers: HeaderMap,
+) -> Result<Response, Error> {
+    validate_secret(&state, &headers)?;
+    let mut snapshot = state.snapshot_transport.snapshot();
+    snapshot
+        .observations
+        .retain(|observation| observation.raft_group == "sqlite");
+    Ok(Json(snapshot).into_response())
 }

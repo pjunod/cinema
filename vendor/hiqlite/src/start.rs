@@ -5,6 +5,7 @@ use crate::{CacheVariants, Client, Error, NodeConfig, init, split_brain_check, s
 use axum::Router;
 use axum::routing::{get, post};
 use chrono::Utc;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
@@ -56,14 +57,32 @@ where
     let backup_applied = backup::restore_backup_start(&node_config).await?;
 
     let raft_config = Arc::new(node_config.raft_config.clone().validate().unwrap());
+    let snapshot_transport = crate::LocalSnapshotTransportStatus::new(
+        node_config.node_id,
+        node_config
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .collect::<BTreeSet<_>>(),
+    );
 
     let _do_reset_metadata = init::check_execute_reset(&node_config.data_dir).await?;
     #[cfg(feature = "sqlite")]
-    let raft_db =
-        store::start_raft_db(&node_config, raft_config.clone(), _do_reset_metadata).await?;
+    let raft_db = store::start_raft_db(
+        &node_config,
+        raft_config.clone(),
+        _do_reset_metadata,
+        snapshot_transport.clone(),
+    )
+    .await?;
 
     #[cfg(feature = "cache")]
-    let raft_cache = store::start_raft_cache::<C>(&node_config, raft_config.clone()).await?;
+    let raft_cache = store::start_raft_cache::<C>(
+        &node_config,
+        raft_config.clone(),
+        snapshot_transport.clone(),
+    )
+    .await?;
 
     let (api_addr, rpc_addr) = {
         let node = node_config
@@ -100,9 +119,9 @@ where
         #[cfg(feature = "backup")]
         backups_dir: format!("{}/state_machine/backups", node_config.data_dir),
         id: node_config.node_id,
-        #[cfg(feature = "cache")]
         nodes: node_config.nodes.clone(),
         addr_api: api_addr.clone(),
+        snapshot_transport,
         #[cfg(feature = "sqlite")]
         raft_db,
         #[cfg(feature = "cache")]
@@ -190,6 +209,10 @@ where
                         .delete(management::leave_cluster),
                 )
                 .route("/metrics/{raft_type}", get(management::metrics))
+                .route(
+                    "/transport/sqlite",
+                    get(management::snapshot_transport_sqlite),
+                )
                 .route("/elect/{raft_type}", post(management::elect)),
         )
         .route("/listen", get(api::listen))

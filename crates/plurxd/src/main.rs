@@ -2073,6 +2073,10 @@ fn spawn_background_loops(
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
     tokio::spawn(state.clone().store_metrics_loop());
+    tokio::spawn(crate::http::cluster_operations::peer_status_cache_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     let replication = state.replication.clone();
     tokio::spawn(replication.passive_metrics_loop(background_shutdown.clone().cancelled_owned()));
     tokio::spawn(
