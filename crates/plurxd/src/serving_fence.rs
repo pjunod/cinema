@@ -216,6 +216,8 @@ impl ServingFence {
             || path.ends_with("/photo")
             || path.starts_with("/library/metadata/")
             || path == "/photo/:/transcode"
+            || path.ends_with("/live-tv/channels")
+            || path == "/_internal/v1/live-tv/snapshot"
     }
 
     /// Routes whose successful handler may admit new process-local media
@@ -225,7 +227,10 @@ impl ServingFence {
         (method == "POST"
             && (path.ends_with("/hls/sessions")
                 || path.ends_with("/offline-packages")
-                || path.ends_with("/publication")))
+                || path.ends_with("/publication")
+                || (path.contains("/live-tv/channels/") && path.ends_with("/sessions"))
+                || path == "/_internal/v1/live-tv/start"
+                || path == "/_internal/v1/live-tv/activate"))
             || (method == "GET"
                 && (path.ends_with("/hls/start")
                     || path.ends_with("/stream.mp4")

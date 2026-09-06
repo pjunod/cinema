@@ -3198,6 +3198,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 <script src="/assets/playback-control.js"></script>
 <script src="/assets/reader.js"></script>
 <script src="/assets/hls.min.js"></script>
+<script src="/assets/live-tv.js"></script>
 <script>
 "use strict";
 const PlaybackPolicy = window.PlurxPlaybackPolicy;
@@ -3827,6 +3828,7 @@ function artHtml(it, cls){
 
 // ---- auth flows -----------------------------------------------------------
 function logout(){
+  stopLiveTv().catch(()=>{});
   if(READER) destroyReader(false);
   PAGE_RENDER_GENERATION++;
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
@@ -3983,7 +3985,7 @@ function classicChrome(active, inner){
   document.getElementById("app").innerHTML=`
    <header class="top">
      <a href="#/" class="logo">${APP_NAME}</a>
-     <nav><a href="#/" class="${active==='home'?'active':''}">Home</a><a href="#/activity" class="${active==='activity'?'active':''}">Activity</a>${admin}</nav>
+     <nav><a href="#/" class="${active==='home'?'active':''}">Home</a><a href="#/live-tv" class="${active==='live-tv'?'active':''}">Live TV</a><a href="#/activity" class="${active==='activity'?'active':''}">Activity</a>${admin}</nav>
      <span class="spacer"></span>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
      <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
@@ -12757,6 +12759,244 @@ function playbackPanel(settings){
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
   return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${streaming}${local}`;
 }
+// Live TV owns its own media element and capability. It never enters PLAYER,
+// file progress, playback-control, watched state, autoskip, or Trakt.
+const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0};
+function liveTvNow(){
+  return performance.now();
+}
+function liveTvMarkerId(){
+  // getRandomValues works on private-LAN HTTP origins; randomUUID does not.
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");
+}
+const LIVE_TV_BARRIER=new PlurxLiveTv.StartBarrier(()=>localStorage,liveTvNow,liveTvMarkerId);
+// Observe persisted uncertainty at document boot, not at the first Watch click.
+try{ LIVE_TV_BARRIER.sync(); }catch(e){}
+// A start that failed before the owner could open a tuner is safe to forget.
+// Everything else — every 5xx, and every code this client does not recognise —
+// may already hold a physical tuner whose release never reached us, so the
+// durable marker must survive it. This is an allowlist on purpose: with a
+// denylist, adding a server error code silently makes this client less safe.
+const LIVE_TV_DEFINITIVE_REFUSALS=new Set(["live_tv_disabled","live_tv_protocol_unready","drm_unsupported","channel_not_found","settings_conflict","tuner_capacity","admin_required","invalid_settings"]);
+const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
+  start:async channel=>{
+    const marker=LIVE_TV_BARRIER.begin(); // durable before the POST can leave
+    try{
+      const info=await liveTvRequest(`/live-tv/channels/${encodeURIComponent(channel)}/sessions`,"POST",45000,true);
+      if(!info||typeof info.session_id!=="string"||!info.session_id) throw {code:"start_outcome_unknown"};
+      // Retain ownership through an active-player crash too. Normal channel
+      // switches confirm DELETE first; another document waits conservatively.
+      LIVE_TV.cleanupMarker=marker;
+      return info;
+    }
+    catch(e){
+      // A lost public start response cannot be safely retried as a new request.
+      // No client heartbeat exists for that capability; allow the server's
+      // bounded start + idle expiry to finish before admitting another start.
+      const definitive=LIVE_TV_DEFINITIVE_REFUSALS.has(e.code)||(!e.code&&e.status>=400&&e.status<500);
+      if(!definitive){ LIVE_TV_BARRIER.hold(marker); throw {code:"start_outcome_unknown"}; }
+      LIVE_TV_BARRIER.confirm(marker);
+      throw e;
+    }
+  },
+  release:async id=>{
+    // Persist before DELETE too: reload while cleanup is pending must not
+    // forget that this document still owns an unconfirmed physical session.
+    try{ LIVE_TV.cleanupMarker=LIVE_TV_BARRIER.hold(LIVE_TV.cleanupMarker); }catch(e){}
+    for(let attempt=0;attempt<2;attempt++){
+      try{ await liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}`,"DELETE",8000,false,LIVE_TV.unloading===true); break; }
+      catch(e){ if(e.status===404||e.status===410||e.code==="capability_expired") break; if(attempt===1) throw e; }
+    }
+    LIVE_TV_BARRIER.confirm(LIVE_TV.cleanupMarker); LIVE_TV.cleanupMarker=null;
+  },
+  status:id=>liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}/status`,"GET",15000),
+  keepalive:id=>{
+    LIVE_TV.cleanupMarker=LIVE_TV_BARRIER.hold(LIVE_TV.cleanupMarker);
+    return liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}/keepalive`,"PUT",15000);
+  },
+});
+async function liveTvRequest(path,method,timeout,authenticated=false,keepalive=false){
+  const headers=authenticated&&TOKEN?{authorization:"Bearer "+TOKEN}:{};
+  // `keepalive` lets the unload DELETE outlive the document. Without it the
+  // browser aborts the only release that could confirm the durable marker, so
+  // every ordinary reload while watching cost a 90-second safety wait for a
+  // tuner the server had in fact already released.
+  const response=await fetch(API+path,{method,headers,cache:"no-store",keepalive,signal:AbortSignal.timeout(timeout)});
+  if(!response.ok){
+    let body={}; try{ body=await response.json(); }catch(e){}
+    const error=new Error(body.message||body.error||"Live TV request failed");
+    error.status=response.status; error.code=body.code; throw error;
+  }
+  return response.status===204?null:response.json();
+}
+function liveTvMessage(message){
+  const mount=document.getElementById("live-tv-message"); if(mount) mount.textContent=message;
+}
+function liveTvFailure(error){
+  const view=PlurxLiveTv.errorView(error);
+  liveTvMessage(`${view.title}. ${view.detail}`);
+}
+async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
+  await stopLiveTv().catch(()=>{});
+  if(generation!==PAGE_RENDER_GENERATION) return;
+  const route=location.hash;
+  layoutChrome("live-tv",`<h1>Live TV</h1><p class="sub">Over-the-air channels from your HDHomeRun. Live only — no recording or rewind.</p>
+    <section id="live-tv-player" class="card" aria-label="Live television player" hidden>
+      <div class="row"><strong id="live-tv-title"></strong><span class="pill">LIVE</span></div>
+      <video id="live-tv-video" playsinline style="display:block;width:100%;max-height:65vh;background:#000" aria-label="Live television"></video>
+      <div class="row"><button class="primary sm" onclick="resumeLiveTv()">Play live</button><button class="ghost sm" onclick="pauseLiveTv()">Pause</button><button class="ghost sm" onclick="muteLiveTv(this)">Mute</button><button class="ghost sm" onclick="fullscreenLiveTv()">Fullscreen</button><button class="ghost sm" onclick="stopLiveTv().catch(liveTvFailure)">Stop</button></div>
+    </section>
+    <p id="live-tv-message" role="status" aria-live="polite">Loading channels…</p>
+    <div class="row"><label for="live-tv-search">Find a channel</label><input id="live-tv-search" type="search" oninput="renderLiveTvChannels()" placeholder="Number or name"><button class="ghost sm" onclick="viewLiveTv()">Refresh channels</button><button class="ghost sm" onclick="stopLiveTv().then(()=>liveTvMessage('Stopped')).catch(liveTvFailure)">Stop / retry cleanup</button>${ME.is_admin?'<a href="#/settings/developer">Configure HDHomeRun</a>':""}</div>
+    <div id="live-tv-channels" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin-top:20px"></div>`);
+  setPagePhase(route,generation,"shell");
+  try{
+    const result=await api("/live-tv/channels",{signal:AbortSignal.timeout(30000)});
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+    LIVE_TV.channels=result.channels; renderLiveTvChannels();
+    liveTvMessage(result.freshness==="stale"?`Showing a cached lineup (${result.age_seconds} seconds old). The tuner is currently unreachable; starting a channel requires a fresh check.`:`${result.channels.length} channels. Choose an unprotected channel to watch.`);
+  }catch(e){ if(generation===PAGE_RENDER_GENERATION) liveTvFailure(e); }
+  finally{ if(generation===PAGE_RENDER_GENERATION){ setPagePhase(route,generation,"content"); setPagePhase(route,generation,"settled"); } }
+}
+function renderLiveTvChannels(){
+  const mount=document.getElementById("live-tv-channels"); if(!mount) return;
+  const query=(document.getElementById("live-tv-search").value||"").toLocaleLowerCase();
+  mount.innerHTML=LIVE_TV.channels.map((channel,index)=>{
+    if(!`${channel.guide_number} ${channel.guide_name}`.toLocaleLowerCase().includes(query)) return "";
+    const view=PlurxLiveTv.channelView(channel);
+    return `<div class="card"><h2 style="margin-top:0">${esc(channel.guide_number)} · ${esc(channel.guide_name)}</h2><p>${esc(view.label)}${channel.favorite?" · Favorite":""}</p><button class="${view.disabled?'ghost':'primary'} sm" onclick="watchLiveTv(${index})"${view.disabled?' disabled':''}>${view.disabled?"DRM unsupported":"Watch live"}</button></div>`;
+  }).join("")||'<p class="muted">No matching channels.</p>';
+}
+function detachLiveTvMedia(){
+  clearInterval(LIVE_TV.timer); LIVE_TV.timer=null;
+  if(LIVE_TV.hls){ LIVE_TV.hls.destroy(); LIVE_TV.hls=null; }
+  const video=document.getElementById("live-tv-video");
+  if(video){ video.onerror=null; video.onended=null; video.pause(); video.removeAttribute("src"); video.load(); }
+}
+async function stopLiveTv(){
+  ++LIVE_TV.serial; exitLiveTvPresentation(); detachLiveTvMedia();
+  const panel=document.getElementById("live-tv-player"); if(panel) panel.hidden=true;
+  return LIVE_TV_LEASE.stop();
+}
+async function watchLiveTv(index){
+  const channel=LIVE_TV.channels[index];
+  if(!channel||PlurxLiveTv.channelView(channel).disabled||location.hash!=="#/live-tv") return;
+  const serial=++LIVE_TV.serial, generation=PAGE_RENDER_GENERATION;
+  const current=()=>serial===LIVE_TV.serial&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/live-tv";
+  detachLiveTvMedia();
+  if(PLAYER&&PLAYER.fileId) closePlayer();
+  LIVE_TV.lastChannel=index; liveTvMessage(`Starting ${channel.guide_number} · ${channel.guide_name}…`);
+  try{
+    const info=await LIVE_TV_LEASE.start(channel.id);
+    if(!info||!current()) return;
+    const video=document.getElementById("live-tv-video");
+    LIVE_TV.unplayedSince=liveTvNow(); LIVE_TV.lastPosition=0; LIVE_TV.lastFrames=0;
+    document.getElementById("live-tv-player").hidden=false;
+    document.getElementById("live-tv-title").textContent=`${channel.guide_number} · ${channel.guide_name}`;
+    // Ignore the wire URL: the capability only grants same-origin live resources.
+    const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/index.m3u8`;
+    const play=()=>{ if(current()) video.play().then(()=>{ if(current()) liveTvMessage("Playing live"); }).catch(()=>{ if(current()) liveTvMessage("Ready — press Play live within 30 seconds to start audio and video."); }); };
+    const failed=async error=>{
+      if(!current()) return;
+      try{ await LIVE_TV_LEASE.status(); }catch(typed){ error=typed; }
+      if(!current()) return;
+      liveTvFailure(error);
+      stopLiveTv().catch(()=>liveTvMessage("Stream stopped. Owner cleanup is unconfirmed; retry Stop before opening another channel."));
+    };
+    video.onerror=()=>failed({code:video.error&&[3,4].includes(video.error.code)?"codec_unsupported":"stream_failed"});
+    video.onended=()=>failed({code:"stream_failed"});
+    if(window.Hls&&Hls.isSupported()){
+      const hls=new Hls({liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,maxBufferLength:12,maxMaxBufferLength:18,backBufferLength:0});
+      LIVE_TV.hls=hls;
+      hls.on(Hls.Events.MANIFEST_PARSED,play);
+      hls.on(Hls.Events.ERROR,(_,data)=>{ if(data.fatal) failed({code:data.type===Hls.ErrorTypes.MEDIA_ERROR?"codec_unsupported":"stream_failed"}); });
+      hls.loadSource(playlist); hls.attachMedia(video);
+    }else if(video.canPlayType("application/vnd.apple.mpegurl")){
+      video.src=playlist; play();
+    }else{ await failed({code:"codec_unsupported"}); return; }
+    LIVE_TV.timer=setInterval(async()=>{
+      if(!current()||LIVE_TV.polling) return;
+      LIVE_TV.polling=true;
+      try{
+        // Decoded frames, not position. A live-window slide, a gap jump or a
+        // level switch can move currentTime backwards on a healthy stream, and
+        // a high-water mark then refuses to renew until the timeline climbs
+        // back past its old peak — stopping playback that was never stuck.
+        // Position remains the fallback where the quality API is absent.
+        const quality=video.getVideoPlaybackQuality?video.getVideoPlaybackQuality():null;
+        const frames=quality&&Number.isFinite(quality.totalVideoFrames)?quality.totalVideoFrames:null;
+        const position=video.currentTime;
+        const advancing=!video.paused&&(frames!==null?frames>LIVE_TV.lastFrames
+          :Number.isFinite(position)&&position>LIVE_TV.lastPosition+0.1);
+        if(!advancing){
+          if(LIVE_TV.unplayedSince===null) LIVE_TV.unplayedSince=liveTvNow();
+          if(liveTvNow()-LIVE_TV.unplayedSince>=30000){
+            await stopLiveTv(); liveTvMessage("Live TV stopped after 30 seconds without playback. Select a channel to resume.");
+          }
+          return;
+        }
+        if(frames!==null) LIVE_TV.lastFrames=frames;
+        LIVE_TV.lastPosition=position; LIVE_TV.unplayedSince=liveTvNow();
+        if(document.visibilityState!=="hidden") await LIVE_TV_LEASE.keepalive();
+        const status=await LIVE_TV_LEASE.status();
+        if(status&&status.state!=="active") await failed({code:"stream_failed"});
+      }catch(e){ await failed(e); }
+      finally{ LIVE_TV.polling=false; }
+    },10000);
+  }catch(e){ if(current()) liveTvFailure(e); }
+}
+function resumeLiveTv(){
+  const video=document.getElementById("live-tv-video");
+  if(video&&LIVE_TV_LEASE.current) video.play().catch(()=>liveTvMessage("Playback could not start. Stop and select the channel again."));
+}
+function pauseLiveTv(){
+  const video=document.getElementById("live-tv-video");
+  if(video&&LIVE_TV_LEASE.current){ video.pause(); liveTvMessage("Paused. The tuner is released after 30 seconds without playback; resuming has no rewind guarantee."); }
+}
+function muteLiveTv(button){
+  const video=document.getElementById("live-tv-video"); if(video){ video.muted=!video.muted; button.textContent=video.muted?"Unmute":"Mute"; }
+}
+function fullscreenLiveTv(){
+  const panel=document.getElementById("live-tv-player"), video=document.getElementById("live-tv-video");
+  try{
+    if(document.fullscreenElement===panel||document.webkitFullscreenElement===panel||(video&&video.webkitDisplayingFullscreen)){ exitLiveTvPresentation(); return; }
+    if(panel&&panel.requestFullscreen){ const r=panel.requestFullscreen(); if(r&&r.catch) r.catch(()=>{}); }
+    else if(panel&&panel.webkitRequestFullscreen) panel.webkitRequestFullscreen();
+    else if(video&&video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+  }catch(e){}
+}
+function exitLiveTvPresentation(){
+  const panel=document.getElementById("live-tv-player"), video=document.getElementById("live-tv-video");
+  try{
+    const full=document.fullscreenElement||document.webkitFullscreenElement;
+    if(panel&&full&&(full===panel||panel.contains(full))){
+      const exit=document.exitFullscreen||document.webkitExitFullscreen;
+      if(exit){ const r=exit.call(document); if(r&&r.catch) r.catch(()=>{}); }
+    }
+    if(video&&video.webkitDisplayingFullscreen&&video.webkitExitFullscreen) video.webkitExitFullscreen();
+    if(video&&document.pictureInPictureElement===video&&document.exitPictureInPicture){ const r=document.exitPictureInPicture(); if(r&&r.catch) r.catch(()=>{}); }
+    if(video&&video.webkitPresentationMode==="picture-in-picture"&&video.webkitSetPresentationMode) video.webkitSetPresentationMode("inline");
+  }catch(e){}
+}
+window.addEventListener("pagehide",()=>{
+  const info=LIVE_TV_LEASE.current;
+  if(info){ try{ LIVE_TV.cleanupMarker=LIVE_TV_BARRIER.hold(LIVE_TV.cleanupMarker); }catch(e){} }
+  // One DELETE, not two. The release path now carries `keepalive` itself, so
+  // the request that is actually delivered is also the one whose result can
+  // clear the marker; a duplicate raw fetch only spent a second request that
+  // nothing could observe.
+  LIVE_TV.unloading=true;
+  stopLiveTv().catch(()=>{});
+});
+window.addEventListener("storage",event=>{
+  if(event.key===null||event.key.startsWith(LIVE_TV_BARRIER.prefix)){ try{ LIVE_TV_BARRIER.sync(); }catch(e){} }
+});
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="hidden"&&location.hash==="#/live-tv"){
+    stopLiveTv().catch(()=>{}); liveTvMessage("Live TV stopped while the page was in the background. Select a channel to resume.");
+  }
+});
+
 // Everything that is off on purpose, in one place.
 //
 // These are switches with a cost or an unfinished half, not preferences: each
@@ -12779,7 +13019,75 @@ function developerPanel(settings){
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${preview}${prepared}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback, and none of it is a different binary: these are runtime settings; no special build is needed.")}${liveTvSettingsCard(settings)}${preview}${prepared}${experimental}`;
+}
+function liveTvSettingsCard(s){
+  const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
+  const barrier=!!s.live_tv_transition_from_owner_node_id;
+  return setCard(`${cardHead("HDHomeRun Live TV","Watch unprotected antenna channels from one network tuner.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
+    <p>Before enabling: complete the HDHomeRun channel scan; use a stable private IPv4 address; choose one reachable, committed tuner-owner node; and keep every serving node on a compatible plurx version. The owner needs network access to the tuner, writable scratch space, and working FFmpeg H.264/AAC encoding. Each viewer uses one physical tuner and one encoder slot.</p>
+    <p class="hint">Start with 720p and two sessions. ATSC 3.0 may require HEVC and AC-4 decoders your FFmpeg does not include. DRM, recording, rewind, captions, and program-guide scheduling are not supported. A readiness check tests the output graph, not every broadcast codec.</p>
+    <div class="setfields">
+      <div><label for="ltip">Tuner private IPv4</label><input id="ltip" value="${esc(s.live_tv_device_ipv4||"")}" placeholder="192.168.4.100" inputmode="decimal"${disabled}></div>
+      <div><label for="ltowner">Tuner-owner node ID</label><input id="ltowner" value="${esc(s.live_tv_owner_node_id||"")}" maxlength="256"${disabled}><div class="hint">Use the node ID shown in Settings → Cluster.</div></div>
+      <div><label for="ltlimit">Maximum sessions</label><select id="ltlimit"${disabled}>${[1,2,3,4].map(n=>`<option value="${n}"${n===Number(s.live_tv_max_sessions)?' selected':''}>${n}</option>`).join("")}</select></div>
+      <div><label for="ltheight">Output height</label><select id="ltheight"${disabled}>${[720,1080].map(n=>`<option value="${n}"${n===Number(s.live_tv_output_height)?' selected':''}>${n}p</option>`).join("")}</select></div>
+    </div>
+    <p class="hint">${enabled?"Disable before changing the device, owner, or profile. Disabling stops current Live TV sessions.":"Save the configuration, check readiness, then enable. Saving never enables playback."}</p>
+    <div id="ltreadiness" aria-live="polite"></div>
+    <div class="err" id="lterr" role="alert"></div>
+    ${!enabled?setCardFoot("saveLiveTvSettings"):""}
+    <div class="row"><button class="ghost sm" onclick="checkLiveTvReadiness(this)">Check saved configuration</button><button id="ltenable" class="${enabled?'ghost':'primary'} sm" onclick="setLiveTvEnabled(${!enabled},this)">${enabled?"Disable Live TV":"Enable Live TV"}</button><a href="#/live-tv">Browse channels</a></div>
+    ${barrier?`<div class="card"><h3>Previous owner cleanup required</h3><p>Owner <strong>${esc(s.live_tv_transition_from_owner_node_id)}</strong> has not confirmed cleanup before generation ${esc(s.live_tv_transition_drain_before)}. Save again to retry authenticated cleanup. An unreachable node is not proof that its tuner streams stopped.</p><label class="tog" for="ltfenced"><span>I have stopped or powered off the previous owner and prevented it from restarting until it can synchronize the current configuration.</span><input id="ltfenced" type="checkbox"></label><button class="ghost sm" onclick="recoverLiveTvOwner(this)">Confirm physical fencing — keep Live TV disabled</button></div>`:""}`,{id:"live-tv-settings"});
+}
+async function liveTvSettingsWrite(body,button){
+  if(!ME||!ME.is_admin) return;
+  const generation=PAGE_RENDER_GENERATION;
+  if(button) button.disabled=true;
+  const error=document.getElementById("lterr"); if(error) error.textContent="";
+  try{
+    const result=await api("/settings",{method:"PUT",body,signal:AbortSignal.timeout(45000)});
+    if(settingsCurrent(generation,"developer")){
+      cacheSettings(result); renderSettings(); toast("Live TV settings saved");
+    }
+  }catch(e){
+    if(settingsCurrent(generation,"developer")){
+      if(error) error.textContent=e.code==="settings_conflict"?"The configuration changed elsewhere. Reload this section before trying again.":e.message;
+      if(button) button.disabled=false;
+    }
+  }
+}
+async function saveLiveTvSettings(button){
+  if(SETTINGS.live_tv_enabled) return;
+  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+    live_tv_enabled:false,live_tv_device_ipv4:document.getElementById("ltip").value.trim(),
+    live_tv_owner_node_id:document.getElementById("ltowner").value.trim(),
+    live_tv_max_sessions:Number(document.getElementById("ltlimit").value),
+    live_tv_output_height:Number(document.getElementById("ltheight").value)},button);
+}
+async function setLiveTvEnabled(enabled,button){
+  const card=document.getElementById("live-tv-settings");
+  if(enabled&&card&&card.classList.contains("dirty")){ toast("Save the configuration before enabling Live TV"); return; }
+  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,live_tv_enabled:enabled},button);
+}
+async function recoverLiveTvOwner(button){
+  const checked=document.getElementById("ltfenced");
+  if(!checked||!checked.checked||SETTINGS.live_tv_enabled){ toast("Physical fencing must be confirmed while Live TV is disabled"); return; }
+  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+    live_tv_fenced_owner:{owner_node_id:SETTINGS.live_tv_transition_from_owner_node_id,
+      drain_before_generation:SETTINGS.live_tv_transition_drain_before,
+      stopped_and_restart_prevented:true}},button);
+}
+async function checkLiveTvReadiness(button){
+  const generation=PAGE_RENDER_GENERATION;
+  const mount=document.getElementById("ltreadiness");
+  button.disabled=true; mount.textContent="Checking the saved configuration on the tuner owner…";
+  try{
+    const r=await api("/live-tv/readiness/refresh",{method:"POST",signal:AbortSignal.timeout(40000)});
+    if(!settingsCurrent(generation,"developer")||!mount.isConnected) return;
+    mount.innerHTML=`<h3>${r.ready?"Ready to enable":"Needs attention"}</h3><ul>${r.checks.map(c=>`<li><strong>${c.ready?"Pass":"Not ready"}:</strong> ${esc(c.message)}</li>`).join("")}</ul>${r.snapshot?`<p>${esc(r.snapshot.device.friendly_name)} · ${esc(r.snapshot.device.model_number)} · ${esc(r.snapshot.device.tuner_count)} tuners</p>`:""}<p class="hint">This result describes saved generation ${esc(r.generation)}. Enabling always rechecks safety on the server.</p>`;
+  }catch(e){ if(settingsCurrent(generation,"developer")&&mount.isConnected) mount.textContent=e.message; }
+  finally{ if(button.isConnected) button.disabled=false; }
 }
 function usersPanel(users){
   const admins=users.filter(u=>u.is_admin).length;
@@ -14620,6 +14928,7 @@ function catalogChrome(active, inner){
          <button class="ghost sm px-sheetx" type="button" aria-label="Close libraries" onclick="catalogToggleLibs(event)">✕</button>
          <nav class="px-nav" aria-label="Main">
            <a href="#/" class="${homeOn?"on":""}"${homeOn?' aria-current="page"':""}>${catalogIcon("home")}<span class="px-lbl">Home</span></a>
+           <a href="#/live-tv" class="${active==="live-tv"?"on":""}"${active==="live-tv"?' aria-current="page"':""}>${catalogIcon("tv")}<span class="px-lbl">Live TV</span></a>
          </nav>
          <div id="pxlibs"></div>
          <div class="px-sec">Manage</div>
@@ -15111,6 +15420,7 @@ function theaterNavItems(active){
   // library. Home means the home page.
   const homeOn = active==="home" && (hash==="#/"||hash==="#"||hash==="");
   const items=[{tab:"home", href:"#/", label:"Home", on:homeOn},
+               {tab:"live-tv", href:"#/live-tv", label:"Live TV", on:active==="live-tv"},
                {tab:"activity", href:"#/activity", label:"Activity", on:active==="activity"}];
   // Settings appears for admins only, and nowhere else in the shell — a
   // non-admin sees no Settings anywhere in theater's chrome. (The account
@@ -15971,6 +16281,7 @@ async function render(){
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   if(!ACT_TIMER) ACT_TIMER=setInterval(pollActivity,4000);
   let h=location.hash||"#/";
+  if(h!=="#/live-tv") stopLiveTv().catch(()=>{});
   if(!h.startsWith("#/read/")&&READER) destroyReader(true);
   // A join token is bearer authority, so leaving Settings drops the only
   // in-memory copy even before a later Settings visit clears it again.
@@ -15995,6 +16306,7 @@ async function render(){
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
     else if(h==="#/activity") await viewActivity(generation);
+    else if(h==="#/live-tv") await viewLiveTv(generation);
     else if(h==="#/analysis") await viewAnalysis(generation);
     else if(isSettingsRoute(h)) await viewSettings(generation,!stayingInSettings);
     else await viewHome(generation);

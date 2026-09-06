@@ -204,6 +204,35 @@ daemon boots select the activated replicated store.
 
 **Exit:** the demo that defines the project — pull the power on a node mid-movie; playback resumes within seconds; settings/watch state show zero loss; `docker compose up` a 3-node cluster from the README in under 10 minutes.
 
+## Live TV — one HDHomeRun tuner (IN PROGRESS)
+
+Not a reversal of the "no live TV" non-goal so much as a narrowing of it: no
+DVR, no recording, no scheduling, no streaming-service aggregation, no
+discovery feed. One over-the-air tuner, played live on every first-party
+client, off until an administrator turns it on. The plan and its contract are
+[HDHOMERUN-LIVE-TV-PLAN.md](HDHOMERUN-LIVE-TV-PLAN.md); the running state is
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
+
+- ✅ **M1 device, settings, lineup** — one manually configured private IPv4
+  device; generation-fenced replicated settings; sanitized lineup with DRM
+  channels listed and refused.
+- ✅ **M2 live HLS and cluster relay** — one tuner GET and one FFmpeg process
+  per session, a bounded six-segment window, owner-bound capabilities, signed
+  relay and control between voters, idle and progress timeouts, activity and
+  metrics.
+- ✅ **M3 web client** — a live-only controller with explicit controls, frame-
+  based progress, and a durable ownership marker that survives a page restart.
+- ✅ **M4 Apple and Android** — iOS/tvOS and a dedicated Media3 Android player,
+  each with the same uncertainty barrier and the runtime-only Developer card.
+- ◐ **M5 acceptance and documentation** — the endless-source pass, the two-node
+  acceptance cases, and this documentation are in; the **hardware pass has not
+  run** (`make live-tv-hardware-check DEVICE=<ipv4>`) and Android television
+  instrumentation is still outstanding.
+
+**Exit:** a real antenna on a real tuner plays on a phone, a browser, and a TV;
+the numbers in the documentation come from that device rather than from a
+fixture; and every tuner comes back when the last viewer walks away.
+
 ## Phase 5 — Native clients (order: cheapest coverage first)
 
 1. **Android/Google TV (Kotlin/Media3)** — covers Sony/Shield/phones; true MKV direct play; trivial sideload

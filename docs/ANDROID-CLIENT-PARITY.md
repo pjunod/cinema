@@ -193,8 +193,56 @@ encoding, the plan execution, and the pricing; `DetailTrackFactsTest`
 The embedded web app remains plurx's administrative control plane: first-server
 setup, libraries, users, metadata keys, integrations, scan control, and system
 logs. Keeping those mutations in one surface avoids reproducing high-impact
-server administration on a TV remote. The Android Settings screen is therefore
+server administration on a TV remote. The Android Settings screen is primarily
 for device-local viewer and playback preferences plus sign-out/change-server.
+HDHomeRun is the deliberate exception: Settings → Developer exposes its safety
+requirements, saved configuration, readiness and separate runtime enablement.
+Every mutation requires server-enforced administrator access and an exact
+settings generation. Previous-owner recovery carries the original owner and
+drain cutoff, and requires an explicit physical-fencing attestation. No build
+feature switch hides Live TV from the navigation.
+
+The dedicated Media3 live player has channel selection, pause/resume, mute,
+fullscreen and stop, without invoking the finite-media controller or writing
+watch progress. Actual rendered frames renew its no-progress budget: Media3's
+[window-relative live position](https://developer.android.com/media/media3/exoplayer/live-streaming)
+can move backward while healthy. A token-free durable marker preserves start
+and cleanup uncertainty across process death and profile changes. Fourteen
+focused `LiveTvTest` cases cover these contracts; physical decode and remote
+navigation remain separate acceptance evidence. DRM, DVR, rewind, captions and
+guide scheduling are deliberately unsupported in the first profile.
+
+### Live TV
+
+The Android Live TV surface is a dedicated Media3 player rather than the finite
+-media controller: channel selection, pause/resume, mute, fullscreen and stop,
+with no scrubber, no resume point and no progress write. It renews its session
+on **rendered frame count** rather than playback position, because a Media3 live
+window's position can move backwards during healthy playback — a frozen picture
+expires, a shuffling live edge does not.
+
+`LiveTvLease` carries the same uncertainty barrier as the other clients: only a
+failure decided before a tuner can open (`live_tv_disabled`,
+`live_tv_protocol_unready`, `drm_unsupported`, `channel_not_found`,
+`settings_conflict`, `tuner_capacity`, `admin_required`, `invalid_settings`)
+clears the durable ownership marker; anything else holds it for 90 s, because
+an unrecognised failure may mean a tuner did open. The marker is an `AtomicFile`
+written before the POST and refreshed in-process during playback — the
+heartbeat deliberately does **not** rewrite it, since an `fsync` every five
+seconds on the main thread during live video costs frames and buys nothing an
+observer could see.
+
+**Proved:** 16 focused unit tests and four instrumentation tests (two
+`LiveTvUiTest`, two `LiveTvFileBarrierStoreTest`) pass on an API 36 x86_64
+phone emulator under the exact JDK 25 / SDK 37 build. **Not proved:** the
+television profile. Initial D-pad focus is the 10-foot contract and its
+assertion is scoped to television `uiMode`; the AOSP Android TV system image
+enforces adb authorization, which a headless container cannot grant, so that
+half needs one of the arm64 AVDs on the Mac. The server side is now proved
+against a real HDHomeRun FLEX 4K over an antenna — see
+[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) — but playback on a
+physical phone or Google TV against that tuner has not been run, so whether
+Media3 holds a 4 s-segment live window on real hardware is still open.
 
 ## Layout verification
 

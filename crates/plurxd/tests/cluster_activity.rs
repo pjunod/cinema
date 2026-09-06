@@ -290,17 +290,29 @@ impl ActivityProxy {
 
 async fn wait_ready(client: &reqwest::Client, daemon: &mut Daemon, port: u16) {
     let deadline = Instant::now() + Duration::from_secs(90);
+    // Keep the last answer. A daemon that is running but never ready is
+    // answering `/readyz` the whole time, and what it answers is the diagnosis;
+    // discarding it left a ninety-second wait that reported only that it had
+    // waited.
+    let mut last = String::from("<no answer yet>");
     loop {
         daemon.assert_running("waiting for readiness");
-        if client
+        if let Ok(response) = client
             .get(format!("http://127.0.0.1:{port}/readyz"))
             .send()
             .await
-            .is_ok_and(|response| response.status().is_success())
         {
-            return;
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            if status.is_success() {
+                return;
+            }
+            last = format!("{status} {}", body.trim());
         }
-        assert!(Instant::now() < deadline, "daemon readiness timed out");
+        assert!(
+            Instant::now() < deadline,
+            "daemon readiness timed out; last /readyz answer was {last}"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

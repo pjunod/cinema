@@ -104,11 +104,23 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// forbidden — it has to be looked at, and this number updated, which is what
 /// stops a whole statement from disappearing behind an interpolation.
 ///
-/// The four today, each spliced into a host this census does judge:
+/// The five today, each spliced into a host this census does judge:
 /// `hiqlite_media.rs`'s two `GENRE` predicates (into the item count and the
-/// item page), and `hiqlite_durable.rs`'s two membership tombstone arms (into
-/// the offline-package insert, once per arm).
-const EXPECTED_FRAGMENTS: usize = 4;
+/// item page), `hiqlite_durable.rs`'s two membership tombstone arms (into the
+/// offline-package insert, once per arm), and `hiqlite.rs`'s
+/// `CANONICAL_SETTINGS_GENERATION_PREDICATE`.
+///
+/// That last one opens on `$4` because it is the tail of the statement it is
+/// spliced into: `put_settings_if_generation` selects `$1, $2, $3` and then
+/// guards the write on the caller's expected generation. Judged on its own it
+/// would look like a statement introducing `$4` before `$1`; judged as part of
+/// its host -- which is how the census reads it, and the whole reason
+/// interpolations are resolved -- the introduction order is `$1` through `$5`
+/// and the statement is accepted. It is also evaluated directly, as a bare
+/// `SELECT {…}`, by `replicated_generation_guard_matches_only_canonical_integer_state`;
+/// that is a `#[cfg(test)]` fixture bound by rusqlite's positional `params!`,
+/// stripped before this census runs, and not a replicated statement.
+const EXPECTED_FRAGMENTS: usize = 5;
 
 /// One Rust string literal, with its escapes decoded.
 struct Literal {

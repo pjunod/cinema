@@ -315,13 +315,36 @@ def _is_test_path(path: str) -> bool:
     )
 
 
+def _audit_tips(root: Path) -> tuple[str, ...]:
+    """The commits whose combined history this audit should cover.
+
+    Normally just HEAD, which the pre-commit hook sees as the parent of the
+    commit being made. While a merge is in progress the commit will have two
+    parents and its tree already carries both sides' coverage files, so the
+    audit has to see both -- otherwise every entry arriving through MERGE_HEAD
+    looks unmatched and a correct merge cannot be committed at all.
+
+    MERGE_HEAD can name more than one commit for an octopus merge, so every
+    line is taken.
+    """
+    # Asked of git rather than assembled from `root / ".git"`, because in a
+    # worktree `.git` is a file and the real path lives elsewhere.
+    merge_head = Path(_git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip())
+    if not merge_head.is_absolute():
+        merge_head = root / merge_head
+    if not merge_head.is_file():
+        return ("HEAD",)
+    tips = [line.strip() for line in merge_head.read_text().splitlines() if line.strip()]
+    return ("HEAD", *tips)
+
+
 def discover_issues(
     root: Path,
     catalog: Catalog,
     explicit_prefixes: tuple[str, ...] = (),
 ) -> tuple[IssueCommit, ...]:
     issues: list[IssueCommit] = []
-    history = _git(root, "log", "--no-merges", "--format=%H%x09%s")
+    history = _git(root, "log", "--no-merges", "--format=%H%x09%s", *_audit_tips(root))
     for line in history.splitlines():
         sha, subject = line.split("\t", 1)
         if not ISSUE_RE.search(subject) and not any(

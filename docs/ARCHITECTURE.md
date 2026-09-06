@@ -256,6 +256,61 @@ browser actually uses to play a verdict, why Safari and Chromium diverge on
 remux, and the copy-video HLS path that keeps Safari at source resolution — is
 [PLAYBACK.md](PLAYBACK.md).
 
+## 3a. Live TV — a tuner is a singleton, so it gets an owner
+
+Everything in §3 assumes a file: seekable bytes that any node can open and any
+node can serve segment N of. A tuner is the opposite. There is exactly one of
+it, it cannot be reopened at an offset, and two processes reading it do not get
+two streams — they get a fight. So Live TV keeps the same shape as the rest of
+the system by adding one idea: **ownership**.
+
+```
+ HDHomeRun (private IPv4)          owner node                    any other node
+ ┌──────────────────────┐    ┌────────────────────────┐    ┌────────────────────┐
+ │ :80  discover.json   │◀───│ probe + sanitized      │    │                    │
+ │      lineup.json     │    │ lineup, generation-    │    │  GET playlist      │
+ │ :5004 /auto/vN  ─────┼───▶│ fenced                 │    │  GET segment       │
+ └──────────────────────┘    │                        │    │        │           │
+                             │ ONE GET → ONE ffmpeg   │    │        ▼           │
+                             │      │                 │    │  signed relay over │
+                             │      ▼                 │◀───┼── cluster API      │
+                             │ 6-segment live window  │    │  (authenticated,   │
+                             │ + opaque capability    │    │   bounded reads)   │
+                             └────────────────────────┘    └────────────────────┘
+```
+
+- **The owner is configuration, not an election.** `live_tv.owner_node_id` is a
+  replicated setting an administrator sets. An election would have to decide
+  who holds a physical resource on the strength of a heartbeat, and a heartbeat
+  cannot prove somebody else's FFmpeg process closed a tuner socket.
+- **Only committed voters may create a tuner session.** A learner or a node in
+  maintenance relays; it does not open hardware.
+- **Time is never proof.** There is no timeout-only takeover. Re-homing the
+  owner wants a confirmed, signed drain of the previous owner, or — when that
+  node is simply gone — an explicit administrator attestation that it was
+  stopped and cannot restart (`live_tv_fenced_owner`, carrying the original
+  owner and the drain cutoff generation). That is a deliberate refusal to
+  guess, and it is why owner loss ends the session in flight rather than
+  quietly moving it.
+- **Capabilities are the only thing on the wire.** A session hands back one
+  opaque capability, bound to the issuing node and to the settings generation.
+  Relayed reads are authenticated between voters and bounded in size; the
+  playlist bytes and their segment inventory are published atomically, so a
+  reader never sees a playlist naming a segment that is not there yet.
+- **The window is the bound.** Six listed segments, deleted behind the frontier.
+  §3's live-HLS reaper reasons about a file that has an end; a channel does not,
+  so Live TV bounds its scratch by construction instead and reserves its own
+  namespace from the finite-media sweeper.
+- **Always compiled, never on by default.** There is no Cargo feature and no
+  build variant. One binary exposes the same capability everywhere, and
+  `live_tv.enabled` is a replicated runtime setting an administrator flips
+  after readiness passes. A capability that exists in one build and not another
+  is a support problem disguised as a safety feature.
+
+The client half — how each player judges that a live stream is still playing,
+and what it does with an outcome it cannot classify — is
+[PLAYBACK.md](PLAYBACK.md).
+
 ## 4. Scanner & metadata — ffprobe is ground truth
 
 ```
@@ -431,6 +486,11 @@ one of these is a door we're keeping shut on purpose:
 - **Not an everything-server (yet).** Music is out of scope (photos: supported
   in `home` libraries since 2026-07); the data model won't preclude music, but
   it is not bolted on speculatively.
+- **No DVR, and no scheduler.** Live TV (§3a) plays one tuner and keeps
+  nothing. Recording would introduce a writer with a schedule, a retention
+  policy, and a conflict resolver — a second product wearing this one's
+  clothes — and it would put plurx in the business of mutating storage on a
+  timer, which §8's read-only rule exists to prevent.
 - **No transcode-by-default.** The server will not "optimize" a library into
   pre-baked renditions; it transcodes on demand, only when a client forces it.
 

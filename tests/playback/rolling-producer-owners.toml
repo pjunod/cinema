@@ -600,7 +600,10 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-serving-authority-projection"
 pattern = "ServingAuthority"
-expected_occurrences = 14
+# +3 HDHomeRun M2: LiveTvManager's ServingAuthority field and constructor,
+# plus one always-ready test fixture. This projects existing quorum authority;
+# it does not introduce an independent serving lease.
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1179,7 +1182,29 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and the task starts no worker or process.
 # 391 -> 393: the serving-loss regression owns and joins/cancels its HTTP
 # waiter and serving-loss task. No new production task owner is introduced.
-expected_occurrences = 393
+# 389 -> 392 with HDHomeRun document-boundary fixtures: the one-response
+# redirect/size server, stalled-body server, and stalled fetch are test-only.
+# The first is joined by each caller; the stall pair is explicitly aborted or
+# awaited after the absolute deadline. None ships or owns a media producer.
+# 392 -> 394 with the HDHomeRun review regressions. One joined fake-body server
+# proves a truncated device response is URL-redacted; one joined caller task
+# per admitted forced-refresh slot proves the cache shares exactly one device
+# operation. Every handle is awaited before its test returns, neither task is
+# shipped, and neither owns an FFmpeg or tuner process.
+# +19 HDHomeRun M2: six production sites in live_tv.rs own the session worker,
+# bounded stderr drain, single tuner-response/stdin pump, descriptor open,
+# segment-response watchdog, and bounded segment reader. Two main.rs tasks
+# run shutdown-token-bound scratch sweeping and metrics refresh.
+# Eleven additional sites are regression fixtures (ten Live TV, one relay).
+# Session teardown joins the pump and confirms child exit before retirement;
+# response tasks have child cancellation and progress/total deadlines. The
+# descriptor-open blocking task cannot forcibly cancel an operating-system call.
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 413 on the effort branch and 393 on main from a shared base, and neither
+# value describes the merged tree. 417 is what the checker reads off the
+# merge, so it is what is recorded -- the two inventories above are both
+# still true, and the total is measured rather than added up.
+expected_occurrences = 417
 
 [[module_structures]]
 id = "method-spawn"
@@ -1190,7 +1215,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
 # cancellation token and deadline; the child is kill-on-drop and always reaped
 # on the explicit oversize and ordinary completion paths.
-expected_occurrences = 41
+# +1 HDHomeRun M2: spawn_live_ffmpeg launches the sole per-session encoder.
+# The session retains child and foreground admission through confirmed reap;
+# shutdown closes registry insertion before collecting existing owners.
+expected_occurrences = 42
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1274,6 +1302,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # count is both deltas rather than either one.
 # 549 -> 550 with M6 §3.4: the `Duration::from_millis` that timer sleeps for.
 # It is the preparation deadline, not a playback-progress watchdog.
+# +4 for HDHomeRun: two request/body reads share one absolute ten-second
+# deadline, the synthetic FFmpeg readiness graph has a twenty-second bound,
+# and the stalled-body fixture advances one test-only sleep. The child is
+# kill-on-drop and the fixture tasks settle before their runtimes end.
 # 550 -> 555 with M6 §3.4c review regressions: four short sleeps cross the
 # control exchange floor, and one two-second timeout bounds observation of the
 # detached production stage. Every timer is test-only and awaited; none owns a
@@ -1300,7 +1332,19 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 571 -> 577: admission capacity gets one inherited-deadline timeout;
 # takeover cleanup gets one existing-reconciliation-deadline timeout. The
 # remaining net four constructors belong to bounded settlement regressions.
-expected_occurrences = 577
+# Both efforts moved the count from 550 independently, so the merged total is
+# 550 + 4 + 7 rather than either branch's value.
+# +28 HDHomeRun M2: nineteen production Live TV sites bound startup, drain,
+# cleanup, file/HTTP operations, producer observation and response lifetime,
+# or pace scratch/metrics maintenance. Eight sites are regression timing.
+# One peer_transport timeout bounds response-signature verification within
+# the originating request deadline. None elects a replacement tuner owner.
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 589 on the effort branch and 577 on main from a shared base, and neither
+# value describes the merged tree. 609 is what the checker reads off the
+# merge, so it is what is recorded -- the two inventories above are both
+# still true, and the total is measured rather than added up.
+expected_occurrences = 609
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1337,7 +1381,14 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # returns. It owns no rolling producer, outlives no await, and never runs in a
 # shipped binary — it exists so the argv pin has a real Dolby-Vision-shaped
 # HEVC source to copy.
-expected_occurrences = 67
+# +1: the HDHomeRun readiness probe constructs the exact synthetic FFmpeg HLS
+# graph, awaits its output behind a hard deadline, and marks it kill-on-drop.
+# +2 HDHomeRun M2: the production live FFmpeg command and the finite,
+# video-only MPEG-TS fixture generator. The pre-existing readiness command
+# was already counted. Both new children use kill-on-drop; production also
+# retains admission and requires confirmed reap before retirement. The finite
+# source generator has no separate output timeout; it is not a live producer.
+expected_occurrences = 70
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1402,7 +1453,24 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 after the second adversarial review: the internal-relay preparation replay
 # regression reads the in-process response status before asserting its retained
 # canonical body. It launches no child and owns no process.
-expected_occurrences = 217
+# +3 for HDHomeRun: two HTTP status reads enforce the no-redirect/success
+# contract and one `.output()` awaits the bounded synthetic FFmpeg graph.
+# 219 -> 220 with the quorum-fence regression reading `Response::status()` on
+# the in-process signed snapshot refusal. It launches no child and is the
+# assertion that device/FFmpeg work is unreachable after authority loss.
+# +15 HDHomeRun M2: production .spawn() and fixture .output() are the only
+# two new process launches. The other thirteen matches inspect or construct
+# HTTP statuses or serialize LiveTvSession status; they own no OS process.
+# Merging main and the HDHomeRun Live TV effort: this counter had moved to
+# 235 on the effort branch and 217 on main from a shared base, and neither
+# value describes the merged tree. 236 was what the checker read off the merge
+# itself -- the two inventories above are both still true, and the total is
+# measured rather than added up.
+# +1: one more `Response::status()` read, in the serving-fence assertion for
+# the owner's internal Live TV snapshot. Same category as the M3 and M7 rows
+# above: an HTTP status code on an in-process `oneshot` response, launching no
+# process and owning no producer.
+expected_occurrences = 237
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1427,7 +1495,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # calls coordinate test tasks before the leading fetch is released. They are
 # in-process synchronization and do not address or reap an operating-system
 # process.
-expected_occurrences = 306
+# +4 HDHomeRun M2: cleanup_session calls start_kill and bounded wait while
+# retaining child/admission on failure; the session observer calls try_wait;
+# the real video-only fixture awaits its production-graph child.
+expected_occurrences = 310
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -1445,7 +1516,11 @@ pattern = "kill_on_drop\\s*\\("
 # +1: the chapter probe is dropped by cancellation or deadline selection and
 # must not leave ffprobe holding a NAS file or the queue's global media slot.
 # +1 with the bounded subtitle window: its kill_on_drop, for the same reason the whole-track extractor has one.
-expected_occurrences = 37
+# +1: the HDHomeRun graph probe cannot survive cancellation or its deadline.
+# +2 HDHomeRun M2: production encoder and finite video-only source generator.
+# kill-on-drop is a fallback; successful production drain still requires
+# explicit confirmed reap rather than treating drop as cleanup proof.
+expected_occurrences = 40
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

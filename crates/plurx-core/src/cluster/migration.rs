@@ -537,6 +537,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             protocol_min: crate::store::AUTH_PROTOCOL_MIN,
             protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            live_tv_v1: true,
         },
     )
     .await?;
@@ -4283,6 +4284,7 @@ mod tests {
                 protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
                 protocol_min: crate::store::AUTH_PROTOCOL_MIN,
                 protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+                live_tv_v1: true,
             })
             .await
             .expect("reserve the token to the staged node before its failed start");
@@ -4652,6 +4654,7 @@ mod tests {
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             protocol_min: 0,
             protocol_max: 0,
+            live_tv_v1: false,
         };
         assert_ne!(
             membership
@@ -4754,6 +4757,7 @@ mod tests {
             // A joiner that predates the range sends no range fields.
             protocol_min: 0,
             protocol_max: 0,
+            live_tv_v1: false,
         };
         assert_eq!(
             membership
@@ -4766,6 +4770,7 @@ mod tests {
         let new_joiner = RedeemJoinRequest {
             protocol_min: crate::store::AUTH_PROTOCOL_MIN,
             protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            live_tv_v1: true,
             ..old_joiner
         };
         // This one clears the protocol gate; it fails later, on addressing,

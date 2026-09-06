@@ -252,6 +252,19 @@ cluster-daemon-check: ## Run real-daemon activation and activity contracts
 	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
 	  --test cluster_activity -- --nocapture
 
+.PHONY: live-tv-hardware-check
+live-tv-hardware-check: ## Accept Live TV against a real HDHomeRun (set DEVICE=<tuner ipv4>, optional TUNERS=n)
+	test -n "$(DEVICE)" || { \
+	  echo "set DEVICE to your HDHomeRun's private IPv4, e.g. make live-tv-hardware-check DEVICE=192.168.4.20"; \
+	  exit 2; }
+	python3 scripts/live-tv-hardware --self-host --device "$(DEVICE)" \
+	  --tuners "$(or $(TUNERS),1)" --out target/live-tv-hardware
+
+.PHONY: live-tv-two-node-check
+live-tv-two-node-check: ## Run the two-node Live TV acceptance cases (needs a host that can bind ports 80 and 5004)
+	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
+	  --test live_tv_two_node -- --nocapture --test-threads=1
+
 .PHONY: cluster-check
 cluster-check: cluster-wal-check cluster-store-check cluster-harness-check cluster-daemon-check ## Run every replicated recovery and failure contract
 
@@ -397,6 +410,7 @@ ui-baseline: ## Capture the UI baseline for every layout (both tiers, into targe
 .PHONY: ui-check
 ui-check: ## Sweep every layout and fail if the structural golden moved
 	@scripts/ui-baseline --self-host --check
+	@python3 scripts/live-tv-browser --self-host --out target/live-tv-browser
 
 # Every other web test reads the reporter as text. This one runs it. The M5
 # fleet run was the first execution the web control plane ever had, and it
@@ -425,6 +439,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/player-dom.test.js
 	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
+	@node tests/web/live-tv.test.js
 	@node tests/web/layout-containment.test.js
 	@node tests/web/page-read-budget.test.js
 	@node tests/web/theme-family.test.js

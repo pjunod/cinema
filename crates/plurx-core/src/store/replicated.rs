@@ -149,6 +149,19 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // The Live TV configuration is generation-fenced, so its write is a
+    // compare-and-set: read the stored generation, branch on whether it still
+    // matches the caller's, and write the batch only then. That is
+    // ReadBranchWrite rather than the VerbatimBatch of plain `put_settings`,
+    // and the branch is the entire reason the boundary exists -- two
+    // administrators must not be able to half-apply two configurations.
+    SqliteTransactionSite {
+        module: "mod.rs",
+        method: "put_settings_if_generation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
     SqliteTransactionSite {
         module: "watch.rs",
         method: "set_watched_tree",
@@ -837,7 +850,10 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 65);
+        // 66 since `put_settings_if_generation`: the generation-fenced
+        // settings write opens its own boundary, classified beside the others
+        // in SQLITE_TRANSACTION_SITES rather than counted into this number.
+        assert_eq!(methods.len(), 66);
     }
 
     #[test]

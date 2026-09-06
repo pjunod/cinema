@@ -172,7 +172,7 @@ class OperationsContractCase(unittest.TestCase):
         script = read("scripts/ui-baseline")
 
         self.assertIn(
-            'if name in {"home", "activity", "analysis", "settings"}:', script
+            'if name in {"home", "activity", "analysis", "settings", "settings-developer", "live-tv"}:', script
         )
         self.assertIn('[data-phase="settled"]', script)
         self.assertIn('wait_until="domcontentloaded"', script)
