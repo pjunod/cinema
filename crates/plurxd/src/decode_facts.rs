@@ -6,6 +6,10 @@
 //! can be returned or cached.
 
 use std::collections::{BTreeMap, VecDeque};
+#[cfg(unix)]
+use std::ffi::OsString;
+#[cfg(target_os = "linux")]
+use std::ffi::{CString, OsStr};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -56,6 +60,13 @@ pub(crate) enum ProbeStreamSelection {
     FirstPlayable,
     LegacyVideoOrdinal(u32),
     Absolute(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeLaunchMode {
+    Production,
+    #[cfg(test)]
+    Fixture,
 }
 
 /// A held source descriptor and the exclusive ownership lane for every child
@@ -109,6 +120,7 @@ pub(crate) struct DecodeProbeIdentity {
     build_digest: String,
     file: ProbeFileIdentity,
     snapshot_file: ProbeFileIdentity,
+    launch_mode: ProbeLaunchMode,
 }
 
 #[derive(Debug)]
@@ -144,6 +156,18 @@ impl Drop for ExecutableSnapshot {
 
 impl DecodeProbeIdentity {
     pub(crate) async fn discover(bin: &str) -> Result<Self, DecodeFactError> {
+        Self::discover_with_mode(bin, ProbeLaunchMode::Production).await
+    }
+
+    #[cfg(test)]
+    async fn discover_fixture(bin: &str) -> Result<Self, DecodeFactError> {
+        Self::discover_with_mode(bin, ProbeLaunchMode::Fixture).await
+    }
+
+    async fn discover_with_mode(
+        bin: &str,
+        launch_mode: ProbeLaunchMode,
+    ) -> Result<Self, DecodeFactError> {
         // Unit fixtures are executable scripts and exercise many independent
         // startup identities in parallel. Serialize their full discovery so
         // host scheduler load cannot consume a production-scale version
@@ -158,8 +182,6 @@ impl DecodeProbeIdentity {
             std::fs::File::open(&executable)
                 .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?,
         );
-        #[cfg(all(unix, not(test)))]
-        require_direct_probe_executable(&executable_file)?;
         let before =
             held_probe_file_identity_within(Arc::clone(&executable_file), IDENTITY_DEADLINE, None)
                 .await?;
@@ -184,7 +206,10 @@ impl DecodeProbeIdentity {
         if snapshot_file.content_digest != before.content_digest {
             return Err(DecodeFactError::ProbeChanged);
         }
-        let version = probe_version(&executable_snapshot, &executable).await?;
+        if launch_mode == ProbeLaunchMode::Production {
+            require_direct_probe_executable(executable_snapshot.as_file())?;
+        }
+        let version = probe_version(&executable_snapshot, &executable, launch_mode).await?;
         let after_path = executable.clone();
         let after = path_probe_file_identity_within(after_path, IDENTITY_DEADLINE, None).await?;
         if before != after {
@@ -202,6 +227,7 @@ impl DecodeProbeIdentity {
             build_digest: hex::encode(Sha256::digest(digest_input.to_string().as_bytes())),
             file: before,
             snapshot_file,
+            launch_mode,
         })
     }
 
@@ -436,8 +462,6 @@ fn install_probe_child_fds(
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
 #[cfg(target_os = "linux")]
 const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1;
-#[cfg(target_os = "linux")]
-const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
 
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -445,20 +469,12 @@ struct LandlockRulesetAttr {
     handled_access_fs: u64,
 }
 
+/// Deny execution from every path-backed filesystem. The first parser exec is
+/// performed directly from the sealed anonymous descriptor, which Landlock
+/// deliberately does not mediate. A separate seccomp layer makes that one
+/// descriptor the only possible target of every later exec.
 #[cfg(target_os = "linux")]
-#[repr(C)]
-struct LandlockPathBeneathAttr {
-    allowed_access: u64,
-    parent_fd: libc::c_int,
-}
-
-/// Restrict the child to executing the already-installed held artifact. This
-/// is installed before the first exec, so a native launcher cannot exec a
-/// second parser outside the build digest.
-#[cfg(target_os = "linux")]
-fn install_linux_execute_confinement(
-    allowed_executables: &[std::os::fd::RawFd],
-) -> std::io::Result<()> {
+fn install_linux_filesystem_execute_denial() -> std::io::Result<()> {
     let abi = unsafe {
         libc::syscall(
             libc::SYS_landlock_create_ruleset,
@@ -484,26 +500,6 @@ fn install_linux_execute_confinement(
     if ruleset_fd == -1 {
         return Err(std::io::Error::last_os_error());
     }
-    for executable in allowed_executables {
-        let path_attr = LandlockPathBeneathAttr {
-            allowed_access: LANDLOCK_ACCESS_FS_EXECUTE,
-            parent_fd: *executable,
-        };
-        let add_result = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_add_rule,
-                ruleset_fd,
-                LANDLOCK_RULE_PATH_BENEATH,
-                &raw const path_attr,
-                0,
-            )
-        };
-        if add_result == -1 {
-            let error = std::io::Error::last_os_error();
-            unsafe { libc::close(ruleset_fd as libc::c_int) };
-            return Err(error);
-        }
-    }
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
         let error = std::io::Error::last_os_error();
         unsafe { libc::close(ruleset_fd as libc::c_int) };
@@ -518,29 +514,308 @@ fn install_linux_execute_confinement(
     }
 }
 
-#[cfg(all(target_os = "linux", not(test)))]
-fn confine_probe_execution() -> std::io::Result<()> {
-    let allowed_fd =
-        unsafe { libc::open(c"/proc/self/fd/4".as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-    if allowed_fd == -1 {
-        return Err(std::io::Error::last_os_error());
+#[cfg(target_os = "linux")]
+const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
+#[cfg(target_os = "linux")]
+const SECCOMP_DATA_ARGS_OFFSET: u32 = 16;
+#[cfg(target_os = "linux")]
+const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+#[cfg(target_os = "linux")]
+const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+#[cfg(target_os = "linux")]
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const LINUX_AUDIT_ARCH: u32 = 0xc000_003e;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const LINUX_AUDIT_ARCH: u32 = 0xc000_00b7;
+
+#[cfg(target_os = "linux")]
+fn seccomp_statement(code: u16, value: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k: value,
     }
-    let result = install_linux_execute_confinement(&[allowed_fd]);
-    unsafe { libc::close(allowed_fd) };
-    result
 }
 
-#[cfg(all(unix, test))]
-fn confine_probe_execution() -> std::io::Result<()> {
-    Ok(())
+#[cfg(target_os = "linux")]
+fn seccomp_jump(code: u16, value: u32, yes: u8, no: u8) -> libc::sock_filter {
+    libc::sock_filter {
+        code,
+        jt: yes,
+        jf: no,
+        k: value,
+    }
 }
 
-#[cfg(all(unix, not(target_os = "linux"), not(test)))]
-fn confine_probe_execution() -> std::io::Result<()> {
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct LinuxProbeSeccomp {
+    filter: Vec<libc::sock_filter>,
+    filter_len: u16,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxProbeSeccomp {
+    fn install(&self) -> std::io::Result<()> {
+        let program = libc::sock_fprog {
+            len: self.filter_len,
+            filter: self.filter.as_ptr().cast_mut(),
+        };
+        if unsafe {
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                &raw const program,
+            )
+        } == -1
+        {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Keep FD 4 permanently bound to the sealed parser and make it the only
+/// executable object reachable after the first descriptor-based exec.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
+    const LOAD_WORD_ABSOLUTE: u16 = 0x20;
+    const JUMP_EQUAL: u16 = 0x15;
+    const JUMP_GREATER_THAN: u16 = 0x25;
+    const JUMP_GREATER_OR_EQUAL: u16 = 0x35;
+    const RETURN_CONSTANT: u16 = 0x06;
+    const DENIED: u32 = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+
+    let mut filter = vec![
+        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARCH_OFFSET),
+        seccomp_jump(JUMP_EQUAL, LINUX_AUDIT_ARCH, 1, 0),
+        seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_KILL_PROCESS),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, 0),
+    ];
+    #[cfg(target_arch = "x86_64")]
+    filter.extend([
+        // x32 shares AUDIT_ARCH_X86_64 but offsets its syscall table. Refuse
+        // that alternate ABI so native-number checks cannot be bypassed.
+        seccomp_jump(0x45, 0x4000_0000, 0, 1),
+        seccomp_statement(RETURN_CONSTANT, DENIED),
+    ]);
+    for syscall in [
+        libc::SYS_execve,
+        libc::SYS_recvmsg,
+        libc::SYS_recvmmsg,
+        libc::SYS_pidfd_getfd,
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+    ] {
+        filter.push(seccomp_jump(JUMP_EQUAL, syscall as u32, 0, 1));
+        filter.push(seccomp_statement(RETURN_CONSTANT, DENIED));
+    }
+    let descriptor_mutations = [
+        (libc::SYS_close, 0_u32),
+        (libc::SYS_dup3, 1_u32),
+        #[cfg(target_arch = "x86_64")]
+        (libc::SYS_dup2, 1_u32),
+    ];
+    for (syscall, argument) in descriptor_mutations {
+        filter.push(seccomp_jump(JUMP_EQUAL, syscall as u32, 0, 3));
+        filter.push(seccomp_statement(
+            LOAD_WORD_ABSOLUTE,
+            SECCOMP_DATA_ARGS_OFFSET + argument * 8,
+        ));
+        filter.push(seccomp_jump(JUMP_EQUAL, HELD_PROBE_FD as u32, 0, 1));
+        filter.push(seccomp_statement(RETURN_CONSTANT, DENIED));
+        filter.push(seccomp_statement(LOAD_WORD_ABSOLUTE, 0));
+    }
+    filter.extend([
+        seccomp_jump(JUMP_EQUAL, libc::SYS_close_range as u32, 0, 5),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGS_OFFSET),
+        seccomp_jump(JUMP_GREATER_THAN, HELD_PROBE_FD as u32, 3, 0),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGS_OFFSET + 8),
+        seccomp_jump(JUMP_GREATER_OR_EQUAL, HELD_PROBE_FD as u32, 0, 1),
+        seccomp_statement(RETURN_CONSTANT, DENIED),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, 0),
+        seccomp_jump(JUMP_EQUAL, libc::SYS_execveat as u32, 0, 6),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGS_OFFSET),
+        seccomp_jump(JUMP_EQUAL, HELD_PROBE_FD as u32, 1, 0),
+        seccomp_statement(RETURN_CONSTANT, DENIED),
+        seccomp_statement(LOAD_WORD_ABSOLUTE, SECCOMP_DATA_ARGS_OFFSET + 32),
+        seccomp_jump(JUMP_EQUAL, libc::AT_EMPTY_PATH as u32, 1, 0),
+        seccomp_statement(RETURN_CONSTANT, DENIED),
+        seccomp_statement(RETURN_CONSTANT, SECCOMP_RET_ALLOW),
+    ]);
+    let filter_len = u16::try_from(filter.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "probe seccomp program exceeded the kernel length field",
+        )
+    })?;
+    Ok(LinuxProbeSeccomp { filter, filter_len })
+}
+
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+fn build_linux_probe_seccomp() -> std::io::Result<LinuxProbeSeccomp> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "qualified FFprobe execution requires Linux Landlock",
+        "qualified FFprobe seccomp is unsupported on this architecture",
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn mark_unrelated_fds_close_on_exec() -> std::io::Result<()> {
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            HELD_PROBE_FD + 1,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct LinuxExecveArguments {
+    _argv: Vec<CString>,
+    argv_pointers: Vec<usize>,
+    _environment: Vec<CString>,
+    environment_pointers: Vec<usize>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxExecveArguments {
+    fn new(arg0: &OsStr, arguments: &[OsString]) -> std::io::Result<Self> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut argv = Vec::with_capacity(arguments.len() + 1);
+        argv.push(CString::new(arg0.as_bytes())?);
+        for argument in arguments {
+            argv.push(CString::new(argument.as_os_str().as_bytes())?);
+        }
+        let environment = std::env::vars_os()
+            .map(|(key, value)| {
+                let mut entry = key.as_os_str().as_bytes().to_vec();
+                entry.push(b'=');
+                entry.extend_from_slice(value.as_os_str().as_bytes());
+                CString::new(entry)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut argv_pointers = argv
+            .iter()
+            .map(|argument| argument.as_ptr() as usize)
+            .collect::<Vec<_>>();
+        argv_pointers.push(0);
+        let mut environment_pointers = environment
+            .iter()
+            .map(|entry| entry.as_ptr() as usize)
+            .collect::<Vec<_>>();
+        environment_pointers.push(0);
+        Ok(Self {
+            _argv: argv,
+            argv_pointers,
+            _environment: environment,
+            environment_pointers,
+        })
+    }
+
+    fn execute_held_probe(&self) -> std::io::Result<()> {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_execveat,
+                HELD_PROBE_FD,
+                c"".as_ptr(),
+                self.argv_pointers.as_ptr().cast::<*const libc::c_char>(),
+                self.environment_pointers
+                    .as_ptr()
+                    .cast::<*const libc::c_char>(),
+                libc::AT_EMPTY_PATH,
+            )
+        };
+        debug_assert_eq!(result, -1);
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn configure_probe_execution(
+    command: &mut tokio::process::Command,
+    launch_mode: ProbeLaunchMode,
+    executable_fd: std::os::fd::RawFd,
+    source_fd: Option<std::os::fd::RawFd>,
+    arg0: &Path,
+    arguments: &[OsString],
+) -> Result<(), DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    let production_arguments = if launch_mode == ProbeLaunchMode::Production {
+        Some(
+            LinuxExecveArguments::new(arg0.as_os_str(), arguments)
+                .map_err(|error| DecodeFactError::Spawn(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let production_seccomp = if launch_mode == ProbeLaunchMode::Production {
+        Some(
+            build_linux_probe_seccomp()
+                .map_err(|error| DecodeFactError::Spawn(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = (arg0, arguments);
+    unsafe {
+        command.pre_exec(move || {
+            start_probe_session()?;
+            match source_fd {
+                Some(source_fd) => install_probe_child_fds(source_fd, executable_fd)?,
+                None => install_child_fd(executable_fd, HELD_PROBE_FD)?,
+            }
+            match launch_mode {
+                #[cfg(test)]
+                ProbeLaunchMode::Fixture => Ok(()),
+                ProbeLaunchMode::Production => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        mark_unrelated_fds_close_on_exec()?;
+                        install_linux_filesystem_execute_denial()?;
+                        let Some(seccomp) = production_seccomp.as_ref() else {
+                            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                        };
+                        let Some(arguments) = production_arguments.as_ref() else {
+                            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                        };
+                        seccomp.install()?;
+                        arguments.execute_held_probe()
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "qualified FFprobe execution requires Linux isolation",
+                        ))
+                    }
+                }
+            }
+        });
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -567,6 +842,44 @@ fn kill_probe_session(process_group: Option<libc::pid_t>) {
         unsafe {
             libc::kill(-process_group, libc::SIGKILL);
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct ProbeExitAnchor {
+    pidfd: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
+}
+
+#[cfg(target_os = "linux")]
+impl ProbeExitAnchor {
+    fn open(process_group: Option<libc::pid_t>) -> std::io::Result<Self> {
+        use std::os::fd::FromRawFd;
+
+        let pid = process_group.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "spawned FFprobe has no process identifier",
+            )
+        })?;
+        let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if raw_fd == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let raw_fd = libc::c_int::try_from(raw_fd).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "FFprobe pidfd exceeded the descriptor range",
+            )
+        })?;
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) };
+        Ok(Self {
+            pidfd: tokio::io::unix::AsyncFd::new(owned)?,
+        })
+    }
+
+    async fn wait_until_exit(&self) -> std::io::Result<()> {
+        let _readiness = self.pidfd.readable().await?;
+        Ok(())
     }
 }
 
@@ -874,6 +1187,7 @@ fn probe_file_identity_from_file(
 async fn probe_version(
     executable: &ExecutableSnapshot,
     configured_path: &Path,
+    launch_mode: ProbeLaunchMode,
 ) -> Result<Vec<u8>, DecodeFactError> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -888,26 +1202,38 @@ async fn probe_version(
         return Err(DecodeFactError::Deadline);
     }
     let executable_fd = executable.as_file().as_raw_fd();
+    let arguments = vec![OsString::from("-version")];
     let mut command = tokio::process::Command::new(snapshot_execution_path(executable));
     command.as_std_mut().arg0(configured_path);
     command
-        .arg("-version")
+        .args(&arguments)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    unsafe {
-        command.pre_exec(move || {
-            start_probe_session()?;
-            install_child_fd(executable_fd, HELD_PROBE_FD)?;
-            confine_probe_execution()
-        });
-    }
+    configure_probe_execution(
+        &mut command,
+        launch_mode,
+        executable_fd,
+        None,
+        configured_path,
+        &arguments,
+    )?;
     let mut child = command
         .spawn()
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
+    #[cfg(target_os = "linux")]
+    let exit_anchor = match ProbeExitAnchor::open(process_group) {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            terminate_probe_session(&mut child, &session).await;
+            return Err(DecodeFactError::Spawn(format!(
+                "opening FFprobe exit anchor: {error}"
+            )));
+        }
+    };
     let terminator = session.terminator();
     let mut task = tokio::spawn(async move {
         let _version_permit = version_permit;
@@ -918,7 +1244,26 @@ async fn probe_version(
                 return Err(DecodeFactError::MissingPipe);
             }
         };
+        #[cfg(target_os = "linux")]
+        let (stdout, exited) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), async {
+            let exited = exit_anchor.wait_until_exit().await;
+            // Kill descendants as soon as the leader exits so inherited
+            // pipe writers cannot hold the drain open.
+            session.kill_once();
+            exited
+        });
+        #[cfg(target_os = "linux")]
+        let status = {
+            // pidfd readiness proves exit without reaping. The zombie anchors
+            // the PID/PGID until descendants are killed and only then is the
+            // leader reaped.
+            let exited = exited.map_err(|error| DecodeFactError::Read(error.to_string()));
+            exited?;
+            child.wait().await
+        };
+        #[cfg(not(target_os = "linux"))]
         let (stdout, status) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait());
+        #[cfg(not(target_os = "linux"))]
         session.kill_once();
         let stdout = stdout?;
         let status = match status {
@@ -951,6 +1296,7 @@ async fn probe_version(
 async fn probe_version(
     _executable: &ExecutableSnapshot,
     _configured_path: &Path,
+    _launch_mode: ProbeLaunchMode,
 ) -> Result<Vec<u8>, DecodeFactError> {
     Err(DecodeFactError::UnsupportedPlatform)
 }
@@ -1231,9 +1577,23 @@ async fn collect(
     cancelled: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<DecodeFacts, DecodeFactError> {
     use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
 
     let source_fd = source.as_raw_fd();
+    if probe.launch_mode == ProbeLaunchMode::Production
+        && source
+            .metadata()
+            .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?
+            .permissions()
+            .mode()
+            & 0o111
+            != 0
+    {
+        return Err(DecodeFactError::SourceMetadata(
+            "bound media source must not have executable mode bits".to_owned(),
+        ));
+    }
     let source_offset = unsafe { libc::lseek(source_fd, 0, libc::SEEK_CUR) };
     if source_offset == -1 {
         return Err(DecodeFactError::SourceMetadata(
@@ -1259,12 +1619,7 @@ async fn collect(
         offset: source_offset,
     };
     let executable_fd = probe.executable_snapshot.as_file().as_raw_fd();
-    let mut command =
-        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
-    command.as_std_mut().arg0(probe.executable());
-    #[cfg(test)]
-    command.env("PLURX_TEST_PROBE_PATH", probe.executable());
-    command.args([
+    let arguments = [
         "-v",
         "error",
         "-print_format",
@@ -1273,14 +1628,22 @@ async fn collect(
         "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type",
         "-show_streams",
         "/dev/fd/3",
-    ]);
-    unsafe {
-        command.pre_exec(move || {
-            start_probe_session()?;
-            install_probe_child_fds(source_fd, executable_fd)?;
-            confine_probe_execution()
-        });
-    }
+    ]
+    .map(OsString::from);
+    let mut command =
+        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    command.as_std_mut().arg0(probe.executable());
+    #[cfg(test)]
+    command.env("PLURX_TEST_PROBE_PATH", probe.executable());
+    command.args(&arguments);
+    configure_probe_execution(
+        &mut command,
+        probe.launch_mode,
+        executable_fd,
+        Some(source_fd),
+        probe.executable(),
+        &arguments,
+    )?;
     let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1290,6 +1653,16 @@ async fn collect(
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
     let session = ProbeSessionGuard::new(process_group);
+    #[cfg(target_os = "linux")]
+    let exit_anchor = match ProbeExitAnchor::open(process_group) {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            terminate_probe_session(&mut child, &session).await;
+            return Err(DecodeFactError::Spawn(format!(
+                "opening FFprobe exit anchor: {error}"
+            )));
+        }
+    };
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -1311,22 +1684,41 @@ async fn collect(
             return Err(DecodeFactError::Cancelled);
         }
         outcome = tokio::time::timeout(budget.min(PROBE_DEADLINE), async {
+            #[cfg(target_os = "linux")]
+            let (stdout, stderr, exited) = tokio::join!(
+                read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
+                read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
+                async {
+                    let exited = exit_anchor.wait_until_exit().await;
+                    session.kill_once();
+                    exited
+                },
+            );
+            #[cfg(target_os = "linux")]
+            let status = {
+                let exited = exited.map_err(|error| DecodeFactError::Read(error.to_string()));
+                exited?;
+                child.wait().await
+            };
+            #[cfg(not(target_os = "linux"))]
             let (stdout, stderr, status) = tokio::join!(
                 read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
                 read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
                 child.wait(),
             );
-            (stdout, stderr, status)
+            #[cfg(not(target_os = "linux"))]
+            session.kill_once();
+            Ok::<_, DecodeFactError>((stdout, stderr, status))
         }) => outcome,
     };
     let (stdout, stderr, status) = match outcome {
-        Ok((stdout, stderr, status)) => (stdout, stderr, status),
+        Ok(Ok((stdout, stderr, status))) => (stdout, stderr, status),
+        Ok(Err(error)) => return Err(error),
         Err(_) => {
             terminate_probe_session(&mut child, &session).await;
             return Err(DecodeFactError::Deadline);
         }
     };
-    session.kill_once();
     let stdout = stdout?;
     let stderr = stderr?;
     let status = match status {
@@ -1438,6 +1830,157 @@ mod tests {
             .expect("make probe executable");
     }
 
+    #[cfg(target_os = "linux")]
+    fn build_static_probe(path: &std::path::Path, mode: u8) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = path.with_extension("c");
+        std::fs::write(
+            &source,
+            r#"
+#if !defined(__x86_64__) && !defined(__aarch64__)
+#error unsupported test architecture
+#endif
+
+#define NR_READ 0
+#define NR_WRITE 1
+#define NR_CLOSE 3
+#define NR_LSEEK 8
+#define NR_EXECVE 59
+#define NR_FCHMOD 91
+#define NR_EXIT 60
+#define NR_MEMFD_CREATE 319
+#define NR_EXECVEAT 322
+#if defined(__aarch64__)
+#undef NR_READ
+#undef NR_WRITE
+#undef NR_CLOSE
+#undef NR_LSEEK
+#undef NR_EXECVE
+#undef NR_FCHMOD
+#undef NR_EXIT
+#undef NR_MEMFD_CREATE
+#undef NR_EXECVEAT
+#define NR_READ 63
+#define NR_WRITE 64
+#define NR_CLOSE 57
+#define NR_LSEEK 62
+#define NR_EXECVE 221
+#define NR_FCHMOD 52
+#define NR_EXIT 93
+#define NR_MEMFD_CREATE 279
+#define NR_EXECVEAT 281
+#endif
+#define AT_EMPTY_PATH 0x1000
+
+#if defined(__x86_64__)
+static long syscall6(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
+    long result;
+    register long r10 __asm__("r10") = a3;
+    register long r8 __asm__("r8") = a4;
+    register long r9 __asm__("r9") = a5;
+    __asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9) : "rcx", "r11", "memory");
+    return result;
+}
+__asm__(".global _start\n.type _start,@function\n_start:\n mov %rsp,%rdi\n andq $-16,%rsp\n call probe_main\n");
+#else
+static long syscall6(long number, long a0, long a1, long a2, long a3, long a4, long a5) {
+    register long x0 __asm__("x0") = a0;
+    register long x1 __asm__("x1") = a1;
+    register long x2 __asm__("x2") = a2;
+    register long x3 __asm__("x3") = a3;
+    register long x4 __asm__("x4") = a4;
+    register long x5 __asm__("x5") = a5;
+    register long x8 __asm__("x8") = number;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x8) : "memory");
+    return x0;
+}
+__asm__(".global _start\n.type _start,%function\n_start:\n mov x0,sp\n bl probe_main\n");
+#endif
+
+static unsigned long length(const char *text) {
+    unsigned long count = 0;
+    while (text[count]) count++;
+    return count;
+}
+
+static int same(const char *left, const char *right) {
+    while (*left && *right && *left == *right) { left++; right++; }
+    return *left == *right;
+}
+
+static void write_text(long fd, const char *text) {
+    syscall6(NR_WRITE, fd, (long)text, length(text), 0, 0, 0);
+}
+
+static __attribute__((noreturn)) void finish(long status) {
+    syscall6(NR_EXIT, status, 0, 0, 0, 0, 0);
+    for (;;) {}
+}
+
+static const char facts[] = "{\"streams\":[{\"index\":4,\"codec_type\":\"video\",\"codec_name\":\"h264\",\"profile\":\"High\",\"pix_fmt\":\"yuv420p\",\"width\":1920,\"height\":1080,\"avg_frame_rate\":\"24000/1001\",\"r_frame_rate\":\"24000/1001\",\"disposition\":{\"attached_pic\":0}}]}\n";
+
+void probe_main(unsigned long *stack) {
+    long argc = (long)stack[0];
+    char **argv = (char **)(stack + 1);
+#if PROBE_MODE == 0
+    if (argc > 1 && same(argv[1], "-v")) {
+        char source[64];
+        syscall6(NR_LSEEK, 3, 0, 0, 0, 0, 0);
+        long count = syscall6(NR_READ, 3, (long)source, sizeof(source) - 1, 0, 0, 0);
+        if (count != 23) finish(84);
+        source[count] = 0;
+        if (!same(source, "production-bound source")) finish(85);
+    }
+#elif PROBE_MODE == 1
+    char *next[] = { "/usr/bin/false", 0 };
+    write_text(1, "entered:path\n");
+    syscall6(NR_EXECVE, (long)next[0], (long)next, 0, 0, 0, 0);
+    write_text(1, "blocked:path\n");
+#elif PROBE_MODE == 2
+    if (argc > 1 && same(argv[1], "copied")) finish(92);
+    write_text(1, "entered:memfd\n");
+    long copy = syscall6(NR_MEMFD_CREATE, (long)"copy", 0, 0, 0, 0, 0);
+    if (copy < 0) finish(81);
+    syscall6(NR_LSEEK, 4, 0, 0, 0, 0, 0);
+    char buffer[4096];
+    for (;;) {
+        long count = syscall6(NR_READ, 4, (long)buffer, sizeof(buffer), 0, 0, 0);
+        if (count < 0) finish(82);
+        if (count == 0) break;
+        if (syscall6(NR_WRITE, copy, (long)buffer, count, 0, 0, 0) != count) finish(83);
+    }
+    syscall6(NR_FCHMOD, copy, 0500, 0, 0, 0, 0);
+    syscall6(NR_LSEEK, copy, 0, 0, 0, 0, 0);
+    char *next[] = { "copy", "copied", 0 };
+    syscall6(NR_EXECVEAT, copy, (long)"", (long)next, 0, AT_EMPTY_PATH, 0);
+    write_text(1, "blocked:memfd\n");
+#endif
+    write_text(1, facts);
+    finish(0);
+}
+"#,
+        )
+        .expect("write static probe source");
+        let status = std::process::Command::new("cc")
+            .arg("-nostdlib")
+            .arg("-static")
+            .arg("-fno-stack-protector")
+            .arg("-fno-pie")
+            .arg("-no-pie")
+            .arg("-Wl,--build-id=none")
+            .arg("-Wl,-e,_start")
+            .arg(format!("-DPROBE_MODE={mode}"))
+            .arg(&source)
+            .arg("-o")
+            .arg(path)
+            .status()
+            .expect("start static probe compiler");
+        assert!(status.success(), "compile static production-path probe");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500))
+            .expect("make static probe executable");
+    }
+
     #[cfg(unix)]
     #[test]
     fn qualified_probe_identity_refuses_indirect_wrappers() {
@@ -1496,6 +2039,39 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn executable_classification_is_bound_to_the_sealed_snapshot() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let artifact = root.path().join("mutable-probe");
+        let mut elf = vec![0_u8; 64 + 56];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[6] = 1;
+        elf[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        elf[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        elf[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        elf[64..68].copy_from_slice(&1_u32.to_le_bytes());
+        std::fs::write(&artifact, elf).expect("write initially accepted ELF");
+        let opened = std::fs::File::open(&artifact).expect("open initially accepted ELF");
+        require_direct_probe_executable(&opened).expect("initial bytes qualify structurally");
+        std::fs::copy(
+            std::env::current_exe().expect("current dynamic executable"),
+            &artifact,
+        )
+        .expect("replace configured bytes in place");
+        let snapshot = snapshot_executable(&opened).expect("snapshot replacement bytes");
+        assert!(matches!(
+            require_direct_probe_executable(snapshot.as_file()),
+            Err(DecodeFactError::ProbeIdentity(reason)) if reason.contains("statically linked")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn sealed_snapshot_refuses_in_place_mutation() {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::FileExt;
@@ -1512,82 +2088,78 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_confinement_blocks_a_native_launcher_second_exec() {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        use std::os::unix::ffi::OsStringExt;
-        use std::os::unix::fs::FileExt;
-        use std::os::unix::process::CommandExt;
+    #[tokio::test]
+    async fn production_probe_executes_sealed_bytes_and_collects_bound_json() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("static-ffprobe");
+        build_static_probe(&probe, 0);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production probe identity and version");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"production-bound source").expect("media");
+        let source = Arc::new(std::fs::File::open(media).expect("open media"));
+        let facts = DecodeFactCache::new()
+            .get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(source),
+                None,
+                ProbeStreamSelection::Absolute(4),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .expect("sealed production collection");
+        assert_eq!(facts.input_video_stream(), 4);
+        assert_eq!(facts.codec(), Some("h264"));
+    }
 
-        let shell = std::fs::File::open("/bin/sh").expect("open native launcher");
-        let mut header = [0_u8; 64];
-        shell
-            .read_exact_at(&mut header, 0)
-            .expect("read native launcher ELF header");
-        assert_eq!(&header[..6], b"\x7fELF\x02\x01");
-        let program_offset = u64::from_le_bytes(header[32..40].try_into().expect("program offset"));
-        let entry_size = u16::from_le_bytes(header[54..56].try_into().expect("entry size"));
-        let entry_count = u16::from_le_bytes(header[56..58].try_into().expect("entry count"));
-        let mut interpreter = None;
-        for entry in 0..entry_count {
-            let offset = program_offset + u64::from(entry) * u64::from(entry_size);
-            let mut program = [0_u8; 56];
-            shell
-                .read_exact_at(&mut program, offset)
-                .expect("read native launcher program header");
-            if u32::from_le_bytes(program[..4].try_into().expect("program type")) == 3 {
-                let path_offset =
-                    u64::from_le_bytes(program[8..16].try_into().expect("path offset"));
-                let path_bytes =
-                    u64::from_le_bytes(program[32..40].try_into().expect("path bytes"));
-                let mut path = vec![0_u8; usize::try_from(path_bytes).expect("path size")];
-                shell
-                    .read_exact_at(&mut path, path_offset)
-                    .expect("read native launcher interpreter");
-                if path.last() == Some(&0) {
-                    path.pop();
-                }
-                interpreter = Some(std::path::PathBuf::from(std::ffi::OsString::from_vec(path)));
-                break;
-            }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn production_probe_blocks_path_and_second_memfd_exec() {
+        let root = crate::test_tempdir().expect("tempdir");
+        for (mode, name) in [(1, "path-launcher"), (2, "memfd-launcher")] {
+            let probe = root.path().join(name);
+            build_static_probe(&probe, mode);
+            DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{name} must enter and observe blocked exec: {error}")
+                });
         }
-        let interpreter = interpreter.expect("native launcher interpreter");
-        let shell_allowed =
-            unsafe { libc::open(c"/bin/sh".as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-        assert_ne!(shell_allowed, -1, "open launcher O_PATH");
-        let shell_allowed = unsafe { std::fs::File::from_raw_fd(shell_allowed) };
-        let interpreter_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
-            interpreter.as_os_str(),
-        ))
-        .expect("interpreter path has no NUL");
-        let interpreter_allowed =
-            unsafe { libc::open(interpreter_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-        assert_ne!(interpreter_allowed, -1, "open interpreter O_PATH");
-        let interpreter_allowed = unsafe { std::fs::File::from_raw_fd(interpreter_allowed) };
-        let shell_fd = shell_allowed.as_raw_fd();
-        let interpreter_fd = interpreter_allowed.as_raw_fd();
-        let mut command = std::process::Command::new("/bin/sh");
-        command.args(["-c", "exec /usr/bin/true"]);
-        unsafe {
-            command
-                .pre_exec(move || install_linux_execute_confinement(&[shell_fd, interpreter_fd]));
-        }
-        let status = match command.status() {
-            Ok(status) => status,
-            Err(error)
-                if matches!(
-                    error.raw_os_error(),
-                    Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP)
-                ) =>
-            {
-                return;
-            }
-            Err(error) => panic!("start confined native launcher: {error}"),
-        };
-        assert!(
-            !status.success(),
-            "the retained native artifact must not exec a second parser"
-        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn production_probe_refuses_an_executable_source_fd() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("static-ffprobe");
+        build_static_probe(&probe, 0);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production probe identity");
+        let source_path = root.path().join("executable-media");
+        std::fs::write(&source_path, b"not executable content").expect("source");
+        std::fs::set_permissions(&source_path, std::fs::Permissions::from_mode(0o500))
+            .expect("mark source executable");
+        let source = Arc::new(std::fs::File::open(source_path).expect("open source"));
+        let error = DecodeFactCache::new()
+            .get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(source),
+                None,
+                ProbeStreamSelection::Absolute(4),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .expect_err("executable source must be refused before FD 3 installation");
+        assert!(matches!(
+            error,
+            DecodeFactError::SourceMetadata(reason) if reason.contains("executable mode")
+        ));
     }
 
     #[cfg(unix)]
@@ -1624,7 +2196,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
 "###,
         );
         let cache = DecodeFactCache::with_capacity(2);
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("probe identity");
         let first = cache
@@ -1674,7 +2246,7 @@ if test "$1" = "-version"; then printf '%s\n' 'ffprobe version stream-selection'
 printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"mjpeg","profile":"Baseline","pix_fmt":"yuvj420p","width":600,"height":600,"avg_frame_rate":"25/1","r_frame_rate":"25/1","color_transfer":"bt709","disposition":{"attached_pic":1}},{"index":7,"codec_type":"video","codec_name":"hevc","profile":"Main 10","pix_fmt":"yuv420p10le","width":3840,"height":2160,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"smpte2084","disposition":{"attached_pic":0}}]}'
 "###,
         );
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("probe identity");
         let cache = DecodeFactCache::new();
@@ -1737,7 +2309,7 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"mjpeg",
     #[cfg(unix)]
     #[tokio::test]
     async fn missing_probe_identity_is_refused_before_fact_collection() {
-        let error = DecodeProbeIdentity::discover("plurx-no-such-ffprobe")
+        let error = DecodeProbeIdentity::discover_fixture("plurx-no-such-ffprobe")
             .await
             .expect_err("missing probe");
         assert!(matches!(error, DecodeFactError::ProbeIdentity(_)));
@@ -1756,7 +2328,7 @@ if test "$1" = "-version"; then printf '%s\n' 'ffprobe version one'; exit 0; fi
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 "###;
         executable(&probe, body);
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("identity");
         let cache = DecodeFactCache::new();
@@ -1802,7 +2374,7 @@ if test "$1" = "-version"; then printf '%s\n' 'ffprobe version held-a'; exit 0; 
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 "###,
         );
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("identity");
         let original = root.path().join("ffprobe-original");
@@ -1852,7 +2424,7 @@ if test "$1" = "-version"; then printf '%s\n' 'ffprobe version snapshot-a'; exit
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 "###,
         );
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("identity");
         let snapshot_path = identity.executable_snapshot.path().to_owned();
@@ -1898,7 +2470,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
 touch "$PLURX_TEST_PROBE_PATH.done"
 "###,
         );
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("identity");
         let cache = Arc::new(DecodeFactCache::new());
@@ -2041,7 +2613,7 @@ sleep 1
 printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 "###,
         );
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("identity");
         let cache = Arc::new(DecodeFactCache::new());
@@ -2092,7 +2664,7 @@ sleep 1
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 "###,
         );
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("identity");
         let cache = Arc::new(DecodeFactCache::new());
@@ -2168,7 +2740,7 @@ touch "$PLURX_TEST_PROBE_PATH.started"
 wait
 "###,
         );
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("identity");
         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -2213,6 +2785,43 @@ wait
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn normal_completion_kills_descendants_before_reaping_the_group_leader() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"source").expect("media");
+        let source = Arc::new(std::fs::File::open(media).expect("open source"));
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version normal-group-exit'; exit 0; fi
+( sleep 1; touch "$PLURX_TEST_PROBE_PATH.descendant" ) &
+printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","disposition":{"attached_pic":0}}]}'
+"###,
+        );
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("identity");
+        DecodeFactCache::new()
+            .get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(source),
+                None,
+                ProbeStreamSelection::Absolute(4),
+                Duration::from_secs(3),
+                None,
+            )
+            .await
+            .expect("facts");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert!(
+            !probe.with_extension("descendant").exists(),
+            "normal completion must kill the process group while the leader PID remains anchored"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn source_lease_wait_is_charged_to_the_probe_deadline() {
@@ -2235,7 +2844,7 @@ sleep 5
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 "###,
         );
-        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
             .await
             .expect("identity");
         let cache = DecodeFactCache::new();

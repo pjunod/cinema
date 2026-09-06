@@ -21686,6 +21686,14 @@ pub(crate) mod tests {
             neutral_decode_fact_observation(Err(crate::decode_facts::DecodeFactError::Cancelled)),
             NeutralDecodeFactObservation::Cancelled
         ));
+        assert!(matches!(
+            neutral_decode_fact_observation(Err(crate::decode_facts::DecodeFactError::Spawn(
+                "Linux execution isolation unavailable".to_owned()
+            ))),
+            NeutralDecodeFactObservation::ContinueLegacy(
+                crate::decode_facts::DecodeFactError::Spawn(_)
+            )
+        ));
         let started = Instant::now();
         let production_deadline = started + Duration::from_secs(1);
         let observation_duration = Duration::from_secs(2);

@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 exact-head adversarial re-review pending · **Updated:** 2026-09-06 ·
+**Status:** M1 third-review repairs in validation · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -23,17 +23,17 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Second-review repair `608dd04d`: macOS collector 17/17, pinned Linux 1.97.1 collector 20/20, macOS and Linux all-target Clippy with denied warnings, 12 ownership/status contracts, catalog and history checks, and the complete Rust unit profile pass; unit totals include core 955/955, store 87/87, and daemon 1,777/1,777 with 3 declared ignores |
-| Exact receipt | `608dd04d`: history 1,357, catalog 24/30/1,435, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass; its exact successor adds the required history mapping and stale-provenance regression before adversarial re-review |
+| Focused validation | Working tree after `b0b206df`: macOS collector 17/17 and pinned Linux 1.97.1 collector 24/24. Linux composes production discovery, sealed-FD execution, deny-all path execution, exact-FD seccomp, pidfd-before-reap cleanup, bound source FD 3, JSON parsing, path and second-memfd escape denial, and executable-source refusal. The complete Rust unit profile passes: core 955/955, decoder integration 34/34, store 87/87, PGS 20/20, daemon 1,777/1,777, 3 declared ignores, and no failures; denied-warning all-target Clippy passes on macOS and pinned Linux |
+| Exact receipt | `b0b206df`: exact post-map history audit 1,359, catalog 24/30/1,436, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass. Earlier `608dd04d` runs were precommit source-tree evidence, not an exact post-map receipt |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
-| Blocker | Obtain exact-head adversarial approval, then run one clean full-suite qualification after all fixes |
+| Blocker | Commit and map the fully validated third-review repair, then obtain exact-head adversarial approval before the one clean full-suite qualification |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Exact-head re-review pending | Commit `608dd04d` closes the reusable-PGID, mutable-snapshot, parser-closure, platform-boundary, ownership-ledger, and history-map findings with macOS/Linux Clippy, focused cross-platform tests, and complete unit evidence |
+| M1 · explicit plan and facts | Third-review repair in validation | The working tree replaces the invalid anonymous-memfd Landlock allow rule with sealed-FD `execveat`, deny-all path execution, exact-FD seccomp, and pidfd-anchored cleanup; mandatory Linux production-path regressions pass 24/24 |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -54,16 +54,23 @@ of container and profile.
 
 The daemon collector discovers and fingerprints a configured parser artifact.
 The enforced production boundary requires a self-contained Linux ELF with no
-interpreter or dynamic dependency closure, copies it to a sealed anonymous
-descriptor, and confines execution so a native launcher cannot exec a second
-parser. Unsupported production Unix targets and script, dynamic, or indirect
-launchers fail closed; test-only scripted fixtures do not weaken the shipping
-path. Every probe owns a process session so timeout or cancellation signals the
-complete process group. The caller-facing deadline may detach the owned cleanup
-task, but that task retains the child, source descriptor, offset restoration,
-and admission permits until reap completes. Caller and task share one
-take-once process-group terminator, preventing a delayed guard from signaling a
-reused PGID. Lease admission is charged to the same end-to-end deadline.
+interpreter or dynamic dependency closure and copies it to a sealed anonymous
+descriptor. The child executes that exact descriptor with `execveat`; a
+deny-all Landlock execution domain blocks path-backed replacements, while a
+seccomp filter permits later `execveat` only for retained FD 4 and prevents
+closing, replacing, or injecting that descriptor. Unsupported kernels,
+architectures, production Unix targets, scripts, and dynamic or indirect
+launchers fail closed; M1 treats the unavailable observation as neutral and
+continues the unchanged legacy route. Test-only scripted fixtures are selected
+through an explicit fixture constructor and do not replace the production-mode
+tests. Every probe owns a process session so timeout or cancellation signals
+the complete process group. On Linux a pidfd observes leader exit without
+reaping; descendants are killed while the zombie still anchors the numeric
+PID/PGID, then the leader is reaped. The caller-facing deadline may detach the
+owned cleanup task, but that task retains the child, source descriptor, offset
+restoration, and admission permits until reap completes. Caller and task share
+one take-once process-group terminator. Lease admission is charged to the same
+end-to-end deadline.
 Legacy video ordinals are resolved to
 absolute input indices, and file-level catalog metadata is merged only when the
 selection is the catalog's first non-attached playable stream. The fact digest
@@ -137,18 +144,33 @@ allowed a compiled launcher or replaceable dynamic parser closure, Linux
 snapshot bytes remained owner-writable, explicit and drop cleanup could signal
 a reused numeric PGID, two ownership counters were stale, and the corrective
 commit lacked a history mapping. Commit `608dd04d` requires a self-contained
-Linux ELF, seals its anonymous snapshot, applies an execute-only Landlock rule
-to prevent a second parser exec, rejects other production Unix targets, shares
-take-once termination ownership, updates the inventory, and maps `0dcbcdf2` to
-its Rust and catalog contracts. These changes make unsupported prerequisites a
-typed refusal rather than an unbound best effort.
+Linux ELF, seals its anonymous snapshot, rejects other production Unix targets,
+shares take-once termination ownership, updates the inventory, and maps
+`0dcbcdf2` to its Rust and catalog contracts. These changes make unsupported
+prerequisites a typed refusal rather than an unbound best effort.
 
 The exact second-review repair `608dd04d` passes 17/17 macOS collector tests,
 20/20 pinned Linux 1.97.1 collector tests, and all-target denied-warning Clippy
 on both platforms. The complete Rust unit profile passes with core 955/955,
 store 87/87, daemon 1,777/1,777, 3 declared ignores, and no failures. Twelve
-combined ownership/status contracts, catalog lint, history audit, formatting,
-and the exact-tree whitespace check also pass.
+combined ownership/status contracts, catalog lint, formatting, and the
+working-tree whitespace check also passed. The mapping lived only in successor
+`b0b206df`, whose exact post-map history audit passes with 1,359 corrective
+commits; `608dd04d` itself does not pass that exact audit.
+
+Two independent reviews of exact `b0b206df` found three remaining P1 defects.
+The production Landlock rule attempted to allow an anonymous memfd, which the
+pinned Linux kernel rejects with `EBADFD`; even if accepted, Landlock cannot
+mediate a second anonymous memfd. ELF classification preceded the sealed copy,
+leaving a mutable-file TOCTOU, and normal completion reaped the leader before
+its sole process-group kill. The current repair classifies the sealed bytes,
+uses FD-based first execution under a deny-all filesystem-exec domain, restricts
+later execution and FD mutation with architecture-checked seccomp, refuses an
+executable source FD, and uses pidfd readiness to kill the group before reap.
+The mandatory pinned-Linux production API test now exercises static discovery,
+sealed FD 4, source FD 3, version output, JSON facts, and cleanup; companion
+tests prove path-backed and second-memfd attempts are denied without treating
+unsupported isolation as a pass.
 
 ## M0 frozen source inventory
 
@@ -483,7 +505,7 @@ full-base diff. The exact head then passed the full PR suite recorded below.
 | 2026-09-06 | Run qualification through task-scoped `ffmpeg-full` 8.1.2_2 wrappers | The installed full build provides `zscale`; the wrappers add only the retained x265 ABI 216 library path and leave the host installation unchanged |
 | 2026-09-06 | Accept two declared full-suite skips on this Darwin builder | Android device validation requires unavailable `adb`; the two-node Live TV drill is Linux-only. Both remain explicit M8 fleet/client prerequisites rather than passing claims |
 | 2026-09-06 | Reuse warmed cluster targets for the final exact-head suite | The first diagnostic run spent its 1,800-second bound compiling vendor targets. Warm targets change no source or test semantics and let the complete three-node workload run inside the same fixed bound |
-| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. Linux can provide a sealed anonymous executable plus Landlock second-exec confinement; other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name this prerequisite rather than hide it behind a code feature gate |
+| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact plus kernel isolation for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. The supported path requires memfd seals, `execveat`, Landlock, seccomp-BPF, `close_range`, and pidfds on x86-64 or arm64 Linux; failure is a neutral M1 observation and keeps legacy routing. Other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name these prerequisites rather than hide them behind a code feature gate |
 
 ## Validation ledger
 
@@ -574,11 +596,13 @@ lane and focused tests provide earlier feedback.
 | `0dcbcdf2` before exact-head re-review | pinned Linux 1.97.1 container `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · 17/17, including direct-native identity, descriptor execution, crossed-fd assignment, bounded caller cleanup ownership, and process-group reap |
 | `0dcbcdf2` before exact-head re-review | `CARGO='rustup run 1.97.1 cargo' make unit` with qualified FFmpeg 8.1.2 and loopback fixture permission | Pass · core 955/955, store contracts 87/87, daemon 1,776/1,776, all remaining workspace and documentation tests, 3 declared ignores, and no failures |
 | `0dcbcdf2` | Independent plan/scope and subprocess adversarial re-reviews | Changes requested · both identified stale exact-head evidence; plan review found a reusable-PGID double-signal, and subprocess review additionally showed that native launchers, dynamic dependencies, mutable Linux snapshot bytes, and unsupported Unix execution remained outside the claimed build boundary |
-| `608dd04d` before exact-head receipt | macOS and pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · macOS 17/17 and Linux 20/20; Linux adds static dependency-closure classification, sealed in-place mutation refusal, native-launcher second-exec denial, descriptor execution/crossing, and take-once group termination |
+| Working tree based on `608dd04d` before exact-head receipt | macOS and pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · macOS 17/17 and Linux 20/20; Linux added structural static classification, sealed in-place mutation refusal, path-backed launcher denial, descriptor execution/crossing, and take-once group termination. Later review proved this was not a usable production isolation path |
 | `608dd04d` before exact-head receipt | macOS plus ephemeral pinned Linux 1.97.1 `cargo clippy --locked -p plurxd --all-targets -- -D warnings` | Pass · no warnings on either platform; the Linux run compiled the ELF, memfd, Landlock, and Linux-only regressions |
 | `608dd04d` before exact-head receipt | `CARGO='rustup run 1.97.1 cargo' make unit` with qualified FFmpeg 8.1.2 and loopback fixture permission | Pass · core 955/955, store contracts 87/87, daemon 1,777/1,777, all remaining workspace and documentation tests, 3 declared ignores, and no failures |
-| `608dd04d` before exact-head receipt | ownership/status contracts, `make validation-lint`, `make history-check`, formatting, and diff check | Pass · 12/12 contracts, catalog 24/30/1,435, history 1,357 corrective commits, and clean formatting/whitespace |
-| `608dd04d` | Effort commit hook | Pass · history 1,357, catalog 24/30/1,435, operations 211/211, formatting, status contract, and pinned all-target workspace compile |
+| Working tree based on `608dd04d` before exact-head receipt | ownership/status contracts, `make validation-lint`, precommit `make history-check`, formatting, and diff check | Pass · 12/12 contracts, catalog 24/30/1,435, and clean formatting/whitespace. This was source-tree hook evidence with the successor mapping staged, not an exact audit of commit `608dd04d` |
+| `608dd04d` precommit source tree | Effort commit hook | Pass · catalog 24/30/1,435, operations 211/211, formatting, status contract, pinned all-target workspace compile, and staged-map history check; no exact postcommit history claim |
+| `b0b206df` | Exact post-map receipt and independent plan/probe adversarial reviews | Receipt pass · history 1,359, catalog 24/30/1,436, operations 211/211, formatting, status contract, and pinned all-target workspace compile. Reviews requested changes for unusable anonymous-memfd Landlock allowance, second-memfd escape, classification TOCTOU, reap-before-group-kill, and missing production-path composition evidence |
+| Working tree after `b0b206df` | macOS and pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · macOS 17/17 and Linux 24/24. Linux runs the normal production API through sealed FD 4 and bound source FD 3, rejects path and second-memfd exec, classifies captured bytes, refuses executable media, and kills descendants before leader reap |
 
 ## Remaining evidence before release
 

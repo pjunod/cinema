@@ -1368,7 +1368,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # version admission, detached version cleanup, and the caller-facing fact
 # deadline. One test-only timeout proves cleanup retains ownership after that
 # deadline. None initiates recovery or chooses a replacement plan.
-expected_occurrences = 630
+# 630 -> 631 after pidfd cleanup review: one test-only sleep crosses the
+# descendant marker deadline after normal-exit process-group cleanup. It starts
+# no work and makes a surviving inherited-pipe owner fail deterministically.
+expected_occurrences = 631
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1538,7 +1541,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # 310 -> 313 with M1: version and selected-stream collection each await their
 # retained FFprobe child, and the common group-termination helper performs the
 # final reap after signalling. Source/build leases survive all three waits.
-expected_occurrences = 313
+# 313 -> 315 with Linux pidfd exit anchoring: each shipping probe path has
+# mutually exclusive Linux and non-Linux reap expressions in source. Linux
+# waits for exit without reaping, kills the anchored process group, then reaps;
+# non-Linux production refuses before spawn and retains its fixture-only arm.
+expected_occurrences = 315
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
