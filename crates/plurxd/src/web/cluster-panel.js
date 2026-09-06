@@ -272,30 +272,27 @@
     const chronologyOrder=observations=>{
       // A remote age was sampled at an unknown instant between this process's
       // request start and receipt. Sort only non-overlapping local-monotonic
-      // intervals; transit-overlapping intervals are one ambiguity cohort and
-      // use deterministic phase/event fallback. Build those cohorts once for
-      // the full comparison set so the resulting order remains transitive.
+      // intervals. Each rank is the non-dominated frontier: an observation is
+      // excluded whenever another interval is provably newer. Do not merge
+      // connected overlap components; a broad uncertain interval can overlap
+      // two intervals that are themselves provably ordered.
       const useAttemptAge=observations.length>0&&
         observations.every(observation=>attemptAge(observation)!==null);
       const range=observation=>{
         const upper=useAttemptAge?attemptAge(observation):age(observation);
         return {lower:Math.max(0,upper-ageUncertainty(observation)),upper};
       };
-      const ordered=observations.map(observation=>({observation,...range(observation)}));
-      ordered.sort((left,right)=>left.lower-right.lower||left.upper-right.upper||
-        tieBreak(left.observation,right.observation));
+      let remaining=observations.map(observation=>({observation,...range(observation)}));
       const ranks=new Map();
-      let rank=-1;
-      let overlappingUpper=-1;
-      ordered.forEach(entry=>{
-        if(rank<0||entry.lower>overlappingUpper){
-          rank+=1;
-          overlappingUpper=entry.upper;
-        }else{
-          overlappingUpper=Math.max(overlappingUpper,entry.upper);
-        }
-        ranks.set(entry.observation,rank);
-      });
+      let rank=0;
+      while(remaining.length){
+        const frontier=remaining.filter(entry=>!remaining.some(other=>
+          other!==entry&&other.upper<entry.lower));
+        frontier.forEach(entry=>ranks.set(entry.observation,rank));
+        const frontierSet=new Set(frontier);
+        remaining=remaining.filter(entry=>!frontierSet.has(entry));
+        rank+=1;
+      }
       return {
         rank:observation=>ranks.get(observation)||0,
         compare:(left,right)=>(ranks.get(left)||0)-(ranks.get(right)||0)||

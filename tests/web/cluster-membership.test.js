@@ -1082,6 +1082,63 @@ test("response transit uncertainty cannot make a delayed predecessor look newer"
   }
 });
 
+test("an uncertain bridge cannot promote a provably older attempt", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "b".repeat(64);
+  const newest = transportObservation("installing", {
+    snapshot_id: "partial-order-frontier",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "newest",
+    attempt_id: 3,
+    socket_epoch: 3,
+    sample_age_ms: 0,
+    attempt_age_ms: 0,
+    age_uncertainty_ms: 0,
+    active_deadline_remaining_ms: 60_000,
+  });
+  const uncertainBridge = transportObservation("failed", {
+    snapshot_id: "partial-order-frontier",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "uncertain-bridge",
+    attempt_id: 2,
+    socket_epoch: 2,
+    sample_age_ms: 100,
+    attempt_age_ms: 100,
+    age_uncertainty_ms: 100,
+  });
+  const provablyOlder = transportObservation("stalled", {
+    snapshot_id: "partial-order-frontier",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "provably-older",
+    attempt_id: 1,
+    socket_epoch: 1,
+    sample_age_ms: 100,
+    attempt_age_ms: 100,
+    age_uncertainty_ms: 0,
+  });
+
+  for (const observations of [
+    [newest, uncertainBridge, provablyOlder],
+    [newest, provablyOlder, uncertainBridge],
+    [uncertainBridge, newest, provablyOlder],
+    [uncertainBridge, provablyOlder, newest],
+    [provablyOlder, newest, uncertainBridge],
+    [provablyOlder, uncertainBridge, newest],
+  ]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "newest");
+  }
+});
+
 test("late predecessor acknowledgement cannot hide a restarted receiver", () => {
   const ui = sandbox();
   const snapshotFingerprint = "a".repeat(64);
