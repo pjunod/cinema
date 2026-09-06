@@ -32,7 +32,10 @@ use crate::error::StoreError;
 use crate::store::SQLITE_SCHEMA_VERSION;
 
 #[cfg(feature = "hiqlite-store")]
-use crate::config::{Config, DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS};
+use crate::config::{
+    Config, DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS, DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
+    DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+};
 #[cfg(feature = "hiqlite-store")]
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
@@ -1672,7 +1675,7 @@ async fn acquire_daemon_lock_within(data_dir: &Path, window: Duration) -> Result
                 ));
             }
             Err(std::fs::TryLockError::Error(error)) => {
-                return Err(migration_io("locking", &path, error))
+                return Err(migration_io("locking", &path, error));
             }
         }
     }
@@ -2001,20 +2004,30 @@ async fn start_voter(
     // target-local applied watch. The deadline allows an abandoned in-flight
     // snapshot RPC to reach its configured soft cancellation point, reconnect,
     // and complete one clean transfer.
-    let catchup_timeout = Duration::from_secs(config.cluster.install_snapshot_timeout_secs)
-        .saturating_add(SNAPSHOT_CATCHUP_GRACE);
+    let catchup_timeout = snapshot_catchup_timeout(
+        config.cluster.snapshot_transfer_timeout_secs,
+        config.cluster.install_snapshot_timeout_secs,
+    );
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
     let catchup_target = loop {
-        match client.db_quorum_watermark().await {
-            Ok(watermark) => break watermark.committed_index,
-            Err(error) if tokio::time::Instant::now() < catchup_deadline => {
+        match tokio::time::timeout_at(catchup_deadline, client.db_quorum_watermark()).await {
+            Ok(Ok(watermark)) => break watermark.committed_index,
+            Ok(Err(error)) if tokio::time::Instant::now() < catchup_deadline => {
                 tracing::debug!(%error, "waiting for startup quorum watermark");
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 let _ = shutdown_voter(&client, active_transport).await;
                 return Err(StoreError::Database(format!(
                     "node {} could not obtain a startup quorum watermark within \
                      {catchup_timeout:?}: {error}",
+                    identity.node_id
+                )));
+            }
+            Err(_) => {
+                let _ = shutdown_voter(&client, active_transport).await;
+                return Err(StoreError::Database(format!(
+                    "node {} could not obtain a startup quorum watermark within \
+                     {catchup_timeout:?}: deadline expired",
                     identity.node_id
                 )));
             }
@@ -2078,6 +2091,10 @@ pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> Node
         health_check_delay_secs: 0,
         wal_size: HIQLITE_WAL_SIZE_BYTES,
         read_pool_size,
+        snapshot_chunk_timeout: snapshot_timeout_duration(DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS),
+        snapshot_transfer_timeout: snapshot_timeout_duration(
+            DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+        ),
         // Snapshot frequency, disaster-recovery retention, and WAL sync retain
         // Hiqlite's established values. The heartbeat/election window above
         // admits measured durable recovery responses; the snapshot transfer
@@ -2095,10 +2112,30 @@ fn install_snapshot_timeout_ms(seconds: u64) -> u64 {
 }
 
 #[cfg(feature = "hiqlite-store")]
+fn snapshot_catchup_timeout(transfer_seconds: u64, install_seconds: u64) -> Duration {
+    Duration::from_secs(transfer_seconds)
+        .saturating_add(Duration::from_secs(install_seconds))
+        .saturating_add(SNAPSHOT_CATCHUP_GRACE)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn snapshot_timeout_duration(seconds: u64) -> Duration {
+    Duration::from_millis(
+        seconds
+            .checked_mul(1_000)
+            .expect("validated snapshot timeout seconds must fit milliseconds"),
+    )
+}
+
+#[cfg(feature = "hiqlite-store")]
 fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
     let mut defaults = production_hiqlite_defaults_with_read_pool(config.cluster.read_pool_size);
     defaults.raft_config.install_snapshot_timeout =
         install_snapshot_timeout_ms(config.cluster.install_snapshot_timeout_secs);
+    defaults.snapshot_chunk_timeout =
+        snapshot_timeout_duration(config.cluster.snapshot_chunk_timeout_secs);
+    defaults.snapshot_transfer_timeout =
+        snapshot_timeout_duration(config.cluster.snapshot_transfer_timeout_secs);
     defaults
 }
 
@@ -3425,6 +3462,18 @@ mod tests {
         assert_eq!(defaults.raft_config.max_in_snapshot_log_to_keep, 1);
         assert_eq!(defaults.raft_config.purge_batch_size, 1);
         assert_eq!(defaults.raft_config.install_snapshot_timeout, 120_000);
+        assert_eq!(defaults.snapshot_chunk_timeout, Duration::from_secs(30));
+        assert_eq!(
+            defaults.snapshot_transfer_timeout,
+            Duration::from_secs(1_200)
+        );
+        assert_eq!(
+            snapshot_catchup_timeout(
+                config.cluster.snapshot_transfer_timeout_secs,
+                config.cluster.install_snapshot_timeout_secs,
+            ),
+            Duration::from_secs(1_365)
+        );
         assert!(
             format!("{:?}", defaults.raft_config.snapshot_policy).contains("10000"),
             "snapshot policy must stay at 10,000 entries"
@@ -3435,9 +3484,20 @@ mod tests {
             "read-pool tuning must not change immediate-async WAL sync"
         );
 
+        config.cluster.snapshot_chunk_timeout_secs = 45;
+        config.cluster.snapshot_transfer_timeout_secs = 900;
         config.cluster.install_snapshot_timeout_secs = 300;
         let tuned = production_hiqlite_defaults(&config);
         assert_eq!(tuned.raft_config.install_snapshot_timeout, 300_000);
+        assert_eq!(tuned.snapshot_chunk_timeout, Duration::from_secs(45));
+        assert_eq!(tuned.snapshot_transfer_timeout, Duration::from_secs(900));
+        assert_eq!(
+            snapshot_catchup_timeout(
+                config.cluster.snapshot_transfer_timeout_secs,
+                config.cluster.install_snapshot_timeout_secs,
+            ),
+            Duration::from_secs(1_245)
+        );
     }
 
     /// Once the active voter exists, every later initialization error must

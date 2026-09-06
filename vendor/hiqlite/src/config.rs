@@ -3,6 +3,7 @@ use crate::{Error, Node, NodeId};
 use openraft::SnapshotPolicy;
 use std::borrow::Cow;
 use std::env;
+use std::time::Duration;
 use tracing::{debug, warn};
 
 #[cfg(feature = "backup")]
@@ -12,6 +13,9 @@ use crate::backup;
 use crate::dashboard::DashboardState;
 
 pub use openraft::Config as RaftConfig;
+
+pub const DEFAULT_SNAPSHOT_CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(1_200);
 
 #[derive(Debug)]
 pub struct RateLimitConfig {
@@ -101,6 +105,10 @@ pub struct NodeConfig {
     /// The internal Raft config. This must be the same on each node.
     /// You will get good defaults with `NodeConfig::default_raft_config(_)`.
     pub raft_config: RaftConfig,
+    /// Deadline for one non-final snapshot chunk RPC.
+    pub snapshot_chunk_timeout: Duration,
+    /// Absolute transfer-stage deadline for one snapshot attempt.
+    pub snapshot_transfer_timeout: Duration,
     /// Specific TLS certificates for the Raft traffic. Overwrites `tls_auto_certificates`.
     pub tls_raft: Option<ServerTlsConfig>,
     /// Specific TLS certificates for the API traffic. Overwrites `tls_auto_certificates`.
@@ -161,6 +169,8 @@ impl Default for NodeConfig {
             #[cfg(feature = "cache")]
             cache_storage_disk: true,
             raft_config: Self::default_raft_config(10_000),
+            snapshot_chunk_timeout: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
+            snapshot_transfer_timeout: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
             tls_raft: None,
             tls_api: None,
             secret_raft: String::default(),
@@ -329,6 +339,8 @@ impl NodeConfig {
             #[cfg(feature = "cache")]
             cache_storage_disk,
             raft_config: Self::default_raft_config(logs_keep),
+            snapshot_chunk_timeout: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
+            snapshot_transfer_timeout: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
             tls_raft: ServerTlsConfig::from_env("RAFT"),
             tls_api: ServerTlsConfig::from_env("API"),
             secret_raft: env::var("HQL_SECRET_RAFT").expect("HQL_SECRET_RAFT not found"),
@@ -423,6 +435,17 @@ impl NodeConfig {
         if self.secret_raft.len() < 16 || self.secret_api.len() < 16 {
             return Err(Error::Config(
                 "'secret_raft' and 'secret_api' should be at least 16 characters long".into(),
+            ));
+        }
+
+        if self.snapshot_chunk_timeout.is_zero() {
+            return Err(Error::Config(
+                "'snapshot_chunk_timeout' must be greater than zero".into(),
+            ));
+        }
+        if self.snapshot_transfer_timeout < self.snapshot_chunk_timeout {
+            return Err(Error::Config(
+                "'snapshot_transfer_timeout' must be at least 'snapshot_chunk_timeout'".into(),
             ));
         }
 

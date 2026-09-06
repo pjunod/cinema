@@ -14,11 +14,13 @@ use openraft::error::RPCError;
 use openraft::error::RemoteError;
 use openraft::error::Unreachable;
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf};
+use tokio::sync::watch;
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 use tokio::{select, task, time};
@@ -49,13 +51,34 @@ use crate::store::state_machine::sqlite::TypeConfigSqlite;
 use crate::Error;
 #[cfg(any(feature = "cache", feature = "sqlite"))]
 use openraft::{
-    error::{InstallSnapshotError, RaftError},
-    network::{RPCOption, RaftNetwork, RaftNetworkFactory},
+    OptionalSend, Snapshot, Vote,
+    error::{Fatal, InstallSnapshotError, RaftError, ReplicationClosed, StreamingError, Timeout},
+    network::{RPCOption, RPCTypes, RaftNetwork, RaftNetworkFactory},
     raft::{
         AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
-        InstallSnapshotResponse, VoteRequest, VoteResponse,
+        InstallSnapshotResponse, SnapshotResponse, VoteRequest, VoteResponse,
     },
 };
+
+#[cfg(any(feature = "cache", feature = "sqlite"))]
+use openraft::network::snapshot_transport::{Chunked, SnapshotTransport};
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SnapshotRpcBudgets {
+    chunk: Duration,
+    transfer: Duration,
+    install: Duration,
+}
+
+impl SnapshotRpcBudgets {
+    pub(crate) fn from_node_config(config: &crate::NodeConfig) -> Self {
+        Self {
+            chunk: config.snapshot_chunk_timeout,
+            transfer: config.snapshot_transfer_timeout,
+            install: Duration::from_millis(config.raft_config.install_snapshot_timeout),
+        }
+    }
+}
 
 pub struct NetworkStreaming {
     pub node_id: NodeId,
@@ -65,6 +88,7 @@ pub struct NetworkStreaming {
     pub heartbeat_interval: u64,
     pub is_raft_stopped: Arc<AtomicBool>,
     pub is_startup_finished: Arc<AtomicBool>,
+    pub(crate) snapshot_budgets: SnapshotRpcBudgets,
     // pub sender: flume::Sender<RaftRequest>,
 }
 
@@ -79,6 +103,7 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
         let (sender, rx) = flume::bounded(1);
         let reset = Arc::new(ConnectionResetState::default());
         let shutdown = Arc::new(ConnectionShutdownState::default());
+        let snapshot_attempt = Arc::new(StdMutex::new(None));
 
         let task = tokio::task::spawn(Box::pin(Self::ws_handler(
             self.node_id,
@@ -99,6 +124,10 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
             sender,
             reset,
             shutdown,
+            local_node_id: self.node_id,
+            snapshot_budgets: self.snapshot_budgets,
+            snapshot_attempt,
+            next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         }
@@ -116,6 +145,7 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
         let (sender, rx) = flume::bounded(1);
         let reset = Arc::new(ConnectionResetState::default());
         let shutdown = Arc::new(ConnectionShutdownState::default());
+        let snapshot_attempt = Arc::new(StdMutex::new(None));
 
         let task = tokio::task::spawn(Box::pin(Self::ws_handler(
             self.node_id,
@@ -136,6 +166,10 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
             sender,
             reset,
             shutdown,
+            local_node_id: self.node_id,
+            snapshot_budgets: self.snapshot_budgets,
+            snapshot_attempt,
+            next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         }
@@ -876,12 +910,142 @@ where
     write_frame_flushed(write, Frame::binary(Payload::from(bytes))).await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotAttemptPhase {
+    Transfer,
+    FinalInstall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SnapshotStageDeadline {
+    phase: SnapshotAttemptPhase,
+    deadline: time::Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FinalInstallWindow {
+    start: time::Instant,
+    deadline: time::Instant,
+}
+
+#[derive(Debug)]
+struct SnapshotAttempt {
+    id: u64,
+    start: time::Instant,
+    snapshot_id: String,
+    transfer_deadline: time::Instant,
+    final_install: StdMutex<Option<FinalInstallWindow>>,
+    stage: watch::Sender<SnapshotStageDeadline>,
+}
+
+impl SnapshotAttempt {
+    fn new(id: u64, snapshot_id: String, budgets: SnapshotRpcBudgets) -> Arc<Self> {
+        let start = time::Instant::now();
+        let transfer_deadline = start + budgets.transfer;
+        let (stage, _) = watch::channel(SnapshotStageDeadline {
+            phase: SnapshotAttemptPhase::Transfer,
+            deadline: transfer_deadline,
+        });
+        Arc::new(Self {
+            id,
+            start,
+            snapshot_id,
+            transfer_deadline,
+            final_install: StdMutex::new(None),
+            stage,
+        })
+    }
+
+    fn rpc_deadline(
+        &self,
+        done: bool,
+        hard_ttl: Duration,
+        budgets: SnapshotRpcBudgets,
+    ) -> Option<time::Instant> {
+        let now = time::Instant::now();
+        if !done {
+            self.stage.send_replace(SnapshotStageDeadline {
+                phase: SnapshotAttemptPhase::Transfer,
+                deadline: self.transfer_deadline,
+            });
+            return Some(
+                (now + budgets.chunk)
+                    .min(self.transfer_deadline)
+                    .min(now + hard_ttl),
+            );
+        }
+
+        let mut final_install = self
+            .final_install
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let returning_from_transfer = self.stage.borrow().phase == SnapshotAttemptPhase::Transfer;
+        if returning_from_transfer && now >= self.transfer_deadline {
+            return None;
+        }
+        if final_install.is_none() {
+            let attempt_end = self.start + budgets.transfer + budgets.install;
+            *final_install = Some(FinalInstallWindow {
+                start: now,
+                deadline: (now + budgets.install).min(attempt_end).min(now + hard_ttl),
+            });
+        }
+        let final_window = final_install.expect("final install window was just initialized");
+        debug_assert!(final_window.start >= self.start);
+        self.stage.send_replace(SnapshotStageDeadline {
+            phase: SnapshotAttemptPhase::FinalInstall,
+            deadline: final_window.deadline,
+        });
+        Some(final_window.deadline)
+    }
+}
+
+struct SnapshotAttemptGuard {
+    attempt_id: u64,
+    slot: Arc<StdMutex<Option<Arc<SnapshotAttempt>>>>,
+}
+
+impl Drop for SnapshotAttemptGuard {
+    fn drop(&mut self) {
+        let mut slot = self
+            .slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|attempt| attempt.id == self.attempt_id)
+        {
+            *slot = None;
+        }
+    }
+}
+
+async fn wait_for_snapshot_deadline(
+    mut stage: watch::Receiver<SnapshotStageDeadline>,
+) -> SnapshotStageDeadline {
+    loop {
+        let current = *stage.borrow_and_update();
+        tokio::select! {
+            _ = time::sleep_until(current.deadline) => return current,
+            changed = stage.changed() => {
+                if changed.is_err() {
+                    return current;
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub struct NetworkConnectionStreaming {
     node: Node,
     sender: flume::Sender<RaftRequest>,
     reset: Arc<ConnectionResetState>,
     shutdown: Arc<ConnectionShutdownState>,
+    local_node_id: NodeId,
+    snapshot_budgets: SnapshotRpcBudgets,
+    snapshot_attempt: Arc<StdMutex<Option<Arc<SnapshotAttempt>>>>,
+    next_snapshot_attempt: Arc<AtomicU64>,
     runtime: tokio::runtime::Handle,
     task: Option<JoinHandle<()>>,
 }
@@ -934,6 +1098,41 @@ impl Drop for NetworkConnectionStreaming {
 }
 
 impl NetworkConnectionStreaming {
+    fn snapshot_rpc_ttl(&self, done: bool, option: &RPCOption) -> Option<Duration> {
+        let now = time::Instant::now();
+        let attempt = self
+            .snapshot_attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let deadline = match attempt {
+            Some(attempt) => attempt.rpc_deadline(done, option.hard_ttl(), self.snapshot_budgets),
+            None => Some(
+                (now + if done {
+                    self.snapshot_budgets.install
+                } else {
+                    self.snapshot_budgets.chunk
+                })
+                .min(now + option.hard_ttl()),
+            ),
+        };
+        deadline
+            .filter(|deadline| *deadline > now)
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    fn snapshot_timeout_error<Err>(&self) -> RPCError<NodeId, Node, Err>
+    where
+        Err: std::error::Error,
+    {
+        RPCError::Timeout(Timeout {
+            action: RPCTypes::InstallSnapshot,
+            id: self.local_node_id,
+            target: self.node.id,
+            timeout: Duration::ZERO,
+        })
+    }
+
     #[inline(always)]
     async fn send<Err>(
         &mut self,
@@ -985,6 +1184,101 @@ impl NetworkConnectionStreaming {
             }
             Err(error) => Err(RPCError::Unreachable(Unreachable::new(&error))),
         }
+    }
+}
+
+#[cfg(any(feature = "cache", feature = "sqlite"))]
+async fn bounded_full_snapshot<C>(
+    network: &mut NetworkConnectionStreaming,
+    vote: Vote<NodeId>,
+    snapshot: Snapshot<C>,
+    cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
+    option: RPCOption,
+) -> Result<SnapshotResponse<NodeId>, StreamingError<C, Fatal<NodeId>>>
+where
+    C: openraft::RaftTypeConfig<NodeId = NodeId, Node = Node>,
+    C::SnapshotData: tokio::io::AsyncRead + tokio::io::AsyncWrite + tokio::io::AsyncSeek + Unpin,
+    NetworkConnectionStreaming: RaftNetwork<C>,
+{
+    let attempt_id = network
+        .next_snapshot_attempt
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1);
+    let attempt = SnapshotAttempt::new(
+        attempt_id,
+        snapshot.meta.snapshot_id.clone(),
+        network.snapshot_budgets,
+    );
+    {
+        let mut slot = network
+            .snapshot_attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(Arc::clone(&attempt));
+    }
+    let _attempt_guard = SnapshotAttemptGuard {
+        attempt_id,
+        slot: Arc::clone(&network.snapshot_attempt),
+    };
+    let stage = attempt.stage.subscribe();
+    let local_node_id = network.local_node_id;
+    let target_node_id = network.node.id;
+    let driver = Chunked::send_snapshot(
+        network,
+        vote,
+        snapshot,
+        std::future::pending::<ReplicationClosed>(),
+        option,
+    );
+
+    supervise_snapshot_driver(
+        attempt,
+        local_node_id,
+        target_node_id,
+        stage,
+        cancel,
+        driver,
+    )
+    .await
+}
+
+#[cfg(any(feature = "cache", feature = "sqlite"))]
+async fn supervise_snapshot_driver<C, Cancel, Driver>(
+    attempt: Arc<SnapshotAttempt>,
+    local_node_id: NodeId,
+    target_node_id: NodeId,
+    stage: watch::Receiver<SnapshotStageDeadline>,
+    cancel: Cancel,
+    driver: Driver,
+) -> Result<SnapshotResponse<NodeId>, StreamingError<C, Fatal<NodeId>>>
+where
+    C: openraft::RaftTypeConfig<NodeId = NodeId, Node = Node>,
+    Cancel: Future<Output = ReplicationClosed> + OptionalSend + 'static,
+    Driver: Future<Output = Result<SnapshotResponse<NodeId>, StreamingError<C, Fatal<NodeId>>>>,
+{
+    let attempt_id = attempt.id;
+    let snapshot_id = attempt.snapshot_id.clone();
+    let mut deadline = std::pin::pin!(wait_for_snapshot_deadline(stage));
+    let mut caller_cancel = std::pin::pin!(cancel);
+    let mut driver = std::pin::pin!(driver);
+
+    tokio::select! {
+        biased;
+        closed = &mut caller_cancel => {
+            info!(attempt_id, %snapshot_id, target_node_id, "snapshot attempt cancelled by replication owner");
+            Err(StreamingError::Closed(closed))
+        }
+        expired = &mut deadline => {
+            error!(attempt_id, %snapshot_id, target_node_id, phase = ?expired.phase,
+                "snapshot attempt reached its absolute phase deadline");
+            Err(StreamingError::Timeout(Timeout {
+                action: RPCTypes::InstallSnapshot,
+                id: local_node_id,
+                target: target_node_id,
+                timeout: expired.deadline.saturating_duration_since(attempt.start),
+            }))
+        }
+        result = &mut driver => result,
     }
 }
 
@@ -1045,9 +1339,12 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
+        let rpc_ttl = self
+            .snapshot_rpc_ttl(req.done, &option)
+            .ok_or_else(|| self.snapshot_timeout_error())?;
         let (ack, rx) = oneshot::channel();
         match self
-            .send(RaftRequest::SnapshotDB((ack, req)), rx, option.soft_ttl())
+            .send(RaftRequest::SnapshotDB((ack, req)), rx, rpc_ttl)
             .await?
         {
             RaftStreamResponsePayload::SnapshotDB(resp) => {
@@ -1055,6 +1352,16 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
             }
             _ => unreachable!(),
         }
+    }
+
+    async fn full_snapshot(
+        &mut self,
+        vote: Vote<NodeId>,
+        snapshot: Snapshot<TypeConfigSqlite>,
+        cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
+        option: RPCOption,
+    ) -> Result<SnapshotResponse<NodeId>, StreamingError<TypeConfigSqlite, Fatal<NodeId>>> {
+        bounded_full_snapshot(self, vote, snapshot, cancel, option).await
     }
 
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
@@ -1109,13 +1416,12 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
+        let rpc_ttl = self
+            .snapshot_rpc_ttl(req.done, &option)
+            .ok_or_else(|| self.snapshot_timeout_error())?;
         let (ack, rx) = oneshot::channel();
         match self
-            .send(
-                RaftRequest::SnapshotCache((ack, req)),
-                rx,
-                option.soft_ttl(),
-            )
+            .send(RaftRequest::SnapshotCache((ack, req)), rx, rpc_ttl)
             .await?
         {
             RaftStreamResponsePayload::SnapshotCache(resp) => {
@@ -1123,6 +1429,16 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
             }
             _ => unreachable!(),
         }
+    }
+
+    async fn full_snapshot(
+        &mut self,
+        vote: Vote<NodeId>,
+        snapshot: Snapshot<TypeConfigKV>,
+        cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
+        option: RPCOption,
+    ) -> Result<SnapshotResponse<NodeId>, StreamingError<TypeConfigKV, Fatal<NodeId>>> {
+        bounded_full_snapshot(self, vote, snapshot, cancel, option).await
     }
 
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
@@ -1270,6 +1586,14 @@ mod tests {
             sender,
             reset: Arc::new(ConnectionResetState::default()),
             shutdown: Arc::new(ConnectionShutdownState::default()),
+            local_node_id: 1,
+            snapshot_budgets: SnapshotRpcBudgets {
+                chunk: Duration::from_secs(30),
+                transfer: Duration::from_secs(1_200),
+                install: Duration::from_secs(120),
+            },
+            snapshot_attempt: Arc::new(StdMutex::new(None)),
+            next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         };
@@ -1746,6 +2070,422 @@ mod tests {
         assert_eq!(append_response_ttl(&option), Duration::from_millis(800));
     }
 
+    fn test_snapshot_budgets() -> SnapshotRpcBudgets {
+        SnapshotRpcBudgets {
+            chunk: Duration::from_secs(30),
+            transfer: Duration::from_secs(120),
+            install: Duration::from_secs(60),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window() {
+        let budgets = test_snapshot_budgets();
+        let attempt = SnapshotAttempt::new(1, "snapshot".into(), budgets);
+        let start = attempt.start;
+
+        assert_eq!(
+            attempt.rpc_deadline(false, Duration::from_secs(300), budgets),
+            Some(start + Duration::from_secs(30))
+        );
+        time::advance(Duration::from_secs(25)).await;
+        assert_eq!(
+            attempt.rpc_deadline(false, Duration::from_secs(300), budgets),
+            Some(start + Duration::from_secs(55))
+        );
+        time::advance(Duration::from_secs(55)).await;
+        assert_eq!(
+            attempt.rpc_deadline(false, Duration::from_secs(300), budgets),
+            Some(start + Duration::from_secs(110))
+        );
+        time::advance(Duration::from_secs(15)).await;
+        assert_eq!(
+            attempt.rpc_deadline(false, Duration::from_secs(300), budgets),
+            Some(start + Duration::from_secs(120)),
+            "the last chunk receives only the transfer time that remains"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_install_deadline_latches_once_and_mismatch_restores_transfer_deadline() {
+        let budgets = test_snapshot_budgets();
+        let attempt = SnapshotAttempt::new(2, "snapshot".into(), budgets);
+        let start = attempt.start;
+        let mut stage = attempt.stage.subscribe();
+        time::advance(Duration::from_secs(100)).await;
+
+        let final_deadline = attempt
+            .rpc_deadline(true, Duration::from_secs(300), budgets)
+            .expect("final stage begins before transfer expiry");
+        assert_eq!(final_deadline, start + Duration::from_secs(160));
+        time::advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            attempt.rpc_deadline(true, Duration::from_secs(300), budgets),
+            Some(final_deadline),
+            "a final retry must not renew the install window"
+        );
+
+        assert_eq!(
+            attempt.rpc_deadline(false, Duration::from_secs(300), budgets),
+            Some(start + Duration::from_secs(120)),
+            "a mismatch returning to offset zero keeps the original transfer boundary"
+        );
+        assert_eq!(
+            *stage.borrow_and_update(),
+            SnapshotStageDeadline {
+                phase: SnapshotAttemptPhase::Transfer,
+                deadline: start + Duration::from_secs(120),
+            }
+        );
+        assert_eq!(
+            attempt.rpc_deadline(true, Duration::from_secs(300), budgets),
+            Some(final_deadline),
+            "re-entering final installation must reuse the first deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_install_respects_the_first_rpc_hard_cap_and_transfer_expiry() {
+        let budgets = test_snapshot_budgets();
+        let attempt = SnapshotAttempt::new(3, "snapshot".into(), budgets);
+        let start = attempt.start;
+        time::advance(Duration::from_secs(80)).await;
+        let hard_capped = attempt
+            .rpc_deadline(true, Duration::from_secs(40), budgets)
+            .expect("final stage begins with transfer time remaining");
+        assert_eq!(hard_capped, start + Duration::from_secs(120));
+        time::advance(Duration::from_secs(10)).await;
+        assert_eq!(
+            attempt.rpc_deadline(true, Duration::from_secs(300), budgets),
+            Some(hard_capped),
+            "a retry cannot replace the first RPC's hard cap"
+        );
+
+        let expired = SnapshotAttempt::new(4, "expired".into(), budgets);
+        time::advance(Duration::from_secs(120)).await;
+        assert_eq!(
+            expired.rpc_deadline(true, Duration::from_secs(300), budgets),
+            None,
+            "final installation cannot begin after transfer expiry"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mismatch_cannot_reenter_final_install_after_transfer_expiry() {
+        let budgets = test_snapshot_budgets();
+        let attempt = SnapshotAttempt::new(5, "snapshot".into(), budgets);
+        time::advance(Duration::from_secs(100)).await;
+        attempt
+            .rpc_deadline(true, Duration::from_secs(300), budgets)
+            .expect("begin final install before transfer expiry");
+        attempt
+            .rpc_deadline(false, Duration::from_secs(300), budgets)
+            .expect("mismatch returns to the original transfer window");
+        time::advance(Duration::from_secs(20)).await;
+
+        assert_eq!(
+            attempt.rpc_deadline(true, Duration::from_secs(300), budgets),
+            None,
+            "a final retry cannot outrun the restored transfer deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchable_snapshot_deadline_switches_to_the_active_phase() {
+        let budgets = test_snapshot_budgets();
+        let attempt = SnapshotAttempt::new(5, "snapshot".into(), budgets);
+        let start = attempt.start;
+        let stage = attempt.stage.subscribe();
+        time::advance(Duration::from_secs(100)).await;
+        attempt
+            .rpc_deadline(true, Duration::from_secs(300), budgets)
+            .expect("begin final install");
+        attempt
+            .rpc_deadline(false, Duration::from_secs(300), budgets)
+            .expect("return to transfer after mismatch");
+
+        let deadline = tokio::spawn(wait_for_snapshot_deadline(stage));
+        time::advance(Duration::from_secs(19)).await;
+        tokio::task::yield_now().await;
+        assert!(!deadline.is_finished());
+        time::advance(Duration::from_secs(1)).await;
+        let expired = deadline.await.expect("join deadline watcher");
+        assert_eq!(expired.phase, SnapshotAttemptPhase::Transfer);
+        assert_eq!(expired.deadline, start + Duration::from_secs(120));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry() {
+        let budgets = test_snapshot_budgets();
+        let attempt = SnapshotAttempt::new(6, "advancing".into(), budgets);
+        let stage = attempt.stage.subscribe();
+        let driver_attempt = Arc::clone(&attempt);
+        let transfer = tokio::spawn(supervise_snapshot_driver::<TypeConfigSqlite, _, _>(
+            attempt,
+            1,
+            7,
+            stage,
+            std::future::pending::<ReplicationClosed>(),
+            async move {
+                for _ in 0..3 {
+                    driver_attempt
+                        .rpc_deadline(false, Duration::from_secs(300), budgets)
+                        .expect("an advancing chunk starts before transfer expiry");
+                    time::sleep(Duration::from_secs(30)).await;
+                }
+                Ok(SnapshotResponse::new(Vote::new(1, 1)))
+            },
+        ));
+        tokio::task::yield_now().await;
+
+        time::advance(Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !transfer.is_finished(),
+            "the chunk watchdog is per RPC, not a whole-transfer deadline"
+        );
+        time::advance(Duration::from_secs(29)).await;
+        tokio::task::yield_now().await;
+        time::advance(Duration::from_secs(30)).await;
+
+        assert!(matches!(
+            transfer.await.expect("join advancing transfer"),
+            Ok(response) if response.vote == Vote::new(1, 1)
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_non_final_rpc_expires_at_chunk_budget_and_resets_socket() {
+        let (sender, _receiver) = flume::bounded(1);
+        let reset = Arc::new(ConnectionResetState::default());
+        let socket_epoch = reset.epoch();
+        let attempt = SnapshotAttempt::new(9, "snapshot".into(), test_snapshot_budgets());
+        let mut network = NetworkConnectionStreaming {
+            node: test_node(),
+            sender,
+            reset: Arc::clone(&reset),
+            shutdown: Arc::new(ConnectionShutdownState::default()),
+            local_node_id: 1,
+            snapshot_budgets: test_snapshot_budgets(),
+            snapshot_attempt: Arc::new(StdMutex::new(Some(attempt))),
+            next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
+            runtime: tokio::runtime::Handle::current(),
+            task: None,
+        };
+        let mut rpc = tokio::spawn(async move {
+            <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
+                &mut network,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: test_snapshot_meta(),
+                    offset: 0,
+                    data: b"chunk".to_vec(),
+                    done: false,
+                },
+                RPCOption::new(Duration::from_secs(300)),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        time::advance(Duration::from_secs(29)).await;
+        tokio::task::yield_now().await;
+        assert!(!rpc.is_finished());
+        time::advance(Duration::from_secs(1)).await;
+
+        assert!(matches!(
+            (&mut rpc).await.expect("join chunk RPC"),
+            Err(RPCError::Unreachable(_))
+        ));
+        assert_ne!(
+            reset.epoch(),
+            socket_epoch,
+            "the expired active RPC must request connection reset"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn repeated_mismatch_style_resets_expire_at_the_original_transfer_deadline() {
+        let budgets = test_snapshot_budgets();
+        let attempt = SnapshotAttempt::new(7, "mismatches".into(), budgets);
+        let stage = attempt.stage.subscribe();
+        let driver_attempt = Arc::clone(&attempt);
+        let transfer = tokio::spawn(supervise_snapshot_driver::<TypeConfigSqlite, _, _>(
+            attempt,
+            1,
+            7,
+            stage,
+            std::future::pending::<ReplicationClosed>(),
+            async move {
+                loop {
+                    // A mismatch makes the upstream driver return to a
+                    // non-final offset. Repeated calls update the active phase
+                    // but must never replace the attempt's original deadline.
+                    driver_attempt
+                        .rpc_deadline(false, Duration::from_secs(300), budgets)
+                        .expect("transfer remains active before its deadline");
+                    time::sleep(Duration::from_secs(1)).await;
+                }
+                #[allow(unreachable_code)]
+                Ok(SnapshotResponse::new(Vote::new(1, 1)))
+            },
+        ));
+        tokio::task::yield_now().await;
+
+        time::advance(Duration::from_secs(119)).await;
+        tokio::task::yield_now().await;
+        assert!(!transfer.is_finished());
+        time::advance(Duration::from_secs(1)).await;
+
+        assert!(matches!(
+            transfer.await.expect("join bounded mismatch loop"),
+            Err(StreamingError::Timeout(Timeout { timeout, .. }))
+                if timeout == Duration::from_secs(120)
+        ));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn final_install_may_exceed_chunk_window_but_cannot_renew_install_window() {
+        let budgets = test_snapshot_budgets();
+        let attempt = SnapshotAttempt::new(8, "final".into(), budgets);
+        time::advance(Duration::from_secs(10)).await;
+        let final_deadline = attempt
+            .rpc_deadline(true, Duration::from_secs(300), budgets)
+            .expect("begin final install before transfer expiry");
+        let stage = attempt.stage.subscribe();
+        let retry_attempt = Arc::clone(&attempt);
+        let install = tokio::spawn(supervise_snapshot_driver::<TypeConfigSqlite, _, _>(
+            attempt,
+            1,
+            7,
+            stage,
+            std::future::pending::<ReplicationClosed>(),
+            async {
+                time::sleep(Duration::from_secs(45)).await;
+                Ok(SnapshotResponse::new(Vote::new(1, 1)))
+            },
+        ));
+        tokio::task::yield_now().await;
+
+        time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !install.is_finished(),
+            "a healthy final restore may run longer than the 30-second chunk window"
+        );
+        assert_eq!(
+            retry_attempt.rpc_deadline(true, Duration::from_secs(300), budgets),
+            Some(final_deadline),
+            "a final retry cannot renew the first install deadline"
+        );
+        time::advance(Duration::from_secs(14)).await;
+
+        assert!(matches!(
+            install.await.expect("join final install"),
+            Ok(response) if response.vote == Vote::new(1, 1)
+        ));
+    }
+
+    #[test]
+    fn stale_snapshot_guard_cannot_clear_a_newer_attempt() {
+        let slot = Arc::new(StdMutex::new(None));
+        let budgets = test_snapshot_budgets();
+        let first = SnapshotAttempt::new(1, "first".into(), budgets);
+        *slot.lock().expect("snapshot attempt slot") = Some(Arc::clone(&first));
+        let first_guard = SnapshotAttemptGuard {
+            attempt_id: first.id,
+            slot: Arc::clone(&slot),
+        };
+        let second = SnapshotAttempt::new(2, "second".into(), budgets);
+        *slot.lock().expect("snapshot attempt slot") = Some(Arc::clone(&second));
+
+        drop(first_guard);
+
+        assert_eq!(
+            slot.lock()
+                .expect("snapshot attempt slot")
+                .as_ref()
+                .map(|attempt| attempt.id),
+            Some(second.id)
+        );
+        drop(SnapshotAttemptGuard {
+            attempt_id: second.id,
+            slot: Arc::clone(&slot),
+        });
+        assert!(slot.lock().expect("snapshot attempt slot").is_none());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately() {
+        let reset = Arc::new(ConnectionResetState::default());
+        let socket_epoch = reset.epoch();
+        let attempt = SnapshotAttempt::new(10, "snapshot".into(), test_snapshot_budgets());
+        let attempts = Arc::new(StdMutex::new(Some(Arc::clone(&attempt))));
+        let attempt_guard = SnapshotAttemptGuard {
+            attempt_id: attempt.id,
+            slot: Arc::clone(&attempts),
+        };
+        let (cancel, cancelled) = oneshot::channel();
+        let active_rpc = {
+            let reset = Arc::clone(&reset);
+            async move {
+                let _reset_guard = ConnectionResetGuard::new(reset);
+                std::future::pending::<
+                    Result<
+                        SnapshotResponse<NodeId>,
+                        StreamingError<TypeConfigSqlite, Fatal<NodeId>>,
+                    >,
+                >()
+                .await
+            }
+        };
+        let transfer = tokio::spawn({
+            let attempt = Arc::clone(&attempt);
+            async move {
+                let result = supervise_snapshot_driver(
+                    Arc::clone(&attempt),
+                    1,
+                    7,
+                    attempt.stage.subscribe(),
+                    async move {
+                        cancelled
+                            .await
+                            .expect("test cancellation sender remains open")
+                    },
+                    active_rpc,
+                )
+                .await;
+                drop(attempt_guard);
+                result
+            }
+        });
+        tokio::task::yield_now().await;
+        cancel
+            .send(ReplicationClosed::new("test leader change"))
+            .expect("active RPC still waits for cancellation");
+
+        assert!(matches!(
+            transfer.await.expect("join snapshot wrapper"),
+            Err(StreamingError::Closed(_))
+        ));
+        assert!(
+            attempts.lock().expect("snapshot attempt slot").is_none(),
+            "the attempt guard must clear on cancellation"
+        );
+        assert_ne!(
+            reset.epoch(),
+            socket_epoch,
+            "dropping the active RPC guard must request connection reset"
+        );
+    }
+
     #[test]
     fn snapshot_mismatch_remains_a_remote_api_error() {
         let node = test_node();
@@ -1781,6 +2521,14 @@ mod tests {
             sender,
             reset: Arc::clone(&reset),
             shutdown: Arc::new(ConnectionShutdownState::default()),
+            local_node_id: 1,
+            snapshot_budgets: SnapshotRpcBudgets {
+                chunk: Duration::from_secs(30),
+                transfer: Duration::from_secs(1_200),
+                install: Duration::from_secs(120),
+            },
+            snapshot_attempt: Arc::new(StdMutex::new(None)),
+            next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
             task: None,
         };
@@ -1862,6 +2610,14 @@ mod tests {
             sender,
             reset: Arc::clone(&reset),
             shutdown: Arc::new(ConnectionShutdownState::default()),
+            local_node_id: 1,
+            snapshot_budgets: SnapshotRpcBudgets {
+                chunk: Duration::from_secs(30),
+                transfer: Duration::from_secs(1_200),
+                install: Duration::from_secs(120),
+            },
+            snapshot_attempt: Arc::new(StdMutex::new(None)),
+            next_snapshot_attempt: Arc::new(AtomicU64::new(0)),
             runtime: tokio::runtime::Handle::current(),
             task: None,
         };

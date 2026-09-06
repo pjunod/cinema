@@ -22,7 +22,15 @@ pub const DEFAULT_SCAN_PRUNE_PERCENT: u8 = 10;
 /// until an operator explicitly enables it cluster-wide.
 pub const DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 64;
 pub const MAX_BOUNDED_REPLICA_MAX_LAG_ENTRIES: u64 = 10_000;
-/// Default deadline for sending and installing one Raft snapshot segment.
+/// Deadline for one non-final Raft snapshot chunk RPC.
+pub const DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS: u64 = 30;
+pub const MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS: u64 = 5;
+pub const MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS: u64 = 300;
+/// Absolute deadline for the transfer stage of one Raft snapshot attempt.
+pub const DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = 1_200;
+pub const MIN_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = 60;
+pub const MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = 14_400;
+/// Deadline for the final snapshot installation RPC.
 pub const DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = 120;
 pub const MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = 10;
 pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = 3_600;
@@ -137,8 +145,12 @@ pub struct ClusterConfig {
     /// Local Hiqlite read-only connection pool. Four is the measured/default
     /// baseline; the bounded knob permits retained 4/8/16 comparison runs.
     pub read_pool_size: usize,
-    /// Deadline for sending and installing one Raft snapshot segment. Hiqlite's
-    /// zero non-final-segment timeout makes this the snapshot transfer deadline.
+    /// Deadline for one non-final snapshot chunk RPC, including admission,
+    /// frame delivery, and acknowledgement.
+    pub snapshot_chunk_timeout_secs: u64,
+    /// Absolute deadline for the transfer stage of one snapshot attempt.
+    pub snapshot_transfer_timeout_secs: u64,
+    /// Deadline for the final snapshot installation RPC.
     pub install_snapshot_timeout_secs: u64,
 }
 
@@ -158,6 +170,8 @@ impl Default for ClusterConfig {
             bounded_replica_reads: false,
             bounded_replica_max_lag_entries: DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES,
             read_pool_size: 4,
+            snapshot_chunk_timeout_secs: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
+            snapshot_transfer_timeout_secs: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
             install_snapshot_timeout_secs: DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS,
         }
     }
@@ -247,6 +261,36 @@ impl Config {
                 ),
             });
         }
+        if !(MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS..=MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS)
+            .contains(&config.cluster.snapshot_chunk_timeout_secs)
+        {
+            return Err(ConfigError::Value {
+                key: "cluster.snapshot_chunk_timeout_secs".to_owned(),
+                message: format!(
+                    "must be between {MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS} and \
+                     {MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS} seconds"
+                ),
+            });
+        }
+        if !(MIN_SNAPSHOT_TRANSFER_TIMEOUT_SECS..=MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS)
+            .contains(&config.cluster.snapshot_transfer_timeout_secs)
+        {
+            return Err(ConfigError::Value {
+                key: "cluster.snapshot_transfer_timeout_secs".to_owned(),
+                message: format!(
+                    "must be between {MIN_SNAPSHOT_TRANSFER_TIMEOUT_SECS} and \
+                     {MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS} seconds"
+                ),
+            });
+        }
+        if config.cluster.snapshot_chunk_timeout_secs
+            > config.cluster.snapshot_transfer_timeout_secs
+        {
+            return Err(ConfigError::Value {
+                key: "cluster.snapshot_chunk_timeout_secs".to_owned(),
+                message: "must not exceed cluster.snapshot_transfer_timeout_secs".to_owned(),
+            });
+        }
         Ok(config)
     }
 
@@ -318,8 +362,48 @@ impl Config {
             &mut self.cluster,
             env_var("PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"),
         )?;
+        apply_snapshot_chunk_timeout_env(
+            &mut self.cluster,
+            env_var("PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS"),
+        )?;
+        apply_snapshot_transfer_timeout_env(
+            &mut self.cluster,
+            env_var("PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS"),
+        )?;
         Ok(())
     }
+}
+
+fn apply_snapshot_chunk_timeout_env(
+    cluster: &mut ClusterConfig,
+    value: Option<String>,
+) -> Result<(), ConfigError> {
+    if let Some(value) = value {
+        cluster.snapshot_chunk_timeout_secs = value.parse().map_err(|_| ConfigError::Env {
+            var: "PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS".to_owned(),
+            message: format!(
+                "`{value}` is not an integer from {MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS} through \
+                 {MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS}"
+            ),
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_snapshot_transfer_timeout_env(
+    cluster: &mut ClusterConfig,
+    value: Option<String>,
+) -> Result<(), ConfigError> {
+    if let Some(value) = value {
+        cluster.snapshot_transfer_timeout_secs = value.parse().map_err(|_| ConfigError::Env {
+            var: "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS".to_owned(),
+            message: format!(
+                "`{value}` is not an integer from {MIN_SNAPSHOT_TRANSFER_TIMEOUT_SECS} through \
+                 {MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS}"
+            ),
+        })?;
+    }
+    Ok(())
 }
 
 fn apply_install_snapshot_timeout_env(
@@ -368,6 +452,14 @@ mod tests {
             DEFAULT_BOUNDED_REPLICA_MAX_LAG_ENTRIES
         );
         assert_eq!(config.cluster.read_pool_size, 4);
+        assert_eq!(
+            config.cluster.snapshot_chunk_timeout_secs,
+            DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS
+        );
+        assert_eq!(
+            config.cluster.snapshot_transfer_timeout_secs,
+            DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS
+        );
         assert_eq!(
             config.cluster.install_snapshot_timeout_secs,
             DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS
@@ -565,6 +657,102 @@ mod tests {
             apply_install_snapshot_timeout_env(&mut cluster, Some("fast".to_owned())),
             Err(ConfigError::Env { var, .. })
                 if var == "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"
+        ));
+    }
+
+    #[test]
+    fn snapshot_chunk_and_transfer_timeouts_validate_bounds_and_relationship() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plurx.toml");
+
+        for (key, values) in [
+            (
+                "snapshot_chunk_timeout_secs",
+                [
+                    MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS,
+                    DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
+                    MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS,
+                ],
+            ),
+            (
+                "snapshot_transfer_timeout_secs",
+                [
+                    MIN_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+                    DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+                    MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+                ],
+            ),
+        ] {
+            for seconds in values {
+                std::fs::write(&path, format!("[cluster]\n{key} = {seconds}\n"))
+                    .expect("write valid snapshot budget");
+                Config::load(Some(&path)).expect("load valid snapshot budget");
+            }
+        }
+
+        for (key, seconds) in [
+            (
+                "snapshot_chunk_timeout_secs",
+                MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS - 1,
+            ),
+            (
+                "snapshot_chunk_timeout_secs",
+                MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS + 1,
+            ),
+            (
+                "snapshot_transfer_timeout_secs",
+                MIN_SNAPSHOT_TRANSFER_TIMEOUT_SECS - 1,
+            ),
+            (
+                "snapshot_transfer_timeout_secs",
+                MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS + 1,
+            ),
+        ] {
+            std::fs::write(&path, format!("[cluster]\n{key} = {seconds}\n"))
+                .expect("write invalid snapshot budget");
+            assert!(matches!(
+                Config::load(Some(&path)),
+                Err(ConfigError::Value { key: rejected, .. }) if rejected == format!("cluster.{key}")
+            ));
+        }
+
+        std::fs::write(
+            &path,
+            "[cluster]\nsnapshot_chunk_timeout_secs = 300\n\
+             snapshot_transfer_timeout_secs = 60\n",
+        )
+        .expect("write invalid snapshot relationship");
+        assert!(matches!(
+            Config::load(Some(&path)),
+            Err(ConfigError::Value { key, .. }) if key == "cluster.snapshot_chunk_timeout_secs"
+        ));
+    }
+
+    #[test]
+    fn snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override() {
+        let mut cluster = ClusterConfig::default();
+        apply_snapshot_chunk_timeout_env(&mut cluster, Some("45".to_owned()))
+            .expect("parse chunk override");
+        apply_snapshot_transfer_timeout_env(&mut cluster, Some("900".to_owned()))
+            .expect("parse transfer override");
+        assert_eq!(cluster.snapshot_chunk_timeout_secs, 45);
+        assert_eq!(cluster.snapshot_transfer_timeout_secs, 900);
+
+        apply_snapshot_chunk_timeout_env(&mut cluster, None).expect("ignore empty chunk override");
+        apply_snapshot_transfer_timeout_env(&mut cluster, None)
+            .expect("ignore empty transfer override");
+        assert_eq!(cluster.snapshot_chunk_timeout_secs, 45);
+        assert_eq!(cluster.snapshot_transfer_timeout_secs, 900);
+
+        assert!(matches!(
+            apply_snapshot_chunk_timeout_env(&mut cluster, Some("fast".to_owned())),
+            Err(ConfigError::Env { var, .. })
+                if var == "PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS"
+        ));
+        assert!(matches!(
+            apply_snapshot_transfer_timeout_env(&mut cluster, Some("forever".to_owned())),
+            Err(ConfigError::Env { var, .. })
+                if var == "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS"
         ));
     }
 }

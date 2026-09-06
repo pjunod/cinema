@@ -82,6 +82,9 @@ pub(crate) async fn start_raft_db(
         heartbeat_interval: node_config.raft_config.heartbeat_interval,
         is_raft_stopped: is_raft_stopped.clone(),
         is_startup_finished: is_startup_finished.clone(),
+        snapshot_budgets: crate::network::raft_client::SnapshotRpcBudgets::from_node_config(
+            node_config,
+        ),
     };
 
     let shutdown_handle = log_store.shutdown_handle();
@@ -152,6 +155,9 @@ where
         heartbeat_interval: node_config.raft_config.heartbeat_interval,
         is_startup_finished: is_startup_finished.clone(),
         is_raft_stopped: is_raft_stopped.clone(),
+        snapshot_budgets: crate::network::raft_client::SnapshotRpcBudgets::from_node_config(
+            node_config,
+        ),
     };
 
     let tx_caches = state_machine_store.tx_caches.clone();

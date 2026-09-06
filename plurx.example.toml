@@ -51,7 +51,12 @@ scan_prune_percent = 10
 # Local replicated read-only connection pool; accepted range is 1 through 16.
 # Keep 4 unless a retained 4/8/16 workload comparison proves another value.
 # read_pool_size = 4
-# Snapshot transfer/install deadline in seconds; accepted range is 10 through
-# 3600. The 120-second default covers production-sized state snapshots on a
-# healthy LAN without retrying from zero at the former 10-second boundary.
+# One non-final 3 MiB snapshot chunk, including queueing, delivery, and reply.
+# Range: 5 through 300 seconds. Must not exceed the full transfer budget.
+# snapshot_chunk_timeout_secs = 30
+# Full transfer stage across all chunks, retries, and mismatches. Range: 60
+# through 14400 seconds. Progress never renews this absolute attempt budget.
+# snapshot_transfer_timeout_secs = 1200
+# Final chunk and database-install stage. Range: 10 through 3600 seconds. This
+# is independent of the short non-final chunk watchdog.
 # install_snapshot_timeout_secs = 120
