@@ -34805,7 +34805,7 @@ pub(crate) mod tests {
         for (name, idle_ms, published_end_ms, why) in [
             (
                 "still-delivering",
-                WEDGE_IDLE_MS - 1,
+                WEDGE_IDLE_MS / 2,
                 WEDGE_GAP_MS,
                 "a delivery completed a moment ago is a slow link, not a wedge",
             ),
@@ -34848,6 +34848,26 @@ pub(crate) mod tests {
             );
             drop(claim);
         }
+    }
+
+    #[test]
+    fn delivery_wedge_thresholds_are_exact() {
+        assert!(!delivery_wedge(
+            WEDGE_IDLE_MS - 1,
+            Some(WEDGE_GAP_MS),
+            0
+        ));
+        assert!(!delivery_wedge(
+            WEDGE_IDLE_MS,
+            Some(WEDGE_GAP_MS - 1),
+            0
+        ));
+        assert!(!delivery_wedge(WEDGE_IDLE_MS, None, 0));
+        assert!(delivery_wedge(
+            WEDGE_IDLE_MS,
+            Some(WEDGE_GAP_MS),
+            0
+        ));
     }
 
     #[tokio::test]
