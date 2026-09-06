@@ -1204,7 +1204,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # value describes the merged tree. 417 is what the checker reads off the
 # merge, so it is what is recorded -- the two inventories above are both
 # still true, and the total is measured rather than added up.
-expected_occurrences = 417
+# 417 -> 423 with M1 bound decoder facts: one blocking digest worker and one
+# probe singleflight owner ship in `decode_facts`; four additional probe/cache
+# race tasks are test-only. The blocking worker retains its semaphore permit
+# until the operating-system read ends, the singleflight owner publishes one
+# shared result, and every fixture task is joined before its test returns.
+# None chooses or replaces a rolling producer.
+expected_occurrences = 423
 
 [[module_structures]]
 id = "method-spawn"
@@ -1218,7 +1224,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1 HDHomeRun M2: spawn_live_ffmpeg launches the sole per-session encoder.
 # The session retains child and foreground admission through confirmed reap;
 # shutdown closes registry insertion before collecting existing owners.
-expected_occurrences = 42
+# 42 -> 44 with M1: the two descriptor-bound FFprobe launches collect the
+# configured-build version and selected-stream facts. Both children are
+# kill-on-drop, output-bounded, process-group signalled on cancellation or
+# timeout, and awaited before their source/build ownership is released.
+expected_occurrences = 44
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1344,7 +1354,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # value describes the merged tree. 609 is what the checker reads off the
 # merge, so it is what is recorded -- the two inventories above are both
 # still true, and the total is measured rather than added up.
-expected_occurrences = 609
+# 609 -> 626 with M1 bound decoder facts. Seven production constructors bound
+# digest admission/completion, probe singleflight admission, source-offset
+# ownership, version collection, and selected-stream collection. Ten test-only
+# sleeps/timeouts make cancellation, deadline, and ownership races
+# deterministic. Every child deadline is paired with group termination and
+# reap; no timer decides producer recovery or selects a replacement plan.
+expected_occurrences = 626
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1388,7 +1404,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # was already counted. Both new children use kill-on-drop; production also
 # retains admission and requires confirmed reap before retirement. The finite
 # source generator has no separate output timeout; it is not a live producer.
-expected_occurrences = 70
+# 70 -> 73 with M1: two production commands execute the retained FFprobe
+# snapshot for version and selected-stream facts; one Linux-only fixture
+# command verifies collision-safe assignment of crossed source/executable
+# descriptors. The fixture waits synchronously and owns no rolling producer.
+expected_occurrences = 73
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1470,7 +1490,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # the owner's internal Live TV snapshot. Same category as the M3 and M7 rows
 # above: an HTTP status code on an in-process `oneshot` response, launching no
 # process and owning no producer.
-expected_occurrences = 237
+# 237 -> 240 with M1: the two retained FFprobe commands call `.spawn()` and
+# the Linux crossed-descriptor fixture calls `.status()`. The former are the
+# bounded process owners described above; the latter waits for one finite
+# shell assertion and ships in no binary.
+expected_occurrences = 240
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1498,12 +1522,18 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +4 HDHomeRun M2: cleanup_session calls start_kill and bounded wait while
 # retaining child/admission on failure; the session observer calls try_wait;
 # the real video-only fixture awaits its production-graph child.
-expected_occurrences = 310
+# 310 -> 313 with M1: version and selected-stream collection each await their
+# retained FFprobe child, and the common group-termination helper performs the
+# final reap after signalling. Source/build leases survive all three waits.
+expected_occurrences = 313
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
-expected_occurrences = 32
+# 32 -> 33 with M1: `libc::kill` targets the negative process-group id on
+# cancellation or timeout so descendants inheriting the held media descriptor
+# cannot outlive the probe owner. The direct child is then awaited above.
+expected_occurrences = 33
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -1520,7 +1550,10 @@ pattern = "kill_on_drop\\s*\\("
 # +2 HDHomeRun M2: production encoder and finite video-only source generator.
 # kill-on-drop is a fallback; successful production drain still requires
 # explicit confirmed reap rather than treating drop as cleanup proof.
-expected_occurrences = 40
+# 40 -> 42 with M1: both retained FFprobe commands enable kill-on-drop as the
+# last-resort cancellation fence in addition to explicit process-group signal
+# and reap on every owned completion path.
+expected_occurrences = 42
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

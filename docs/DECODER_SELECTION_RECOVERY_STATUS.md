@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 final repairs qualified; exact-head re-review pending · **Updated:** 2026-09-06 ·
+**Status:** M1 diagnostic full-suite repairs in progress · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -20,20 +20,20 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M1 — explicit plans and bound facts |
 | Task branch | `codex/decoder-selection-m1` |
-| Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and its one full-suite run |
+| Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | M1 code head `c03a98b3`: selector matrix 34/34, macOS bound FFprobe collector 14/14, Linux collector 15/15, and neutral observation policy 1/1 pass; default-feature Clippy denies warnings |
 | Exact receipt | `8cc77fa6`: history 1,353, catalog 24/30/1,431, operations 211/211, formatting, pinned all-target workspace compile, status contract, and effort-base diff check pass |
-| Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0; Historical pre-rebase head `01368ce1` remains history only; the M1 full suite waits until all fresh review findings are closed |
-| Blocker | None; the latest adversarial change requests are implemented and await exact-head verification before the single M1 full suite |
+| Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `bb25576c`: 20 passed, 3 failed, 2 declared skips; the rejected run found stale ownership counts and two test-only Clippy findings, then exhausted disk during cluster compilation after all preceding cluster tests passed |
+| Blocker | None; generated build artifacts were reclaimed, the diagnostic findings are being repaired, and only a later clean exact-head run can qualify M1 |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Final re-review | Code head `c03a98b3` and exact receipt `8cc77fa6`: planner 34/34, macOS collector 14/14, Linux collector 15/15, neutral policy 1/1, Clippy, operations, compile, validation lint, and history audit pass; exact-head approvals and the single full suite remain |
+| M1 · explicit plan and facts | Diagnostic repairs | Code head `c03a98b3` and exact receipt `8cc77fa6` passed focused and fast validation; diagnostic full-suite head `bb25576c` rejected stale ownership counts and two test-only Clippy findings, while cluster compilation later exhausted disk rather than failing a test |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |

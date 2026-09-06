@@ -102,7 +102,9 @@ pub(crate) struct DecodeProbeIdentity {
 #[derive(Debug)]
 struct ExecutableSnapshot {
     file: std::fs::File,
-    path: tempfile::TempPath,
+    // Retaining the path owns the temporary directory entry for as long as
+    // Linux executes the held descriptor or macOS executes the immutable path.
+    _path: tempfile::TempPath,
 }
 
 impl ExecutableSnapshot {
@@ -112,7 +114,7 @@ impl ExecutableSnapshot {
 
     #[cfg(any(test, not(target_os = "linux")))]
     fn path(&self) -> &Path {
-        self.path.as_ref()
+        self._path.as_ref()
     }
 }
 
@@ -379,7 +381,7 @@ fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, Dec
     let path = snapshot.into_temp_path();
     let file = std::fs::File::open(&path)
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    Ok(ExecutableSnapshot { file, path })
+    Ok(ExecutableSnapshot { file, _path: path })
 }
 
 #[cfg(not(unix))]

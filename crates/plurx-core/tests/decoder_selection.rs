@@ -13,6 +13,9 @@ fn identity(byte: char) -> DecodeSourceIdentity {
     DecodeSourceIdentity::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
 }
 
+// A flat argument list keeps each fixture visually aligned with FFprobe's
+// stream object, which is the contract these tests exercise.
+#[allow(clippy::too_many_arguments)]
 fn video(
     index: u32,
     codec: Option<&str>,
@@ -269,14 +272,7 @@ fn legacy_h264_preferences_match_existing_encoder_routes() {
         )
         .expect("legacy route resolves");
         assert_eq!(plan.decode().backend(), backend);
-        assert_eq!(
-            plan.decode().evidence(),
-            if backend == DecodeBackend::Software {
-                DecodeEvidence::LegacyUnverified
-            } else {
-                DecodeEvidence::LegacyUnverified
-            }
-        );
+        assert_eq!(plan.decode().evidence(), DecodeEvidence::LegacyUnverified);
     }
 }
 
