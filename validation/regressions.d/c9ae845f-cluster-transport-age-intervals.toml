@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = ["c9ae845f"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "core.media",
+  "identity.access",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "The focused cluster/WAL lane retains request-to-receipt transit as an explicit local-monotonic age uncertainty, and the membership web suite exercises both input orders to ensure delayed predecessor evidence cannot appear newer. The same browser suite proves completion authority is applied only after receiver-attempt chronology."
