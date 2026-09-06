@@ -346,6 +346,33 @@ fn prepare_within(
     if !predecessor_is_authoritative {
         return Ok(None);
     }
+    // The ask has to still be the one this successor is for.
+    //
+    // Inside the transaction rather than before it, which is the whole point:
+    // the source file read and the height resolution that precede staging are
+    // awaits, and an ask that lands across them is exactly what a pre-await
+    // check cannot see. Single-writer SQLite makes the window smaller than the
+    // replicated backend's, not absent — the caller still awaits between
+    // reading the ask and calling this.
+    //
+    // A missing row admits. A playback that predates this schema, or one whose
+    // viewer has never sent an intent-changing request, has no ask to disagree
+    // with, and fencing every session older than the node's own schema would
+    // be a worse failure than the one this closes.
+    if let Some(expected) = preparation.expected_desired_revision {
+        let ask_still_current = tx
+            .query_row(
+                "SELECT 1 FROM media_playback_desired
+                  WHERE user_id = ?1 AND playback_id = ?2 AND revision != ?3",
+                params![preparation.user_id, preparation.playback_id, expected],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_none();
+        if !ask_still_current {
+            return Ok(None);
+        }
+    }
     let existing = tx
         .query_row(
             &format!(
@@ -1861,7 +1888,21 @@ impl MediaSessionStore for SqliteStore {
                         AND preparation.deadline_ms > ?2)
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = ?1 AND user_id = ?3
-                        AND playback_id = ?4 AND state = 'active')",
+                        AND playback_id = ?4 AND state = 'active')
+                    -- The ask has to still be the one this successor is for.
+                    -- Carried in the CAS rather than checked before it, and
+                    -- that placement is the behaviour: a stale ask makes this
+                    -- update affect no rows, which drops into the same abort
+                    -- branch a lost pointer race does. A successor built for
+                    -- an ask the viewer has left is not a successor to keep —
+                    -- its recipe is for the old ask and it can never
+                    -- legitimately commit — so tearing it down and freeing the
+                    -- slot is the outcome, not leaving it staged. Checking
+                    -- earlier and returning made this backend keep the row
+                    -- while the replicated twin tore it down, which the
+                    -- three-voter lane caught.
+                    AND (?8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                      WHERE user_id = ?3 AND playback_id = ?4 AND revision != ?8))",
                 params![
                     staged.staged_incarnation_id,
                     now_ms,
@@ -1870,6 +1911,7 @@ impl MediaSessionStore for SqliteStore {
                     staged.expected_predecessor_incarnation_id,
                     request.expected_predecessor_owner_node_id,
                     request.expected_predecessor_owner_epoch,
+                    request.expected_desired_revision.unwrap_or(0),
                 ],
             )?;
             if pointer_advanced != 1 {

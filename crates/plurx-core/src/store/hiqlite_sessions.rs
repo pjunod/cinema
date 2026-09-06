@@ -578,6 +578,19 @@ fn prepare_statements(
 ) -> Vec<(&'static str, hiqlite::Params)> {
     let prepare_lease_resource = format!("session:{}", preparation.incarnation_id);
     let removed_owner_key = removed_job_owner_key(&preparation.owner_node_id);
+    // Zero is "no expectation", and it can never collide with a real one:
+    // `media_playback_desired.revision` is CHECK (revision > 0). Carrying a
+    // sentinel rather than a NULL keeps the predicate readable — a comparison
+    // against NULL is neither true nor false, and a reviewer should not have
+    // to reason about three-valued logic to see that an absent ask admits.
+    //
+    // The predicate itself is deliberately `NOT EXISTS (... revision != $n)`
+    // rather than `EXISTS (... revision = $n)`. Those differ exactly where the
+    // row is missing, and missing must admit: a playback that predates this
+    // schema, or one whose viewer has never sent an intent-changing request,
+    // has no ask to disagree with. An upgraded node that fenced every session
+    // older than itself would be a worse failure than the one this closes.
+    let expected_desired_revision = preparation.expected_desired_revision.unwrap_or(0);
     vec![
         (
             // Every statement carries the same fixed preconditions. A
@@ -606,6 +619,8 @@ fn prepare_statements(
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $7 AND owner_node_id = $13
                     AND owner_epoch = $14 AND state = 'active')
+                AND ($15 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                  WHERE user_id = $5 AND playback_id = $6 AND revision != $15))
              ON CONFLICT(resource) DO UPDATE SET
                 expires_at_ms = excluded.expires_at_ms,
                 revision = job_leases.revision + 1,
@@ -628,7 +643,8 @@ fn prepare_statements(
                 MAX_OWNED,
                 removed_owner_key.as_str(),
                 preparation.expected_predecessor_owner_node_id.as_str(),
-                preparation.expected_predecessor_owner_epoch
+                preparation.expected_predecessor_owner_epoch,
+                expected_desired_revision
             ),
         ),
         (
@@ -661,6 +677,8 @@ fn prepare_statements(
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $13 AND owner_node_id = $18
                     AND owner_epoch = $19 AND state = 'active')
+                AND ($20 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                  WHERE user_id = $3 AND playback_id = $4 AND revision != $20))
              RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id",
             params!(
                 preparation.incarnation_id.as_str(),
@@ -681,7 +699,8 @@ fn prepare_statements(
                 MAX_OWNED,
                 removed_owner_key.as_str(),
                 preparation.expected_predecessor_owner_node_id.as_str(),
-                preparation.expected_predecessor_owner_epoch
+                preparation.expected_predecessor_owner_epoch,
+                expected_desired_revision
             ),
         ),
         (
@@ -702,7 +721,9 @@ fn prepare_statements(
                   AND pointer.current_incarnation_id = $4
                   AND predecessor.owner_node_id = $10
                   AND predecessor.owner_epoch = $11
-                  AND predecessor.state = 'active')",
+                  AND predecessor.state = 'active')
+               AND ($12 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                 WHERE user_id = $1 AND playback_id = $2 AND revision != $12))",
             params!(
                 preparation.user_id,
                 preparation.playback_id.as_str(),
@@ -714,7 +735,8 @@ fn prepare_statements(
                 preparation.owner_node_id.as_str(),
                 MEDIA_SESSION_PUBLICATION_BLOCKED,
                 preparation.expected_predecessor_owner_node_id.as_str(),
-                preparation.expected_predecessor_owner_epoch
+                preparation.expected_predecessor_owner_epoch,
+                expected_desired_revision
             ),
         ),
     ]
@@ -2174,6 +2196,12 @@ impl MediaSessionStore for HiqliteAuthStore {
             .control_receipt
             .as_ref()
             .map_or(0, |receipt| receipt.updated_at_ms);
+        // Same sentinel and same shape as the admission predicate: zero is no
+        // expectation, and a missing row admits. The gap this closes is the
+        // client round trip between announcing a successor and acknowledging
+        // it, which is where a viewer changes their mind while a commit is
+        // already in flight.
+        let expected_desired_revision = request.expected_desired_revision.unwrap_or(0);
         // The pointer advance and the predecessor's retirement in one
         // transaction, both fenced on the exact recorded predecessor. Nothing
         // here reads the pointer to decide what to reap; a pointer that no
@@ -2206,6 +2234,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                           AND client_instance_id = $12 AND sequence = $13
                           AND request_fingerprint = $14 AND response_json = $15
                           AND expires_at_ms = $16 AND updated_at_ms = $17))
+                    AND ($18 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                      WHERE user_id = $3 AND playback_id = $4 AND revision != $18))
                   RETURNING current_incarnation_id",
                 params!(
                     staged.staged_incarnation_id.as_str(),
@@ -2224,7 +2254,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     receipt_request_fingerprint,
                     receipt_response_json,
                     receipt_expires_at_ms,
-                    receipt_updated_at_ms
+                    receipt_updated_at_ms,
+                    expected_desired_revision
                 ),
             ),
             (
@@ -4152,6 +4183,7 @@ mod tests {
 
     fn statement_test_preparation() -> crate::domain::MediaSessionPreparation {
         crate::domain::MediaSessionPreparation {
+            expected_desired_revision: None,
             incarnation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
             session_id: "session".to_owned(),
             user_id: 1,

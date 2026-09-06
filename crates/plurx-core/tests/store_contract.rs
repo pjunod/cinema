@@ -481,6 +481,8 @@ const NETWORK_PRIOR_METHODS: &[&str] = &[
 ];
 const COORDINATION_METHODS: &[&str] = &["acquire_lease", "renew_lease", "release_lease"];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    "record_desired_selection",
+    "desired_selection",
     "claim_media_session_request",
     "assign_media_session_request_owner",
     "activate_media_session",
@@ -820,6 +822,7 @@ fn staged_preparation(
     predecessor: &str,
 ) -> plurx_core::domain::MediaSessionPreparation {
     plurx_core::domain::MediaSessionPreparation {
+        expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
         user_id,
@@ -849,6 +852,7 @@ fn preparation_commit_request(
         now_ms,
         lease_expires_at_ms,
         control_receipt: None,
+        expected_desired_revision: None,
     }
 }
 
@@ -888,6 +892,231 @@ fn preparation_abort_request(
 /// it every tick. Without this refusal a preparation nobody commits holds an
 /// encoder and one of that user's admission slots for as long as the node
 /// lives, and the deadline the operator was promised never arrives.
+/// A successor is not admitted, and not committed, against an ask the viewer
+/// has left.
+///
+/// The two gaps this closes are both awaits, and both invisible to the checks
+/// that precede them. Between deciding to stage and staging there is a source
+/// file read and a height resolution; between staging and committing there is
+/// a whole client round trip — the successor is announced, the client prepares
+/// it, and only then acknowledges. A viewer can change their mind inside
+/// either, and until the store compared the ask, both ended with media the
+/// viewer had already moved off being published as though they had asked for
+/// it — the commit doing so on the authority of the client's own
+/// acknowledgement.
+///
+/// Driven against both backends, because the predicate has to mean the same
+/// thing in the replicated store and in SQLite or a single-node deployment and
+/// a cluster disagree about what a viewer asked for.
+#[tokio::test]
+async fn a_successor_is_refused_when_the_viewer_has_asked_for_something_else() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("desired-admission-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "desired-admission-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fd01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fd02",
+            backend,
+        )
+        .await;
+
+        let first_ask = store
+            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record first ask: {error}"));
+        assert_eq!(first_ask.revision, 1);
+
+        // A stale expectation is refused at admission. The viewer moved on
+        // between the decision to stage and the staging itself, which is the
+        // window the source read and the height resolution open.
+        let mut stale = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000fd03",
+            "00000000-0000-4000-8000-00000000fd04",
+            predecessor,
+        );
+        stale.expected_desired_revision = Some(first_ask.revision + 1);
+        assert!(
+            store
+                .prepare_media_session(&stale)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale prepare: {error}"))
+                .is_none(),
+            "{backend}: a successor for an ask that is not current must not be admitted"
+        );
+
+        // The current expectation is admitted.
+        let staged = "00000000-0000-4000-8000-00000000fd05";
+        let mut current = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000fd06",
+            predecessor,
+        );
+        current.expected_desired_revision = Some(first_ask.revision);
+        store
+            .prepare_media_session(&current)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the current ask must be admitted"));
+
+        // Now the viewer changes their mind while that successor is in flight.
+        let second_ask = store
+            .record_desired_selection(
+                user.id,
+                playback,
+                &"b".repeat(64),
+                "v1;quality=manual:720",
+                2_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record second ask: {error}"));
+        assert_eq!(second_ask.revision, 2);
+
+        let mut commit = preparation_commit_request(staged, 3_000, 900_000);
+        commit.expected_desired_revision = Some(first_ask.revision);
+        assert!(
+            store
+                .commit_media_session_preparation(user.id, playback, &commit)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale commit: {error}"))
+                .is_none(),
+            "{backend}: a successor built for an ask the viewer has left must not be published"
+        );
+
+        // And the pointer did not move: the refusal is a refusal, not a
+        // partially applied commit.
+        let route = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback still points somewhere"));
+        assert_eq!(
+            route.incarnation_id, predecessor,
+            "{backend}: a refused commit leaves the pointer where it was"
+        );
+        assert_eq!(route.state, "active");
+
+        // And the refusal tore the successor down rather than leaving it
+        // staged. That is the right outcome and not merely the observed one: a
+        // successor built for an ask the viewer has left can never
+        // legitimately commit — its recipe is for the old ask — so holding the
+        // playback's one preparation slot until its deadline would block the
+        // successor the viewer is actually waiting for.
+        //
+        // This is also where the two backends first disagreed. Checking the
+        // ask before the CAS and returning early left SQLite holding the row
+        // while the replicated twin tore it down; carrying the predicate
+        // inside the CAS makes a stale ask fall into the same abort branch a
+        // lost pointer race does, in both.
+        assert!(
+            store
+                .staged_media_session_for_playback(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: staged read: {error}"))
+                .is_none(),
+            "{backend}: a successor refused for a stale ask is torn down, not left holding the slot"
+        );
+
+        // A fresh successor, admitted under the ask that is now current,
+        // commits — so the refusal above was about the ask and not about
+        // anything else having gone wrong with this playback.
+        let replacement = "00000000-0000-4000-8000-00000000fd07";
+        let mut fresh = staged_preparation(
+            user.id,
+            playback,
+            replacement,
+            "00000000-0000-4000-8000-00000000fd08",
+            predecessor,
+        );
+        fresh.expected_desired_revision = Some(second_ask.revision);
+        fresh.now_ms = 4_000;
+        store
+            .prepare_media_session(&fresh)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fresh prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the current ask must be admitted"));
+        let mut commit = preparation_commit_request(replacement, 5_000, 900_000);
+        commit.expected_desired_revision = Some(second_ask.revision);
+        store
+            .commit_media_session_preparation(user.id, playback, &commit)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fresh commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a current ask must commit"));
+    })
+    .await;
+}
+
+/// A playback with no recorded ask is admitted, not fenced.
+///
+/// Absent is no evidence. A playback that predates this schema, or one whose
+/// viewer has never sent an intent-changing request, has no ask to disagree
+/// with — and a node that fenced every session older than its own schema would
+/// be a worse failure than the one the predicate closes.
+#[tokio::test]
+async fn a_playback_with_no_recorded_ask_is_still_admitted() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("desired-absent-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "desired-absent-playback";
+        let predecessor = "00000000-0000-4000-8000-00000000fe01";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "00000000-0000-4000-8000-00000000fe02",
+            backend,
+        )
+        .await;
+        assert!(
+            store
+                .desired_selection(user.id, playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                .is_none(),
+            "{backend}: the fixture must have no recorded ask"
+        );
+
+        let staged = "00000000-0000-4000-8000-00000000fe03";
+        let mut preparation = staged_preparation(
+            user.id,
+            playback,
+            staged,
+            "00000000-0000-4000-8000-00000000fe04",
+            predecessor,
+        );
+        // An expectation carried forward from a node that had one, against a
+        // row that does not exist. This is the upgrade shape.
+        preparation.expected_desired_revision = Some(7);
+        store
+            .prepare_media_session(&preparation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an absent ask must admit, not fence"));
+
+        let mut commit = preparation_commit_request(staged, 3_000, 900_000);
+        commit.expected_desired_revision = Some(7);
+        store
+            .commit_media_session_preparation(user.id, playback, &commit)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an absent ask must commit, not fence"));
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_staged_successor_cannot_renew_past_its_deadline() {
     for_each_backend(|store, backend| async move {
@@ -13394,7 +13623,11 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 39);
+    // 40 with `media_playback_desired`. A v14 source has no rows for it —
+    // its `minimum_schema` is 28 — but the table is still reported, because
+    // the digest inventory is over what the import *plans*, not over what the
+    // source happened to hold.
+    assert_eq!(report.tables.len(), 40);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -15032,7 +15265,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 290, "review the Store method count");
+    assert_eq!(declared.len(), 292, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

@@ -4765,6 +4765,17 @@ impl PreparationExecutor {
                     now_ms,
                     lease_expires_at_ms,
                     control_receipt,
+                    // Read at the commit, not carried from the staging. The
+                    // gap between the two is a client round trip — announce,
+                    // prepare, acknowledge — and a viewer can change their
+                    // mind twice inside it.
+                    expected_desired_revision: self
+                        .store
+                        .desired_selection(self.user_id, &self.playback_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|desired| desired.revision),
                 },
             )
             .await?;
@@ -21971,6 +21982,7 @@ mod tests {
         now_ms: i64,
     ) -> plurx_core::domain::MediaSessionPreparation {
         plurx_core::domain::MediaSessionPreparation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),
             user_id: 7,

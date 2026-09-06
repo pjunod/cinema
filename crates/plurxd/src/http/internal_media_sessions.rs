@@ -1164,6 +1164,7 @@ mod tests {
         state
             .store
             .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                expected_desired_revision: None,
                 incarnation_id: successor_incarnation.clone(),
                 session_id: successor_session.clone(),
                 user_id: user.id,
@@ -1256,6 +1257,7 @@ mod tests {
                 user.id,
                 "relay-player",
                 &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                    expected_desired_revision: None,
                     staged_incarnation_id: successor_incarnation,
                     expected_predecessor_owner_node_id: state.node_id.clone(),
                     expected_predecessor_owner_epoch: 1,

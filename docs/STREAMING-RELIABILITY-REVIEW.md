@@ -1184,10 +1184,41 @@ state that stopped offering on the *attempt* would leave the store one ask
 behind whenever a write failed, with nothing left to notice, because the
 client's retry would then say nothing needed writing.
 
-**Still open** in this thread: none of the three admission points compares the
-stored ask yet, so a successor can still be admitted, committed or activated
-against an ask the viewer has left. That is the next lane, and it is the one
-the durable row exists for.
+**Also corrected: a successor is no longer admitted or committed against an ask
+the viewer has left.** Two gaps, both awaits, and both invisible to the checks
+that precede them. Between deciding to stage and staging there is a source file
+read and a height resolution; between staging and committing there is a whole
+client round trip — announce, prepare, acknowledge. A viewer can change their
+mind inside either, and until the store compared the ask, both ended with media
+the viewer had already moved off being published as though they had asked for
+it, the commit doing so on the authority of the client's own acknowledgement.
+
+The expected desired revision is now compared inside the admission transaction
+and inside the commit CAS, in both backends. It is read at each point rather
+than carried from the exchange that triggered the work, because a value
+captured before the awaits proves only that the ask had not changed before the
+work started.
+
+An absent row admits. A playback that predates the schema, or one whose viewer
+has never sent an intent-changing request, has no ask to disagree with, and a
+node that fenced every session older than its own schema would be a worse
+failure than the one this closes. The predicate is `NOT EXISTS (… revision !=
+expected)` rather than `EXISTS (… revision = expected)` for exactly that
+reason: the two differ only where the row is missing.
+
+The three-voter lane earned its runtime here. The first version checked the ask
+before the commit CAS and returned early, which left SQLite holding the stale
+successor while the replicated backend tore it down — the two backends
+disagreeing about what happens to a successor nobody wants. Carrying the
+predicate inside the CAS makes a stale ask fall into the same abort branch a
+lost pointer race does, in both, which is also the right outcome: a successor
+built for an ask the viewer has left can never legitimately commit, so holding
+the playback's one preparation slot until its deadline would block the
+successor they are actually waiting for.
+
+**Still open** in this thread: ordinary activation does not compare the ask
+yet — only preparation admission and prepared commit do — and the remaining §1
+race proofs are unwritten.
 
 **Partly corrected: a failed rendition now gives its producer back.** Reading
 the teardown paths rather than the finding turned up one leak that was

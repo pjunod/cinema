@@ -6697,6 +6697,19 @@ async fn stage_prepared_successor(
         response_json,
         media_origin_ms: resume_ms,
         now_ms,
+        // Read here rather than carried from the exchange that triggered this,
+        // and re-compared inside the admission transaction. The awaits between
+        // that exchange and this line — the source file read, the height
+        // resolution — are exactly where a newer ask lands, and a value
+        // captured before them would prove only that the ask had not changed
+        // before the work started.
+        expected_desired_revision: state
+            .store
+            .desired_selection(route.user_id, &route.playback_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|desired| desired.revision),
         deadline_ms: now_ms.saturating_add(PREPARATION_DEADLINE_MS),
     };
     match executor.stage(&preparation).await {
@@ -15077,6 +15090,7 @@ mod tests {
         };
         let now_ms = unix_ms();
         let preparation = plurx_core::domain::MediaSessionPreparation {
+            expected_desired_revision: None,
             incarnation_id: staged_incarnation_id.clone(),
             session_id: staged_session_id,
             user_id: route.user_id,

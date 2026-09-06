@@ -1015,6 +1015,17 @@ pub struct MediaSessionPreparation {
     /// Exact source position represented by session-relative zero.
     pub media_origin_ms: i64,
     pub now_ms: i64,
+    /// The desired revision this successor is being built for.
+    ///
+    /// Compared inside the admission transaction, not before it: the source
+    /// file read and the height resolution that precede staging are awaits,
+    /// and an ask that changes across them is exactly the case a pre-await
+    /// check cannot see. `None` where no durable ask exists — a playback that
+    /// predates the row, or one whose viewer has never sent an
+    /// intent-changing request — and absent is no evidence, so it admits
+    /// rather than refuses. An upgraded node that fenced every session older
+    /// than its own schema would be a worse failure than the one this closes.
+    pub expected_desired_revision: Option<i64>,
     /// When the preparation stops being a candidate.
     ///
     /// One clock, deliberately. This is written to the staged row's
@@ -1053,6 +1064,17 @@ pub struct MediaSessionPreparationCommitRequest {
     pub now_ms: i64,
     pub lease_expires_at_ms: i64,
     pub control_receipt: Option<MediaSessionTerminalAck>,
+    /// The desired revision this successor was admitted under.
+    ///
+    /// Re-compared at the commit, because the gap between admission and commit
+    /// is a client round trip — the successor is announced, the client
+    /// prepares it, and only then acknowledges — and a viewer can change their
+    /// mind twice inside it. The actor-local check that precedes this is a
+    /// pre-await check by construction: it cannot see an ask that lands while
+    /// the Store call is in flight.
+    ///
+    /// `None` admits, for the same reason it does at staging.
+    pub expected_desired_revision: Option<i64>,
 }
 
 /// Actor-authorized inputs for discarding one prepared successor.
