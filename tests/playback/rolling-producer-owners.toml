@@ -1419,7 +1419,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 217 -> 226 with M4: seven net additions are in-process membership or HTTP
 # response `status()` reads used by maintenance/status handlers and acceptance
 # tests. The other two are the node-runtime cleanup spawns inventoried under
-# `runtime-handle-method-spawn` above. None constructs, launches, or owns an
+# `method-spawn` above. None constructs, launches, or owns an
 # operating-system process.
 expected_occurrences = 226
 
