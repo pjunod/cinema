@@ -104,18 +104,24 @@ mod tests {
 
         let challenge_response = ChallengeResponse::new(1, &challenge, secret.as_ref()).unwrap();
 
-        assert!(challenge_response
-            .verify(&challenge, secret_bad.as_ref())
-            .is_err());
+        assert!(
+            challenge_response
+                .verify(&challenge, secret_bad.as_ref())
+                .is_err()
+        );
         let response = challenge_response
             .verify(&challenge, secret.as_ref())
             .unwrap();
 
-        assert!(response
-            .verify(&challenge_response, secret_bad.as_ref())
-            .is_err());
-        assert!(response
-            .verify(&challenge_response, secret.as_ref())
-            .is_ok());
+        assert!(
+            response
+                .verify(&challenge_response, secret_bad.as_ref())
+                .is_err()
+        );
+        assert!(
+            response
+                .verify(&challenge_response, secret.as_ref())
+                .is_ok()
+        );
     }
 }

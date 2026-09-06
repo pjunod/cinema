@@ -96,10 +96,7 @@ impl LocalDbRaftMetrics {
             node_id: metrics.id,
             current_term: metrics.current_term,
             current_leader: metrics.current_leader,
-            last_applied_term: metrics
-                .last_applied
-                .as_ref()
-                .map(|log| log.leader_id.term),
+            last_applied_term: metrics.last_applied.as_ref().map(|log| log.leader_id.term),
             last_applied_index: metrics.last_applied.as_ref().map(|log| log.index),
         }
     }
@@ -150,7 +147,6 @@ impl Client {
     /// Subscribe to database Raft metrics only when this client owns the local
     /// node. Remote clients return an error; this method never performs IO.
     #[cfg(feature = "sqlite")]
-    #[must_use]
     pub fn local_db_raft_metrics(&self) -> Result<LocalDbRaftMetrics, Error> {
         let state = self.inner.state.as_ref().ok_or_else(|| {
             Error::Connect("local database Raft metrics require a local node client".to_owned())
@@ -165,7 +161,6 @@ impl Client {
     /// Remote clients fail immediately. Reading this handle performs no
     /// management request, storage operation, allocation, or lock acquisition.
     #[cfg(feature = "sqlite")]
-    #[must_use]
     pub fn local_db_snapshot_metrics(&self) -> Result<crate::LocalDbSnapshotMetrics, Error> {
         self.inner.state.as_ref().ok_or_else(|| {
             Error::Connect("local database snapshot metrics require a local node client".to_owned())
@@ -178,7 +173,6 @@ impl Client {
     /// The handle reads only the live log store's owned locks and never opens
     /// or walks WAL files. Remote clients fail immediately.
     #[cfg(feature = "sqlite")]
-    #[must_use]
     pub fn local_db_wal_status(&self) -> Result<hiqlite_wal::WalStatusHandle, Error> {
         let state = self.inner.state.as_ref().ok_or_else(|| {
             Error::Connect("local database WAL status requires a local node client".to_owned())
@@ -550,6 +544,22 @@ impl Client {
                 .raft_cache
                 .is_raft_stopped
                 .store(true, Ordering::Relaxed);
+            state.raft_cache.snapshot_executor.request_shutdown();
+            if !state
+                .raft_cache
+                .snapshot_executor
+                .wait_for_shutdown(Duration::from_secs(5))
+                .await
+            {
+                return Err(Error::Error(
+                    "cache snapshot executor still owns work during shutdown".into(),
+                ));
+            }
+            // Keep the Raft core and state-machine worker alive until every
+            // accepted snapshot operation has relinquished ownership. Core
+            // shutdown can close the install response before the inner
+            // durable apply has finished, which would make a later WAL/cache
+            // shutdown race that still-running work.
             state.raft_cache.raft.shutdown().await?;
             if let Some(handle) = &state.raft_cache.shutdown_handle {
                 handle.shutdown().await?;
@@ -581,6 +591,17 @@ impl Client {
 
             state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
 
+            state.raft_db.snapshot_executor.request_shutdown();
+            if !state
+                .raft_db
+                .snapshot_executor
+                .wait_for_shutdown(Duration::from_secs(5))
+                .await
+            {
+                return Err(Error::Error(
+                    "sqlite snapshot executor still owns work during shutdown".into(),
+                ));
+            }
             state.raft_db.raft.shutdown().await?;
             info!("Shutting down sqlite logs writer");
             state.raft_db.shutdown_handle.shutdown().await?;
@@ -729,7 +750,11 @@ mod tests {
         .into_db_quorum_watermark()
         .expect_err("a malformed advertised protocol is not an old leader");
 
-        assert!(error.to_string().contains("invalid local_read_protocol_version"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid local_read_protocol_version")
+        );
     }
 
     #[tokio::test]

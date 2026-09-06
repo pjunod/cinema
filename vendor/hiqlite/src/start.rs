@@ -91,6 +91,8 @@ where
 
     #[cfg(feature = "sqlite")]
     let (tx_client_stream, rx_client_stream) = flume::bounded(1);
+    #[cfg(feature = "sqlite")]
+    let (tx_client_control, rx_client_control) = flume::bounded(1);
 
     let state = Arc::new(AppState {
         app_start: Utc::now(),
@@ -116,6 +118,8 @@ where
         client_request_id: std::sync::atomic::AtomicUsize::new(0),
         #[cfg(any(feature = "backup", feature = "dashboard"))]
         tx_client_stream: tx_client_stream.clone(),
+        #[cfg(feature = "dashboard")]
+        tx_client_control: tx_client_control.clone(),
         health_check_delay_secs: node_config.health_check_delay_secs,
         learner_only: node_config.learner_only,
         #[cfg(feature = "s3")]
@@ -237,10 +241,7 @@ where
         task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
-            server
-                .serve(router_api.into_make_service())
-                .await
-                .unwrap();
+            server.serve(router_api.into_make_service()).await.unwrap();
         }));
     } else {
         let listener = TcpListener::from_std(listener_api)?;
@@ -309,6 +310,10 @@ where
         tx_client_stream,
         #[cfg(feature = "sqlite")]
         rx_client_stream,
+        #[cfg(feature = "sqlite")]
+        tx_client_control,
+        #[cfg(feature = "sqlite")]
+        rx_client_control,
         tx_shutdown,
         #[cfg(feature = "cache")]
         node_config.rate_limit_cache,

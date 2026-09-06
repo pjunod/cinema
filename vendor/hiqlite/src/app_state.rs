@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 
+#[cfg(feature = "dashboard")]
+use crate::client::stream::ClientStreamControl;
 #[cfg(any(feature = "backup", feature = "dashboard"))]
 use crate::client::stream::ClientStreamReq;
 #[cfg(feature = "dashboard")]
@@ -73,6 +75,8 @@ pub(crate) struct AppState {
     pub client_request_id: AtomicUsize,
     #[cfg(any(feature = "backup", feature = "dashboard"))]
     pub tx_client_stream: flume::Sender<ClientStreamReq>,
+    #[cfg(feature = "dashboard")]
+    pub tx_client_control: flume::Sender<ClientStreamControl>,
     pub health_check_delay_secs: u32,
     pub learner_only: bool,
 }
@@ -88,6 +92,8 @@ impl AppState {
 #[cfg(feature = "sqlite")]
 pub struct StateRaftDB {
     pub raft: openraft::Raft<TypeConfigSqlite>,
+    pub(crate) snapshot_executor:
+        crate::network::snapshot_executor::SnapshotExecutor<TypeConfigSqlite>,
     pub shutdown_handle: hiqlite_wal::ShutdownHandle,
     pub wal_status: hiqlite_wal::WalStatusHandle,
     pub sql_writer: flume::Sender<WriterRequest>,
@@ -100,6 +106,7 @@ pub struct StateRaftDB {
 #[cfg(feature = "cache")]
 pub struct StateRaftCache {
     pub raft: openraft::Raft<TypeConfigKV>,
+    pub(crate) snapshot_executor: crate::network::snapshot_executor::SnapshotExecutor<TypeConfigKV>,
     pub tx_caches: Vec<flume::Sender<CacheRequestHandler>>,
     #[cfg(feature = "listen_notify")]
     pub tx_notify: flume::Sender<NotifyRequest>,

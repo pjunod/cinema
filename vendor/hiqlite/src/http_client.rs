@@ -25,6 +25,14 @@ pub fn build_http_client(tls_no_verify: bool) -> reqwest::Client {
         );
     }
 
+    #[cfg(test)]
+    {
+        // Unit tests use only loopback HTTP or explicit no-verification TLS.
+        // Keep them deterministic on headless macOS runners where the native
+        // keychain can be unavailable even though no test requests HTTPS.
+        builder = builder.tls_certs_only(std::iter::empty::<reqwest::Certificate>());
+    }
+
     builder.build().unwrap()
 }
 

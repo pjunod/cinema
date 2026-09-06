@@ -2,13 +2,14 @@ use crate::Node;
 use crate::NodeId;
 use crate::app_state::RaftType;
 use crate::helpers::{deserialize, serialize};
+use crate::network::frame_io::{
+    CLOSE_WRITE_TIMEOUT, write_close_frame_flushed, write_frame_flushed,
+};
 use crate::network::raft_server::{
     RaftStreamRequest, RaftStreamResponse, RaftStreamResponsePayload,
 };
 use crate::network::web_socket_connect;
 use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, Payload, WebSocketWrite};
-use hyper::upgrade::Upgraded;
-use hyper_util::rt::TokioIo;
 use openraft::error::RPCError;
 use openraft::error::RemoteError;
 use openraft::error::Unreachable;
@@ -17,7 +18,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf};
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 use tokio::{select, task, time};
@@ -77,6 +78,7 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
 
         let (sender, rx) = flume::bounded(1);
         let reset = Arc::new(ConnectionResetState::default());
+        let shutdown = Arc::new(ConnectionShutdownState::default());
 
         let task = tokio::task::spawn(Box::pin(Self::ws_handler(
             self.node_id,
@@ -89,12 +91,15 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
             self.is_raft_stopped.clone(),
             self.is_startup_finished.clone(),
             Arc::clone(&reset),
+            Arc::clone(&shutdown),
         )));
 
         NetworkConnectionStreaming {
             node: node.clone(),
             sender,
             reset,
+            shutdown,
+            runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         }
     }
@@ -110,6 +115,7 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
 
         let (sender, rx) = flume::bounded(1);
         let reset = Arc::new(ConnectionResetState::default());
+        let shutdown = Arc::new(ConnectionShutdownState::default());
 
         let task = tokio::task::spawn(Box::pin(Self::ws_handler(
             self.node_id,
@@ -122,12 +128,15 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
             self.is_raft_stopped.clone(),
             self.is_startup_finished.clone(),
             Arc::clone(&reset),
+            Arc::clone(&shutdown),
         )));
 
         NetworkConnectionStreaming {
             node: node.clone(),
             sender,
             reset,
+            shutdown,
+            runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         }
     }
@@ -181,7 +190,6 @@ enum RaftRequest {
 
     StreamResponse(RaftStreamResponse),
 
-    ReaderExit,
     Shutdown,
 }
 
@@ -204,7 +212,7 @@ impl RaftRequest {
             Self::VoteCache((ack, _)) => ack.is_closed(),
             #[cfg(feature = "cache")]
             Self::SnapshotCache((ack, _)) => ack.is_closed(),
-            Self::StreamResponse(_) | Self::ReaderExit | Self::Shutdown => return None,
+            Self::StreamResponse(_) | Self::Shutdown => return None,
         };
 
         if response_is_closed {
@@ -230,7 +238,7 @@ impl RaftRequest {
             Self::VoteCache((ack, _)) => Some(ack),
             #[cfg(feature = "cache")]
             Self::SnapshotCache((ack, _)) => Some(ack),
-            Self::StreamResponse(_) | Self::ReaderExit | Self::Shutdown => None,
+            Self::StreamResponse(_) | Self::Shutdown => None,
         };
         if let Some(ack) = ack {
             let _ = ack.send(Err(error));
@@ -248,6 +256,30 @@ enum WritePayload {
 struct ConnectionResetState {
     epoch: AtomicU64,
     notify: Notify,
+}
+
+#[derive(Default)]
+struct ConnectionShutdownState {
+    requested: AtomicBool,
+    notify: Notify,
+}
+
+impl ConnectionShutdownState {
+    fn request(&self) {
+        if !self.requested.swap(true, Ordering::AcqRel) {
+            self.notify.notify_one();
+        }
+    }
+
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    async fn requested(&self) {
+        while !self.is_requested() {
+            self.notify.notified().await;
+        }
+    }
 }
 
 impl ConnectionResetState {
@@ -287,7 +319,21 @@ enum OutboundDisposition {
 #[derive(Debug)]
 enum WriteEnqueueError {
     Reset,
+    Shutdown,
+    ReaderFinished(Result<(), String>),
+    WriterFinished(Result<(), String>),
     Disconnected(flume::SendError<WritePayload>),
+}
+
+// Boxing the request variant would add an allocation to every Raft RPC only to
+// reduce this short-lived supervisor value's stack size.
+#[allow(clippy::large_enum_variant)]
+enum ConnectedEvent {
+    Reset,
+    Shutdown,
+    ReaderFinished(Result<(), String>),
+    WriterFinished(Result<(), String>),
+    Request(Result<RaftRequest, flume::RecvError>),
 }
 
 async fn next_connected_event(
@@ -295,45 +341,112 @@ async fn next_connected_event(
     socket_epoch: u64,
     rx_read: &flume::Receiver<RaftRequest>,
     rx: &flume::Receiver<RaftRequest>,
-) -> Option<Result<RaftRequest, flume::RecvError>> {
+    shutdown: &ConnectionShutdownState,
+    reader_finished: &mut oneshot::Receiver<Result<(), String>>,
+    writer_finished: &mut oneshot::Receiver<Result<(), String>>,
+) -> ConnectedEvent {
     select! {
         biased;
-        _ = reset.changed_since(socket_epoch) => None,
-        result = rx_read.recv_async() => Some(result),
-        result = rx.recv_async() => Some(result),
+        _ = shutdown.requested() => ConnectedEvent::Shutdown,
+        _ = reset.changed_since(socket_epoch) => ConnectedEvent::Reset,
+        result = reader_finished => ConnectedEvent::ReaderFinished(
+            result.unwrap_or_else(|_| Err("Raft reader task exited without reporting an outcome".into()))
+        ),
+        result = writer_finished => ConnectedEvent::WriterFinished(
+            result.unwrap_or_else(|_| Err("Raft writer task exited without reporting an outcome".into()))
+        ),
+        result = rx_read.recv_async() => ConnectedEvent::Request(result),
+        result = rx.recv_async() => ConnectedEvent::Request(result),
     }
 }
 
 async fn enqueue_write_or_reset(
     tx_write: &flume::Sender<WritePayload>,
-    payload: WritePayload,
+    mut payload: WritePayload,
     reset: &ConnectionResetState,
     socket_epoch: u64,
+    shutdown: &ConnectionShutdownState,
+    reader_finished: &mut oneshot::Receiver<Result<(), String>>,
+    writer_finished: &mut oneshot::Receiver<Result<(), String>>,
 ) -> Result<(), WriteEnqueueError> {
-    select! {
-        biased;
-        _ = reset.changed_since(socket_epoch) => Err(WriteEnqueueError::Reset),
-        result = tx_write.send_async(payload) => result.map_err(WriteEnqueueError::Disconnected),
+    loop {
+        // Preserve first-terminal ownership: do not hand a frame to the
+        // writer after reset/shutdown/task completion was already latched.
+        // These synchronous checks run before every ownership-transfer
+        // attempt; the select below handles state that changes while full.
+        if shutdown.is_requested() {
+            return Err(WriteEnqueueError::Shutdown);
+        }
+        if reset.epoch() != socket_epoch {
+            return Err(WriteEnqueueError::Reset);
+        }
+        match reader_finished.try_recv() {
+            Ok(outcome) => return Err(WriteEnqueueError::ReaderFinished(outcome)),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                return Err(WriteEnqueueError::ReaderFinished(Err(
+                    "Raft reader task exited without reporting an outcome".into(),
+                )));
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+        }
+        match writer_finished.try_recv() {
+            Ok(outcome) => return Err(WriteEnqueueError::WriterFinished(outcome)),
+            Err(oneshot::error::TryRecvError::Closed) => {
+                return Err(WriteEnqueueError::WriterFinished(Err(
+                    "Raft writer task exited without reporting an outcome".into(),
+                )));
+            }
+            Err(oneshot::error::TryRecvError::Empty) => {}
+        }
+        match tx_write.try_send(payload) {
+            Ok(()) => return Ok(()),
+            Err(flume::TrySendError::Disconnected(payload)) => {
+                return Err(WriteEnqueueError::Disconnected(flume::SendError(payload)));
+            }
+            Err(flume::TrySendError::Full(pending)) => payload = pending,
+        }
+        select! {
+            biased;
+            _ = shutdown.requested() => return Err(WriteEnqueueError::Shutdown),
+            _ = reset.changed_since(socket_epoch) => return Err(WriteEnqueueError::Reset),
+            result = &mut *reader_finished => return Err(WriteEnqueueError::ReaderFinished(
+                result.unwrap_or_else(|_| Err("Raft reader task exited without reporting an outcome".into()))
+            )),
+            result = &mut *writer_finished => return Err(WriteEnqueueError::WriterFinished(
+                result.unwrap_or_else(|_| Err("Raft writer task exited without reporting an outcome".into()))
+            )),
+            () = time::sleep(Duration::from_millis(1)) => {}
+        }
     }
 }
 
 async fn stop_stream_tasks(
     tx_write: &flume::Sender<WritePayload>,
-    handle_write: JoinHandle<()>,
+    mut handle_write: JoinHandle<()>,
     handle_read: JoinHandle<()>,
     forced_reset: bool,
 ) {
     // Cleanup must never queue behind a blocked socket write. A reset is a
     // forced transport boundary, so abort both split tasks immediately after
     // a best-effort close. Other reconnects retain the short graceful window.
-    let _ = tx_write.try_send(WritePayload::Close);
-    if !forced_reset {
-        time::sleep(Duration::from_millis(250)).await;
-    }
+    let writer_finished = if forced_reset {
+        false
+    } else {
+        time::timeout(CLOSE_WRITE_TIMEOUT, async {
+            tx_write.send_async(WritePayload::Close).await.ok()?;
+            Some((&mut handle_write).await)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    };
 
-    handle_write.abort();
+    if !writer_finished {
+        handle_write.abort();
+        let _ = handle_write.await;
+    }
     handle_read.abort();
-    let _ = handle_write.await;
     let _ = handle_read.await;
 }
 
@@ -351,6 +464,7 @@ impl NetworkStreaming {
         is_raft_stopped: Arc<AtomicBool>,
         is_startup_finished: Arc<AtomicBool>,
         reset: Arc<ConnectionResetState>,
+        connection_shutdown: Arc<ConnectionShutdownState>,
     ) {
         let mut request_id = 0usize;
         // TODO probably, a Vec<_> is faster here since we would never have too many in flight reqs
@@ -363,10 +477,17 @@ impl NetworkStreaming {
         let mut shutdown = false;
 
         'outer: loop {
+            if connection_shutdown.is_requested() {
+                break;
+            }
             if is_raft_stopped.load(Ordering::Relaxed) {
                 if !is_startup_finished.load(Ordering::Relaxed) {
                     debug!("Raft is still starting up - skipping initial connection");
-                    time::sleep(Duration::from_secs(1)).await;
+                    select! {
+                        biased;
+                        _ = connection_shutdown.requested() => break 'outer,
+                        () = time::sleep(Duration::from_secs(1)) => {}
+                    }
                     continue;
                 }
 
@@ -376,15 +497,20 @@ impl NetworkStreaming {
 
             info!("Trying to open WebSocket stream");
             let socket = {
-                match web_socket_connect::try_connect(
+                let connection = web_socket_connect::try_connect(
                     this_node,
                     &node.addr_raft,
                     &raft_type,
                     tls_config.clone(),
                     &secret,
-                )
-                .await
-                {
+                );
+                tokio::pin!(connection);
+                let connection = select! {
+                    biased;
+                    _ = connection_shutdown.requested() => break 'outer,
+                    result = &mut connection => result,
+                };
+                match connection {
                     Ok(socket) => {
                         info!("WebSocket connected successfully");
                         socket
@@ -394,7 +520,11 @@ impl NetworkStreaming {
 
                         for _ in 0..3 {
                             // if there is a network error, no reason to try too hard to connect
-                            time::sleep(Duration::from_millis(heartbeat_interval)).await;
+                            select! {
+                                biased;
+                                _ = connection_shutdown.requested() => break 'outer,
+                                () = time::sleep(Duration::from_millis(heartbeat_interval)) => {}
+                            }
 
                             // make sure channel is always free
                             match rx.try_recv() {
@@ -413,10 +543,8 @@ impl NetworkStreaming {
                                         #[cfg(feature = "cache")]
                                         RaftRequest::SnapshotCache((ack, _)) => Some(ack),
                                         RaftRequest::StreamResponse(_) => None,
-                                        RaftRequest::ReaderExit => {
-                                            continue;
-                                        }
                                         RaftRequest::Shutdown => {
+                                            connection_shutdown.request();
                                             break 'outer;
                                         }
                                     };
@@ -451,18 +579,58 @@ impl NetworkStreaming {
             // IMPORTANT: the reader is NOT CANCEL SAFE in v0.8!
             let read = FragmentCollectorRead::new(read);
 
-            let handle_read = task::spawn(Box::pin(Self::stream_reader(read, tx_read.clone())));
-            let handle_write = task::spawn(Box::pin(Self::stream_writer(write, rx_write)));
+            let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
+            let handle_read = task::spawn(Box::pin(async move {
+                let outcome = Self::stream_reader(read, tx_read).await;
+                let _ = tx_reader_finished.send(outcome);
+            }));
+            let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
+            let handle_write = task::spawn(Box::pin(Self::stream_writer(
+                write,
+                rx_write,
+                tx_writer_finished,
+            )));
 
             let mut forced_reset = false;
             'connected: loop {
-                let res = match next_connected_event(&reset, socket_epoch, &rx_read, &rx).await {
-                    None => {
+                let res = match next_connected_event(
+                    &reset,
+                    socket_epoch,
+                    &rx_read,
+                    &rx,
+                    &connection_shutdown,
+                    &mut rx_reader_finished,
+                    &mut rx_writer_finished,
+                )
+                .await
+                {
+                    ConnectedEvent::Reset => {
                         debug!("RPC future was cancelled - reconnecting Raft stream");
                         forced_reset = true;
                         break;
                     }
-                    Some(res) => res,
+                    ConnectedEvent::Shutdown => {
+                        debug!("Raft connection shutdown requested");
+                        shutdown = true;
+                        break;
+                    }
+                    ConnectedEvent::ReaderFinished(outcome) => {
+                        match outcome {
+                            Ok(()) => debug!("Raft WebSocket reader exited"),
+                            Err(err) => error!("Raft WebSocket reader failed: {err}"),
+                        }
+                        forced_reset = true;
+                        break;
+                    }
+                    ConnectedEvent::WriterFinished(outcome) => {
+                        match outcome {
+                            Ok(()) => error!("Raft WebSocket writer exited while connected"),
+                            Err(err) => error!("Raft WebSocket writer failed: {err}"),
+                        }
+                        forced_reset = true;
+                        break;
+                    }
+                    ConnectedEvent::Request(res) => res,
                 };
 
                 let req = match res {
@@ -538,14 +706,9 @@ impl NetworkStreaming {
                         None
                     }
 
-                    RaftRequest::ReaderExit => {
-                        debug!(
-                            "ReaderExit - Client Stream reader exited - initiating shutdown + reconnect"
-                        );
-                        break;
-                    }
                     RaftRequest::Shutdown => {
                         debug!("RaftRequest::Shutdown");
+                        connection_shutdown.request();
                         shutdown = true;
                         break;
                     }
@@ -559,6 +722,9 @@ impl NetworkStreaming {
                         WritePayload::Payload(bytes),
                         &reset,
                         socket_epoch,
+                        &connection_shutdown,
+                        &mut rx_reader_finished,
+                        &mut rx_writer_finished,
                     )
                     .await
                     {
@@ -567,6 +733,33 @@ impl NetworkStreaming {
                             let _ = ack.send(Err(Error::Connect(
                                 "Raft transport reset during request write".into(),
                             )));
+                            forced_reset = true;
+                            break 'connected;
+                        }
+                        Err(WriteEnqueueError::Shutdown) => {
+                            let _ = ack.send(Err(Error::Connect(
+                                "Raft connection shutdown during request write".into(),
+                            )));
+                            shutdown = true;
+                            break 'connected;
+                        }
+                        Err(WriteEnqueueError::ReaderFinished(outcome)) => {
+                            let detail = outcome
+                                .err()
+                                .unwrap_or_else(|| "reader exited while connected".into());
+                            let _ = ack.send(Err(Error::Connect(format!(
+                                "Raft reader ended during request write: {detail}"
+                            ))));
+                            forced_reset = true;
+                            break 'connected;
+                        }
+                        Err(WriteEnqueueError::WriterFinished(outcome)) => {
+                            let detail = outcome
+                                .err()
+                                .unwrap_or_else(|| "writer exited while connected".into());
+                            let _ = ack.send(Err(Error::Connect(format!(
+                                "Raft writer ended during request write: {detail}"
+                            ))));
                             forced_reset = true;
                             break 'connected;
                         }
@@ -599,34 +792,36 @@ impl NetworkStreaming {
         debug!("Raft Client shut down, tx closed, exiting WsHandler");
     }
 
-    async fn stream_reader(
-        mut read: FragmentCollectorRead<ReadHalf<TokioIo<Upgraded>>>,
+    async fn stream_reader<S>(
+        mut read: FragmentCollectorRead<ReadHalf<S>>,
         tx: flume::Sender<RaftRequest>,
-    ) {
-        while let Ok(frame) = read
-            .read_frame(&mut |frame| async move {
-                // TODO obligated sends should be auto ping / pong / close ? -> verify!
-                debug!(
-                    "Received obligated send in stream client: OpCode: {:?}: {:?}",
-                    frame.opcode.clone(),
-                    frame.payload
-                );
-                Ok::<(), Error>(())
-            })
-            .await
-        {
+    ) -> Result<(), String>
+    where
+        S: AsyncRead + Unpin,
+    {
+        loop {
+            let frame = read
+                .read_frame(&mut |frame| async move {
+                    // TODO obligated sends should be auto ping / pong / close ? -> verify!
+                    debug!(
+                        "Received obligated send in stream client: OpCode: {:?}: {:?}",
+                        frame.opcode.clone(),
+                        frame.payload
+                    );
+                    Ok::<(), Error>(())
+                })
+                .await
+                .map_err(|err| err.to_string())?;
             match frame.opcode {
                 OpCode::Continuation => {}
                 OpCode::Text => {}
                 OpCode::Binary => {
                     let bytes = frame.payload.deref();
-                    let payload = deserialize::<RaftStreamResponse>(bytes).unwrap();
-                    if let Err(err) = tx.send_async(RaftRequest::StreamResponse(payload)).await {
-                        error!(
-                            "Error sending Response to Raft client stream manager: {:?}",
-                            err
-                        );
-                    }
+                    let payload = deserialize::<RaftStreamResponse>(bytes)
+                        .map_err(|err| format!("invalid Raft stream response: {err}"))?;
+                    tx.send_async(RaftRequest::StreamResponse(payload))
+                        .await
+                        .map_err(|err| format!("Raft reader outcome channel closed: {err}"))?;
                 }
                 OpCode::Close => break,
                 OpCode::Ping => {}
@@ -634,33 +829,51 @@ impl NetworkStreaming {
             }
         }
 
-        let _ = tx.send_async(RaftRequest::ReaderExit).await;
         debug!("Exiting Client Stream Reader");
+        Ok(())
     }
 
-    async fn stream_writer(
-        mut write: WebSocketWrite<WriteHalf<TokioIo<Upgraded>>>,
+    async fn stream_writer<S>(
+        mut write: WebSocketWrite<S>,
         rx: flume::Receiver<WritePayload>,
-    ) {
-        while let Ok(payload) = rx.recv_async().await {
+        finished: oneshot::Sender<Result<(), String>>,
+    ) where
+        S: AsyncWrite + Unpin,
+    {
+        let outcome = loop {
+            let payload = match rx.recv_async().await {
+                Ok(payload) => payload,
+                Err(_) => break Ok(()),
+            };
             match payload {
                 WritePayload::Payload(bytes) => {
-                    let frame = Frame::binary(Payload::from(bytes));
-                    if let Err(err) = write.write_frame(frame).await {
+                    if let Err(err) = write_raft_request_frame(&mut write, bytes).await {
                         error!("Client Stream error: {:?}", err);
-                        break;
+                        break Err(err.to_string());
                     }
                 }
                 WritePayload::Close => {
                     debug!("Received Close request in Client Stream Writer");
-                    let _ = write.write_frame(Frame::close(1000, b"go away")).await;
-                    break;
+                    let _ =
+                        write_close_frame_flushed(&mut write, Frame::close(1000, b"go away")).await;
+                    break Ok(());
                 }
             }
-        }
+        };
 
+        let _ = finished.send(outcome);
         debug!("Exiting Client Stream Writer");
     }
+}
+
+async fn write_raft_request_frame<S>(
+    write: &mut WebSocketWrite<S>,
+    bytes: Vec<u8>,
+) -> Result<(), fastwebsockets::WebSocketError>
+where
+    S: AsyncWrite + Unpin,
+{
+    write_frame_flushed(write, Frame::binary(Payload::from(bytes))).await
 }
 
 #[allow(clippy::type_complexity)]
@@ -668,6 +881,8 @@ pub struct NetworkConnectionStreaming {
     node: Node,
     sender: flume::Sender<RaftRequest>,
     reset: Arc<ConnectionResetState>,
+    shutdown: Arc<ConnectionShutdownState>,
+    runtime: tokio::runtime::Handle,
     task: Option<JoinHandle<()>>,
 }
 
@@ -704,13 +919,17 @@ impl Drop for ConnectionResetGuard {
 
 impl Drop for NetworkConnectionStreaming {
     fn drop(&mut self) {
+        self.shutdown.request();
         let _ = self.sender.try_send(RaftRequest::Shutdown);
-        // Dropping a Tokio JoinHandle detaches its task. That is intentional:
-        // `ws_handler` must receive the shutdown request, close the WebSocket,
-        // and abort its split reader and writer. Aborting the handler here
-        // instead detached those child tasks while the reader still owned its
-        // socket, leaking one accepted Raft connection per OpenRaft RPC.
-        drop(self.task.take());
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        // Drop cannot await and may run on a non-runtime thread. The handle
+        // captured when this connection was constructed remains the cleanup
+        // owner for its supervisor and split socket tasks.
+        self.runtime.spawn(async move {
+            let _ = task.await;
+        });
     }
 }
 
@@ -927,6 +1146,7 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
 
 #[cfg(test)]
 mod tests {
+    use fastwebsockets::{Role, WebSocket};
     use openraft::error::{InstallSnapshotError, RaftError, SnapshotMismatch};
     use openraft::{SnapshotMeta, SnapshotSegmentId, Vote};
 
@@ -954,8 +1174,78 @@ mod tests {
         }))
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
-    async fn dropping_connection_allows_handler_to_process_shutdown() {
+    async fn production_raft_request_writer_flushes_a_snapshot_chunk_through_tls() {
+        let bytes = serialize(&RaftStreamRequest::SnapshotDB((
+            9,
+            InstallSnapshotRequest {
+                vote: Vote::new_committed(1, 1),
+                meta: test_snapshot_meta(),
+                offset: 0,
+                data: vec![42; 3 * 1024 * 1024],
+                done: false,
+            },
+        )))
+        .expect("serialize Raft snapshot request");
+        crate::network::frame_io::tests::exercise_gated_tls_writer(
+            Role::Client,
+            bytes,
+            true,
+            |mut write, bytes| async move { write_raft_request_frame(&mut write, bytes).await },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn production_raft_writer_reports_flush_failure_to_its_supervisor() {
+        let write = crate::network::frame_io::tests::split_writer(
+            crate::network::frame_io::tests::TestIo::failing_flush(),
+        );
+        let (tx, rx) = flume::bounded(1);
+        let (finished, outcome) = oneshot::channel();
+        tx.send_async(WritePayload::Payload(b"raft request".to_vec()))
+            .await
+            .expect("queue Raft request");
+
+        NetworkStreaming::stream_writer(write, rx, finished).await;
+
+        let error = outcome
+            .await
+            .expect("writer terminal outcome")
+            .expect_err("flush failure must terminate the writer");
+        assert!(error.contains("injected flush failure"));
+    }
+
+    #[tokio::test]
+    async fn production_raft_reader_reports_malformed_frames() {
+        let (client_io, server_io) = tokio::io::duplex(4 * 1024);
+        let client = WebSocket::after_handshake(client_io, Role::Client);
+        let (read, _write) = client.split(tokio::io::split);
+        let read = FragmentCollectorRead::new(read);
+        let (tx, _rx) = flume::bounded(1);
+        let (finished, result) = oneshot::channel();
+        tokio::spawn(async move {
+            let _ = finished.send(NetworkStreaming::stream_reader(read, tx).await);
+        });
+        let mut server = WebSocket::after_handshake(server_io, Role::Server);
+
+        crate::network::frame_io::write_socket_frame_flushed(
+            &mut server,
+            Frame::binary(Payload::Borrowed(b"not a Raft response")),
+        )
+        .await
+        .expect("send malformed server frame");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), result)
+            .await
+            .expect("reader must report promptly")
+            .expect("reader task must report an outcome");
+        assert!(matches!(outcome, Err(ref err) if err.contains("invalid Raft stream response")));
+    }
+
+    #[tokio::test]
+    async fn dropping_connection_off_runtime_keeps_cleanup_owned() {
         let (sender, receiver) = flume::bounded(1);
         let release = Arc::new(Notify::new());
         let stopped = Arc::new(Notify::new());
@@ -979,15 +1269,94 @@ mod tests {
             },
             sender,
             reset: Arc::new(ConnectionResetState::default()),
+            shutdown: Arc::new(ConnectionShutdownState::default()),
+            runtime: tokio::runtime::Handle::current(),
             task: Some(task),
         };
 
-        drop(connection);
+        std::thread::spawn(move || drop(connection))
+            .join()
+            .expect("drop connection off runtime");
         release.notify_one();
 
         tokio::time::timeout(Duration::from_secs(1), stopped.notified())
             .await
-            .expect("the detached handler must consume shutdown and exit cleanly");
+            .expect("the captured runtime must reap the handler after off-runtime drop");
+    }
+
+    #[tokio::test]
+    async fn repeated_connection_failures_return_supervised_tasks_to_baseline() {
+        struct ActiveTask(Arc<AtomicU64>);
+
+        impl Drop for ActiveTask {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let active = Arc::new(AtomicU64::new(0));
+        for _ in 0..100 {
+            let (client_io, server_io) = tokio::io::duplex(4 * 1024);
+            let client = WebSocket::after_handshake(client_io, Role::Client);
+            let (read, write) = client.split(tokio::io::split);
+            let read = FragmentCollectorRead::new(read);
+            let (tx_read, rx_read) = flume::bounded(1);
+            let (_request_sender, request_receiver) = flume::bounded(1);
+            let (reader_finished, mut reader_result) = oneshot::channel();
+            let (writer_finished, mut writer_result) = oneshot::channel();
+            let (tx_write, rx_write) = flume::bounded(1);
+
+            let active_reader = Arc::clone(&active);
+            let handle_read = tokio::spawn(async move {
+                active_reader.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveTask(active_reader);
+                let outcome = NetworkStreaming::stream_reader(read, tx_read).await;
+                let _ = reader_finished.send(outcome);
+            });
+            let active_writer = Arc::clone(&active);
+            let handle_write = tokio::spawn(async move {
+                active_writer.fetch_add(1, Ordering::SeqCst);
+                let _active = ActiveTask(active_writer);
+                NetworkStreaming::stream_writer(write, rx_write, writer_finished).await;
+            });
+            let peer = tokio::spawn(async move {
+                let mut server = WebSocket::after_handshake(server_io, Role::Server);
+                crate::network::frame_io::write_socket_frame_flushed(
+                    &mut server,
+                    Frame::binary(Payload::Borrowed(b"not a Raft response")),
+                )
+                .await
+                .expect("inject malformed peer response");
+            });
+
+            let reset = ConnectionResetState::default();
+            let shutdown = ConnectionShutdownState::default();
+            let event = tokio::time::timeout(
+                Duration::from_secs(1),
+                next_connected_event(
+                    &reset,
+                    reset.epoch(),
+                    &rx_read,
+                    &request_receiver,
+                    &shutdown,
+                    &mut reader_result,
+                    &mut writer_result,
+                ),
+            )
+            .await
+            .expect("real reader failure must wake the supervisor");
+            assert!(matches!(
+                event,
+                ConnectedEvent::ReaderFinished(Err(ref error))
+                    if error.contains("invalid Raft stream response")
+            ));
+
+            stop_stream_tasks(&tx_write, handle_write, handle_read, true).await;
+            peer.await.expect("peer task must quiesce");
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+        }
+
+        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1000,19 +1369,162 @@ mod tests {
         let reset = Arc::new(ConnectionResetState::default());
         let socket_epoch = reset.epoch();
         let guard = ConnectionResetGuard::new(Arc::clone(&reset));
+        let shutdown = ConnectionShutdownState::default();
+        let (_reader_finished, mut reader_finished) = oneshot::channel();
+        let (_writer_finished, mut writer_finished) = oneshot::channel();
 
         drop(guard);
 
         let event = tokio::time::timeout(
             Duration::from_secs(1),
-            next_connected_event(&reset, socket_epoch, &reader_receiver, &receiver),
+            next_connected_event(
+                &reset,
+                socket_epoch,
+                &reader_receiver,
+                &receiver,
+                &shutdown,
+                &mut reader_finished,
+                &mut writer_finished,
+            ),
         )
         .await
-            .expect("the handler's reconnect consumer must observe the retained reset");
-        assert!(event.is_none());
+        .expect("the handler's reconnect consumer must observe the retained reset");
+        assert!(matches!(event, ConnectedEvent::Reset));
         assert!(matches!(
             receiver.recv_async().await,
             Ok(RaftRequest::Shutdown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_coordinator_observes_writer_failure_while_reader_is_pending() {
+        let (_request_sender, request_receiver) = flume::bounded(1);
+        let (_reader_sender, reader_receiver) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        let (_reader_finished, mut reader_result) = oneshot::channel();
+        let (writer_finished, mut writer_result) = oneshot::channel();
+
+        writer_finished
+            .send(Err("injected flush failure".to_owned()))
+            .expect("writer outcome receiver must remain open");
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_connected_event(
+                &reset,
+                socket_epoch,
+                &reader_receiver,
+                &request_receiver,
+                &shutdown,
+                &mut reader_result,
+                &mut writer_result,
+            ),
+        )
+        .await
+        .expect("writer failure must wake the connection supervisor");
+        assert!(matches!(
+            event,
+            ConnectedEvent::WriterFinished(Err(ref err)) if err == "injected flush failure"
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_coordinator_observes_reader_failure_while_writer_is_pending() {
+        let (_request_sender, request_receiver) = flume::bounded(1);
+        let (_reader_sender, reader_receiver) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        let (reader_finished, mut reader_result) = oneshot::channel();
+        let (_writer_finished, mut writer_result) = oneshot::channel();
+
+        reader_finished
+            .send(Err("invalid Raft response".to_owned()))
+            .expect("reader outcome receiver must remain open");
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_connected_event(
+                &reset,
+                socket_epoch,
+                &reader_receiver,
+                &request_receiver,
+                &shutdown,
+                &mut reader_result,
+                &mut writer_result,
+            ),
+        )
+        .await
+        .expect("reader failure must wake the connection supervisor");
+        assert!(matches!(
+            event,
+            ConnectedEvent::ReaderFinished(Err(ref err)) if err == "invalid Raft response"
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_coordinator_treats_reader_panic_as_terminal() {
+        let (_request_sender, request_receiver) = flume::bounded(1);
+        let (_reader_sender, reader_receiver) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        let (reader_finished, mut reader_result) = oneshot::channel::<Result<(), String>>();
+        let (_writer_finished, mut writer_result) = oneshot::channel();
+        drop(reader_finished);
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_connected_event(
+                &reset,
+                socket_epoch,
+                &reader_receiver,
+                &request_receiver,
+                &shutdown,
+                &mut reader_result,
+                &mut writer_result,
+            ),
+        )
+        .await
+        .expect("dropped reader outcome must wake the connection supervisor");
+        assert!(matches!(
+            event,
+            ConnectedEvent::ReaderFinished(Err(ref err))
+                if err.contains("without reporting an outcome")
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_coordinator_treats_writer_panic_as_terminal() {
+        let (_request_sender, request_receiver) = flume::bounded(1);
+        let (_reader_sender, reader_receiver) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        let (_reader_finished, mut reader_result) = oneshot::channel();
+        let (writer_finished, mut writer_result) = oneshot::channel::<Result<(), String>>();
+        drop(writer_finished);
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_connected_event(
+                &reset,
+                socket_epoch,
+                &reader_receiver,
+                &request_receiver,
+                &shutdown,
+                &mut reader_result,
+                &mut writer_result,
+            ),
+        )
+        .await
+        .expect("dropped writer outcome must wake the connection supervisor");
+        assert!(matches!(
+            event,
+            ConnectedEvent::WriterFinished(Err(ref err))
+                if err.contains("without reporting an outcome")
         ));
     }
 
@@ -1092,12 +1604,18 @@ mod tests {
             .try_send(WritePayload::Payload(b"blocked".to_vec()))
             .expect("fill writer queue");
         let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
         let socket_epoch = reset.epoch();
+        let (_reader_finished, mut reader_result) = oneshot::channel();
+        let (_writer_finished, mut writer_result) = oneshot::channel();
         let enqueue = enqueue_write_or_reset(
             &tx_write,
             WritePayload::Payload(b"waiting".to_vec()),
             &reset,
             socket_epoch,
+            &shutdown,
+            &mut reader_result,
+            &mut writer_result,
         );
         tokio::pin!(enqueue);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -1110,6 +1628,96 @@ mod tests {
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(1), &mut enqueue).await,
             Ok(Err(WriteEnqueueError::Reset))
+        ));
+    }
+
+    #[tokio::test]
+    async fn latched_reset_prevents_write_queue_ownership_transfer() {
+        let (tx_write, rx_write) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        reset.request_reset(socket_epoch);
+        let (_reader_finished, mut reader_result) = oneshot::channel();
+        let (_writer_finished, mut writer_result) = oneshot::channel();
+
+        let result = enqueue_write_or_reset(
+            &tx_write,
+            WritePayload::Payload(b"stale".to_vec()),
+            &reset,
+            socket_epoch,
+            &shutdown,
+            &mut reader_result,
+            &mut writer_result,
+        )
+        .await;
+
+        assert!(matches!(result, Err(WriteEnqueueError::Reset)));
+        assert!(rx_write.is_empty());
+    }
+
+    #[tokio::test]
+    async fn latched_reader_failure_prevents_write_queue_ownership_transfer() {
+        let (tx_write, rx_write) = flume::bounded(1);
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        let (reader_finished, mut reader_result) = oneshot::channel();
+        let (_writer_finished, mut writer_result) = oneshot::channel();
+        reader_finished
+            .send(Err("reader stopped".into()))
+            .expect("retain reader result receiver");
+
+        let result = enqueue_write_or_reset(
+            &tx_write,
+            WritePayload::Payload(b"stale".to_vec()),
+            &reset,
+            socket_epoch,
+            &shutdown,
+            &mut reader_result,
+            &mut writer_result,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(WriteEnqueueError::ReaderFinished(Err(ref error)))
+                if error == "reader stopped"
+        ));
+        assert!(rx_write.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_write_enqueue_under_backpressure() {
+        let (tx_write, _rx_write) = flume::bounded(1);
+        tx_write
+            .try_send(WritePayload::Payload(b"blocked".to_vec()))
+            .expect("fill writer queue");
+        let reset = ConnectionResetState::default();
+        let shutdown = ConnectionShutdownState::default();
+        let socket_epoch = reset.epoch();
+        let (_reader_finished, mut reader_result) = oneshot::channel();
+        let (_writer_finished, mut writer_result) = oneshot::channel();
+        let enqueue = enqueue_write_or_reset(
+            &tx_write,
+            WritePayload::Payload(b"waiting".to_vec()),
+            &reset,
+            socket_epoch,
+            &shutdown,
+            &mut reader_result,
+            &mut writer_result,
+        );
+        tokio::pin!(enqueue);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            std::future::Future::poll(enqueue.as_mut(), &mut context).is_pending(),
+            "the write enqueue must be blocked before shutdown"
+        );
+        shutdown.request();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), &mut enqueue).await,
+            Ok(Err(WriteEnqueueError::Shutdown))
         ));
     }
 
@@ -1166,42 +1774,52 @@ mod tests {
     #[tokio::test]
     async fn sqlite_install_snapshot_preserves_mismatch_for_offset_reset() {
         let (sender, receiver) = flume::bounded(1);
+        let reset = Arc::new(ConnectionResetState::default());
+        let socket_epoch = reset.epoch();
         let mut network = NetworkConnectionStreaming {
             node: test_node(),
             sender,
-            reset: Arc::new(ConnectionResetState::default()),
+            reset: Arc::clone(&reset),
+            shutdown: Arc::new(ConnectionShutdownState::default()),
+            runtime: tokio::runtime::Handle::current(),
             task: None,
         };
         let responder = tokio::spawn(async move {
-            let (ack, request) = match receiver
-                .recv_async()
-                .await
-                .expect("receive SQLite snapshot request")
-            {
-                RaftRequest::SnapshotDB(request) => request,
-                request => panic!("unexpected SQLite Raft request: {request:?}"),
-            };
-            assert_eq!(request.offset, 4);
-            ack.send(Ok(RaftStreamResponsePayload::SnapshotDB(Err(
-                mismatch_at(request.offset),
-            ))))
-            .expect("return SQLite snapshot response");
+            for expected_offset in [4, 0] {
+                let (ack, request) = match receiver
+                    .recv_async()
+                    .await
+                    .expect("receive SQLite snapshot request")
+                {
+                    RaftRequest::SnapshotDB(request) => request,
+                    request => panic!("unexpected SQLite Raft request: {request:?}"),
+                };
+                assert_eq!(request.offset, expected_offset);
+                let response = if expected_offset == 4 {
+                    Err(mismatch_at(request.offset))
+                } else {
+                    Ok(InstallSnapshotResponse {
+                        vote: Vote::new_committed(1, 7),
+                    })
+                };
+                ack.send(Ok(RaftStreamResponsePayload::SnapshotDB(response)))
+                    .expect("return SQLite snapshot response");
+            }
         });
 
-        let error = <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
-            &mut network,
-            InstallSnapshotRequest {
-                vote: Vote::new_committed(1, 1),
-                meta: test_snapshot_meta(),
-                offset: 4,
-                data: b"efgh".to_vec(),
-                done: true,
-            },
-            RPCOption::new(Duration::from_millis(500)),
-        )
-        .await;
-        responder.await.expect("join SQLite snapshot responder");
-
+        let error =
+            <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
+                &mut network,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: test_snapshot_meta(),
+                    offset: 4,
+                    data: b"efgh".to_vec(),
+                    done: true,
+                },
+                RPCOption::new(Duration::from_millis(500)),
+            )
+            .await;
         assert!(matches!(
             error,
             Err(RPCError::RemoteError(RemoteError {
@@ -1214,32 +1832,60 @@ mod tests {
                 && expect == SnapshotSegmentId::from(("snapshot", 0))
                 && got == SnapshotSegmentId::from(("snapshot", 4))
         ));
+        let recovered =
+            <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
+                &mut network,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: test_snapshot_meta(),
+                    offset: 0,
+                    data: b"abcd".to_vec(),
+                    done: true,
+                },
+                RPCOption::new(Duration::from_millis(500)),
+            )
+            .await
+            .expect("offset-zero retry must succeed on the same connection");
+        responder.await.expect("join SQLite snapshot responder");
+        assert_eq!(recovered.vote, Vote::new_committed(1, 7));
+        assert_eq!(reset.epoch(), socket_epoch);
     }
 
     #[cfg(feature = "cache")]
     #[tokio::test]
     async fn cache_install_snapshot_preserves_mismatch_for_offset_reset() {
         let (sender, receiver) = flume::bounded(1);
+        let reset = Arc::new(ConnectionResetState::default());
+        let socket_epoch = reset.epoch();
         let mut network = NetworkConnectionStreaming {
             node: test_node(),
             sender,
-            reset: Arc::new(ConnectionResetState::default()),
+            reset: Arc::clone(&reset),
+            shutdown: Arc::new(ConnectionShutdownState::default()),
+            runtime: tokio::runtime::Handle::current(),
             task: None,
         };
         let responder = tokio::spawn(async move {
-            let (ack, request) = match receiver
-                .recv_async()
-                .await
-                .expect("receive cache snapshot request")
-            {
-                RaftRequest::SnapshotCache(request) => request,
-                request => panic!("unexpected cache Raft request: {request:?}"),
-            };
-            assert_eq!(request.offset, 4);
-            ack.send(Ok(RaftStreamResponsePayload::SnapshotCache(Err(
-                mismatch_at(request.offset),
-            ))))
-            .expect("return cache snapshot response");
+            for expected_offset in [4, 0] {
+                let (ack, request) = match receiver
+                    .recv_async()
+                    .await
+                    .expect("receive cache snapshot request")
+                {
+                    RaftRequest::SnapshotCache(request) => request,
+                    request => panic!("unexpected cache Raft request: {request:?}"),
+                };
+                assert_eq!(request.offset, expected_offset);
+                let response = if expected_offset == 4 {
+                    Err(mismatch_at(request.offset))
+                } else {
+                    Ok(InstallSnapshotResponse {
+                        vote: Vote::new_committed(1, 7),
+                    })
+                };
+                ack.send(Ok(RaftStreamResponsePayload::SnapshotCache(response)))
+                    .expect("return cache snapshot response");
+            }
         });
 
         let error = <NetworkConnectionStreaming as RaftNetwork<TypeConfigKV>>::install_snapshot(
@@ -1254,8 +1900,6 @@ mod tests {
             RPCOption::new(Duration::from_millis(500)),
         )
         .await;
-        responder.await.expect("join cache snapshot responder");
-
         assert!(matches!(
             error,
             Err(RPCError::RemoteError(RemoteError {
@@ -1268,5 +1912,22 @@ mod tests {
                 && expect == SnapshotSegmentId::from(("snapshot", 0))
                 && got == SnapshotSegmentId::from(("snapshot", 4))
         ));
+        let recovered =
+            <NetworkConnectionStreaming as RaftNetwork<TypeConfigKV>>::install_snapshot(
+                &mut network,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: test_snapshot_meta(),
+                    offset: 0,
+                    data: b"abcd".to_vec(),
+                    done: true,
+                },
+                RPCOption::new(Duration::from_millis(500)),
+            )
+            .await
+            .expect("offset-zero retry must succeed on the same connection");
+        responder.await.expect("join cache snapshot responder");
+        assert_eq!(recovered.vote, Vote::new_committed(1, 7));
+        assert_eq!(reset.epoch(), socket_epoch);
     }
 }

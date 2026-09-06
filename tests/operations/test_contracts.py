@@ -1210,12 +1210,59 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
         self.assertIn("run: make cluster-wal-check", workflow)
         wal_commands = make_dry_run_commands("cluster-wal-check")
+        self.assertTrue(
+            all("scripts/require-test-count" in command for command in wal_commands),
+            "every cluster WAL command must retain the nonzero test-count guard",
+        )
         hiqlite_snapshot_tests = (
+            "raw_write_frame_stays_idle_after_transport_recovers_until_an_explicit_flush",
+            "real_tls_tail_backpressure_completes_for_every_payload_direction",
+            "real_tls_no_backpressure_control_completes_without_an_extra_frame",
+            "frame_completion_flushes_the_underlying_transport",
+            "flush_failure_is_a_failed_frame_write",
+            "permanently_blocked_flush_expires_the_combined_budget",
+            "close_frame_uses_the_short_fixed_budget",
+            "production_raft_request_writer_flushes_a_snapshot_chunk_through_tls",
+            "production_raft_writer_reports_flush_failure_to_its_supervisor",
+            "production_raft_response_writer_flushes_serialized_response_through_tls",
+            "production_raft_response_writer_reports_flush_failure_and_closes",
+            "production_api_request_writer_flushes_serialized_request_through_tls",
+            "production_api_writer_reports_flush_failure_to_its_supervisor",
+            "queued_leader_change_wins_before_queued_api_request",
+            "queued_api_response_wins_before_queued_leader_change",
+            "queued_api_response_wins_before_leader_during_writer_backpressure",
+            "leader_handoff_settles_decoded_response_before_failing_unresolved_requests",
+            "dedicated_leader_control_bypasses_application_backlog_during_writer_backpressure",
+            "proxy_handoff_settles_decoded_response_before_failing_unresolved_requests",
+            "dropped_caller_still_allows_its_proxy_refusal_to_claim_handoff",
+            "concurrent_proxy_refusals_coalesce_into_one_endpoint_advance",
+            "teardown_drained_proxy_refusal_claims_the_socket_handoff",
+            "teardown_drained_non_proxy_refusal_preserves_terminal_ambiguity",
+            "production_api_response_writer_flushes_serialized_response_through_tls",
+            "production_api_response_writer_reports_flush_failure_and_closes",
+            "production_raft_reader_reports_malformed_frames",
+            "production_api_reader_reports_malformed_frames",
+            "silent_peer_cannot_hold_the_server_handshake_open",
+            "executor_runs_one_queues_one_and_drops_abandoned_queued_work",
+            "shutdown_reports_running_work_without_cancelling_it",
+            "cancelled_shutdown_wait_retains_the_executor_handle",
+            "shutdown_before_submission_is_latched_and_admits_no_work",
+            "admission_deadline_never_executes_the_timed_out_job",
+            "accepted_partial_write_finishes_before_same_offset_retry",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
             "replacement_socket_drops_cancelled_request_after_consuming_reset",
             "live_request_on_stale_socket_requires_reconnect",
             "reset_interrupts_write_enqueue_under_backpressure",
+            "latched_reset_prevents_write_queue_ownership_transfer",
+            "latched_reader_failure_prevents_write_queue_ownership_transfer",
+            "shutdown_interrupts_write_enqueue_under_backpressure",
+            "handler_coordinator_observes_writer_failure_while_reader_is_pending",
+            "handler_coordinator_treats_writer_panic_as_terminal",
+            "handler_coordinator_observes_reader_failure_while_writer_is_pending",
+            "handler_coordinator_treats_reader_panic_as_terminal",
             "forced_reset_cleanup_does_not_wait_for_full_writer_queue",
+            "dropping_connection_off_runtime_keeps_cleanup_owned",
+            "repeated_connection_failures_return_supervised_tasks_to_baseline",
             "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
             "cache_install_snapshot_preserves_mismatch_for_offset_reset",
         )
@@ -1233,6 +1280,15 @@ for (const startupDelay of [0, 1600, 7000]) {
             )
             self.assertIn("--lib -- --exact", command)
 
+        proxy_writer_test = (
+            "server::proxy::stream::tests::"
+            "production_proxy_response_writer_flushes_serialized_response_through_tls"
+        )
+        matching = [command for command in wal_commands if proxy_writer_test in command]
+        self.assertEqual(len(matching), 1)
+        self.assertIn("--no-default-features --features server", matching[0])
+        self.assertIn("--lib -- --exact", matching[0])
+
         openraft_test = (
             "network::snapshot_transport::tests::"
             "test_chunked_reset_offset_if_snapshot_id_mismatch"
@@ -1249,6 +1305,13 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn('--manifest-path "$OPENRAFT_MANIFEST"', openraft_command)
         self.assertIn("--features generic-snapshot-data", openraft_command)
         self.assertIn("--lib -- --exact", openraft_command)
+        snapshot_metrics = [
+            command
+            for command in wal_commands
+            if " snapshot_metrics --lib -- --test-threads=1" in command
+        ]
+        self.assertEqual(len(snapshot_metrics), 1)
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=10", snapshot_metrics[0])
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):

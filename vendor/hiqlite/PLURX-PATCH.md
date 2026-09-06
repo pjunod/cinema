@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries thirteen compatibility patches for clustered
+Apache-2.0. Plurx carries fifteen compatibility patches for clustered
 deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
@@ -48,13 +48,35 @@ deployments:
   covers convergence; these vendor tests do not claim to drive that private
   sender themselves. Remove this patch only after upstream Hiqlite preserves
   peer snapshot errors on both transports.
+- Every Raft, cluster-API, proxy, and authentication WebSocket frame is flushed
+  before its writer waits for more work. One 30-second budget covers the write
+  and flush together; errors and expiry terminate the writer and wake the
+  connection supervisor even while its reader remains live. Graceful Close
+  frames use a separate 250-millisecond best-effort allowance, and the server
+  challenge/response exchange remains inside the existing five-second
+  connection deadline. The real-TLS frame regressions hold the ciphertext tail
+  of both client and server writes, including 3 MiB frames, and prove that the
+  same socket completes after backpressure clears.
+- Raft and cluster-API connection supervisors own and join both split socket
+  tasks. Reader EOF, malformed frames, writer errors, task panics, reset,
+  shutdown, and leader handoff all wake admission even when a bounded queue is
+  full. Queue admission uses an ownership-retaining `try_send` loop, so a
+  timeout or handoff cannot claim a mutation was undispatched after a
+  cancellable send future already transferred it. Accepted snapshot receive
+  operations move to one node-owned executor per Raft group with one running
+  and one queued request; disconnecting a socket drops its reply but cannot
+  cancel a partial file write. Queued work whose reply owner disappeared is
+  skipped before execution. Graceful shutdown keeps Raft and its state-machine
+  worker alive until this executor releases accepted work, and cancellation of
+  one shutdown waiter cannot detach the retained task. Connections capture
+  their originating Tokio runtime so an off-runtime drop still owns cleanup.
 - A dropped OpenRaft RPC signals its WebSocket manager through a dedicated
   retained notification instead of best-effort enqueueing `Reset` behind the
   request itself. The old one-slot queue could be full at the hard deadline,
   lose the reset, and leave a leader permanently waiting on the abandoned
   connection after a follower had installed its snapshot. The
-  `dropping_rpc_wait_signals_stream_reset_when_request_queue_is_full` regression
-  keeps cancellation independent of request-queue pressure.
+  `handler_coordinator_consumes_retained_reset_when_request_queue_is_full`
+  regression keeps cancellation independent of request-queue pressure.
 - Snapshot build, install, read, and asynchronous cleanup share one
   file-ownership boundary. Completed files use fsync plus atomic rename, and a
   separately fsynced pointer publishes the exact current generation (including
@@ -108,7 +130,7 @@ deployments:
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
 
-Remove this vendor when an upstream Hiqlite release contains all thirteen patches
+Remove this vendor when an upstream Hiqlite release contains all fifteen patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep

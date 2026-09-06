@@ -27,8 +27,8 @@ use rusqlite::{OpenFlags, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::clone::Clone;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
@@ -729,7 +729,8 @@ impl StateMachineSqlite {
             .await
             .expect("SQLite Writer rx to always be listening");
 
-        rx.await.expect("snapshot writer to return an apply result")?;
+        rx.await
+            .expect("snapshot writer to return an apply result")?;
         Self::reconnect_read_pool(
             &self.read_pool,
             &self.path_db,
@@ -749,15 +750,17 @@ impl StateMachineSqlite {
             SnapshotPointer::Missing => {
                 let snapshot_id = if db_exists {
                     match self.read_authoritative_snapshot_id().await? {
-                        Some(snapshot_id) => match self.read_snapshot_metadata(&snapshot_id).await {
-                            Ok(_) => Some(snapshot_id),
-                            Err(error) => {
-                                warn!(
-                                    "Ignoring invalid snapshot named by live database metadata: {error}"
-                                );
-                                self.find_legacy_current_snapshot_id(false).await?
+                        Some(snapshot_id) => {
+                            match self.read_snapshot_metadata(&snapshot_id).await {
+                                Ok(_) => Some(snapshot_id),
+                                Err(error) => {
+                                    warn!(
+                                        "Ignoring invalid snapshot named by live database metadata: {error}"
+                                    );
+                                    self.find_legacy_current_snapshot_id(false).await?
+                                }
                             }
-                        },
+                        }
                         None => None,
                     }
                 } else {
@@ -812,16 +815,14 @@ impl StateMachineSqlite {
         let metadata = rx.await.map_err(|error| StorageError::IO {
             source: StorageIOError::read_state_machine(&error),
         })?;
-        metadata
-            .last_snapshot_id
-            .map(|snapshot_id| {
-                Uuid::parse_str(&snapshot_id)
-                    .map(|id| id.to_string())
-                    .map_err(|error| StorageError::IO {
-                        source: StorageIOError::read_state_machine(&error),
-                    })
-            })
-            .transpose()
+        match metadata.last_snapshot_id {
+            Some(snapshot_id) => Uuid::parse_str(&snapshot_id)
+                .map(|id| Some(id.to_string()))
+                .map_err(|error| StorageError::IO {
+                    source: StorageIOError::read_state_machine(&error),
+                }),
+            None => Ok(None),
+        }
     }
 
     async fn read_current_snapshot(&mut self) -> StorageResult<Option<StoredSnapshot>> {
@@ -870,12 +871,9 @@ impl StateMachineSqlite {
         let mut current: Option<(Option<LogId<NodeId>>, Uuid)> = None;
         let mut first_candidate_error = None;
         loop {
-            let Some(entry) = list
-                .next_entry()
-                .await
-                .map_err(|error| StorageError::IO {
-                    source: StorageIOError::read(&error),
-                })?
+            let Some(entry) = list.next_entry().await.map_err(|error| StorageError::IO {
+                source: StorageIOError::read(&error),
+            })?
             else {
                 break;
             };
@@ -943,10 +941,7 @@ impl StateMachineSqlite {
         }
     }
 
-    async fn read_snapshot_metadata(
-        &self,
-        snapshot_id: &str,
-    ) -> StorageResult<StateMachineData> {
+    async fn read_snapshot_metadata(&self, snapshot_id: &str) -> StorageResult<StateMachineData> {
         self.validate_snapshot_file(snapshot_id).await?;
         let path_snapshot = format!("{}/{}", self.path_snapshots, snapshot_id);
         let expected_id = snapshot_id.to_owned();
@@ -974,16 +969,14 @@ impl StateMachineSqlite {
                         .into(),
                     )
                 })?;
-            let meta_bytes = stmt
-                .query_row((), |row| row.get::<_, Vec<u8>>(0))
-                .map_err(|error| {
-                    Error::Sqlite(
-                        format!(
-                            "Error reading metadata from snapshot '{path_debug}': {error}"
+            let meta_bytes =
+                stmt.query_row((), |row| row.get::<_, Vec<u8>>(0))
+                    .map_err(|error| {
+                        Error::Sqlite(
+                            format!("Error reading metadata from snapshot '{path_debug}': {error}")
+                                .into(),
                         )
-                        .into(),
-                    )
-                })?;
+                    })?;
             let metadata: StateMachineData = deserialize(&meta_bytes).map_err(Error::from)?;
             if metadata.last_snapshot_id.as_deref() != Some(expected_id.as_str()) {
                 return Err(Error::Sqlite(
@@ -1010,10 +1003,7 @@ impl StateMachineSqlite {
         &mut self,
         snapshot_files: &mut SnapshotFileState,
     ) -> StorageResult<Option<StoredSnapshot>> {
-        let Some(snapshot_id) = self
-            .resolve_current_snapshot_id(snapshot_files)
-            .await?
-        else {
+        let Some(snapshot_id) = self.resolve_current_snapshot_id(snapshot_files).await? else {
             return Ok(None);
         };
 
@@ -1110,9 +1100,9 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 // PLURX_VALIDATION_LOG_APPLIED is set at process start.
                 static VALIDATION_LOG_APPLIED: std::sync::OnceLock<bool> =
                     std::sync::OnceLock::new();
-                if *VALIDATION_LOG_APPLIED.get_or_init(|| {
-                    std::env::var_os("PLURX_VALIDATION_LOG_APPLIED").is_some()
-                }) {
+                if *VALIDATION_LOG_APPLIED
+                    .get_or_init(|| std::env::var_os("PLURX_VALIDATION_LOG_APPLIED").is_some())
+                {
                     let mut payload = match &entry.payload {
                         EntryPayload::Blank => "blank".to_owned(),
                         EntryPayload::Membership(_) => "membership".to_owned(),
@@ -1534,14 +1524,34 @@ mod backup_owner_contracts {
 #[cfg(test)]
 mod snapshot_metrics_contracts {
     use super::*;
+    use crate::LocalDbSnapshotMetrics;
     use crate::helpers::serialize;
     use crate::store::state_machine::sqlite::snapshot_builder::{
         CURRENT_PUBLICATION_RENAMED, RELEASE_CURRENT_PUBLICATION,
         inject_current_publication_failure,
     };
-    use crate::LocalDbSnapshotMetrics;
     use openraft::{CommittedLeaderId, RaftSnapshotBuilder};
     use tokio::io::AsyncWriteExt;
+
+    async fn new_test_state(
+        root: &str,
+        filename: &str,
+    ) -> Result<StateMachineSqlite, StorageError<NodeId>> {
+        StateMachineSqlite::new(
+            root,
+            filename,
+            1,
+            false,
+            16,
+            1,
+            #[cfg(feature = "s3")]
+            None,
+            false,
+            #[cfg(feature = "backup")]
+            30,
+        )
+        .await
+    }
 
     async fn write_snapshot_fixture(path: String, snapshot_id: &str, applied_index: u64) {
         let snapshot_id = snapshot_id.to_owned();
@@ -1553,10 +1563,7 @@ mod snapshot_metrics_contracts {
             )
             .expect("create snapshot metadata table");
             let metadata = StateMachineData {
-                last_applied_log_id: Some(LogId::new(
-                    CommittedLeaderId::new(3, 1),
-                    applied_index,
-                )),
+                last_applied_log_id: Some(LogId::new(CommittedLeaderId::new(3, 1), applied_index)),
                 last_membership: StoredMembership::default(),
                 last_snapshot_id: Some(snapshot_id),
             };
@@ -1604,7 +1611,7 @@ mod snapshot_metrics_contracts {
             std::env::temp_dir().join(format!("hiqlite-snapshot-metrics-{}", Uuid::now_v7()));
         fs::create_dir_all(&root).await.expect("create test root");
         let root = root.to_str().expect("UTF-8 temp path").to_owned();
-        let mut state = StateMachineSqlite::new(&root, "metrics.db", 1, false, 16, 1, false)
+        let mut state = new_test_state(&root, "metrics.db")
             .await
             .expect("create SQLite state machine");
         let handle = LocalDbSnapshotMetrics::new();
@@ -1692,10 +1699,9 @@ mod snapshot_metrics_contracts {
         fs::write(format!("{root}/state_machine/lock"), b"simulate crash")
             .await
             .expect("create crash-recovery lock");
-        let mut restarted =
-            StateMachineSqlite::new(&root, "metrics.db", 1, false, 16, 1, false)
-                .await
-                .expect("restart SQLite state machine");
+        let mut restarted = new_test_state(&root, "metrics.db")
+            .await
+            .expect("restart SQLite state machine");
         let current = restarted
             .get_current_snapshot()
             .await
@@ -1719,8 +1725,12 @@ mod snapshot_metrics_contracts {
             .expect("create legacy snapshot directory");
         let installed_id = "018f0000-0000-7000-8000-000000000001";
         let newer_local_id = "019f0000-0000-7000-8000-000000000002";
-        write_snapshot_fixture(snapshots.join(installed_id).display().to_string(), installed_id, 200)
-            .await;
+        write_snapshot_fixture(
+            snapshots.join(installed_id).display().to_string(),
+            installed_id,
+            200,
+        )
+        .await;
         write_snapshot_fixture(
             snapshots.join(newer_local_id).display().to_string(),
             newer_local_id,
@@ -1732,7 +1742,7 @@ mod snapshot_metrics_contracts {
             .expect("read immutable installed snapshot before migration");
 
         let root = root.to_str().expect("UTF-8 legacy root").to_owned();
-        let mut state = StateMachineSqlite::new(&root, "legacy.db", 1, false, 16, 1, false)
+        let mut state = new_test_state(&root, "legacy.db")
             .await
             .expect("recover legacy snapshots");
         let current = state
@@ -1757,10 +1767,9 @@ mod snapshot_metrics_contracts {
         fs::write(format!("{root}/state_machine/lock"), b"simulate crash")
             .await
             .expect("create legacy auto-heal lock");
-        let mut restarted =
-            StateMachineSqlite::new(&root, "legacy.db", 1, false, 16, 1, false)
-                .await
-                .expect("auto-heal migrated snapshot");
+        let mut restarted = new_test_state(&root, "legacy.db")
+            .await
+            .expect("auto-heal migrated snapshot");
         let current = restarted
             .get_current_snapshot()
             .await
@@ -1793,10 +1802,7 @@ mod snapshot_metrics_contracts {
         let higher_index_orphan_id = "019f0000-0000-7000-8000-000000000002";
         write_snapshot_fixture(snapshots.join(live_id).display().to_string(), live_id, 100).await;
         write_snapshot_fixture(
-            snapshots
-                .join(higher_index_orphan_id)
-                .display()
-                .to_string(),
+            snapshots.join(higher_index_orphan_id).display().to_string(),
             higher_index_orphan_id,
             200,
         )
@@ -1806,7 +1812,7 @@ mod snapshot_metrics_contracts {
             .expect("create live legacy database");
 
         let root = root.to_str().expect("UTF-8 legacy root").to_owned();
-        let mut state = StateMachineSqlite::new(&root, "legacy.db", 1, false, 16, 1, false)
+        let mut state = new_test_state(&root, "legacy.db")
             .await
             .expect("migrate live database snapshot pointer");
         let current = state
@@ -1857,11 +1863,8 @@ mod snapshot_metrics_contracts {
         )
         .await;
 
-        let root = root
-            .to_str()
-            .expect("UTF-8 failed-build root")
-            .to_owned();
-        let mut state = StateMachineSqlite::new(&root, "legacy.db", 1, false, 16, 1, false)
+        let root = root.to_str().expect("UTF-8 failed-build root").to_owned();
+        let mut state = new_test_state(&root, "legacy.db")
             .await
             .expect("migrate failed legacy build");
         assert_eq!(
@@ -1889,9 +1892,11 @@ mod snapshot_metrics_contracts {
             "hiqlite-snapshot-pending-recovery-{}",
             Uuid::now_v7()
         ));
-        fs::create_dir_all(&root).await.expect("create pending root");
+        fs::create_dir_all(&root)
+            .await
+            .expect("create pending root");
         let root = root.to_str().expect("UTF-8 pending root").to_owned();
-        let mut state = StateMachineSqlite::new(&root, "pending.db", 1, false, 16, 1, false)
+        let mut state = new_test_state(&root, "pending.db")
             .await
             .expect("create pending state machine");
         let candidate_id = "028f0000-0000-7000-8000-000000000001";
@@ -1924,7 +1929,12 @@ mod snapshot_metrics_contracts {
         drop(receiving_state);
         install.abort();
         RELEASE_CURRENT_PUBLICATION.notify_one();
-        assert!(install.await.expect_err("cancel install caller").is_cancelled());
+        assert!(
+            install
+                .await
+                .expect_err("cancel install caller")
+                .is_cancelled()
+        );
 
         let lock_path = format!("{root}/state_machine/lock");
         time::timeout(Duration::from_secs(5), async {
@@ -1935,10 +1945,9 @@ mod snapshot_metrics_contracts {
         .await
         .expect("detached publication exits and writer releases lock");
 
-        let mut restarted =
-            StateMachineSqlite::new(&root, "pending.db", 1, false, 16, 1, false)
-                .await
-                .expect("recover durable pending generation");
+        let mut restarted = new_test_state(&root, "pending.db")
+            .await
+            .expect("recover durable pending generation");
         let current = restarted
             .get_current_snapshot()
             .await
