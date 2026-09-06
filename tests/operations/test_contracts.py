@@ -2381,6 +2381,58 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn("if-no-files-found: error", topology)
 
+    def test_transport_recovery_campaign_is_a_persistent_affected_linux_gate(self):
+        workflow = read(".github/workflows/ci.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        recovery = jobs["cluster_transport_recovery"]
+        make_commands = make_dry_run_commands("cluster-transport-recovery-check")
+
+        self.assertEqual(len(make_commands), 3)
+        self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=7", make_commands[1])
+        self.assertIn("scripts/require-test-count", make_commands[1])
+        self.assertIn("transport_recovery::tests --lib", make_commands[1])
+        self.assertIn(
+            "transport-recovery target/validation/cluster-transport-recovery.json",
+            make_commands[2],
+        )
+
+        self.assertIn("needs.scope.outputs.cluster_auth == 'true'", recovery)
+        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-topology]", recovery)
+        self.assertIn("rust-toolchain@1.97.1", recovery)
+        self.assertIn("lane: cluster-transport-recovery", recovery)
+        self.assertIn('persistent-eligible: "true"', recovery)
+        self.assertIn("make cluster-transport-recovery-check", recovery)
+        self.assertIn("cluster-transport-recovery-receipt.json", recovery)
+        self.assertIn("target/validation/cluster-transport-recovery.json", recovery)
+        self.assertIn("if-no-files-found: error", recovery)
+        self.assertIn(
+            "steps.transport_recovery.outcome != 'success'", recovery
+        )
+
+        for aggregate_name in ("publish_main", "pr_gate"):
+            aggregate = jobs[aggregate_name]
+            self.assertIn(
+                "cluster_transport_recovery", workflow_job_needs(aggregate)
+            )
+            self.assertIn("CLUSTER_TRANSPORT_RECOVERY_RESULT", aggregate)
+        self.assertIn(
+            '"cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}"',
+            jobs["pr_gate"],
+        )
+
+        with (ROOT / "validation/points.toml").open("rb") as handle:
+            catalog = tomllib.load(handle)
+        checks = {entry["id"]: entry for entry in catalog["checks"]}
+        campaign = checks["cluster-transport-recovery"]
+        self.assertEqual(campaign["command"], "make cluster-transport-recovery-check")
+        self.assertEqual(campaign["profiles"], ["full", "nightly"])
+        self.assertEqual(campaign["platforms"], ["linux"])
+        self.assertEqual(campaign["timeout_seconds"], 7200)
+        points = {entry["id"]: entry for entry in catalog["points"]}
+        for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
+            self.assertIn("cluster-transport-recovery", points[point]["checks"])
+
         # Hosted smoke keeps scoped GHA state; an eligible self-hosted smoke
         # uses the one named host builder and enforces its postcondition.
         package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
@@ -2656,7 +2708,10 @@ for (const startupDelay of [0, 1600, 7000]) {
                     and name == "cluster-store-backstop"
                 ):
                     expected = ci_store
-                elif path == ".github/workflows/ci.yml" and name == "cluster_topology":
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "cluster_topology",
+                    "cluster_transport_recovery",
+                }:
                     expected = ci_topology
                 elif path == ".github/workflows/ci.yml" and name == "check":
                     expected = high_cpu_ffmpeg6

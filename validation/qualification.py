@@ -23,6 +23,7 @@ REQUIRED_JOBS = frozenset(
         "rust",
         "cluster_store",
         "cluster_topology",
+        "cluster_transport_recovery",
         "cluster_wal",
         "cluster_daemon",
         "web_layout",

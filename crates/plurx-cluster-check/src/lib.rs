@@ -96,6 +96,7 @@ mod named_runner;
 #[cfg(test)]
 mod storage_evidence;
 mod topology;
+mod transport_recovery;
 pub use failure_drills::{
     validate_failure_drill_artifact, ClusterFailureDrillArtifact,
     FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION,
@@ -111,6 +112,14 @@ pub use topology::{
     percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
     NodeAppliedIndex, NodeCorpusObservation, ResourceSample, TopologyRun, TopologyWorkload,
     TOPOLOGY_ARTIFACT_SCHEMA_VERSION, TOPOLOGY_WRITE_OPERATIONS,
+};
+pub use transport_recovery::{
+    validate_transport_recovery_artifact, AcknowledgedRecoveryWrite,
+    ClusterTransportRecoveryArtifact, ProcessResourceCount, RecoveryCycleEvidence,
+    RecoveryImageEvidence, RecoveryRole, RecoveryRoleCampaign, RecoveryRuntimeStatus,
+    RecoveryWriteDigest, SnapshotFileEvidence, TransportRecoveryWorstDurations,
+    TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION, TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+    TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
 };
 
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
@@ -316,6 +325,25 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
+        Some("transport-recovery") => {
+            if args.get(3).is_some() {
+                bail!("transport-recovery accepts at most one output path");
+            }
+            let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
+                PathBuf::from("target/validation/cluster-transport-recovery.json")
+            });
+            transport_recovery::run_transport_recovery_campaign(&output).await
+        }
+        Some("transport-recovery-writer") => {
+            let config = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("transport-recovery-writer requires one config JSON path")?;
+            if args.get(3).is_some() {
+                bail!("transport-recovery-writer accepts exactly one config JSON path");
+            }
+            transport_recovery::run_transport_recovery_writer(&config).await
+        }
         Some("watermark-experiment") => run_watermark_double_read_experiment(args.get(2)).await,
         Some("inspect-wal") => run_inspect_wal(&args[2..]),
         Some("topology") => {
@@ -7536,6 +7564,23 @@ pub enum Request {
     ReadLocalSetting {
         key: String,
     },
+    /// Populate the fixed M5 SQLite recovery image through replicated SQL.
+    SeedRecoveryImage {
+        minimum_bytes: u64,
+        marker: String,
+    },
+    /// Hash every byte of the target-local recovery image after installation.
+    RecoveryImageDigest {
+        minimum_bytes: u64,
+    },
+    /// Hash the acknowledged writer rows applied on this target.
+    RecoveryWriteDigest {
+        prefix: String,
+    },
+    /// Snapshot, purge, apply, install, and transport evidence from this node.
+    RecoveryStatus,
+    /// Linux process-local thread and socket counts after quiescence.
+    ProcessResources,
     ForceCompaction {
         phase: String,
         /// The `BACKGROUND_SQL_CLASSES` entries whose background writers are
@@ -7666,6 +7711,7 @@ pub enum Request {
 impl Request {
     fn response_timeout(&self) -> Duration {
         match self {
+            Self::SeedRecoveryImage { .. } => Duration::from_secs(900),
             Self::ForceCompaction { .. } => COMPACTION_RESPONSE_TIMEOUT,
             Self::WriteWithoutQuorum => WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT,
             Self::RemoveVoter { .. }
@@ -7857,6 +7903,18 @@ pub enum Response {
     },
     Setting {
         value: Option<String>,
+    },
+    RecoveryImage {
+        evidence: RecoveryImageEvidence,
+    },
+    RecoveryWriteDigest {
+        digest: RecoveryWriteDigest,
+    },
+    RecoveryStatus {
+        status: RecoveryRuntimeStatus,
+    },
+    ProcessResources {
+        resources: ProcessResourceCount,
     },
     ArtworkFenceApply {
         setting: bool,
@@ -10292,6 +10350,25 @@ async fn handle_request(
         }
         Request::ReadLocalSetting { ref key } => Ok(Response::Setting {
             value: read_local_setting(client, key).await?,
+        }),
+        Request::SeedRecoveryImage {
+            minimum_bytes,
+            ref marker,
+        } => Ok(Response::RecoveryImage {
+            evidence: transport_recovery::seed_recovery_image(client, minimum_bytes, marker)
+                .await?,
+        }),
+        Request::RecoveryImageDigest { minimum_bytes } => Ok(Response::RecoveryImage {
+            evidence: transport_recovery::recovery_image_digest(client, minimum_bytes).await?,
+        }),
+        Request::RecoveryWriteDigest { ref prefix } => Ok(Response::RecoveryWriteDigest {
+            digest: transport_recovery::recovery_write_digest(client, prefix).await?,
+        }),
+        Request::RecoveryStatus => Ok(Response::RecoveryStatus {
+            status: transport_recovery::recovery_runtime_status(client).await?,
+        }),
+        Request::ProcessResources => Ok(Response::ProcessResources {
+            resources: transport_recovery::process_resources()?,
         }),
         Request::ForceCompaction {
             ref phase,

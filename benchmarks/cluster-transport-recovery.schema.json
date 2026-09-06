@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.dev/schemas/cluster-transport-recovery-v1.json",
+  "title": "Plurx cluster transport recovery qualification evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_scope",
+    "build_sha",
+    "platform",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "snapshot_policy",
+    "transport",
+    "resource_thread_margin",
+    "resource_socket_margin",
+    "learner",
+    "voter"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_scope": { "const": "linux_separate_process_recovery" },
+    "build_sha": { "$ref": "#/$defs/gitSha" },
+    "platform": { "const": "linux" },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "snapshot_policy": { "$ref": "#/$defs/snapshotPolicy" },
+    "transport": { "$ref": "#/$defs/transport" },
+    "resource_thread_margin": { "const": 4 },
+    "resource_socket_margin": { "const": 2 },
+    "learner": { "$ref": "#/$defs/roleCampaign" },
+    "voter": { "$ref": "#/$defs/roleCampaign" }
+  },
+  "$defs": {
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "role": {
+      "type": "string",
+      "enum": ["learner", "voter"]
+    },
+    "snapshotPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["validation_only", "logs_since_last", "production_default_unchanged"],
+      "properties": {
+        "validation_only": { "const": true },
+        "logs_since_last": { "const": 256 },
+        "production_default_unchanged": { "const": true }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raft_transport",
+        "api_writer_transport",
+        "tls_enabled",
+        "tls_certificate_verification_disabled_for_self_signed_harness",
+        "separate_node_processes",
+        "separate_writer_process"
+      ],
+      "properties": {
+        "raft_transport": { "const": "hiqlite_production_tls_chunked_snapshot" },
+        "api_writer_transport": { "const": "hiqlite_production_tls_websocket" },
+        "tls_enabled": { "const": true },
+        "tls_certificate_verification_disabled_for_self_signed_harness": { "const": true },
+        "separate_node_processes": { "const": true },
+        "separate_writer_process": { "const": true }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threads", "sockets"],
+      "properties": {
+        "threads": { "type": "integer", "minimum": 1 },
+        "sockets": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "marker",
+        "minimum_sqlite_bytes",
+        "rows",
+        "payload_bytes",
+        "content_sha256"
+      ],
+      "properties": {
+        "marker": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "minimum_sqlite_bytes": { "type": "integer", "minimum": 88559616 },
+        "rows": { "type": "integer", "minimum": 1 },
+        "payload_bytes": { "type": "integer", "minimum": 88559616 },
+        "content_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_id", "bytes", "sha256"],
+      "properties": {
+        "snapshot_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bytes": { "type": "integer", "minimum": 88559616 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value_sha256", "acknowledged_at_unix_ms"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "value_sha256": { "$ref": "#/$defs/sha256" },
+        "acknowledged_at_unix_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "cycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "cycle",
+        "recovery_started_at_unix_ms",
+        "recovery_finished_at_unix_ms",
+        "snapshot_index",
+        "purged_index",
+        "applied_index",
+        "source_snapshot",
+        "installed_snapshot",
+        "image",
+        "bytes_transferred",
+        "transfer_attempts",
+        "reconnect_count",
+        "retry_count",
+        "recovery_millis",
+        "transfer_millis",
+        "install_millis",
+        "acknowledged_writes",
+        "acknowledged_write_digest",
+        "target_write_digest",
+        "baseline_resources",
+        "post_quiescence_resources"
+      ],
+      "properties": {
+        "role": { "$ref": "#/$defs/role" },
+        "cycle": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "recovery_started_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "recovery_finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "snapshot_index": { "type": "integer", "minimum": 1 },
+        "purged_index": { "type": "integer", "minimum": 1 },
+        "applied_index": { "type": "integer", "minimum": 1 },
+        "source_snapshot": { "$ref": "#/$defs/snapshot" },
+        "installed_snapshot": { "$ref": "#/$defs/snapshot" },
+        "image": { "$ref": "#/$defs/image" },
+        "bytes_transferred": { "type": "integer", "minimum": 88559616 },
+        "transfer_attempts": { "type": "integer", "minimum": 1 },
+        "reconnect_count": { "type": "integer", "minimum": 0 },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "recovery_millis": { "type": "integer", "minimum": 0 },
+        "transfer_millis": { "type": "integer", "minimum": 0 },
+        "install_millis": { "type": "integer", "minimum": 0 },
+        "acknowledged_writes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/write" }
+        },
+        "acknowledged_write_digest": { "$ref": "#/$defs/sha256" },
+        "target_write_digest": { "$ref": "#/$defs/sha256" },
+        "baseline_resources": { "$ref": "#/$defs/resources" },
+        "post_quiescence_resources": { "$ref": "#/$defs/resources" }
+      }
+    },
+    "worst": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recovery_millis", "transfer_millis", "install_millis"],
+      "properties": {
+        "recovery_millis": { "type": "integer", "minimum": 0 },
+        "transfer_millis": { "type": "integer", "minimum": 0 },
+        "install_millis": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "roleCampaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "cycles_required", "minimum_sqlite_bytes", "cycles", "worst_durations"],
+      "properties": {
+        "role": { "$ref": "#/$defs/role" },
+        "cycles_required": { "const": 20 },
+        "minimum_sqlite_bytes": { "type": "integer", "enum": [88559616, 177119232] },
+        "cycles": {
+          "type": "array",
+          "minItems": 20,
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/cycle" }
+        },
+        "worst_durations": { "$ref": "#/$defs/worst" }
+      }
+    }
+  }
+}

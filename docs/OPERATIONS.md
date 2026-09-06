@@ -1923,6 +1923,50 @@ installing, retrying, or stalled transport never grants reads. While port
 32400 is still closed, the daemon also emits one bounded startup-wait record
 every ten seconds with target/applied indexes when known.
 
+### Qualify transport recovery before fleet enablement
+
+Run the recovery campaign on a Linux validation host before declaring the
+bounded transport safe for a fleet. It is a qualification workload, not a
+production toggle:
+
+```bash
+make cluster-transport-recovery-check
+```
+
+The command creates fresh separate-process clusters and uses the production
+TLS Raft snapshot path. A second process keeps committing acknowledged writes
+through the production TLS API WebSocket while node 4 is rebuilt from an empty
+data directory. It runs 20 recoveries with node 4 admitted as a learner using
+the current membership token protocol, then 20 with node 4 as a voter. The
+learner image carries at least 88,559,616 bytes and the voter image at least
+177,119,232 bytes. Any failed cycle fails the command; there is no partial-pass
+result.
+
+The campaign's 256-log snapshot trigger exists only in the cluster validation
+launch payload. It is absent from `plurxd`, TOML, environment variables, and
+the Settings UI, so it cannot change production snapshot frequency. The
+transport correction itself remains compiled and active without a feature
+gate.
+
+Successful runs write
+`target/validation/cluster-transport-recovery.json`. The closed-schema artifact
+binds the exact Git SHA and records, per cycle, the source and installed
+snapshot ID/size/SHA-256, snapshot/purge/applied indexes, transferred bytes,
+attempt/reconnect/retry counts, recovery/transfer/install durations, the
+readiness acknowledgement plus every write acknowledged while recovery was
+running, the target-local digest of all those writes, the recovered SQLite
+content digest, and post-quiescence thread and socket counts. The summary
+records the worst duration for each role. Do not accept an artifact if its
+build SHA differs from the candidate, either role has fewer than 20 cycles,
+the source and installed snapshot hashes differ, an acknowledged-write digest
+differs, or resource counts exceed the recorded fixed margins.
+
+Main-bound cluster changes run this command in the dedicated
+`cluster_transport_recovery` CI job and retain the evidence, log, and exact
+lane receipt. An effort is not qualified when that selected job is skipped or
+fails. Ordinary effort task PRs retain their compile-only development gate;
+the 40-cycle campaign belongs to the final effort-to-main qualification.
+
 Set the variable only to choose a grace deliberately. Whether anybody chose is
 answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
 that is anything other than the interpolation default in
