@@ -8,7 +8,7 @@ use axum::Json;
 use axum::body;
 use axum::body::Body;
 use axum::extract::{Extension, Path};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, get};
 use openraft::error::{CheckIsLeaderError, ForwardToLeader, RaftError};
@@ -452,7 +452,12 @@ pub(crate) async fn snapshot_transport_sqlite(
     snapshot
         .observations
         .retain(|observation| observation.raft_group == "sqlite");
-    Ok(Json(snapshot).into_response())
+    let mut response = Json(snapshot).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -504,6 +509,12 @@ mod transport_route_tests {
             .await
             .expect("valid secret");
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(reqwest::header::CACHE_CONTROL),
+            Some(&reqwest::header::HeaderValue::from_static(
+                "private, no-store"
+            ))
+        );
         let snapshot = response
             .json::<crate::SnapshotTransportStatus>()
             .await
