@@ -1250,10 +1250,22 @@ mod tests {
                 // Everything v44 and later built has to go, or the replayed
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
-                // history, v48's desired-selection row. Leaving any of them
-                // makes the replay fail on a column or table that is already
-                // there.
-                "DROP INDEX dv_conversions_recovery_guard;
+                // history, v48's desired-selection row, v49's pointer fence.
+                // Leaving any of them makes the replay fail on a column or
+                // table that is already there.
+                //
+                // The fence triggers go first, and they have to: they name
+                // `media_playback_desired`, so once that table is dropped any
+                // write to `media_playback_pointers` fails with "no such
+                // table" rather than with anything about this fixture. A
+                // trigger outliving the table it reads is a hazard the real
+                // schema never has — both arrive in the same migration line —
+                // but it is exactly what winding a database backwards by hand
+                // produces.
+                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
+                 DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
+                 ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
+                 DROP INDEX dv_conversions_recovery_guard;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
                  DROP TABLE IF EXISTS media_playback_desired;
@@ -1345,11 +1357,12 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 4] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 5] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
             "media_playback_desired",
+            "desired_revision",
         ];
 
         assert!(

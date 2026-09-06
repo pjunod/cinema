@@ -1160,13 +1160,22 @@ impl MediaSessionStore for SqliteStore {
             let expected_desired_revision = activation.expected_desired_revision.unwrap_or(0);
             let pointer_advanced = tx.execute(
                 "INSERT INTO media_playback_pointers
-                    (user_id, playback_id, current_incarnation_id, updated_at_ms)
-                 SELECT ?1, ?2, ?3, ?4
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms,
+                     desired_revision)
+                 SELECT ?1, ?2, ?3, ?4,
+                        -- Read here rather than passed in, so the row records
+                        -- the ask that was current when it was written and a
+                        -- null means the playback had none. A writer without
+                        -- this column cannot produce anything but a null, which
+                        -- is what the fence trigger keys on.
+                        (SELECT revision FROM media_playback_desired
+                          WHERE user_id = ?1 AND playback_id = ?2)
                   WHERE (?5 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
                           WHERE user_id = ?1 AND playback_id = ?2 AND revision != ?5))
                  ON CONFLICT(user_id, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
-                    updated_at_ms = excluded.updated_at_ms",
+                    updated_at_ms = excluded.updated_at_ms,
+                    desired_revision = excluded.desired_revision",
                 params![
                     activation.user_id,
                     activation.playback_id,
@@ -1679,6 +1688,32 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn validation_write_legacy_playback_pointer(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        // Exactly the statement a binary from before v49 emits: four columns,
+        // no `desired_revision`, so the row arrives with a null there.
+        let playback_id = playback_id.to_owned();
+        let incarnation_id = incarnation_id.to_owned();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO media_playback_pointers
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                    current_incarnation_id = excluded.current_incarnation_id,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![user_id, playback_id, incarnation_id, now_ms],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn desired_selection(
         &self,
         user_id: i64,
@@ -1916,7 +1951,9 @@ impl MediaSessionStore for SqliteStore {
             // that made a flag on `activate_media_session` unacceptable.
             let pointer_advanced = tx.execute(
                 "UPDATE media_playback_pointers
-                    SET current_incarnation_id = ?1, updated_at_ms = ?2
+                    SET current_incarnation_id = ?1, updated_at_ms = ?2,
+                        desired_revision = (SELECT revision FROM media_playback_desired
+                          WHERE user_id = ?3 AND playback_id = ?4)
                   WHERE user_id = ?3 AND playback_id = ?4
                     AND current_incarnation_id = ?5
                     AND EXISTS (SELECT 1 FROM media_sessions predecessor

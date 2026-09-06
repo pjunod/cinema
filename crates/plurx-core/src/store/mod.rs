@@ -178,6 +178,104 @@ pub(crate) const MEDIA_PLAYBACK_DESIRED_SCHEMA: &str =
         PRIMARY KEY (user_id, playback_id)
     ) STRICT;";
 
+/// Fence a playback pointer written against an ask that is not the current one.
+///
+/// Every comparison of the desired revision up to now has been application SQL
+/// — the predicate preparation admission, prepared commit and ordinary
+/// activation each carry. That fences *this* binary against a stale ask and
+/// does nothing at all about an older one, because an older binary simply does
+/// not emit the predicate. Schema compatibility is checked when a database is
+/// opened and never again, so a process that was already running when the
+/// cluster migrated keeps writing this pointer with statements from before the
+/// rule existed. A trigger is the only thing standing in the path of a
+/// statement this binary did not write.
+///
+/// The column and both triggers are one step because they are one change. A
+/// column nothing enforces is not a fence, and a trigger cannot be created on
+/// a column that does not exist yet; a database holding one without the other
+/// accepts exactly the writes this exists to refuse. The replicated chain has
+/// already spent a whole extra version step recovering from a trigger that
+/// shipped separately from the column it guards, which is the mistake being
+/// avoided here rather than repeated.
+///
+/// `desired_revision` is nullable and the null carries meaning: it is what a
+/// write leaves when the playback has no recorded ask. Every writer in this
+/// binary fills it from `media_playback_desired` inside the same statement, so
+/// a null on a playback that *does* have an ask can only have come from a
+/// binary that predates the column — which is precisely the writer being
+/// fenced. `IS NOT` rather than `!=` because a null compared with `!=` is
+/// null, not true, and the old writer would sail through the one comparison
+/// written for it.
+///
+/// Both operations, because an upsert reaches the pointer through both: a
+/// first pointer inserts, a replacement updates. A fence on one of them is a
+/// fence on nothing, since the case that matters — an old writer replacing a
+/// live pointer — is the one that updates.
+///
+/// A playback with no ask row is untouched, deliberately. "No ask recorded" is
+/// not "a different ask", the first play of every title looks like this, and
+/// an import loads pointers before it loads asks. `RAISE(ABORT)` rather than a
+/// silent no-op, because an old writer that believes it advanced the pointer
+/// is the whole failure being prevented, and a refusal it cannot see is not a
+/// fence.
+macro_rules! pointer_desired_revision_column {
+    () => {
+        "ALTER TABLE media_playback_pointers ADD COLUMN desired_revision INTEGER;"
+    };
+}
+
+macro_rules! pointer_desired_fence_insert_trigger {
+    () => {
+        "CREATE TRIGGER IF NOT EXISTS media_playback_pointers_desired_fence_ai
+    BEFORE INSERT ON media_playback_pointers
+    WHEN EXISTS (SELECT 1 FROM media_playback_desired
+                  WHERE user_id = NEW.user_id AND playback_id = NEW.playback_id
+                    AND revision IS NOT NEW.desired_revision)
+    BEGIN
+      SELECT RAISE(ABORT, 'playback pointer written against an ask that is not current');
+    END;"
+    };
+}
+
+macro_rules! pointer_desired_fence_update_trigger {
+    () => {
+        "CREATE TRIGGER IF NOT EXISTS media_playback_pointers_desired_fence_au
+    BEFORE UPDATE ON media_playback_pointers
+    WHEN EXISTS (SELECT 1 FROM media_playback_desired
+                  WHERE user_id = NEW.user_id AND playback_id = NEW.playback_id
+                    AND revision IS NOT NEW.desired_revision)
+    BEGIN
+      SELECT RAISE(ABORT, 'playback pointer written against an ask that is not current');
+    END;"
+    };
+}
+
+/// The three statements as one SQLite migration, applied in one transaction.
+///
+/// Written through macros rather than by hand twice because the replicated
+/// backend needs them as separate transaction entries and this one needs them
+/// as a batch — and the two backends holding different text for the same
+/// guard is the failure every shared schema constant here exists to prevent.
+pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA: &str = concat!(
+    pointer_desired_revision_column!(),
+    "\n",
+    pointer_desired_fence_insert_trigger!(),
+    "\n",
+    pointer_desired_fence_update_trigger!(),
+);
+
+/// The column on its own, for the replicated migration's first statement.
+pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_REVISION_COLUMN: &str =
+    pointer_desired_revision_column!();
+
+/// The insert-path trigger on its own.
+pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER: &str =
+    pointer_desired_fence_insert_trigger!();
+
+/// The update-path trigger on its own.
+pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER: &str =
+    pointer_desired_fence_update_trigger!();
+
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
     AFTER UPDATE OF publication_ready_at_ms ON media_sessions
@@ -2938,6 +3036,29 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// intent-changing request. Absent is not "unchanged" and not "default":
     /// it is no evidence, and every caller has to treat it that way or an
     /// upgraded node would fence every session that started before it.
+    /// Write a playback pointer the way a binary from before `desired_revision`
+    /// would: naming only the columns that existed then.
+    ///
+    /// A test-only shape on a production trait, which is a cost worth naming.
+    /// It exists because there is no other way to produce that write from this
+    /// binary — every real writer fills the column inside its own statement —
+    /// and a fence proved only against writes this binary can make is not
+    /// proved against the writer it was built for. The alternative was to test
+    /// the trigger as SQL text on one backend and assert nothing at all about
+    /// the replicated one, where the same guard has to hold and where a
+    /// divergence would surface during a restore.
+    ///
+    /// It is deliberately not a bypass: it takes no revision, so it cannot be
+    /// used to write a pointer *around* the fence, only to attempt the exact
+    /// write the fence exists to refuse.
+    async fn validation_write_legacy_playback_pointer(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError>;
+
     async fn desired_selection(
         &self,
         user_id: i64,

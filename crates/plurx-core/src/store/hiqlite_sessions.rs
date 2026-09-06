@@ -174,6 +174,12 @@ pub(super) const MEDIA_PLAYBACK_POINTERS_SCHEMA: &str =
     playback_id            TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),
     current_incarnation_id TEXT NOT NULL UNIQUE,
     updated_at_ms          INTEGER NOT NULL,
+    -- The ask this pointer was written against. Nullable, and the null means
+    -- the playback had no recorded ask -- see the fence triggers, which read a
+    -- null on a playback that *does* have one as a writer from before this
+    -- column. A fresh install declares it here; an upgrade adds it by `ALTER`,
+    -- and the two have to end in the same shape.
+    desired_revision       INTEGER,
     PRIMARY KEY (user_id, playback_id)
 ) STRICT";
 
@@ -277,6 +283,9 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
         super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
         super::MEDIA_PLAYBACK_DESIRED_SCHEMA,
+        // Last, because both fence triggers reference the ask table above.
+        super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER,
+        super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER,
     ] {
         validate_sql(sql)?;
         for result in timeout_store(client.batch(sql)).await? {
@@ -1584,8 +1593,15 @@ impl MediaSessionStore for HiqliteAuthStore {
             ),
             (
                 "INSERT INTO media_playback_pointers
-                    (user_id, playback_id, current_incarnation_id, updated_at_ms)
-                 SELECT $1, $2, $3, $4 WHERE EXISTS (
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms,
+                     desired_revision)
+                 SELECT $1, $2, $3, $4,
+                        -- See the SQLite twin: the row records the ask current
+                        -- when it was written, and only a writer without the
+                        -- column can leave a null here.
+                        (SELECT revision FROM media_playback_desired
+                          WHERE user_id = $1 AND playback_id = $2)
+                  WHERE EXISTS (
                    SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND session_id = $5
                      AND owner_node_id = $6 AND state = 'active')
                    AND (($7 = '' AND NOT EXISTS (
@@ -1602,7 +1618,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                      WHERE user_id = $1 AND playback_id = $2 AND revision != $8))
                  ON CONFLICT(user_id, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
-                    updated_at_ms = excluded.updated_at_ms
+                    updated_at_ms = excluded.updated_at_ms,
+                    desired_revision = excluded.desired_revision
                   WHERE media_playback_pointers.current_incarnation_id IN ($7, $3)
                     AND media_playback_pointers.current_incarnation_id
                         != excluded.current_incarnation_id",
@@ -1862,6 +1879,29 @@ impl MediaSessionStore for HiqliteAuthStore {
         desired_row(self, user_id, playback_id)
             .await?
             .ok_or_else(|| StoreError::Database("desired selection vanished".to_owned()))
+    }
+
+    async fn validation_write_legacy_playback_pointer(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        // The replicated twin of the same pre-v49 statement.
+        let sql = "INSERT INTO media_playback_pointers
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                    current_incarnation_id = excluded.current_incarnation_id,
+                    updated_at_ms = excluded.updated_at_ms";
+        validate_sql(sql)?;
+        timeout_store(
+            self.client()
+                .execute(sql, params!(user_id, playback_id, incarnation_id, now_ms)),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn desired_selection(
@@ -2223,7 +2263,9 @@ impl MediaSessionStore for HiqliteAuthStore {
         let mut statements: Vec<(&str, hiqlite::Params)> = vec![
             (
                 "UPDATE media_playback_pointers
-                    SET current_incarnation_id = $1, updated_at_ms = $2
+                    SET current_incarnation_id = $1, updated_at_ms = $2,
+                        desired_revision = (SELECT revision FROM media_playback_desired
+                          WHERE user_id = $3 AND playback_id = $4)
                   WHERE user_id = $3 AND playback_id = $4
                     AND current_incarnation_id = $5
                     AND EXISTS (SELECT 1 FROM media_sessions predecessor

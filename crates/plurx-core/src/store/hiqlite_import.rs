@@ -662,6 +662,13 @@ const TABLES: &[TablePlan] = &[
             "playback_id",
             "current_incarnation_id",
             "updated_at_ms",
+            // Carried rather than recomputed. The fence triggers read a null
+            // here on a playback that has an ask as a writer from before the
+            // column, so a restore that dropped this would turn every imported
+            // pointer into one the next write cannot replace. Sources older
+            // than v49 have no such column and are handled by
+            // `value_projection`, not by leaving it out here.
+            "desired_revision",
         ],
         order_by: "user_id, playback_id",
         minimum_schema: 25,
@@ -2139,7 +2146,20 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
         .columns
         .iter()
         .map(|column| {
-            if table.name == "cluster_fragment_index_jobs"
+            if table.name == "media_playback_pointers"
+                && *column == "desired_revision"
+                && schema_version < 49
+            {
+                // A source from before the column has no ask to attribute the
+                // pointer to, and null is the honest answer rather than a
+                // fabricated revision. The fence lets it through for exactly
+                // as long as the playback has no `media_playback_desired` row
+                // — which such a source also cannot have, because that table
+                // arrived at v48 and this one at v49. Inventing a revision
+                // here is the "never replace a missing expected token with the
+                // current revision" mistake, spelled as a restore.
+                "NULL".to_owned()
+            } else if table.name == "cluster_fragment_index_jobs"
                 && *column == "priority"
                 && schema_version < 41
             {

@@ -980,6 +980,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // satisfies it — which is why it is its own table rather than columns on
     // `media_playback_pointers`, whose `current_incarnation_id` is NOT NULL.
     crate::store::MEDIA_PLAYBACK_DESIRED_SCHEMA,
+    // v49: the revision a pointer write was decided against, and the triggers
+    // that refuse a write naming the wrong one — or naming none while an ask
+    // exists to name, which is the only shape a binary from before this column
+    // can produce. Application SQL fences this binary against a stale ask;
+    // nothing fenced a process that was already running when the schema moved,
+    // because compatibility is checked at open and never again.
+    crate::store::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2269,7 +2276,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 48,
+            version, 49,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2997,7 +3004,9 @@ mod tests {
         );
         for (table, columns) in [
             ("media_session_requests", 10),
-            ("media_playback_pointers", 4),
+            // 5 since v49 added `desired_revision`, the ask a pointer write
+            // was decided against.
+            ("media_playback_pointers", 5),
             ("media_sessions", 19),
         ] {
             assert_eq!(

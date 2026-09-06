@@ -483,6 +483,9 @@ const COORDINATION_METHODS: &[&str] = &["acquire_lease", "renew_lease", "release
 const MEDIA_SESSION_METHODS: &[&str] = &[
     "record_desired_selection",
     "desired_selection",
+    // Test-only in intent, declared on the trait because the fence it proves
+    // has to be proved on both backends. See its doc comment.
+    "validation_write_legacy_playback_pointer",
     "claim_media_session_request",
     "assign_media_session_request_owner",
     "activate_media_session",
@@ -848,6 +851,128 @@ async fn an_activation_with_no_recorded_ask_is_still_admitted() {
                 .unwrap_or_else(|error| panic!("{backend}: first activation: {error}"))
                 .is_some(),
             "{backend}: a playback with no recorded ask must still activate"
+        );
+    })
+    .await;
+}
+
+/// A pointer write that names no ask, on a playback that has one, is refused
+/// by the database itself.
+///
+/// Every desired-revision compare up to here is application SQL: the predicate
+/// preparation admission, prepared commit and ordinary activation each carry.
+/// That fences this binary and does nothing whatever about an older one, which
+/// does not emit the predicate at all — and neither backend re-reads schema
+/// compatibility after the database is open, so a process already running when
+/// the cluster migrated keeps writing with statements from before the rule.
+///
+/// This test writes the pointer the way such a process would: directly, naming
+/// only the columns that existed before, so `desired_revision` comes out null.
+/// It has to be refused, and refused loudly — a fence an old writer cannot
+/// observe is not a fence, it is a silent divergence between what the writer
+/// believes and what the pointer says.
+#[tokio::test]
+async fn a_pointer_written_without_an_ask_is_refused_while_an_ask_exists() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("pointer-fence", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-pointer-fence";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            "11111111-1111-4111-8111-111111111201",
+            "11111111-1111-4111-8111-111111111202",
+            backend,
+        )
+        .await;
+
+        // Before any ask exists, the legacy shape is permitted. "No ask
+        // recorded" is not "a different ask", and a database that refused this
+        // would refuse every playback that predates the schema.
+        store
+            .validation_write_legacy_playback_pointer(
+                user.id,
+                playback,
+                "11111111-1111-4111-8111-111111111203",
+                3_000,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{backend}: a pointer with no ask to disagree with must be allowed: {error}")
+            });
+
+        store
+            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record ask: {error}"));
+
+        // Now there is an ask, and the same write is refused.
+        let refused = store
+            .validation_write_legacy_playback_pointer(
+                user.id,
+                playback,
+                "11111111-1111-4111-8111-111111111204",
+                4_000,
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "{backend}: a writer that cannot name the ask must not be able to move the pointer"
+        );
+
+        // And the pointer is where it was, not partly moved.
+        let route = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"));
+        assert!(
+            route
+                .is_none_or(|route| route.incarnation_id != "11111111-1111-4111-8111-111111111204"),
+            "{backend}: the refused pointer write left nothing behind"
+        );
+
+        // The same refusal on a playback that has no pointer yet.
+        //
+        // Separate because the two paths are two triggers: SQLite fires per
+        // operation, and the write above lands on the update path because the
+        // playback already points somewhere. A fence installed on only the
+        // update path passes every assertion above while leaving an old writer
+        // free to establish the *first* pointer for a playback whose viewer
+        // has already asked for something — and that pointer is then what
+        // every later reader trusts.
+        let fresh = "playback-pointer-fence-first";
+        store
+            .record_desired_selection(
+                user.id,
+                fresh,
+                &"b".repeat(64),
+                "v1;quality=original",
+                5_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record fresh ask: {error}"));
+        assert!(
+            store
+                .validation_write_legacy_playback_pointer(
+                    user.id,
+                    fresh,
+                    "11111111-1111-4111-8111-111111111205",
+                    6_000,
+                )
+                .await
+                .is_err(),
+            "{backend}: the first pointer for a playback is fenced too"
+        );
+        assert!(
+            store
+                .media_session_route_for_playback(user.id, fresh)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: fresh route: {error}"))
+                .is_none(),
+            "{backend}: and the playback still points nowhere"
         );
     })
     .await;
@@ -13759,9 +13884,16 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
+             -- v49's pointer fence first: both triggers name
+             -- `media_playback_desired`, so once that table is gone every
+             -- write to `media_playback_pointers` fails with \"no such
+             -- table\" instead of anything to do with this fixture. Then
              -- v48's desired-selection row, then v45's negative fragment
              -- index, then v44's permanent recovery-guard ledger, then v43's
              -- conversion ledger.
+             DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
+             DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
+             ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
              DROP TABLE IF EXISTS media_playback_desired;
              DROP TABLE fragment_index_outcomes;
              DROP TABLE dv_recovery_guards;
@@ -15524,7 +15656,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 292, "review the Store method count");
+    assert_eq!(declared.len(), 293, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
