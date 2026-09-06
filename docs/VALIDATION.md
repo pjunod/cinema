@@ -464,7 +464,8 @@ starts every check in a new session. If the outer budget expires, one bounded
 cleanup deadline covers discovery, termination, direct-shell reap, and output
 EOF. The runner immediately stops the root process group, discovers both the
 launch session and retained-parent child sessions, stops newly observed groups
-until the same complete stopped closure is seen twice, and sends `SIGKILL`
+until a complete stopped closure is confirmed unchanged by two subsequent
+censuses, and sends `SIGKILL`
 deepest-first without resuming the tree. A bounded post-kill census then proves
 that every recorded live process identity disappeared; zombies are accepted as
 non-executable and left to their owning system reaper. The runner reaps only

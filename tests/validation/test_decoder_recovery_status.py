@@ -19,7 +19,7 @@ FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M1_EFFORT_BASE = "a8bbe574"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
-M1_RECEIPT_HEAD = "f33b0dcb"
+M1_RECEIPT_HEAD = "d82726ec"
 M1_RUNTIME_RECEIPT_HEAD = "bc3c3bee"
 M1_REPAIR_HEAD = "07c8f905"
 
@@ -176,8 +176,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_m1_review_repair_distinguishes_exact_and_working_tree_evidence(self) -> None:
         self.assertIn(
-            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact mapped history audit 1,383, "
-            "catalog 24 points / 30 checks / 1,444 audited files, validation 136/136, "
+            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact mapped history audit 1,384, "
+            "catalog 24 points / 30 checks / 1,444 audited files, validation 143/143, "
             "operations 211/211, formatting, and the pinned all-target workspace "
             "compile pass",
             self.status,
@@ -193,9 +193,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             self.status,
         )
         self.assertIn(
-            "`f33b0dcb` pins that outer validation ceiling to exactly 3,600 seconds",
+            "`d82726ec` retains the exact 3,600-second outer ceiling",
             self.status,
         )
+        self.assertIn("proves recorded live identities disappeared", self.status)
         self.assertIn("reaps only its owned shell", self.status)
         self.assertIn(
             "Validation checks may not daemonize, double-fork, or deliberately "
