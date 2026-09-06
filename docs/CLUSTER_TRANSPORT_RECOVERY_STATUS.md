@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | five findings against moved-base candidate `aa504834` are fixed in `315b462a`; the replacement Rust 1.97.1 fast lane is green and three exact-SHA adversarial reviews are next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | four findings against exact candidate `cc7fa35a` are fixed in `c0725954`; the replacement Rust 1.97.1 fast lane is green and three exact-SHA adversarial reviews restart from zero | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -132,9 +132,24 @@ revocation in one Store transaction, compacts ambiguous anti-replay state into
 one replicated expiration watermark, and maps every regression into the
 persistent lane. Focused exact regressions, the membership web suite, workspace
 all-target compile and denied-warning Clippy, and 197 operations contracts pass;
-The complete cluster/WAL fast lane passes from the beginning on committed
+The complete cluster/WAL fast lane passed from the beginning on committed
 replacement `315b462a`, after correcting one stale preflight assertion to the
-new deadline-relative stalled age. Three replacement exact-SHA reviews remain.
+new deadline-relative stalled age. Three exact reviews of candidate `cc7fa35a`
+then found four P2 gaps: a completion inside the five-second cohort could hide
+newer same-snapshot failure or progress, deadline-less active states did not
+publish their effective fallback stall boundary, cache-admin propagation used
+the eight-peer diagnostics limit instead of the supported committed roster,
+and the new atomic promotion path lacked a direct three-voter Store contract.
+Replacement `c0725954` fixes all four. The producer now serializes its effective
+fallback deadline and mixed-version consumers derive the same boundary; only a
+completion at least as fresh as live same-fingerprint evidence supersedes it;
+credential revocation admits all 63 possible remote members while retaining
+eight-request fanout concurrency; and the three-voter contract proves missing,
+wrong, and exact claims plus rollback when token deletion fails after the user
+update. The web suite, exact new regressions, 197 operations contracts,
+workspace check and denied-warning Clippy, vendored denied-warning Clippy,
+formatting, history audit, validation catalog, and the complete cluster/WAL lane
+pass. Three replacement exact-SHA reviews remain.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -182,7 +197,8 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 eleventh-review corrections | pass · superseded before commit | Local monotonic receipt age includes collection dwell; legacy heartbeats reach trusted receipt-owning expiry; local outage fences and cleanup are generation-scoped and serialized; retries are deduplicated, backed off, and shutdown-aware; password/session and last-admin mutations are atomic; and revocation requires a stable twice-observed exact committed roster. The complete focused lane and pre-review matrix passed, but pre-commit audit found two remaining races. |
 | M4 twelfth-review corrections | fail · `eba5dfc3` rejected after green qualification | A dedicated replicated cache-admin lease excludes membership and planned-outage changes across the claim-bound Store mutation, but exact review found five remaining boundedness, restart, fence-expiry, token-resolution, and local-aging defects. This exact tree is not a release candidate. |
 | M4 thirteenth-review corrections | fail · `aa504834` rejected after green moved-base qualification | Definitive singleton losers are receipt-free, cleanup ownership is fail-fast and bounded, readiness remains false while any claim can authorize Store, v3 Begin ACK proves exact local application, expired operation identities remain exactly resolvable, and locally collected transport evidence includes monotonic collection dwell. Three exact reviews still found five correctness and persistent-inventory gaps; this exact tree is not a release candidate. |
-| M4 fourteenth-review corrections | pass · committed `315b462a`, exact review pending | Stalled age is deadline-relative, planned-outage waiting ends with its exact fence, combined promotion/password/token revocation is atomic, ambiguous cache-admin anti-replay state is one bounded expiration watermark, and all focused regressions are permanently inventoried. Focused exact tests, web, workspace compile/Clippy, 197 operations contracts, and the complete cluster/WAL lane pass; three exact-SHA reviews remain. |
+| M4 fourteenth-review corrections | fail · exact candidate `cc7fa35a` rejected after green qualification | Stalled age is deadline-relative, planned-outage waiting ends with its exact fence, combined promotion/password/token revocation is atomic, ambiguous cache-admin anti-replay state is one bounded expiration watermark, and all focused regressions are permanently inventoried. Three adversarial reviews still found four completion-freshness, fallback-deadline, revocation-roster, and clustered-Store-coverage gaps. |
+| M4 fifteenth-review corrections | pass · committed `c0725954`, exact review pending | Completion authority is freshness-bounded; deadline-less active state publishes and projects the producer's 30-second fallback; cache-admin revocation covers up to 63 remote committed members with concurrency eight; and a three-voter contract proves missing/wrong/exact claims plus atomic rollback on token deletion failure. Exact regressions, web, 197 operations contracts, workspace and vendored denied-warning Clippy, validation lint, history audit, formatting, and the complete cluster/WAL lane pass; three exact-SHA reviews restart from zero. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -325,6 +341,17 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
     that arrive behind it receive a typed conflict instead of joining an
     unbounded mutex waiter queue. Its admission-settlement wait ends at the
     exact replicated fence deadline or process shutdown.
+26. **Keep diagnostics width separate from credential correctness.** Operations
+    status still probes at most eight peers, but cache-admin invalidation covers
+    every remote member in the supported 64-member committed roster. Network
+    concurrency remains eight, so the larger correctness bound does not create
+    an unbounded request burst.
+27. **Treat effective fallback deadlines as part of retained status.** Active
+    ownership without an explicit RPC deadline still has the producer's
+    30-second stall boundary. The producer now serializes it, while current
+    daemon and browser consumers derive the same boundary for rolling peers.
+    Same-snapshot completion can suppress live evidence only when it is at
+    least as fresh, preventing an older terminal sample from hiding a successor.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 
@@ -405,8 +432,10 @@ production-path regressions. Review of exact candidate `c37970b3` then found
 an indirect abandoned-row capability scan, scheduler-dependent snapshot
 admission order, one reset/physical-epoch mix-up, missing cross-observer
 semantic identity, stale same-snapshot UI precedence, and an overclaimed
-request-path isolation test. The replacement fixes all six, the combined lane
-is green, and three clean reviews of its next committed SHA are the next gate.
+request-path isolation test. Later exact review rejected `cc7fa35a` on four
+remaining freshness, fallback, large-roster, and Store-contract gaps. Those are
+fixed in `c0725954`; the complete focused lane and compile/lint matrix are green,
+and three clean reviews of the new exact candidate are the next gate.
 M5 replacement work includes the earlier CI receipt and exact-test
 count corrections plus the later zero-resource-growth, early archive-identity,
 and cumulative-attempt corrections. It also refuses successful recovery or
