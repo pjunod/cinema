@@ -76,7 +76,7 @@ is added back to the producer deadline so it cannot consume the legacy FFmpeg
 startup budget. Already assembled output is checked before probing. Command
 construction remains an M2 migration.
 
-Current focused code evidence on M1 code head `c03a98b3`:
+Current focused code evidence on M1 code head `cc464663`:
 
 - `cargo test -p plurx-core --test decoder_selection`: 34 passed.
 - macOS `cargo test -p plurxd decode_facts::tests:: -- --nocapture`: 14 passed.
