@@ -12988,8 +12988,8 @@ window.addEventListener("pagehide",()=>{
   LIVE_TV.unloading=true;
   stopLiveTv().catch(()=>{});
 });
-window.addEventListener("storage",event=>{
-  if(event.key===null||event.key.startsWith(LIVE_TV_BARRIER.prefix)){ try{ LIVE_TV_BARRIER.sync(); }catch(e){} }
+window.addEventListener("storage",storageEvent=>{
+  if(storageEvent.key===null||storageEvent.key.startsWith(LIVE_TV_BARRIER.prefix)){ try{ LIVE_TV_BARRIER.sync(); }catch(e){} }
 });
 document.addEventListener("visibilitychange",()=>{
   if(document.visibilityState==="hidden"&&location.hash==="#/live-tv"){
