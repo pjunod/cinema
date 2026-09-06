@@ -817,6 +817,105 @@ test("legacy snapshot labels without fingerprints remain attempt-local", () => {
   assert.equal(current.observation.boot_id, "current-sender");
 });
 
+test("transport selection is permutation invariant across fingerprint cohorts", () => {
+  const ui = sandbox();
+  const evidence = {
+    stale: transportObservation("stalled", {
+      observing_node_id: 1,
+      peer_node_id: 2,
+      direction: "outbound",
+      snapshot_id: "snapshot-a",
+      snapshot_fingerprint: "7".repeat(64),
+      boot_id: "stale-a",
+      attempt_id: 1,
+      socket_epoch: 1,
+      sample_age_ms: 299_000,
+    }),
+    freshA: transportObservation("transferring", {
+      snapshot_id: "snapshot-a",
+      snapshot_fingerprint: "7".repeat(64),
+      boot_id: "fresh-a",
+      attempt_id: 2,
+      socket_epoch: 2,
+      sample_age_ms: 40,
+    }),
+    freshB: transportObservation("installing", {
+      snapshot_id: "snapshot-b",
+      snapshot_fingerprint: "8".repeat(64),
+      boot_id: "fresh-b",
+      attempt_id: 3,
+      socket_epoch: 3,
+      sample_age_ms: 40,
+    }),
+  };
+  const permutations = [
+    ["stale", "freshA", "freshB"],
+    ["stale", "freshB", "freshA"],
+    ["freshA", "stale", "freshB"],
+    ["freshA", "freshB", "stale"],
+    ["freshB", "stale", "freshA"],
+    ["freshB", "freshA", "stale"],
+  ];
+
+  for(const order of permutations){
+    const operations = {
+      nodes: order.map(name=>({
+        transport: {
+          observing_node_id: evidence[name].observing_node_id,
+          observations: [evidence[name]],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing", order.join(","));
+    assert.equal(current.observation.boot_id, "fresh-b", order.join(","));
+  }
+});
+
+test("fresh acknowledged sender completion outranks stale receiver completion", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "9".repeat(64);
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("complete", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: "completed-snapshot",
+              snapshot_fingerprint: snapshotFingerprint,
+              acknowledged_offset: 4096,
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("complete", {
+              snapshot_id: "completed-snapshot",
+              snapshot_fingerprint: snapshotFingerprint,
+              acknowledged_offset: null,
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "startup_watermark");
+  assert.equal(current.text, "waiting for startup watermark");
+  assert.equal(current.observation.direction, "outbound");
+  assert.equal(current.observation.acknowledged_offset, 4096);
+});
+
 test("stalled transport renders its observer and sample age", () => {
   const ui = sandbox();
   const membership = status("degraded", [

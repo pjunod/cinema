@@ -1772,9 +1772,16 @@ node-owned FIFO executor actually admits that exact request. A queued request
 or later admission waiter cannot displace the running install's identity. This
 keeps `operation_owns_work` tied to the future that currently owns the durable
 state-machine operation, including while an older socket is disappearing.
-Admission tickets are reserved synchronously at receipt and released or
-skipped on cancellation, so scheduler polling order cannot let a later request
-overtake an earlier one. The bounded `snapshot_id` remains display text only;
+Admission tickets are reserved synchronously when a socket task calls the
+executor and released or skipped on cancellation, so reverse future polling
+cannot reorder callers that have reached that boundary. Receipt and submit
+remain separate task steps, so the public status attempt ID is assigned under
+the status lock at actual worker start; the order of real durable installs is
+therefore authoritative even if an earlier receiver task was descheduled before
+submission. At most two socket tasks may wait behind the executor's one running
+and one queued request; additional callers receive the explicit retryable
+`snapshot_admission_busy` outcome, and cancelled ticket retention stays bounded.
+The bounded `snapshot_id` remains display text only;
 cross-observer correlation uses a separate 64-hex SHA-256 fingerprint of the
 original ID. Older peers that omit it stay attempt-local instead of acquiring
 unsafe identity from a potentially colliding display label.
@@ -1806,6 +1813,11 @@ public and private listeners concurrently, so up to sixteen bounded HTTP
 requests may be in flight. Roster members beyond the eight-probe bound remain
 visible as `peer_limit` instead of disappearing. A healthy sender can therefore
 report outbound evidence for a learner whose public listener is still closed.
+Safety-changing maintenance-entry and restart-preparation requests do not use
+those five-second peer projections: they reread committed membership and the
+peer directory, then perform current authenticated probes under one absolute
+two-second preflight deadline. A roster or directory read that does not finish
+inside its own 500-millisecond share fails closed before mutation.
 Inactive status older than five minutes expires instead of continuing to claim
 work. An observation with an active monotonic deadline remains visible past
 five minutes through that deadline and for the producer's five-minute stalled

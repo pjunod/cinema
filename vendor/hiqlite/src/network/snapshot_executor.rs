@@ -2,7 +2,7 @@ use openraft::Raft;
 use openraft::RaftTypeConfig;
 use openraft::error::{InstallSnapshotError, RaftError};
 use openraft::raft::{InstallSnapshotRequest, InstallSnapshotResponse};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -18,6 +18,10 @@ type SnapshotResult<C> = Result<
     RaftError<<C as RaftTypeConfig>::NodeId, InstallSnapshotError>,
 >;
 
+// The executor itself still owns at most one running and one queued job.
+// Bound socket-owned callers waiting to claim the single queue slot as well.
+const MAX_ADMISSION_WAITERS: usize = 2;
+
 struct Job<Req, Resp> {
     request: Req,
     response: oneshot::Sender<Resp>,
@@ -26,23 +30,37 @@ struct Job<Req, Resp> {
 #[derive(Default)]
 struct AdmissionOrderState {
     serving: u64,
-    cancelled: BTreeSet<u64>,
+    // A cancelled ticket retains its waiter permit until the serving cursor
+    // reaches it. Otherwise one descheduled head waiter plus rapid churn in a
+    // second slot could accumulate an unbounded set of cancelled ticket IDs.
+    cancelled: BTreeMap<u64, tokio::sync::OwnedSemaphorePermit>,
 }
 
-#[derive(Default)]
 struct AdmissionOrder {
     next: AtomicU64,
     state: StdMutex<AdmissionOrderState>,
     changed: Notify,
+    waiter_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl AdmissionOrder {
-    fn reserve(self: &Arc<Self>) -> AdmissionTicket {
-        AdmissionTicket {
+    fn new() -> Self {
+        Self {
+            next: AtomicU64::new(0),
+            state: StdMutex::new(AdmissionOrderState::default()),
+            changed: Notify::new(),
+            waiter_slots: Arc::new(tokio::sync::Semaphore::new(MAX_ADMISSION_WAITERS)),
+        }
+    }
+
+    fn reserve(self: &Arc<Self>) -> Option<AdmissionTicket> {
+        let waiter_slot = Arc::clone(&self.waiter_slots).try_acquire_owned().ok()?;
+        Some(AdmissionTicket {
             order: Arc::clone(self),
             ticket: self.next.fetch_add(1, Ordering::AcqRel),
             active: true,
-        }
+            waiter_slot: Some(waiter_slot),
+        })
     }
 
     async fn wait_until_serving(&self, ticket: u64) {
@@ -62,7 +80,7 @@ impl AdmissionOrder {
         }
     }
 
-    fn release(&self, ticket: u64) {
+    fn release(&self, ticket: u64, waiter_slot: tokio::sync::OwnedSemaphorePermit) {
         let mut state = self
             .state
             .lock()
@@ -70,12 +88,12 @@ impl AdmissionOrder {
         if ticket == state.serving {
             state.serving = state.serving.wrapping_add(1);
             let mut serving = state.serving;
-            while state.cancelled.remove(&serving) {
+            while state.cancelled.remove(&serving).is_some() {
                 state.serving = state.serving.wrapping_add(1);
                 serving = state.serving;
             }
         } else if ticket > state.serving {
-            state.cancelled.insert(ticket);
+            state.cancelled.insert(ticket, waiter_slot);
         }
         drop(state);
         self.changed.notify_waiters();
@@ -86,6 +104,7 @@ struct AdmissionTicket {
     order: Arc<AdmissionOrder>,
     ticket: u64,
     active: bool,
+    waiter_slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl AdmissionTicket {
@@ -96,7 +115,9 @@ impl AdmissionTicket {
     fn release(&mut self) {
         if self.active {
             self.active = false;
-            self.order.release(self.ticket);
+            if let Some(waiter_slot) = self.waiter_slot.take() {
+                self.order.release(self.ticket, waiter_slot);
+            }
         }
     }
 }
@@ -128,6 +149,7 @@ impl<Req, Resp> NodeOwnedExecutor<Req, Resp> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SubmitError {
     AdmissionTimeout,
+    AdmissionBusy,
     ConnectionClosed,
     ExecutorClosed,
     ResponseClosed,
@@ -171,7 +193,7 @@ where
         Self {
             tx,
             admission_timeout,
-            admission_order: Arc::new(AdmissionOrder::default()),
+            admission_order: Arc::new(AdmissionOrder::new()),
             shutdown,
             task: Mutex::new(Some(task)),
         }
@@ -182,13 +204,16 @@ where
         request: Req,
         connection_closed: &'a mut watch::Receiver<bool>,
     ) -> impl Future<Output = Result<Resp, SubmitError>> + 'a {
-        // Reserve synchronously, before this future can be polled. Inbound
-        // socket handlers call `submit` immediately after receipt, so later
-        // tasks cannot overtake an earlier receipt merely by being polled
-        // first. Dropping the future releases or skips its ticket.
-        let mut admission_ticket = self.admission_order.reserve();
+        // Reserve synchronously, before this future can be polled, so callers
+        // that reach the executor retain FIFO order under reverse polling.
+        // Status ownership is assigned separately at actual worker start.
+        // Dropping the future releases or skips its bounded ticket.
+        let admission_ticket = self.admission_order.reserve();
         let admission_deadline = time::Instant::now() + self.admission_timeout;
         async move {
+            let Some(mut admission_ticket) = admission_ticket else {
+                return Err(SubmitError::AdmissionBusy);
+            };
             if *connection_closed.borrow() {
                 return Err(SubmitError::ConnectionClosed);
             }
@@ -644,6 +669,158 @@ mod tests {
         );
         let completed = &status.snapshot().observations[0];
         assert_eq!(completed.snapshot_id.as_deref(), Some("fifo-b"));
+        assert_eq!(completed.phase, crate::SnapshotTransportPhase::Complete);
+        assert!(!completed.operation_owns_work);
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn production_snapshot_status_follows_worker_start_after_pre_ticket_deschedule() {
+        use crate::store::state_machine::sqlite::TypeConfigSqlite;
+        use crate::transport_status::{InboundSnapshotAttempt, InboundSnapshotChunk};
+        use openraft::{SnapshotMeta, Vote};
+
+        fn track_attempt(
+            status: &crate::LocalSnapshotTransportStatus,
+            snapshot_id: &str,
+            socket_epoch: u64,
+        ) -> InboundSnapshotAttempt {
+            status
+                .inbound_received(InboundSnapshotChunk {
+                    raft_group: "sqlite",
+                    peer_node_id: 1,
+                    snapshot_id,
+                    offset: 0,
+                    len: 64,
+                    done: true,
+                    socket_epoch,
+                    deadline: time::Instant::now() + Duration::from_secs(30),
+                })
+                .expect("track inbound snapshot")
+        }
+
+        fn request(
+            status_attempt: InboundSnapshotAttempt,
+            snapshot_id: &str,
+        ) -> SnapshotExecutorRequest<TypeConfigSqlite> {
+            SnapshotExecutorRequest {
+                status_attempt: Some(status_attempt),
+                request: InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: SnapshotMeta {
+                        last_log_id: None,
+                        last_membership: Default::default(),
+                        snapshot_id: snapshot_id.to_owned(),
+                    },
+                    offset: 0,
+                    data: vec![0; 64],
+                    done: true,
+                },
+            }
+        }
+
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        // The first socket is deliberately descheduled after receipt but
+        // before calling submit, while the later receipt reaches the executor.
+        let earlier_receipt = track_attempt(&status, "descheduled-a", 1);
+        let later_receipt = track_attempt(&status, "descheduled-b", 2);
+        let gates = Arc::new([Semaphore::new(0), Semaphore::new(0)]);
+        let started = Arc::new(Mutex::new(Vec::<String>::new()));
+        let executor = Arc::new(start_snapshot_executor_with_installer::<
+            TypeConfigSqlite,
+            _,
+            _,
+        >(
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            status.clone(),
+            {
+                let gates = Arc::clone(&gates);
+                let started = Arc::clone(&started);
+                move |request| {
+                    let gate_index = match request.meta.snapshot_id.as_str() {
+                        "descheduled-a" => 0,
+                        "descheduled-b" => 1,
+                        other => panic!("unexpected admitted snapshot {other}"),
+                    };
+                    let gates = Arc::clone(&gates);
+                    let started = Arc::clone(&started);
+                    async move {
+                        started.lock().await.push(request.meta.snapshot_id.clone());
+                        gates[gate_index]
+                            .acquire()
+                            .await
+                            .expect("test gate")
+                            .forget();
+                        Ok(InstallSnapshotResponse { vote: request.vote })
+                    }
+                }
+            },
+        ));
+
+        let (_close_later, mut later_closed) = watch::channel(false);
+        let later = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(request(later_receipt, "descheduled-b"), &mut later_closed)
+                    .await
+            }
+        });
+        while started.lock().await.as_slice() != ["descheduled-b"] {
+            tokio::task::yield_now().await;
+        }
+        let later_owner = &status.snapshot().observations[0];
+        assert_eq!(later_owner.snapshot_id.as_deref(), Some("descheduled-b"));
+        assert!(later_owner.operation_owns_work);
+        let later_status_attempt_id = later_owner.attempt_id;
+
+        let (_close_earlier, mut earlier_closed) = watch::channel(false);
+        let earlier = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .submit(
+                        request(earlier_receipt, "descheduled-a"),
+                        &mut earlier_closed,
+                    )
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(started.lock().await.as_slice(), ["descheduled-b"]);
+
+        gates[1].add_permits(1);
+        assert!(
+            later
+                .await
+                .expect("later receipt caller")
+                .expect("later receipt response")
+                .is_ok()
+        );
+        while started.lock().await.as_slice() != ["descheduled-b", "descheduled-a"] {
+            tokio::task::yield_now().await;
+        }
+        let actual_later_owner = &status.snapshot().observations[0];
+        assert_eq!(
+            actual_later_owner.snapshot_id.as_deref(),
+            Some("descheduled-a")
+        );
+        assert!(actual_later_owner.operation_owns_work);
+        assert!(actual_later_owner.attempt_id > later_status_attempt_id);
+
+        gates[0].add_permits(1);
+        assert!(
+            earlier
+                .await
+                .expect("earlier receipt caller")
+                .expect("earlier receipt response")
+                .is_ok()
+        );
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.snapshot_id.as_deref(), Some("descheduled-a"));
         assert_eq!(completed.phase, crate::SnapshotTransportPhase::Complete);
         assert!(!completed.operation_owns_work);
         assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
@@ -1143,6 +1320,102 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(started.load(Ordering::SeqCst), 1);
         assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test]
+    async fn admission_waiter_budget_bounds_cancelled_ticket_retention_and_reports_busy() {
+        let gate = Arc::new(Semaphore::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let executor = Arc::new(NodeOwnedExecutor::start(Duration::from_secs(1), {
+            let gate = Arc::clone(&gate);
+            let started = Arc::clone(&started);
+            move |request: usize| {
+                let gate = Arc::clone(&gate);
+                let started = Arc::clone(&started);
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    gate.acquire().await.expect("test gate").forget();
+                    request
+                }
+            }
+        }));
+
+        let (_close_first, mut first_closed) = watch::channel(false);
+        let first = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move { executor.submit(1, &mut first_closed).await }
+        });
+        while started.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+
+        let (close_second, mut second_closed) = watch::channel(false);
+        let second = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move { executor.submit(2, &mut second_closed).await }
+        });
+        while !executor.tx.is_full() {
+            tokio::task::yield_now().await;
+        }
+
+        let (_close_head, mut head_closed) = watch::channel(false);
+        let head = executor.submit(3, &mut head_closed);
+        let (_close_cancelled, mut cancelled_closed) = watch::channel(false);
+        let cancelled = executor.submit(4, &mut cancelled_closed);
+        drop(cancelled);
+        assert_eq!(
+            executor.admission_order.waiter_slots.available_permits(),
+            0,
+            "a cancelled ticket behind a descheduled head retains its bounded slot"
+        );
+        assert_eq!(
+            executor
+                .admission_order
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .cancelled
+                .len(),
+            1
+        );
+
+        let next_before_busy = executor.admission_order.next.load(Ordering::Acquire);
+        let (_close_busy, mut busy_closed) = watch::channel(false);
+        assert_eq!(
+            executor.submit(5, &mut busy_closed).await,
+            Err(SubmitError::AdmissionBusy)
+        );
+        assert_eq!(
+            executor.admission_order.next.load(Ordering::Acquire),
+            next_before_busy,
+            "overflow must not allocate an unreachable ticket"
+        );
+
+        drop(head);
+        assert_eq!(
+            executor.admission_order.waiter_slots.available_permits(),
+            MAX_ADMISSION_WAITERS
+        );
+        assert!(
+            executor
+                .admission_order
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .cancelled
+                .is_empty()
+        );
+
+        close_second.send_replace(true);
+        assert_eq!(
+            second.await.expect("second caller task"),
+            Err(SubmitError::ConnectionClosed)
+        );
+        gate.add_permits(1);
+        assert_eq!(first.await.expect("first caller task"), Ok(1));
+        tokio::task::yield_now().await;
+        assert_eq!(started.load(Ordering::SeqCst), 1);
         assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
     }
 

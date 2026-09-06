@@ -283,24 +283,125 @@ pub(crate) async fn collect_aggregate(
     .await
 }
 
-/// Safety-changing operations re-read committed membership instead of acting
-/// on a diagnostics cache that may be several seconds old. Peer observations
-/// remain cache-only, as before; only roster authority is refreshed here.
+/// Safety-changing operations re-read committed membership and make fresh,
+/// authenticated observations of the bounded peer directory. The complete
+/// preflight shares one absolute deadline so a slow Store read cannot consume
+/// an unbounded amount of request time before peer probes begin.
 pub(crate) async fn collect_current_aggregate(
     state: &AppState,
 ) -> Result<ClusterOperationsAggregate, ApiError> {
-    collect_aggregate_with_cached_sources(
+    let deadline = deadline_after(AGGREGATE_TIMEOUT);
+    let membership_for_status = state.membership.clone();
+    let membership_for_directory = state.membership.clone();
+    let transport = PeerTransport::new(state.membership.clone());
+    let replication = state.replication.clone();
+    collect_current_aggregate_with_sources(
         &state.node_id,
-        || async {
-            match state.membership.status().await {
-                Ok(status) => MembershipStatusCacheRead::Fresh(Box::new(status)),
-                Err(_) => MembershipStatusCacheRead::Unavailable,
-            }
+        deadline,
+        move || async move {
+            membership_for_status
+                .status()
+                .await
+                .map_err(|error| error.to_string())
+        },
+        move || async move {
+            membership_for_directory
+                .operations_peers()
+                .await
+                .map_err(|error| error.to_string())
         },
         || local_snapshot(state),
-        || state.peer_status_cache.fresh(),
+        move |peers, deadline| async move {
+            collect_peer_statuses(peers, transport, replication, deadline).await
+        },
     )
     .await
+}
+
+async fn collect_current_aggregate_with_sources<
+    MembershipRead,
+    MembershipFuture,
+    DirectoryRead,
+    DirectoryFuture,
+    LocalRead,
+    LocalFuture,
+    CollectPeers,
+    CollectPeersFuture,
+>(
+    local_node_id: &str,
+    deadline: tokio::time::Instant,
+    membership_read: MembershipRead,
+    directory_read: DirectoryRead,
+    local_read: LocalRead,
+    collect_peers: CollectPeers,
+) -> Result<ClusterOperationsAggregate, ApiError>
+where
+    MembershipRead: FnOnce() -> MembershipFuture,
+    MembershipFuture: std::future::Future<Output = Result<MembershipStatus, String>>,
+    DirectoryRead: FnOnce() -> DirectoryFuture,
+    DirectoryFuture: std::future::Future<Output = Result<Vec<ActivityPeer>, String>>,
+    LocalRead: FnOnce() -> LocalFuture,
+    LocalFuture: std::future::Future<Output = ClusterNodeOperationsStatus>,
+    CollectPeers: FnOnce(Vec<ActivityPeer>, tokio::time::Instant) -> CollectPeersFuture,
+    CollectPeersFuture: std::future::Future<Output = BTreeMap<String, PeerStatusOutcome>>,
+{
+    let preflight = async {
+        let membership_deadline =
+            deadline.min(tokio::time::Instant::now() + PEER_DIRECTORY_TIMEOUT);
+        let membership = tokio::time::timeout_at(membership_deadline, membership_read())
+            .await
+            .map_err(|_| {
+                ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cluster_roster_timed_out",
+                    "the current committed cluster roster did not respond before the preflight deadline",
+                )
+            })?
+            .map_err(|_| {
+                ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cluster_roster_unavailable",
+                    "the current committed cluster roster is unavailable",
+                )
+            })?;
+
+        let directory_deadline = deadline.min(tokio::time::Instant::now() + PEER_DIRECTORY_TIMEOUT);
+        let peers = tokio::time::timeout_at(directory_deadline, directory_read())
+            .await
+            .map_err(|_| {
+                ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cluster_peer_directory_timed_out",
+                    "the current committed peer directory did not respond before the preflight deadline",
+                )
+            })?
+            .map_err(|_| {
+                ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cluster_peer_directory_unavailable",
+                    "the current committed peer directory is unavailable",
+                )
+            })?;
+
+        let local_status = local_read().await;
+        let remote = collect_peers(peers, deadline).await;
+        Ok(assemble_aggregate(
+            local_node_id,
+            membership,
+            local_status,
+            PeerStatusCacheRead::Fresh(remote),
+        ))
+    };
+
+    tokio::time::timeout_at(deadline, preflight)
+        .await
+        .map_err(|_| {
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cluster_preflight_timed_out",
+                "the current cluster preflight did not complete before its absolute deadline",
+            )
+        })?
 }
 
 async fn collect_aggregate_with_cached_sources<
@@ -343,6 +444,23 @@ where
     };
     let local_status = local_read().await;
     let remote = peer_read().await;
+    Ok(assemble_aggregate(
+        local_node_id,
+        membership,
+        local_status,
+        remote,
+    ))
+}
+
+fn assemble_aggregate<Remote>(
+    local_node_id: &str,
+    membership: MembershipStatus,
+    local_status: ClusterNodeOperationsStatus,
+    remote: Remote,
+) -> ClusterOperationsAggregate
+where
+    Remote: Into<PeerStatusCacheRead>,
+{
     let observed_at_unix_ms = unix_ms();
     let observations = join_observations(
         &membership,
@@ -353,14 +471,14 @@ where
     );
     let verdict = rollout_verdict(&membership, &observations);
     let maintenance = maintenance_entry_verdicts(&membership, &observations);
-    Ok(ClusterOperationsAggregate {
+    ClusterOperationsAggregate {
         schema_version: 1,
         observed_at_unix_ms,
         membership,
         nodes: observations,
         verdict,
         maintenance,
-    })
+    }
 }
 
 pub(crate) async fn support_bundle(
@@ -2369,78 +2487,70 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_request_reads_only_node_owned_projections() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (_app, mut state) = crate::http::tests::test_app_with_state();
+        state.node_id = "node-1".to_owned();
 
-        let membership_cache_reads = std::sync::Arc::new(AtomicUsize::new(0));
-        let local_process_reads = std::sync::Arc::new(AtomicUsize::new(0));
-        let peer_cache_reads = std::sync::Arc::new(AtomicUsize::new(0));
-        let log_buffer_reads = std::sync::Arc::new(AtomicUsize::new(0));
-
-        let collect = |membership_cache_reads: std::sync::Arc<AtomicUsize>,
-                       local_process_reads: std::sync::Arc<AtomicUsize>,
-                       peer_cache_reads: std::sync::Arc<AtomicUsize>| async move {
-            collect_aggregate_with_cached_sources(
-                "node-1",
-                move || async move {
-                    membership_cache_reads.fetch_add(1, Ordering::Relaxed);
-                    MembershipStatusCacheRead::Fresh(Box::new(test_membership("node-1", 2)))
-                },
-                move || async move {
-                    local_process_reads.fetch_add(1, Ordering::Relaxed);
-                    test_local_status("node-1", Some(1))
-                },
-                move || async move {
-                    peer_cache_reads.fetch_add(1, Ordering::Relaxed);
-                    PeerStatusCacheRead::Fresh(BTreeMap::new())
-                },
-            )
+        // The fixture is deliberately not a replicated cluster. A production
+        // request that reaches MembershipManager::status cannot succeed, and
+        // its current peer directory is empty. Seed only the two node-owned
+        // projections that GET and support are allowed to consume.
+        assert!(state.membership.status().await.is_err());
+        assert!(state
+            .membership
+            .operations_peers()
             .await
-        };
+            .expect("unclustered peer directory")
+            .is_empty());
+        state
+            .membership_status_cache
+            .store(test_membership("node-1", 2))
+            .await;
+        state
+            .peer_status_cache
+            .store(&BTreeMap::from([(
+                "node-2".to_owned(),
+                PeerStatusOutcome {
+                    node_id: "node-2".to_owned(),
+                    state: ObservationState::Answered,
+                    status: Some(test_local_status("node-2", Some(2))),
+                    transport: None,
+                },
+            )]))
+            .await;
 
-        let (headers, Json(aggregate)) = aggregate_response_with(|| {
-            collect(
-                membership_cache_reads.clone(),
-                local_process_reads.clone(),
-                peer_cache_reads.clone(),
-            )
-        })
-        .await
-        .expect("cached aggregate response");
+        let (headers, Json(aggregate)) = aggregate(test_admin(), State(state.clone()))
+            .await
+            .expect("production aggregate handler must use node-owned projections");
         assert_eq!(aggregate.nodes.len(), 2);
+        assert_eq!(aggregate.nodes[1].observation, ObservationState::Answered);
         assert_eq!(
             headers.get(header::CACHE_CONTROL),
             Some(&HeaderValue::from_static("private, no-store"))
         );
 
-        let response = support_bundle_response_with(
-            || {
-                collect(
-                    membership_cache_reads.clone(),
-                    local_process_reads.clone(),
-                    peer_cache_reads.clone(),
-                )
-            },
-            || {
-                log_buffer_reads.fetch_add(1, Ordering::Relaxed);
-                Vec::new()
-            },
-        )
-        .await
-        .expect("cached support response");
+        let response = support_bundle(test_admin(), State(state))
+            .await
+            .expect("production support handler must use node-owned projections");
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
             Some(&HeaderValue::from_static("application/zip"))
         );
 
-        assert_eq!(membership_cache_reads.load(Ordering::Relaxed), 2);
-        assert_eq!(local_process_reads.load(Ordering::Relaxed), 2);
-        assert_eq!(peer_cache_reads.load(Ordering::Relaxed), 2);
-        assert_eq!(log_buffer_reads.load(Ordering::Relaxed), 1);
-
-        // Supplemental wiring guard: the behavioral seam above owns each
-        // complete response. Production handlers may select only the cache-only
-        // collector (and bounded log ring for support) before entering it.
+        // Supplemental capability guard: both real handlers above execute the
+        // production collector. Keep its narrow wiring explicit so Store and
+        // peer transports cannot be slipped in beside the projection reads.
         let source = include_str!("cluster_operations.rs");
+        let collector = source
+            .split("pub(crate) async fn collect_aggregate(")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Safety-changing operations").next())
+            .expect("read-only collector source");
+        assert!(collector.contains("state.membership_status_cache.fresh()"));
+        assert!(collector.contains("state.peer_status_cache.fresh()"));
+        assert!(!collector.contains("state.membership.status()"));
+        assert!(!collector.contains("operations_peers"));
+        assert!(!collector.contains("collect_peer_statuses"));
+
         let aggregate_handler = source
             .split("pub(crate) async fn aggregate(")
             .nth(1)
@@ -2460,6 +2570,167 @@ mod tests {
         assert!(support_handler.contains("state.cluster_logs.tail(\"trace\", 200)"));
         assert!(!support_handler.contains("state.membership"));
         assert!(!support_handler.contains("collect_peer_statuses"));
+    }
+
+    #[tokio::test]
+    async fn mutation_preflight_refreshes_roster_directory_and_bounded_peer_observations() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let membership_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let directory_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let public_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let private_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let peers = (2..=13)
+            .map(|index| ActivityPeer {
+                node_id: format!("node-{index}"),
+                raft_id: index,
+                http_base: Some(format!("http://node-{index}:32400")),
+                reachable: true,
+            })
+            .collect::<Vec<_>>();
+        let deadline = tokio::time::Instant::now() + AGGREGATE_TIMEOUT;
+
+        let aggregate = collect_current_aggregate_with_sources(
+            "node-1",
+            deadline,
+            {
+                let membership_calls = membership_calls.clone();
+                move || async move {
+                    membership_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(test_membership("node-1", 13))
+                }
+            },
+            {
+                let directory_calls = directory_calls.clone();
+                move || {
+                    let peers = peers.clone();
+                    async move {
+                        directory_calls.fetch_add(1, Ordering::Relaxed);
+                        Ok(peers)
+                    }
+                }
+            },
+            || async { test_local_status("node-1", Some(1)) },
+            {
+                let public_calls = public_calls.clone();
+                let private_calls = private_calls.clone();
+                move |peers, received_deadline| async move {
+                    assert_eq!(received_deadline, deadline);
+                    collect_peer_statuses_with_sources(
+                        peers,
+                        received_deadline,
+                        move |peer, _peer_deadline| {
+                            public_calls.fetch_add(1, Ordering::Relaxed);
+                            async move {
+                                PeerStatusOutcome {
+                                    node_id: peer.node_id,
+                                    state: ObservationState::Answered,
+                                    status: None,
+                                    transport: None,
+                                }
+                            }
+                        },
+                        move |_raft_id| {
+                            private_calls.fetch_add(1, Ordering::Relaxed);
+                            async { Ok(None) }
+                        },
+                    )
+                    .await
+                }
+            },
+        )
+        .await
+        .expect("fresh bounded mutation preflight");
+
+        assert_eq!(membership_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(directory_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(public_calls.load(Ordering::Relaxed), MAX_OPERATIONS_PEERS);
+        assert_eq!(private_calls.load(Ordering::Relaxed), MAX_OPERATIONS_PEERS);
+        assert_eq!(aggregate.nodes.len(), 13);
+        assert_eq!(
+            aggregate
+                .nodes
+                .iter()
+                .filter(|node| node.observation == ObservationState::PeerLimit)
+                .count(),
+            4
+        );
+
+        let source = include_str!("cluster_operations.rs");
+        let current_collector = source
+            .split_once("pub(crate) async fn collect_current_aggregate(")
+            .expect("current preflight collector")
+            .1
+            .split_once("async fn collect_current_aggregate_with_sources")
+            .expect("current preflight collector end")
+            .0;
+        assert!(current_collector.contains("membership_for_status"));
+        assert!(current_collector.contains(".status()"));
+        assert!(current_collector.contains("membership_for_directory"));
+        assert!(current_collector.contains(".operations_peers()"));
+        assert!(current_collector.contains("PeerTransport::new"));
+        assert!(current_collector.contains("collect_peer_statuses("));
+        let restart = source
+            .split_once("pub(crate) async fn prepare_restart(")
+            .expect("restart handler")
+            .1
+            .split_once("fn restart_preparation_response(")
+            .expect("restart handler end")
+            .0;
+        assert!(restart.contains("collect_current_aggregate(&state).await?"));
+        let maintenance_source = include_str!("cluster.rs");
+        let maintenance = maintenance_source
+            .split_once("pub async fn enter_maintenance(")
+            .expect("maintenance handler")
+            .1
+            .split_once("pub async fn exit_maintenance(")
+            .expect("maintenance handler end")
+            .0;
+        assert!(maintenance.contains("collect_current_aggregate(&state).await?"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mutation_preflight_bounds_the_current_membership_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let directory_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let probe_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let started = tokio::time::Instant::now();
+        let result = collect_current_aggregate_with_sources(
+            "node-1",
+            started + AGGREGATE_TIMEOUT,
+            || async { std::future::pending::<Result<MembershipStatus, String>>().await },
+            {
+                let directory_calls = directory_calls.clone();
+                move || async move {
+                    directory_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(Vec::new())
+                }
+            },
+            || async { test_local_status("node-1", Some(1)) },
+            {
+                let probe_calls = probe_calls.clone();
+                move |_peers, _deadline| async move {
+                    probe_calls.fetch_add(1, Ordering::Relaxed);
+                    BTreeMap::new()
+                }
+            },
+        )
+        .await;
+
+        match result.expect_err("hung membership read must fail closed") {
+            ApiError::Typed { status, code, .. } => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(code, "cluster_roster_timed_out");
+            }
+            error => panic!("unexpected membership deadline error: {error:?}"),
+        }
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            PEER_DIRECTORY_TIMEOUT
+        );
+        assert_eq!(directory_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(probe_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -3101,6 +3372,16 @@ mod tests {
                 restart_commands: Vec::new(),
             },
         }
+    }
+
+    fn test_admin() -> AdminUser {
+        AdminUser(plurx_core::domain::User {
+            id: 1,
+            username: "cluster-admin".to_owned(),
+            password_hash: String::new(),
+            is_admin: true,
+            created_at: 1,
+        })
     }
 
     fn test_membership(local_node_id: &str, voters: usize) -> MembershipStatus {

@@ -192,37 +192,64 @@
     // attempt-local rather than gaining unsafe cross-observer correlation.
     const identity=observation=>fingerprint(observation)
       ?`snapshot:${fingerprint(observation)}`:attemptIdentity(observation);
-    const identityFreshness=new Map();
+    const textCompare=(left,right)=>{
+      const stable=value=>value===undefined?"0:undefined":value===null?"1:null":
+        `${typeof value}:${String(value)}`;
+      left=stable(left);right=stable(right);
+      return left<right?-1:left>right?1:0;
+    };
+    const acknowledgedComplete=observation=>observation.phase==="complete"&&
+      observation.direction==="outbound"&&observation.acknowledged_offset!==null&&
+      observation.acknowledged_offset!==undefined;
+    const tieBreak=(left,right)=>{
+      const acknowledged=Number(acknowledgedComplete(right))-Number(acknowledgedComplete(left));
+      if(acknowledged) return acknowledged;
+      for(const field of ["direction","observing_node_id","peer_node_id","raft_group",
+        "boot_id","attempt_id","socket_epoch","snapshot_id","snapshot_fingerprint",
+        "attempted_offset","acknowledged_offset","locally_received_bytes","total_bytes",
+        "attempt_age_ms","last_acknowledgement_age_ms","last_local_receive_age_ms",
+        "active_deadline_remaining_ms","reconnect_count","retry_count",
+        "last_error_category","operation_owns_work"]){
+        const compared=textCompare(left[field],right[field]);
+        if(compared) return compared;
+      }
+      return 0;
+    };
+    const withinIdentity=(left,right)=>
+      (priority[right.phase]||0)-(priority[left.phase]||0)||
+      age(left)-age(right)||tieBreak(left,right);
+    const groups=new Map();
     candidates.forEach(observation=>{
       const key=identity(observation);
-      identityFreshness.set(key,Math.min(identityFreshness.get(key)??Infinity,age(observation)));
+      if(!groups.has(key)) groups.set(key,{
+        fingerprint:fingerprint(observation),observations:[],
+      });
+      groups.get(key).observations.push(observation);
     });
-    candidates.sort((left,right)=>{
-      const leftIdentity=identity(left),rightIdentity=identity(right);
-      if(leftIdentity!==rightIdentity){
-        const identityAge=identityFreshness.get(leftIdentity)-identityFreshness.get(rightIdentity);
-        if(identityAge) return identityAge;
-      }
-      const freshness=age(left)-age(right);
-      const leftTerminal=left.phase==="failed"||left.phase==="complete";
-      const rightTerminal=right.phase==="failed"||right.phase==="complete";
-      if(leftTerminal&&rightTerminal){
-        const sameSnapshot=fingerprint(left)&&fingerprint(left)===fingerprint(right);
-        const leftReceiverComplete=left.phase==="complete"&&left.direction==="inbound";
-        const rightReceiverComplete=right.phase==="complete"&&right.direction==="inbound";
-        if(sameSnapshot&&leftReceiverComplete!==rightReceiverComplete)
-          return leftReceiverComplete?-1:1;
-        if(freshness) return freshness;
-      }
-      // Observers sample independently, so tiny age differences inside one
-      // snapshot are not ordering authority. Once the gap exceeds one complete
-      // five-second cache window, however, the fresh active attempt supersedes
-      // an old stalled/nonterminal view before phase severity is considered.
-      if(leftIdentity===rightIdentity&&Math.abs(freshness)>5000) return freshness;
-      return (priority[right.phase]||0)-(priority[left.phase]||0)||
-        freshness;
+    const representatives=[];
+    groups.forEach(group=>{
+      let eligible=group.observations;
+      // A receiver that durably completed this exact fingerprint disproves a
+      // sender's failure to observe its reply. Apply that exception once at
+      // the group boundary; it does not cover inbound failures, unrelated
+      // fingerprints, or Complete-vs-Complete evidence.
+      const receiverComplete=eligible.some(observation=>
+        observation.phase==="complete"&&observation.direction==="inbound");
+      if(group.fingerprint&&receiverComplete)
+        eligible=eligible.filter(observation=>
+          !(observation.phase==="failed"&&observation.direction==="outbound"));
+      const freshest=Math.min(...eligible.map(age));
+      const current=eligible.filter(observation=>age(observation)<=freshest+5000);
+      current.sort(withinIdentity);
+      representatives.push(current[0]);
     });
-    return candidates[0]||null;
+    // Identity representatives form one total order: freshness first, then
+    // phase severity, then stable observation fields. Input row order cannot
+    // change the selected recovery explanation.
+    representatives.sort((left,right)=>
+      age(left)-age(right)||
+      (priority[right.phase]||0)-(priority[left.phase]||0)||tieBreak(left,right));
+    return representatives[0]||null;
   }
   function clusterTransportExplanation(ops,raftId,boundedReadReady){
     const observation=clusterTransportObservation(ops,raftId);

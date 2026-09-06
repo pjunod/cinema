@@ -429,6 +429,9 @@ fn record_inbound_submit_error<C: openraft::RaftTypeConfig>(
                 "snapshot_admission_timeout",
             )
         }
+        crate::network::snapshot_executor::SubmitError::AdmissionBusy => {
+            crate::transport_status::InboundSnapshotDisposition::Retrying("snapshot_admission_busy")
+        }
         crate::network::snapshot_executor::SubmitError::ConnectionClosed => {
             crate::transport_status::InboundSnapshotDisposition::Retrying(
                 "snapshot_connection_closed",

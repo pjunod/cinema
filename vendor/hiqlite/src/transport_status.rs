@@ -149,7 +149,12 @@ pub(crate) struct OutboundSnapshotAttempt {
 pub(crate) struct InboundSnapshotAttempt {
     raft_group: &'static str,
     peer_node_id: u64,
-    attempt_id: u64,
+    // Assigned only when the node-owned executor starts this logical
+    // snapshot. Receipt order is not execution order across socket tasks.
+    status_attempt_id: Arc<AtomicU64>,
+    // The matching status generation at receipt, used only to publish an
+    // admission error before this token ever reaches the worker.
+    observed_attempt_id: u64,
     snapshot_id: String,
     snapshot_identity_fingerprint: [u8; 32],
     socket_epoch: u64,
@@ -778,17 +783,11 @@ impl LocalSnapshotTransportStatus {
         let changed_snapshot = existing
             .and_then(|observation| observation.snapshot_identity_fingerprint.as_ref())
             != Some(&snapshot_identity_fingerprint);
-        let existing_attempt_id = existing.map(|observation| observation.attempt_id);
         let existing_end = existing.and_then(|observation| observation.attempted_offset);
         let existing_started = existing.and_then(|observation| observation.attempt_started);
-        if changed_snapshot {
-            state.next_inbound_attempt = state.next_inbound_attempt.saturating_add(1);
-        }
-        let attempt_id = if changed_snapshot {
-            state.next_inbound_attempt
-        } else {
-            existing_attempt_id.unwrap_or(state.next_inbound_attempt)
-        };
+        let observed_attempt_id = existing
+            .filter(|_| !changed_snapshot)
+            .map_or(0, |observation| observation.attempt_id);
         let previous_end = if changed_snapshot {
             0
         } else {
@@ -799,7 +798,8 @@ impl LocalSnapshotTransportStatus {
         let attempt = InboundSnapshotAttempt {
             raft_group,
             peer_node_id,
-            attempt_id,
+            status_attempt_id: Arc::new(AtomicU64::new(0)),
+            observed_attempt_id,
             snapshot_id,
             snapshot_identity_fingerprint,
             socket_epoch,
@@ -985,17 +985,49 @@ impl LocalSnapshotTransportStatus {
                 .observations
                 .insert(key.clone(), empty_observation(now));
         }
+        let status_attempt_id = if admit {
+            let assigned = attempt.status_attempt_id.load(Ordering::Acquire);
+            if assigned != 0 {
+                assigned
+            } else {
+                let same_snapshot = state.observations.get(&key).is_some_and(|observation| {
+                    observation.attempt_id != 0
+                        && observation.snapshot_identity_fingerprint
+                            == Some(attempt.snapshot_identity_fingerprint)
+                });
+                let assigned = if same_snapshot {
+                    state
+                        .observations
+                        .get(&key)
+                        .map_or(0, |observation| observation.attempt_id)
+                } else {
+                    state.next_inbound_attempt = state.next_inbound_attempt.saturating_add(1);
+                    state.next_inbound_attempt
+                };
+                attempt.status_attempt_id.store(assigned, Ordering::Release);
+                assigned
+            }
+        } else {
+            let assigned = attempt
+                .status_attempt_id
+                .load(Ordering::Acquire)
+                .max(attempt.observed_attempt_id);
+            if assigned == 0 {
+                return;
+            }
+            assigned
+        };
         let Some(observation) = state.observations.get_mut(&key) else {
             return;
         };
-        if observation.attempt_id != attempt.attempt_id {
+        if observation.attempt_id != status_attempt_id {
             if !admit
                 || observation.operation_owns_work
-                || attempt.attempt_id < observation.attempt_id
+                || status_attempt_id < observation.attempt_id
             {
                 return;
             }
-            reset_from_inbound_attempt(observation, attempt, now);
+            reset_from_inbound_attempt(observation, attempt, status_attempt_id, now);
         }
         let previous = observation.phase;
         mutate(observation, now);
@@ -1158,10 +1190,11 @@ fn empty_observation(now: Instant) -> Observation {
 fn reset_from_inbound_attempt(
     observation: &mut Observation,
     attempt: &InboundSnapshotAttempt,
+    status_attempt_id: u64,
     now: Instant,
 ) {
     *observation = empty_observation(now);
-    observation.attempt_id = attempt.attempt_id;
+    observation.attempt_id = status_attempt_id;
     observation.snapshot_id = Some(attempt.snapshot_id.clone());
     observation.snapshot_identity_fingerprint = Some(attempt.snapshot_identity_fingerprint);
     observation.socket_epoch = attempt.socket_epoch;
@@ -1526,15 +1559,18 @@ mod tests {
             literal_attempt.snapshot_identity_fingerprint,
             oversized_attempt.snapshot_identity_fingerprint
         );
-        assert!(literal_attempt.attempt_id > oversized_attempt.attempt_id);
+        let oversized_status_attempt_id =
+            oversized_attempt.status_attempt_id.load(Ordering::Acquire);
 
         status.inbound_admitted(&literal_attempt, false, deadline);
+        let literal_status_attempt_id = literal_attempt.status_attempt_id.load(Ordering::Acquire);
+        assert!(literal_status_attempt_id > oversized_status_attempt_id);
         let literal = &status.snapshot().observations[0];
         assert_eq!(
             literal.snapshot_id.as_deref(),
             Some(colliding_display.as_str())
         );
-        assert_eq!(literal.attempt_id, literal_attempt.attempt_id);
+        assert_eq!(literal.attempt_id, literal_status_attempt_id);
         assert_eq!(literal.attempted_offset, Some(8));
         assert_eq!(literal.retry_count, 0);
         assert_eq!(
@@ -1957,7 +1993,10 @@ mod tests {
 
         let observation = &status.snapshot().observations[0];
         assert_eq!(observation.snapshot_id.as_deref(), Some("new"));
-        assert_eq!(observation.attempt_id, new.attempt_id);
+        assert_eq!(
+            observation.attempt_id,
+            new.status_attempt_id.load(Ordering::Acquire)
+        );
         assert_eq!(observation.attempted_offset, Some(8));
         assert_eq!(observation.locally_received_bytes, None);
         assert_eq!(observation.phase, SnapshotTransportPhase::Installing);
