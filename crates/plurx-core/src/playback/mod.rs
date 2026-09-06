@@ -15,10 +15,14 @@ use crate::domain::MediaFile;
 
 pub mod caps;
 pub mod desired;
+pub mod intent;
 use crate::transcode::OutputGrade;
 pub use caps::{DeviceCaps, LearnedLimit, LegacyCaps, Transfer, VideoCaps};
 pub use desired::{
     DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,
+};
+pub use intent::{
+    IntentAxis, IntentEnvelopeError, IntentOrder, MediaIntentEnvelope, MAX_LIFETIME_ID,
 };
 
 /// Built-in device profiles, parsed once from the embedded TOML.
