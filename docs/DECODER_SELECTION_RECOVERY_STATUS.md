@@ -24,9 +24,9 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | M1 code head `cc464663`: selector matrix 34/34, macOS bound FFprobe collector 14/14, Linux collector 15/15, neutral observation policy 1/1, ownership inventory 7/7, status 5/5, formatting, diff check, and workspace all-target Clippy with denied warnings pass |
-| Exact receipt | `a129560e`: history 1,356, catalog 24/30/1,433, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass; one reviewer approved it and the other required a more precise split evidence map for `cc464663` |
+| Exact receipt | `006d832d`: history 1,356, catalog 24/30/1,434, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass; it splits `cc464663` across its real Rust and catalog evidence as required by adversarial review |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `bb25576c`: 20 passed, 3 failed, 2 declared skips; the rejected run found stale ownership counts and two test-only Clippy findings, then exhausted disk during cluster compilation after all preceding cluster tests passed |
-| Blocker | The final evidence-map review finding is being applied; the first exact-head full attempt was intentionally interrupted in its cold Rust build rather than treating a superseded tree as qualification |
+| Blocker | Exact-head adversarial re-review and the clean isolated full suite remain; the first attempt was intentionally interrupted rather than treating a superseded tree as qualification |
 
 ## Milestones
 
@@ -527,6 +527,7 @@ lane and focused tests provide earlier feedback.
 | `d6ecbfb7` | Exact repair receipt effort hook | Pass · catalog 24/30/1,432, operations 211/211, formatting, status contract, and pinned all-target workspace compile; the parent-only history audit rejected its then-unmapped documentation-only subject, which the exact successor maps |
 | `a129560e` | Exact receipt effort hook and adversarial evidence-map review | Hook pass · history 1,356, catalog 24/30/1,433, operations 211/211, formatting, status contract, and pinned all-target workspace compile; one reviewer approved and one found that `cc464663` needed separate Rust plus catalog ownership evidence |
 | `a129560e` | Isolated `make validate-full` attempt | Superseded and intentionally interrupted during the cold Rust build after catalog, history, operations, benchmark, version, and input-fence checks passed; no qualification claimed |
+| `006d832d` | Adversarial evidence-map finding plus effort hook | Finding applied · `cc464663` now names both playback/Rust and validation/catalog coverage; history 1,356, catalog 24/30/1,434, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass |
 
 ## Remaining evidence before release
 
