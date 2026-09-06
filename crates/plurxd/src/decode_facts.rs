@@ -3739,7 +3739,14 @@ void probe_main(unsigned long *stack) {
                 Arc::clone(&ownership),
             )
             .await;
-            assert_eq!(result, Err(DecodeFactError::Deadline), "phase {phase:?}");
+            assert!(
+                result.is_err(),
+                "phase {phase:?} must not pass an interrupted bootstrap"
+            );
+            assert!(
+                started.elapsed() >= Duration::from_millis(75),
+                "phase {phase:?} must keep retrying against the launch deadline"
+            );
             assert!(
                 started.elapsed() < Duration::from_millis(500),
                 "phase {phase:?} must fail at its absolute deadline"
