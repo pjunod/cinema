@@ -253,6 +253,7 @@ const USER_METHODS: &[&str] = &[
     "demote_user_preserving_admin",
     "delete_tokens_for_user",
     "create_token",
+    "create_token_if_password_matches",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -20728,6 +20729,58 @@ async fn user_contract_runs_through_dyn_store() {
             .delete_user(disposable.id)
             .await
             .expect("raw user delete"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn login_token_insert_requires_the_verified_password_version() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("RacingLogin", "verified-hash", false)
+            .await
+            .expect("create racing login user");
+        let verified_password_hash = user.password_hash.clone();
+
+        assert!(store
+            .reset_password_and_revoke_tokens(user.id, "replacement-hash", None)
+            .await
+            .expect("commit concurrent password reset"));
+        assert!(
+            !store
+                .create_token_if_password_matches(
+                    "stale-password-token",
+                    user.id,
+                    Some("interleaving-regression"),
+                    &verified_password_hash,
+                )
+                .await
+                .expect("reject token from stale password verification"),
+            "backend {backend} accepted a token after its verified password version was replaced"
+        );
+        assert!(store
+            .user_for_token("stale-password-token")
+            .await
+            .expect("look up rejected token")
+            .is_none());
+        assert!(store
+            .create_token_if_password_matches(
+                "current-password-token",
+                user.id,
+                None,
+                "replacement-hash",
+            )
+            .await
+            .expect("insert token for current password version"));
+        assert_eq!(
+            store
+                .user_for_token("current-password-token")
+                .await
+                .expect("look up current token")
+                .expect("current token exists")
+                .id,
+            user.id
+        );
     })
     .await;
 }

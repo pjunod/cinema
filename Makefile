@@ -804,6 +804,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::rollback_heartbeat_cannot_republish_retired_cache_revocation_capabilities \
 	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::rollback_credential_mutation_is_rejected_before_readiness_refresh \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
 	  -- --exact
@@ -874,6 +877,11 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract \
 	  clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure \
+	  -- --exact --test-threads=1
+	$(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
+	  --test store_contract \
+	  login_token_insert_requires_the_verified_password_version \
 	  -- --exact --test-threads=1
 	$(CARGO) test --locked -p plurx-core --lib \
 	  store::sqlite::users::tests::concurrent_admin_demote_and_delete_preserve_one_administrator \

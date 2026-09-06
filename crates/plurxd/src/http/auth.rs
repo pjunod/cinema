@@ -54,8 +54,15 @@ pub async fn login(
     let hash = auth::hash_token(&token);
     state
         .store
-        .create_token(&hash, user.id, req.device.as_deref())
-        .await?;
+        .create_token_if_password_matches(
+            &hash,
+            user.id,
+            req.device.as_deref(),
+            &user.password_hash,
+        )
+        .await?
+        .then_some(())
+        .ok_or(ApiError::Unauthorized)?;
     state
         .cache_only_admin_proofs
         .record_authenticated(proof_ticket, hash, &user);

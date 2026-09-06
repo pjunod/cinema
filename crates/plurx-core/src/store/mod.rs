@@ -1192,6 +1192,16 @@ pub trait UserStore: Send + Sync + 'static {
         user_id: i64,
         device: Option<&str>,
     ) -> Result<(), StoreError>;
+    /// Register a login token only if the user's password is still the exact
+    /// version the caller authenticated. This closes the interval in which a
+    /// concurrent reset could otherwise finish before token insertion.
+    async fn create_token_if_password_matches(
+        &self,
+        token_hash: &str,
+        user_id: i64,
+        device: Option<&str>,
+        expected_password_hash: &str,
+    ) -> Result<bool, StoreError>;
     /// Resolve a token hash to its user (touching `last_seen_at`).
     async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError>;
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError>;

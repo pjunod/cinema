@@ -249,6 +249,27 @@ impl UserStore for SqliteStore {
         .await
     }
 
+    async fn create_token_if_password_matches(
+        &self,
+        token_hash: &str,
+        user_id: i64,
+        device: Option<&str>,
+        expected_password_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let token_hash = token_hash.to_owned();
+        let device = device.map(str::to_owned);
+        let expected_password_hash = expected_password_hash.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "INSERT INTO tokens (token_hash, user_id, device) \
+                 SELECT ?1, id, ?2 FROM users \
+                 WHERE id = ?3 AND password_hash = ?4",
+                params![token_hash, device, user_id, expected_password_hash],
+            )? > 0)
+        })
+        .await
+    }
+
     async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
         let token_hash = token_hash.to_owned();
         self.with_conn(move |conn| {
