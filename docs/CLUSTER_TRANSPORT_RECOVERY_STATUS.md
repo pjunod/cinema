@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | [!66](http://192.168.4.7:3000/noirr/plurx/pulls/66) | `80a146bc` passed the complete focused lane and three clean exact-candidate reviews. Its first effort gate exposed five stale module-wide ownership counts plus one inert test string colliding with an established static source contract. The narrow replacement inventories every added task, timer, process-shaped status call, and Barrier wait, and splits that test string without expanding the pre-existing parser. Local preflight and exact-candidate review are in progress | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
+| M4 · transport status | `codex/cluster-transport-m4` | [!66](http://192.168.4.7:3000/noirr/plurx/pulls/66) | final clean candidate `98ca24fc` passed the complete focused lane, exact pinned workspace check and denied-warning Clippy, static/operations/web preflight, and three exact-candidate adversarial reviews after both rationale findings were corrected; replacement effort gate is next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | the reviewed campaign implementation has been rebuilt in an independent clone on the latest M4 line and passes pinned workspace check and denied-warning Clippy; it will move to the replacement M4 commit before qualification | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -225,6 +225,15 @@ warnings during a later quorum loss. The correction reads the locally applied
 permanent marker before any quorum preflight, returns a terminal activation
 state, and exits the worker. A paused-time regression advances 30 seconds and
 proves that a completed worker performs exactly one callback.
+The first effort gate for reviewed candidate `80a146bc` then exposed five stale
+module-wide ownership counts plus an inert test string that duplicated a raw
+production signature. Final candidate `98ca24fc` inventories all new tasks,
+timers, status-shaped calls, and Barrier waits; splits only the test delimiter;
+and leaves the established validation parser unchanged. Its complete focused
+lane, 116 validation tests, 197 operations contracts, web contracts, workspace
+all-target check, denied-warning Clippy, formatting, diff hygiene, and history
+audit pass on Rust 1.97.1. All three exact-SHA adversarial reviews are clean
+after correcting two ownership-rationale wording findings.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
