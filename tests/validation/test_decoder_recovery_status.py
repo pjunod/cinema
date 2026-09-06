@@ -185,7 +185,12 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("macOS collector 20/20", self.status)
         self.assertIn("pinned Linux collector 36/36", self.status)
         self.assertIn("Unchanged-path evidence last run at `22d89d27`", self.status)
-        self.assertIn("Changes after `22d89d27` are confined", self.status)
+        self.assertIn(
+            "Changes after `22d89d27` affect only Linux response-loop "
+            "test-evidence plumbing",
+            self.status,
+        )
+        self.assertIn("whose shipping defaults are inert", self.status)
         self.assertIn("one-shot exec supervision", self.status)
         self.assertIn("invalidated first notification", self.status)
         self.assertIn("source-level enforcement", self.status)
