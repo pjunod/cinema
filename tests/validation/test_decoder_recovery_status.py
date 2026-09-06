@@ -16,6 +16,8 @@ FLEET = ROOT / "tests/playback/decoder-health/fleet-ffmpeg-2026-09-05.toml"
 MEDIA = ROOT / "tests/playback/decoder-media-baseline-2026-09-05.toml"
 HARNESS = ROOT / "scripts/decoder-diagnostic-qualification"
 FORGEJO_TASK_BASE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
+M0_QUALIFIED_HEAD = "59d0a4d1"
+M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 
 
 def normalized(text: str) -> str:
@@ -144,7 +146,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_TASK_BASE, self.status)
         self.assertIn("Historical pre-rebase head `01368ce1`", self.status)
-        self.assertIn("has not yet run its final suite", self.status)
+        self.assertIn(M0_FORGEJO_PR, self.status)
+        self.assertIn(
+            f"Exact code head `{M0_QUALIFIED_HEAD}` passed `make validate-full`: "
+            "23 passed, 0 failed, 2 declared skips",
+            self.status,
+        )
+        self.assertNotIn("has not yet run its final suite", self.status)
         for falsely_remapped_receipt in (
             "`d528794b` | `make validate-full`",
             "`1ad59932` | Independent",

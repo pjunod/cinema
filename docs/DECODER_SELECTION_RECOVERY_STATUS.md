@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 post-rebase review repairs in progress · **Updated:** 2026-09-05 ·
+**Status:** M0 qualified; Forgejo PR #62 pending effort-gate merge · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -20,18 +20,18 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M0 — capture baseline and freeze diagnostic qualification |
 | Task branch | `codex/decoder-selection-m0` |
-| Task PR | Not opened; the exact qualified branch will be published to Forgejo |
+| Task PR | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) into `effort/decoder-selection-recovery` |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Post-rebase inventory and receipt repairs are under focused validation |
-| Full PR validation | Historical pre-rebase head `01368ce1` passed 23/23 runnable checks; it is not current-tree qualification. The repaired Forgejo candidate has not yet run its final suite |
-| Blocker | None; review findings must be fixed and the exact repaired head re-reviewed and qualified before publication |
+| Focused validation | Exact code head `59d0a4d1` passed the M0 inventory, diagnostic, Live TV boundary, complete unit, format, compile, lint, history, and catalog checks |
+| Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips; Historical pre-rebase head `01368ce1` remains history only |
+| Blocker | None; merge waits for the exact receipt review and Forgejo `Effort development gate` |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Post-rebase review repairs in progress | Current-tree focused gates, one corrected-head full suite, and two final adversarial approvals remain required |
+| M0 · baseline and diagnostic qualification | Qualified; pending merge | Exact code head `59d0a4d1`: two independent adversarial approvals, all focused gates, and full suite 23 passed / 0 failed / 2 declared skips |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -301,8 +301,10 @@ Forgejo `main` at `4a6a0268`, both fresh reviews of `3fbeedb2` requested changes
 the newly inherited direct Live TV producer/probe/filter/diagnostic path was
 missing from the inventory; historical receipts had been relabeled with rebased
 hashes; the baseline/current checkpoint was stale; and diagnostic counters did
-not saturate. The current working tree addresses those findings. Fresh approval
-and exact-tree qualification remain pending.
+not saturate. Those findings were repaired. Both independent reviewers approved
+exact code head `59d0a4d1` with no actionable findings after separately checking
+the formatting-only final delta, focused timing regressions, history audit, and
+full-base diff. The exact head then passed the full PR suite recorded below.
 
 | Finding | Resolution on working tree |
 |---|---|
@@ -345,7 +347,7 @@ and exact-tree qualification remain pending.
 | Current `main` added direct Live TV FFmpeg construction outside the frozen movie builders | Five producer-side Live TV rows plus its distinct Web client boundary bring the inventory to 73; static discovery and a complete software argv baseline prevent silent omission |
 | Live TV Web bypasses the ordinary playback-control replacement protocol | A separate client capability row and gap matrix limit it to prepublication recovery until two-player handoff is implemented and physically qualified |
 | Historical receipts were relabeled with rebased hashes | Original hashes are retained as pre-rebase evidence; only commands actually run on the current tree may be recorded as current qualification |
-| Baseline and milestone state remained stale after rebase | The authoritative Forgejo base is explicit and M0 remains pending until repaired-head reviews and qualification finish |
+| Baseline and milestone state remained stale after rebase | The authoritative Forgejo base is explicit; exact head `59d0a4d1` is now qualified and linked to Forgejo PR #62 |
 | Diagnostic counters were unbounded | Every published diagnostic counter saturates at `u64::MAX`; exact maximum and maximum-plus-one repeat summaries are covered |
 
 | Final-review finding | Resolution on working tree |
@@ -369,6 +371,9 @@ and exact-tree qualification remain pending.
 | 2026-09-05 | Collapse only identical repeated probe rows | FFprobe may emit the same selected-stream fact more than once; conflicting rows remain an evidence failure |
 | 2026-09-05 | Map review-only documentation commits to a status contract inside `catalog-contract` instead of ignoring them | The governed test reads the page and verifies its frozen artifacts, safety boundaries, review repairs, and invalid-run labels |
 | 2026-09-05 | Use full Homebrew FFmpeg 8.1.2 plus its retained x265 ABI 216 library for local qualification | The default FFmpeg 8.1.2 lacks `zscale`; FFmpeg 9.0.1 has `zscale` but changes muxer output identities expected by the repository's FFmpeg 8 contracts |
+| 2026-09-06 | Run qualification through task-scoped `ffmpeg-full` 8.1.2_2 wrappers | The installed full build provides `zscale`; the wrappers add only the retained x265 ABI 216 library path and leave the host installation unchanged |
+| 2026-09-06 | Accept two declared full-suite skips on this Darwin builder | Android device validation requires unavailable `adb`; the two-node Live TV drill is Linux-only. Both remain explicit M8 fleet/client prerequisites rather than passing claims |
+| 2026-09-06 | Reuse warmed cluster targets for the final exact-head suite | The first diagnostic run spent its 1,800-second bound compiling vendor targets. Warm targets change no source or test semantics and let the complete three-node workload run inside the same fixed bound |
 
 ## Validation ledger
 
@@ -436,6 +441,13 @@ lane and focused tests provide earlier feedback.
 | Pre-rebase working tree before `01368ce1` | `make playback-smoke` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Pass · 11/11 Chrome cases, including HDR tone-map, copy-HLS, no-MSE, seek, audio switch, and subtitle toggle |
 | Pre-rebase `01368ce1` | `make validate-full` with full FFmpeg 8.1.2, retained x265 ABI 216, Playwright 1.62.0, and anonymous pinned Android container preflight | Pass · 23 runnable checks; Android-device was the sole declared skip because `adb` was unavailable; cluster-auth passed in 1,638.3 s |
 | Pre-rebase `2c266dce` | Independent diagnostic-safety and milestone-scope adversarial reviews | Pass · both reviewers approved with no actionable findings after checking the retained full-suite JSON and JUnit evidence |
+| `59d0a4d1` | `python3 -m unittest tests.operations.test_decoder_diagnostic_qualification tests.validation.test_decoder_selection_inventory tests.validation.test_decoder_recovery_status` and focused Rust Live TV/timing regressions | Pass · current-base inventory, diagnostic saturation, exact Live TV arguments/grammar, and wedge-boundary timing controls |
+| `59d0a4d1` | `CARGO='rustup run 1.97.1 cargo' make unit` | Pass · complete Rust unit profile; daemon 1,759 passed with 3 declared ignores, core 955 passed, store contracts 87 passed, and no failures |
+| `59d0a4d1` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check`; `make history-check`; `make validation-lint`; `git diff --check effort/decoder-selection-recovery...HEAD` | Pass · pinned format/compile evidence, 1,344 corrective commits mapped, 24 catalog points / 30 checks / 1,425 files, and clean diff |
+| `59d0a4d1` | Independent milestone-scope and diagnostic-safety adversarial reviews | Pass · both reviewers approved the exact current-base code head with no actionable findings |
+| `59d0a4d1` | First current-base `make validate-full` diagnostic run | Diagnostic pass · 20 passed, 3 failed, 2 skipped; failures were the non-full FFmpeg missing `zscale`/x265 ABI and cold cluster compilation exceeding 1,800 seconds, not product assertions |
+| `59d0a4d1` | `make playback-smoke`; `scripts/reader-browser`; warmed `make cluster-check` plus exact `cluster_activity` rerun, all through the corrected FFmpeg wrapper where media was involved | Pass · browser playback 11/11, reader online/offline lifecycle, 135 cluster store contracts with 2 helpers ignored, topology/growth/failure drills, 7 activation tests, and 2 activity tests |
+| `59d0a4d1` | `PATH=/private/tmp/plurx-toolbin:/private/tmp/plurx-full-venv/bin:... PLURX_FFMPEG=/private/tmp/plurx-toolbin/ffmpeg PLURX_FFPROBE=/private/tmp/plurx-toolbin/ffprobe CARGO='rustup run 1.97.1 cargo' make validate-full` | Pass · 23 passed, 0 failed, 2 declared skips; generated `2026-09-06T06:46:16Z`, aggregate 2,794.94 check-seconds; Rust gate 130.9 s, UI 72 captures / 6,648 facts, playback 11/11, Apple tvOS 357/357, cluster 1,651.4 s; skips were missing `adb` and Linux-only two-node Live TV |
 
 ## Remaining evidence before release
 
