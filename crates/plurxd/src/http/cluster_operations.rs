@@ -44,7 +44,6 @@ const PEER_DIRECTORY_TIMEOUT: Duration = Duration::from_millis(500);
 const PEER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
 const PEER_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const TRANSPORT_OBSERVATION_TTL_MS: u64 = 5 * 60 * 1_000;
-const MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS: u64 = 5_000;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FRESH_AGE_MS: u64 = 5_000;
 
@@ -370,21 +369,46 @@ impl PlannedOutageLeaseGuard {
         self.local_fence_armed = true;
     }
 
+    /// Order an exact replicated release before any local unfence. This is
+    /// also the barrier used after an outcome-unknown maintenance commit: the
+    /// older transaction can create the maintenance row only before this
+    /// delete, or it runs afterwards without the exact claim and is a no-op.
+    pub(crate) async fn release_replicated_claim(&mut self) -> Result<(), ApiError> {
+        let Some(lease) = self.lease.as_ref() else {
+            return Ok(());
+        };
+        if self.local_fence_armed {
+            // Maintenance calls this lower-level barrier directly. Latch here,
+            // before the release await, so every caller remains fail-closed
+            // across an ambiguous response and the original lease deadline.
+            self.serving.retain_restart_preparation_until_cancelled();
+        }
+        self.membership
+            .release_cluster_operation_lease(lease)
+            .await
+            .map_err(api_error)?;
+        self.lease.take();
+        Ok(())
+    }
+
     pub(crate) async fn release(mut self) {
+        if self.local_fence_armed {
+            self.serving.retain_restart_preparation_until_cancelled();
+        }
+        if let Err(error) = self.release_replicated_claim().await {
+            tracing::warn!(
+                ?error,
+                "planned-outage release failed definitively; Drop will retry the exact claim"
+            );
+            if self.local_fence_armed {
+                self.serving.cancel_restart_preparation(0).await;
+                self.local_fence_armed = false;
+            }
+            return;
+        }
         if self.local_fence_armed {
             self.serving.cancel_restart_preparation(0).await;
             self.local_fence_armed = false;
-        }
-        let Some(lease) = self.lease.as_ref() else {
-            return;
-        };
-        match self.membership.release_cluster_operation_lease(lease).await {
-            Ok(()) => {
-                self.lease.take();
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to release planned-outage lease; Drop will retry and expiry remains authoritative");
-            }
         }
     }
 
@@ -401,20 +425,25 @@ impl Drop for PlannedOutageLeaseGuard {
         if lease.is_none() && !cancel_local_fence {
             return;
         }
+        if cancel_local_fence {
+            // Latch synchronously: the configured deadline could expire
+            // before the async Drop cleanup first runs.
+            self.serving.retain_restart_preparation_until_cancelled();
+        }
         let membership = self.membership.clone();
         let serving = self.serving.clone();
         self.release_runtime.spawn(async move {
-            // Remove the process-local admission fence first. Releasing the
-            // replicated singleton before this point would let another caller
-            // acquire the global slot while fresh preflight still sees this
-            // node as preparing for an outage.
-            if cancel_local_fence {
-                serving.cancel_restart_preparation(0).await;
-            }
             if let Some(lease) = lease {
                 if let Err(error) = membership.release_cluster_operation_lease(&lease).await {
-                    tracing::warn!(%error, "failed to release cancelled planned-outage lease; expiry remains authoritative");
+                    tracing::warn!(%error, "cancelled planned-outage release failed definitively after ambiguous results were exhausted");
+                    if cancel_local_fence {
+                        serving.cancel_restart_preparation(0).await;
+                    }
+                    return;
                 }
+            }
+            if cancel_local_fence {
+                serving.cancel_restart_preparation(0).await;
             }
         });
     }
@@ -625,7 +654,7 @@ where
             local_node_id,
             membership,
             local_status,
-            PeerStatusCacheRead::Fresh(remote),
+            PeerStatusCacheRead::Fresh(remote, Duration::ZERO),
         ))
     };
 
@@ -883,16 +912,28 @@ pub(crate) async fn cancel_restart(
             "restart preparation cancellation must be sent directly to the node named in the route",
         ));
     }
-    state
-        .membership
-        .release_restart_preparation(&node_id)
-        .await
-        .map_err(api_error)?;
-    let active_sessions = local_owned_media_sessions(&state).await;
-    let drain = state
-        .serving
-        .cancel_restart_preparation(active_sessions)
-        .await;
+    // Latch before the first await so neither the configured lease deadline nor
+    // HTTP cancellation can reopen admissions while exact cleanup is unknown.
+    state.serving.retain_restart_preparation_until_cancelled();
+    let cleanup_state = state.clone();
+    let cleanup_node_id = node_id.clone();
+    let (active_sessions, drain) = run_planned_outage_task(async move {
+        if let Err(error) = cleanup_state
+            .membership
+            .release_restart_preparation(&cleanup_node_id)
+            .await
+        {
+            cleanup_state.serving.cancel_restart_preparation(0).await;
+            return Err(api_error(error));
+        }
+        let active_sessions = local_owned_media_sessions(&cleanup_state).await;
+        let drain = cleanup_state
+            .serving
+            .cancel_restart_preparation(active_sessions)
+            .await;
+        Ok((active_sessions, drain))
+    })
+    .await?;
     Ok(Json(restart_preparation_response(
         &state.node_id,
         active_sessions,
@@ -1162,14 +1203,14 @@ struct CachedPeerStatuses {
 }
 
 enum PeerStatusCacheRead {
-    Fresh(BTreeMap<String, PeerStatusOutcome>),
+    Fresh(BTreeMap<String, PeerStatusOutcome>, Duration),
     Unavailable,
     Stale,
 }
 
 impl From<BTreeMap<String, PeerStatusOutcome>> for PeerStatusCacheRead {
     fn from(statuses: BTreeMap<String, PeerStatusOutcome>) -> Self {
-        Self::Fresh(statuses)
+        Self::Fresh(statuses, Duration::ZERO)
     }
 }
 
@@ -1179,10 +1220,9 @@ impl PeerStatusCache {
         let Some(cached) = cache.as_ref() else {
             return PeerStatusCacheRead::Unavailable;
         };
-        if tokio::time::Instant::now().saturating_duration_since(cached.stored_at)
-            < PEER_STATUS_CACHE_TTL
-        {
-            PeerStatusCacheRead::Fresh(cached.statuses.clone())
+        let age = tokio::time::Instant::now().saturating_duration_since(cached.stored_at);
+        if age < PEER_STATUS_CACHE_TTL {
+            PeerStatusCacheRead::Fresh(cached.statuses.clone(), age)
         } else {
             PeerStatusCacheRead::Stale
         }
@@ -1190,9 +1230,9 @@ impl PeerStatusCache {
 
     async fn store(&self, statuses: &BTreeMap<String, PeerStatusOutcome>) {
         *self.inner.lock().await = Some(CachedPeerStatuses {
-            // Availability starts when the refresh is usable. Transport and
-            // process samples retain their source timestamps and are aged
-            // from those timestamps when the aggregate is rendered.
+            // Availability and transport aging start when this authenticated
+            // refresh becomes locally usable. A peer's Unix timestamp remains
+            // diagnostic metadata and never participates in freshness.
             stored_at: tokio::time::Instant::now(),
             statuses: statuses.clone(),
         });
@@ -1593,21 +1633,27 @@ fn join_observations<Remote>(
 where
     Remote: Into<PeerStatusCacheRead>,
 {
-    let (mut remote, missing_state, missing_error_class) = match remote.into() {
-        PeerStatusCacheRead::Fresh(statuses) => {
-            (statuses, ObservationState::Unavailable, "not_observed")
-        }
-        PeerStatusCacheRead::Unavailable => (
-            BTreeMap::new(),
-            ObservationState::Unavailable,
-            "cache_unavailable",
-        ),
-        PeerStatusCacheRead::Stale => (
-            BTreeMap::new(),
-            ObservationState::Unavailable,
-            "cache_stale",
-        ),
-    };
+    let (mut remote, missing_state, missing_error_class, transport_cache_age_ms) =
+        match remote.into() {
+            PeerStatusCacheRead::Fresh(statuses, cache_age) => (
+                statuses,
+                ObservationState::Unavailable,
+                "not_observed",
+                u64::try_from(cache_age.as_millis()).unwrap_or(u64::MAX),
+            ),
+            PeerStatusCacheRead::Unavailable => (
+                BTreeMap::new(),
+                ObservationState::Unavailable,
+                "cache_unavailable",
+                0,
+            ),
+            PeerStatusCacheRead::Stale => (
+                BTreeMap::new(),
+                ObservationState::Unavailable,
+                "cache_stale",
+                0,
+            ),
+        };
     let mut rows = Vec::with_capacity(membership.nodes.len());
     for member in &membership.nodes {
         let (mut state, mut status, transport, mut error_class) = if member.node_id == local_node_id
@@ -1617,9 +1663,7 @@ where
                 .transport
                 .take()
                 .filter(|_| local.raft_id == Some(member.raft_id))
-                .and_then(|transport| {
-                    sanitize_transport(transport, member.raft_id, aggregate_observed_ms)
-                });
+                .and_then(|transport| sanitize_transport(transport, member.raft_id, 0));
             (
                 ObservationState::Answered,
                 Some(local.clone()),
@@ -1637,10 +1681,10 @@ where
                     .flatten()
             });
             let private_transport = outcome.transport.and_then(|transport| {
-                sanitize_transport(transport, member.raft_id, aggregate_observed_ms)
+                sanitize_transport(transport, member.raft_id, transport_cache_age_ms)
             });
             let fallback_transport = fallback_transport.and_then(|transport| {
-                sanitize_transport(transport, member.raft_id, aggregate_observed_ms)
+                sanitize_transport(transport, member.raft_id, transport_cache_age_ms)
             });
             (
                 outcome.state,
@@ -1686,26 +1730,15 @@ where
 fn sanitize_transport(
     mut transport: SnapshotTransportStatus,
     expected_observer: u64,
-    aggregate_observed_ms: u64,
+    locally_elapsed_ms: u64,
 ) -> Option<SnapshotTransportStatus> {
     if transport.observing_node_id != expected_observer {
         return None;
     }
-    let source_age_ms = if transport.observed_at_unix_ms > aggregate_observed_ms {
-        let clock_skew_ms = transport
-            .observed_at_unix_ms
-            .saturating_sub(aggregate_observed_ms);
-        if clock_skew_ms > MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS {
-            return None;
-        }
-        0
-    } else {
-        aggregate_observed_ms.saturating_sub(transport.observed_at_unix_ms)
-    };
     transport
         .observations
         .retain(|observation| observation.observing_node_id == expected_observer);
-    age_transport_observations(&mut transport, source_age_ms);
+    age_transport_observations(&mut transport, locally_elapsed_ms);
     Some(transport)
 }
 
@@ -2250,7 +2283,7 @@ mod tests {
 
     fn fresh_cache_statuses(read: PeerStatusCacheRead) -> BTreeMap<String, PeerStatusOutcome> {
         match read {
-            PeerStatusCacheRead::Fresh(statuses) => statuses,
+            PeerStatusCacheRead::Fresh(statuses, _) => statuses,
             PeerStatusCacheRead::Unavailable => panic!("cache is unavailable"),
             PeerStatusCacheRead::Stale => panic!("cache is stale"),
         }
@@ -2268,15 +2301,23 @@ mod tests {
         read: PeerStatusCacheRead,
         node_id: &str,
         expected_observer: u64,
-        aggregate_observed_ms: u64,
+        _aggregate_observed_ms: u64,
     ) -> SnapshotTransportStatus {
-        let mut statuses = fresh_cache_statuses(read);
+        let (mut statuses, cache_age) = match read {
+            PeerStatusCacheRead::Fresh(statuses, age) => (statuses, age),
+            PeerStatusCacheRead::Unavailable => panic!("cache is unavailable"),
+            PeerStatusCacheRead::Stale => panic!("cache is stale"),
+        };
         let transport = statuses
             .remove(node_id)
             .and_then(|outcome| outcome.transport)
             .expect("cached private transport evidence");
-        sanitize_transport(transport, expected_observer, aggregate_observed_ms)
-            .expect("valid cached private transport evidence")
+        sanitize_transport(
+            transport,
+            expected_observer,
+            u64::try_from(cache_age.as_millis()).unwrap_or(u64::MAX),
+        )
+        .expect("valid cached private transport evidence")
     }
 
     fn test_transport_status(
@@ -2458,7 +2499,10 @@ mod tests {
         assert_eq!(fresh_cache_statuses(cache.fresh().await).len(), 1);
 
         tokio::time::advance(PEER_STATUS_CACHE_TTL - Duration::from_millis(1)).await;
-        assert!(matches!(cache.fresh().await, PeerStatusCacheRead::Fresh(_)));
+        assert!(matches!(
+            cache.fresh().await,
+            PeerStatusCacheRead::Fresh(_, _)
+        ));
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(matches!(cache.fresh().await, PeerStatusCacheRead::Stale));
     }
@@ -2588,7 +2632,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_source_time() {
+    async fn full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time() {
         assert!(
             PEER_STATUS_REFRESH_INTERVAL + PEER_DIRECTORY_TIMEOUT + PEER_STATUS_TIMEOUT
                 < PEER_STATUS_CACHE_TTL,
@@ -2652,8 +2696,8 @@ mod tests {
             source_observed_ms + PEER_STATUS_CACHE_TTL.as_millis() as u64,
         );
         let observation = &projected.observations[0];
-        assert_eq!(observation.sample_age_ms, 5_000);
-        assert_eq!(observation.active_deadline_remaining_ms, Some(5_000));
+        assert_eq!(observation.sample_age_ms, 501);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(9_499));
     }
 
     #[tokio::test(start_paused = true)]
@@ -2790,13 +2834,13 @@ mod tests {
         assert!(fresh.observations.is_empty());
     }
 
-    #[test]
-    fn transport_projection_uses_source_time_and_rejects_unbounded_future_skew() {
+    #[tokio::test(start_paused = true)]
+    async fn transport_projection_uses_local_monotonic_age_despite_remote_clock_skew() {
         let source_observed_ms = 1_000_000;
         let mut transport = test_transport_status(2, 1_000, Some(20_000));
         transport.observed_at_unix_ms = source_observed_ms;
-        let projected = sanitize_transport(transport, 2, source_observed_ms + 6_000)
-            .expect("bounded source timestamp");
+        let projected =
+            sanitize_transport(transport, 2, 6_000).expect("locally timed authenticated transport");
         let observation = &projected.observations[0];
         assert_eq!(observation.sample_age_ms, 7_000);
         assert_eq!(observation.attempt_age_ms, Some(6_100));
@@ -2805,8 +2849,8 @@ mod tests {
 
         let mut replayed = test_transport_status(2, 301_000, Some(30_000));
         replayed.observed_at_unix_ms = source_observed_ms;
-        let projected = sanitize_transport(replayed, 2, source_observed_ms + 40_000)
-            .expect("old source timestamp is valid but ages conservatively");
+        let projected = sanitize_transport(replayed, 2, 40_000)
+            .expect("local cache age crosses the deadline conservatively");
         assert_eq!(projected.observations.len(), 1);
         assert_eq!(
             projected.observations[0].phase,
@@ -2818,15 +2862,40 @@ mod tests {
             Some(0)
         );
 
-        let mut bounded_future = test_transport_status(2, 0, Some(1_000));
-        bounded_future.observed_at_unix_ms =
-            source_observed_ms + MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS;
-        assert!(sanitize_transport(bounded_future, 2, source_observed_ms).is_some());
+        let mut six_minutes_behind = test_transport_status(2, 0, Some(1_000));
+        six_minutes_behind.observed_at_unix_ms = source_observed_ms - 6 * 60 * 1_000;
+        let cache = PeerStatusCache::default();
+        cache
+            .store(&BTreeMap::from([(
+                "node-2".to_owned(),
+                PeerStatusOutcome {
+                    node_id: "node-2".to_owned(),
+                    state: ObservationState::Unreachable,
+                    status: None,
+                    transport: Some(six_minutes_behind),
+                },
+            )]))
+            .await;
+        let behind = cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms);
+        assert_eq!(behind.observed_at_unix_ms, source_observed_ms - 360_000);
+        assert_eq!(behind.observations[0].sample_age_ms, 0);
 
-        let mut unbounded_future = test_transport_status(2, 0, Some(1_000));
-        unbounded_future.observed_at_unix_ms =
-            source_observed_ms + MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS + 1;
-        assert!(sanitize_transport(unbounded_future, 2, source_observed_ms).is_none());
+        let mut five_seconds_ahead = test_transport_status(2, 0, Some(1_000));
+        five_seconds_ahead.observed_at_unix_ms = source_observed_ms + 5_001;
+        cache
+            .store(&BTreeMap::from([(
+                "node-2".to_owned(),
+                PeerStatusOutcome {
+                    node_id: "node-2".to_owned(),
+                    state: ObservationState::Unreachable,
+                    status: None,
+                    transport: Some(five_seconds_ahead),
+                },
+            )]))
+            .await;
+        let ahead = cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms);
+        assert_eq!(ahead.observed_at_unix_ms, source_observed_ms + 5_001);
+        assert_eq!(ahead.observations[0].sample_age_ms, 0);
     }
 
     #[test]
@@ -3155,6 +3224,20 @@ mod tests {
         assert!(
             prepared_claim < guard && guard < detached_owner && detached_owner < replicated_commit
         );
+        let exact_release = source
+            .split_once("pub(crate) async fn release_replicated_claim")
+            .expect("exact planned-outage release")
+            .1
+            .split_once("pub(crate) async fn release(mut self)")
+            .expect("exact planned-outage release end")
+            .0;
+        let local_latch = exact_release
+            .find("retain_restart_preparation_until_cancelled")
+            .expect("synchronous unresolved-release latch");
+        let replicated_release = exact_release
+            .find("release_cluster_operation_lease(lease)")
+            .expect("replicated exact release");
+        assert!(local_latch < replicated_release);
         let current_collector = source
             .split_once("pub(crate) async fn collect_current_aggregate(")
             .expect("current preflight collector")
@@ -3511,7 +3594,7 @@ mod tests {
             .expect("restart preparation handlers end")
             .0;
         let claim = source
-            .find("acquire_restart_preparation")
+            .find("acquire_planned_outage_preflight")
             .expect("replicated lease acquisition");
         let bound = source
             .find("preparation_expiry_unix_ms")
@@ -3523,8 +3606,11 @@ mod tests {
             .find("restart_preparation_response")
             .expect("reboot-ready response");
         assert!(claim < bound && bound < local_fence && local_fence < commands);
-        assert!(source.contains("release_cluster_operation_lease(&lease)"));
-        assert!(source.contains("release_restart_preparation(&node_id)"));
+        assert!(source.contains("lease.release().await"));
+        assert!(source.contains("lease.disarm()"));
+        assert!(source.contains("retain_restart_preparation_until_cancelled"));
+        assert!(source.contains("run_planned_outage_task(async move"));
+        assert!(source.contains("release_restart_preparation(&cleanup_node_id)"));
     }
 
     #[test]

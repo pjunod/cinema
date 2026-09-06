@@ -258,24 +258,38 @@ pub async fn enter_maintenance(
             }
             Err(error) => {
                 let error = api_error(error);
-                match membership.reconcile_local_maintenance_commit().await {
-                    Ok(true) => {
-                        // The response path failed after the transaction became
-                        // durable. Keep the local drain and let the replicated
-                        // maintenance row remain the lifecycle owner.
-                        lease.disarm();
-                    }
-                    Ok(false) => lease.release().await,
-                    Err(reconcile_error) => {
+                // First publish a permanent exact-claim cancellation and
+                // delete the lease in one ordered transaction. A disconnected
+                // maintenance transaction can then only have consumed the
+                // claim before this barrier; if it arrives afterwards, its
+                // lease predicate is false and the transaction is a no-op.
+                match lease.release_replicated_claim().await {
+                    Ok(()) => match membership.reconcile_local_maintenance_commit().await {
+                        Ok(true) => {
+                            // The response path failed after the transaction
+                            // became durable. Keep the local drain and let the
+                            // replicated maintenance row own the lifecycle.
+                            lease.disarm();
+                        }
+                        Ok(false) => lease.release().await,
+                        Err(reconcile_error) => {
+                            tracing::warn!(
+                                %reconcile_error,
+                                "maintenance commit outcome is unknown after exact release; retaining the local fence until expiry"
+                            );
+                            // A failed linearizable read cannot authorize
+                            // unfencing. The process-local deadline remains the
+                            // bounded recovery owner.
+                            lease.disarm();
+                        }
+                    },
+                    Err(release_error) => {
                         tracing::warn!(
-                            %reconcile_error,
-                            "maintenance commit outcome is unknown; retaining local and replicated fences until expiry"
+                            ?release_error,
+                            "maintenance claim release is unresolved; retaining local and replicated fences while Drop retries"
                         );
-                        // A failed linearizable read cannot authorize unfencing.
-                        // Both fences are already bounded by the committed lease
-                        // deadline and heartbeat reconciliation will repair the
-                        // local maintenance projection when quorum returns.
-                        lease.disarm();
+                        // Leave the guard armed. Drop retries the exact ordered
+                        // release and only then removes the local fence.
                     }
                 }
                 Err(error)
@@ -615,12 +629,38 @@ mod tests {
         let commit = enter
             .rfind(".enter_maintenance(&node_id, lease.claim())")
             .expect("durable maintenance commit");
+        let exact_release = enter
+            .find("lease.release_replicated_claim().await")
+            .expect("ordered exact release barrier");
+        let reconcile = enter
+            .find("reconcile_local_maintenance_commit().await")
+            .expect("post-release maintenance reconciliation");
         assert!(claim < bound && bound < begin && begin < wait && wait < commit);
+        assert!(
+            commit < exact_release && exact_release < reconcile,
+            "an ambiguous maintenance write must be fenced by exact release before reconciliation"
+        );
         assert!(enter.contains("PlannedOutageOperation::Maintenance"));
         assert!(enter.contains("if !drain.new_admissions_blocked"));
         assert!(enter.contains("lease.release().await"));
         assert!(enter.contains("lease.disarm()"));
-        assert!(enter.contains("cancel_restart_preparation(active_sessions)"));
+        let guard_source = include_str!("cluster_operations.rs")
+            .split_once("pub(crate) async fn release(mut self)")
+            .expect("planned-outage guard release")
+            .1
+            .split_once("pub(crate) fn disarm")
+            .expect("planned-outage guard release end")
+            .0;
+        let replicated_release = guard_source
+            .find("release_replicated_claim().await")
+            .expect("exact replicated release");
+        let local_unfence = guard_source
+            .find("cancel_restart_preparation(0).await")
+            .expect("local serving unfence");
+        assert!(
+            replicated_release < local_unfence,
+            "the guard must release the exact replicated claim before local unfencing"
+        );
         assert!(enter.contains("node_id != state.node_id"));
         assert!(enter.contains(".maintenance"));
         assert!(!enter.contains("candidate_node_id"));

@@ -476,7 +476,6 @@ struct InboundSnapshotStatusGuard {
 
 #[derive(Clone, Copy)]
 struct SnapshotAdmissionBudget {
-    deadline: time::Instant,
     timeout: Duration,
 }
 
@@ -493,24 +492,22 @@ impl SnapshotAdmissionBudgets {
         Self {
             #[cfg(feature = "sqlite")]
             sqlite: SnapshotAdmissionBudget {
-                deadline: state.raft_db.snapshot_executor.admission_deadline(),
                 timeout: state.raft_db.snapshot_executor.admission_timeout(),
             },
             #[cfg(feature = "cache")]
             cache: SnapshotAdmissionBudget {
-                deadline: state.raft_cache.snapshot_executor.admission_deadline(),
                 timeout: state.raft_cache.snapshot_executor.admission_timeout(),
             },
         }
     }
 
     #[cfg(test)]
-    fn uniform(deadline: time::Instant, timeout: Duration) -> Self {
+    fn uniform(timeout: Duration) -> Self {
         Self {
             #[cfg(feature = "sqlite")]
-            sqlite: SnapshotAdmissionBudget { deadline, timeout },
+            sqlite: SnapshotAdmissionBudget { timeout },
             #[cfg(feature = "cache")]
-            cache: SnapshotAdmissionBudget { deadline, timeout },
+            cache: SnapshotAdmissionBudget { timeout },
         }
     }
 }
@@ -587,7 +584,10 @@ impl PreparedRaftRequest {
                 len,
                 done,
                 socket_epoch,
-                deadline: admission_budget.deadline,
+                // A connection may remain open indefinitely. Give each
+                // decoded request its own admission window instead of
+                // retaining the socket-accept instant as a deadline.
+                deadline: time::Instant::now() + admission_budget.timeout,
             });
         PreparedInboundSnapshotStatus {
             status_guard: InboundSnapshotStatusGuard::new(
@@ -845,10 +845,7 @@ mod tests {
     ) {
         let prepared_request = PreparedRaftRequest::new(
             status,
-            SnapshotAdmissionBudgets::uniform(
-                time::Instant::now() + Duration::from_secs(30),
-                Duration::from_secs(1),
-            ),
+            SnapshotAdmissionBudgets::uniform(Duration::from_secs(1)),
             1,
             1,
             RaftStreamRequest::SnapshotDB((
@@ -971,6 +968,57 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[tokio::test(start_paused = true)]
+    async fn long_lived_socket_derives_a_fresh_admission_deadline_per_request() {
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        let admission_timeout = Duration::from_secs(30);
+        let budgets = SnapshotAdmissionBudgets::uniform(admission_timeout);
+        let first = track_inbound_attempt(&status, "long-lived-socket", 0, 64, false, 1);
+        status.inbound_admitted(&first, false, time::Instant::now() + admission_timeout);
+        status.inbound_finished(
+            &first,
+            64,
+            false,
+            Some(time::Instant::now() + admission_timeout),
+            crate::transport_status::InboundSnapshotDisposition::Succeeded,
+        );
+
+        time::advance(admission_timeout + Duration::from_secs(1)).await;
+        let _prepared = PreparedRaftRequest::new(
+            &status,
+            budgets,
+            1,
+            1,
+            RaftStreamRequest::SnapshotDB((
+                8,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: openraft::SnapshotMeta {
+                        last_log_id: None,
+                        last_membership: Default::default(),
+                        snapshot_id: "long-lived-socket".to_owned(),
+                    },
+                    offset: 64,
+                    data: vec![0; 64],
+                    done: false,
+                },
+            )),
+        );
+
+        let observation = &status.snapshot().observations[0];
+        assert_eq!(
+            observation.phase,
+            crate::SnapshotTransportPhase::Transferring
+        );
+        assert_eq!(
+            observation.active_deadline_remaining_ms,
+            Some(admission_timeout.as_millis() as u64)
+        );
+        assert_eq!(observation.last_error_category, None);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
     async fn production_prepares_snapshot_status_before_biased_socket_close_drops_unpolled_work() {
         let status =
             crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
@@ -987,10 +1035,9 @@ mod tests {
             Some(time::Instant::now() + Duration::from_secs(30)),
             crate::transport_status::InboundSnapshotDisposition::Succeeded,
         );
-        let admission_deadline = time::Instant::now() + Duration::from_secs(30);
         let prepared_request = PreparedRaftRequest::new(
             &status,
-            SnapshotAdmissionBudgets::uniform(admission_deadline, Duration::from_secs(1)),
+            SnapshotAdmissionBudgets::uniform(Duration::from_secs(1)),
             1,
             1,
             RaftStreamRequest::SnapshotDB((

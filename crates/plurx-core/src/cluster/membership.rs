@@ -423,8 +423,38 @@ const EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL: &str =
      WHEN EXISTS (SELECT 1 FROM cluster_operation_leases \
        WHERE expires_at <= NEW.last_seen_at) \
      BEGIN \
+       INSERT INTO cluster_operation_lease_intents (claim_id) \
+         SELECT claim_id FROM cluster_operation_leases \
+         WHERE expires_at <= NEW.last_seen_at \
+         ON CONFLICT(claim_id) DO NOTHING; \
+       INSERT INTO cluster_operation_lease_releases (claim_id) \
+         SELECT claim_id FROM cluster_operation_leases \
+         WHERE expires_at <= NEW.last_seen_at \
+         ON CONFLICT(claim_id) DO NOTHING; \
        DELETE FROM cluster_operation_leases WHERE expires_at <= NEW.last_seen_at; \
+       DELETE FROM cluster_operation_lease_intents \
+         WHERE claim_id IN (SELECT claim_id FROM cluster_operation_lease_releases) \
+           AND claim_id NOT IN (SELECT claim_id FROM cluster_operation_leases); \
      END";
+
+const REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_insert_intent_guard \
+     BEFORE INSERT ON cluster_operation_leases \
+     WHEN NOT EXISTS (SELECT 1 FROM cluster_operation_lease_intents intent \
+       WHERE intent.claim_id = NEW.claim_id) \
+     BEGIN SELECT RAISE(ABORT, 'planned outage lease requires current coordinator'); END";
+const REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_update_intent_guard \
+     BEFORE UPDATE ON cluster_operation_leases \
+     WHEN NOT EXISTS (SELECT 1 FROM cluster_operation_lease_intents intent \
+       WHERE intent.claim_id = NEW.claim_id) \
+     BEGIN SELECT RAISE(ABORT, 'planned outage lease requires current coordinator'); END";
+const REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_delete_intent_guard \
+     BEFORE DELETE ON cluster_operation_leases \
+     WHEN NOT EXISTS (SELECT 1 FROM cluster_operation_lease_intents intent \
+       WHERE intent.claim_id = OLD.claim_id) \
+     BEGIN SELECT RAISE(ABORT, 'planned outage lease release requires current coordinator'); END";
 
 /// One additive column, named as well as spelled.
 ///
@@ -527,6 +557,19 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          operation TEXT NOT NULL CHECK (operation IN ('restart', 'maintenance')), \
          claim_id TEXT NOT NULL UNIQUE, \
          expires_at INTEGER NOT NULL) STRICT",
+    // Permanent cancellation receipts make a prepared claim one-shot. An API
+    // server may submit a disconnected request after a later exact release;
+    // retaining its random claim ID prevents that delayed write from
+    // resurrecting an ownerless outage lease. Planned outages are rare and
+    // UUID claim IDs are never reused, so this is a small permanent operational
+    // audit record rather than a time-based correctness assumption.
+    "CREATE TABLE IF NOT EXISTS cluster_operation_lease_releases (\
+         claim_id TEXT PRIMARY KEY) STRICT",
+    // Exists only inside a current coordinator's replicated transaction. The
+    // triggers installed below make pre-receipt binaries fail closed on lease
+    // insert, update, and delete during rolling upgrade or rollback.
+    "CREATE TABLE IF NOT EXISTS cluster_operation_lease_intents (\
+         claim_id TEXT PRIMARY KEY) STRICT",
     // Transaction-local proof for the maintenance-aware heartbeat. Once a
     // maintenance row exists, the trigger below makes a rollback to a binary
     // that does not understand the fence fail before that process can bind its
@@ -1911,13 +1954,34 @@ const ACQUIRE_CLUSTER_OPERATION_LEASE_SQL: &str = "INSERT INTO cluster_operation
        AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_operation_lease_releases released_claim \
+         WHERE released_claim.claim_id = $3) \
      ON CONFLICT(singleton) DO UPDATE SET \
        node_id = excluded.node_id, operation = excluded.operation, \
        claim_id = excluded.claim_id, expires_at = excluded.expires_at \
-     WHERE cluster_operation_leases.expires_at <= $5";
+     WHERE cluster_operation_leases.expires_at <= $5 \
+        OR (cluster_operation_leases.node_id = $1 \
+            AND cluster_operation_leases.operation = $2 \
+            AND cluster_operation_leases.claim_id = $3)";
 
 const RELEASE_CLUSTER_OPERATION_LEASE_SQL: &str = "DELETE FROM cluster_operation_leases \
      WHERE singleton = 1 AND node_id = $1 AND operation = $2 AND claim_id = $3";
+
+const TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL: &str =
+    "INSERT INTO cluster_operation_lease_releases (claim_id) VALUES ($1) \
+     ON CONFLICT(claim_id) DO NOTHING";
+
+fn cluster_operation_write_may_be_ambiguous(error: &hiqlite::Error) -> bool {
+    matches!(error, hiqlite::Error::Connect(_))
+}
+
+fn retry_ambiguous_cluster_operation_acquire(
+    error: &hiqlite::Error,
+    now_unix_ms: i64,
+    expires_at_unix_ms: i64,
+) -> bool {
+    cluster_operation_write_may_be_ambiguous(error) && now_unix_ms < expires_at_unix_ms
+}
 
 const RELEASE_RESTART_PREPARATION_SQL: &str = "DELETE FROM cluster_operation_leases \
      WHERE singleton = 1 AND node_id = $1 AND operation = 'restart'";
@@ -2684,6 +2748,26 @@ impl MembershipManager {
                 (BACKFILL_REMOVAL_ATTEMPT_REFS_SQL.to_owned(), params!()),
                 (REQUIRE_REMOVAL_INTENT_SQL.to_owned(), params!()),
                 (REQUIRE_LEARNER_JOIN_INTENT_SQL.to_owned(), params!()),
+                (
+                    "DROP TRIGGER IF EXISTS cluster_operation_lease_heartbeat_expiry".to_owned(),
+                    params!(),
+                ),
+                (
+                    EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL.to_owned(),
+                    params!(),
+                ),
+                (
+                    REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL.to_owned(),
+                    params!(),
+                ),
+                (
+                    REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL.to_owned(),
+                    params!(),
+                ),
+                (
+                    REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL.to_owned(),
+                    params!(),
+                ),
             ])
             .await?
             .into_iter()
@@ -4375,24 +4459,58 @@ impl MembershipManager {
         lease: &ClusterOperationLease,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
-        let now = unix_ms()?;
-        let changed = inner
-            .client
-            .execute(
-                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
-                params!(
-                    lease.node_id.as_str(),
-                    lease.operation,
-                    lease.claim_id.as_str(),
-                    lease.expires_at_unix_ms,
-                    now
-                ),
-            )
-            .await?;
-        if changed != 1 {
-            return Err(MembershipError::ClusterOperationPending);
+        loop {
+            let now = unix_ms()?;
+            let result = inner
+                .client
+                .txn(vec![
+                    (
+                        "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
+                         ON CONFLICT(claim_id) DO NOTHING"
+                            .to_owned(),
+                        params!(lease.claim_id.as_str()),
+                    ),
+                    (
+                        ACQUIRE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
+                        params!(
+                            lease.node_id.as_str(),
+                            lease.operation,
+                            lease.claim_id.as_str(),
+                            lease.expires_at_unix_ms,
+                            now
+                        ),
+                    ),
+                    (
+                        "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1"
+                            .to_owned(),
+                        params!(lease.claim_id.as_str()),
+                    ),
+                ])
+                .await;
+            match result {
+                Ok(results) => {
+                    let changes = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                    return match changes.get(1) {
+                        Some(1) => Ok(()),
+                        _ => Err(MembershipError::ClusterOperationPending),
+                    };
+                }
+                Err(error)
+                    if retry_ambiguous_cluster_operation_acquire(
+                        &error,
+                        now,
+                        lease.expires_at_unix_ms,
+                    ) =>
+                {
+                    // The API server may still submit the first command after
+                    // its connection disappears. Retrying the same idempotent
+                    // claim makes whichever command linearizes first own the
+                    // exact value retained by the caller's guard.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
-        Ok(())
     }
 
     /// Release one exact failed claim. A successor claim, even for the same
@@ -4402,18 +4520,49 @@ impl MembershipManager {
         lease: &ClusterOperationLease,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
-        inner
-            .client
-            .execute(
-                RELEASE_CLUSTER_OPERATION_LEASE_SQL,
-                params!(
-                    lease.node_id.as_str(),
-                    lease.operation,
-                    lease.claim_id.as_str()
-                ),
-            )
-            .await?;
-        Ok(())
+        loop {
+            let result = inner
+                .client
+                .txn(vec![
+                    (
+                        "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
+                         ON CONFLICT(claim_id) DO NOTHING"
+                            .to_owned(),
+                        params!(lease.claim_id.as_str()),
+                    ),
+                    (
+                        TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
+                        params!(lease.claim_id.as_str()),
+                    ),
+                    (
+                        RELEASE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
+                        params!(
+                            lease.node_id.as_str(),
+                            lease.operation,
+                            lease.claim_id.as_str()
+                        ),
+                    ),
+                    (
+                        "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1"
+                            .to_owned(),
+                        params!(lease.claim_id.as_str()),
+                    ),
+                ])
+                .await;
+            match result {
+                Ok(results) => {
+                    results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                    return Ok(());
+                }
+                Err(error) if cluster_operation_write_may_be_ambiguous(&error) => {
+                    // Exact receipt plus deletion is idempotent. Do not report
+                    // completion until a response confirms the one-shot claim
+                    // barrier is durable.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// Direct cancellation intentionally means "cancel the current restart
@@ -4421,11 +4570,50 @@ impl MembershipManager {
     /// original HTTP response was lost.
     pub async fn release_restart_preparation(&self, node_id: &str) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
-        inner
-            .client
-            .execute(RELEASE_RESTART_PREPARATION_SQL, params!(node_id))
-            .await?;
-        Ok(())
+        loop {
+            let result = inner
+                .client
+                .txn(vec![
+                    (
+                        "INSERT INTO cluster_operation_lease_intents (claim_id) \
+                         SELECT claim_id FROM cluster_operation_leases \
+                         WHERE singleton = 1 AND node_id = $1 AND operation = 'restart' \
+                         ON CONFLICT(claim_id) DO NOTHING"
+                            .to_owned(),
+                        params!(node_id),
+                    ),
+                    (
+                        "INSERT INTO cluster_operation_lease_releases (claim_id) \
+                         SELECT claim_id FROM cluster_operation_leases \
+                         WHERE singleton = 1 AND node_id = $1 AND operation = 'restart' \
+                         ON CONFLICT(claim_id) DO NOTHING"
+                            .to_owned(),
+                        params!(node_id),
+                    ),
+                    (RELEASE_RESTART_PREPARATION_SQL.to_owned(), params!(node_id)),
+                    (
+                        "DELETE FROM cluster_operation_lease_intents \
+                         WHERE claim_id IN (SELECT claim_id FROM cluster_operation_lease_releases) \
+                           AND claim_id NOT IN (SELECT claim_id FROM cluster_operation_leases)"
+                            .to_owned(),
+                        params!(),
+                    ),
+                ])
+                .await;
+            match result {
+                Ok(results) => {
+                    results.into_iter().collect::<Result<Vec<_>, _>>()?;
+                    return Ok(());
+                }
+                Err(error) if cluster_operation_write_may_be_ambiguous(&error) => {
+                    // The local unresolved-release latch remains closed while
+                    // this node-owned cleanup retries the idempotent receipt
+                    // and exact deletion to a definitive response.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// Enter reversible maintenance for one node. Leadership moves first;
@@ -4496,6 +4684,30 @@ impl MembershipManager {
                     params!(node_id, now, lease.claim_id.as_str()),
                 ),
                 (
+                    "INSERT INTO cluster_operation_lease_intents (claim_id) \
+                     SELECT $2 WHERE EXISTS (SELECT 1 FROM cluster_operation_leases lease \
+                       WHERE lease.singleton = 1 AND lease.node_id = $1 \
+                         AND lease.operation = 'maintenance' AND lease.claim_id = $2) \
+                     ON CONFLICT(claim_id) DO NOTHING"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(lease.claim_id.clone()),
+                    ],
+                ),
+                (
+                    "INSERT INTO cluster_operation_lease_releases (claim_id) \
+                     SELECT $2 WHERE EXISTS (SELECT 1 FROM cluster_operation_leases lease \
+                       WHERE lease.singleton = 1 AND lease.node_id = $1 \
+                         AND lease.operation = 'maintenance' AND lease.claim_id = $2) \
+                     ON CONFLICT(claim_id) DO NOTHING"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(lease.claim_id.clone()),
+                    ],
+                ),
+                (
                     "DELETE FROM cluster_operation_leases \
                      WHERE singleton = 1 AND node_id = $1 \
                        AND operation = 'maintenance' AND claim_id = $2"
@@ -4504,6 +4716,10 @@ impl MembershipManager {
                         Param::StmtOutputNamed(0, "node_id".into()),
                         Param::Text(lease.claim_id.clone()),
                     ],
+                ),
+                (
+                    "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1".to_owned(),
+                    params!(lease.claim_id.as_str()),
                 ),
             ])
             .await;
@@ -9410,6 +9626,153 @@ mod tests {
         );
     }
 
+    fn guarded_operation_lease_fixture() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', NULL); \
+                 CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_removal_attempts (node_id TEXT, attempt_id TEXT); \
+                 CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_operation_leases (\
+                   singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                   node_id TEXT NOT NULL, operation TEXT NOT NULL, \
+                   claim_id TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_operation_lease_releases (claim_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_operation_lease_intents (claim_id TEXT PRIMARY KEY);",
+            )
+            .expect("guarded operation lease schema");
+        for trigger in [
+            REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL,
+            REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL,
+            REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL,
+        ] {
+            connection
+                .execute_batch(trigger)
+                .expect("install current-coordinator lease guard");
+        }
+        connection
+    }
+
+    fn acquire_guarded_operation_lease(
+        connection: &mut rusqlite::Connection,
+        node_id: &str,
+        operation: &str,
+        claim_id: &str,
+    ) -> usize {
+        let transaction = connection.transaction().expect("acquire transaction");
+        transaction
+            .execute(
+                "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
+                 ON CONFLICT(claim_id) DO NOTHING",
+                rusqlite::params![claim_id],
+            )
+            .expect("authorize acquisition");
+        let changed = transaction
+            .execute(
+                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                rusqlite::params![node_id, operation, claim_id, 1_000_i64, 100_i64],
+            )
+            .expect("acquire guarded planned-outage claim");
+        transaction
+            .execute(
+                "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1",
+                rusqlite::params![claim_id],
+            )
+            .expect("consume acquisition authorization");
+        transaction.commit().expect("commit acquisition");
+        changed
+    }
+
+    fn release_guarded_operation_lease(
+        connection: &mut rusqlite::Connection,
+        node_id: &str,
+        operation: &str,
+        claim_id: &str,
+    ) {
+        let transaction = connection.transaction().expect("release transaction");
+        transaction
+            .execute(
+                "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
+                 ON CONFLICT(claim_id) DO NOTHING",
+                rusqlite::params![claim_id],
+            )
+            .expect("authorize exact release");
+        transaction
+            .execute(
+                TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL,
+                rusqlite::params![claim_id],
+            )
+            .expect("record permanent exact-claim release");
+        transaction
+            .execute(
+                RELEASE_CLUSTER_OPERATION_LEASE_SQL,
+                rusqlite::params![node_id, operation, claim_id],
+            )
+            .expect("delete exact claim");
+        transaction
+            .execute(
+                "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1",
+                rusqlite::params![claim_id],
+            )
+            .expect("consume release authorization");
+        transaction.commit().expect("commit release");
+    }
+
+    fn commit_guarded_maintenance(
+        connection: &mut rusqlite::Connection,
+        node_id: &str,
+        claim_id: &str,
+    ) -> bool {
+        let transaction = connection.transaction().expect("maintenance transaction");
+        let inserted = transaction
+            .execute(
+                "INSERT INTO cluster_node_maintenance (node_id) \
+                 SELECT $1 WHERE EXISTS (SELECT 1 FROM cluster_operation_leases \
+                   WHERE singleton = 1 AND node_id = $1 \
+                     AND operation = 'maintenance' AND claim_id = $2) \
+                 ON CONFLICT(node_id) DO NOTHING",
+                rusqlite::params![node_id, claim_id],
+            )
+            .expect("conditionally commit maintenance");
+        if inserted == 0 {
+            transaction
+                .rollback()
+                .expect("rollback rejected maintenance");
+            return false;
+        }
+        transaction
+            .execute(
+                "INSERT INTO cluster_operation_lease_intents (claim_id) VALUES ($1) \
+                 ON CONFLICT(claim_id) DO NOTHING",
+                rusqlite::params![claim_id],
+            )
+            .expect("authorize maintenance lease consumption");
+        transaction
+            .execute(
+                TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL,
+                rusqlite::params![claim_id],
+            )
+            .expect("record maintenance claim consumption");
+        transaction
+            .execute(
+                RELEASE_CLUSTER_OPERATION_LEASE_SQL,
+                rusqlite::params![node_id, "maintenance", claim_id],
+            )
+            .expect("consume maintenance claim");
+        transaction
+            .execute(
+                "DELETE FROM cluster_operation_lease_intents WHERE claim_id = $1",
+                rusqlite::params![claim_id],
+            )
+            .expect("consume maintenance authorization");
+        transaction.commit().expect("commit maintenance");
+        true
+    }
+
     #[test]
     fn maintenance_is_replicated_and_rollout_gated() {
         assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
@@ -9425,6 +9788,17 @@ mod tests {
             statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
                 && statement.contains("CHECK (operation IN ('restart', 'maintenance'))")
         }));
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| statement
+            .contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_releases")));
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| statement
+            .contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_intents")));
+        for trigger in [
+            REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL,
+            REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL,
+            REQUIRE_OPERATION_LEASE_DELETE_INTENT_SQL,
+        ] {
+            assert!(trigger.contains("requires current coordinator"));
+        }
         for trigger in [
             "cluster_operation_lease_heartbeat_expiry",
             "cluster_operation_lease_removal_guard",
@@ -9491,7 +9865,8 @@ mod tests {
                  CREATE TABLE cluster_operation_leases (\
                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                    node_id TEXT NOT NULL, operation TEXT NOT NULL, \
-                   claim_id TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL);",
+                   claim_id TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_operation_lease_releases (claim_id TEXT PRIMARY KEY);",
             )
             .expect("lease schema");
         drop(connection);
@@ -9553,6 +9928,174 @@ mod tests {
     }
 
     #[test]
+    fn released_planned_outage_claim_cannot_be_resurrected_by_a_delayed_write() {
+        let mut connection = guarded_operation_lease_fixture();
+        assert!(connection
+            .execute(
+                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                rusqlite::params![
+                    "node-a",
+                    "restart",
+                    "previous-release-claim",
+                    1_000_i64,
+                    100_i64
+                ],
+            )
+            .is_err());
+        assert_eq!(
+            acquire_guarded_operation_lease(
+                &mut connection,
+                "node-a",
+                "restart",
+                "ambiguous-claim",
+            ),
+            1
+        );
+        assert_eq!(
+            acquire_guarded_operation_lease(
+                &mut connection,
+                "node-a",
+                "restart",
+                "ambiguous-claim",
+            ),
+            1,
+            "retrying the exact claim is idempotent before release"
+        );
+        assert!(connection
+            .execute(
+                "UPDATE cluster_operation_leases SET expires_at = 2_000 \
+                 WHERE claim_id = 'ambiguous-claim'",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "DELETE FROM cluster_operation_leases WHERE claim_id = 'ambiguous-claim'",
+                [],
+            )
+            .is_err());
+        release_guarded_operation_lease(&mut connection, "node-a", "restart", "ambiguous-claim");
+
+        assert_eq!(
+            acquire_guarded_operation_lease(
+                &mut connection,
+                "node-a",
+                "restart",
+                "ambiguous-claim",
+            ),
+            0,
+            "a delayed disconnected acquire must not recreate its released lease"
+        );
+        assert_eq!(
+            acquire_guarded_operation_lease(
+                &mut connection,
+                "node-a",
+                "restart",
+                "successor-claim",
+            ),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT claim_id FROM cluster_operation_leases", [], |row| {
+                    row.get::<_, String>(0)
+                },)
+                .expect("successor lease"),
+            "successor-claim"
+        );
+    }
+
+    #[test]
+    fn maintenance_and_exact_release_are_safe_in_both_commit_orders() {
+        let mut release_first = guarded_operation_lease_fixture();
+        assert_eq!(
+            acquire_guarded_operation_lease(
+                &mut release_first,
+                "node-a",
+                "maintenance",
+                "release-first",
+            ),
+            1
+        );
+        release_guarded_operation_lease(
+            &mut release_first,
+            "node-a",
+            "maintenance",
+            "release-first",
+        );
+        assert!(!commit_guarded_maintenance(
+            &mut release_first,
+            "node-a",
+            "release-first",
+        ));
+        assert_eq!(
+            release_first
+                .query_row("SELECT COUNT(*) FROM cluster_node_maintenance", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("release-first maintenance count"),
+            0
+        );
+
+        let mut maintenance_first = guarded_operation_lease_fixture();
+        assert_eq!(
+            acquire_guarded_operation_lease(
+                &mut maintenance_first,
+                "node-a",
+                "maintenance",
+                "maintenance-first",
+            ),
+            1
+        );
+        assert!(commit_guarded_maintenance(
+            &mut maintenance_first,
+            "node-a",
+            "maintenance-first",
+        ));
+        release_guarded_operation_lease(
+            &mut maintenance_first,
+            "node-a",
+            "maintenance",
+            "maintenance-first",
+        );
+        assert_eq!(
+            maintenance_first
+                .query_row("SELECT COUNT(*) FROM cluster_node_maintenance", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("maintenance-first maintenance count"),
+            1
+        );
+        assert_eq!(
+            maintenance_first
+                .query_row("SELECT COUNT(*) FROM cluster_operation_leases", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("maintenance-first lease count"),
+            0
+        );
+    }
+
+    #[test]
+    fn ambiguous_operation_acquire_retries_only_while_its_owned_claim_is_live() {
+        let ambiguous = hiqlite::Error::Connect("any disconnected response".to_owned());
+        assert!(retry_ambiguous_cluster_operation_acquire(
+            &ambiguous, 999, 1_000,
+        ));
+        assert!(!retry_ambiguous_cluster_operation_acquire(
+            &ambiguous, 1_000, 1_000,
+        ));
+        assert!(!retry_ambiguous_cluster_operation_acquire(
+            &hiqlite::Error::Timeout("definitive timeout".to_owned()),
+            999,
+            1_000,
+        ));
+        assert!(cluster_operation_write_may_be_ambiguous(
+            &hiqlite::Error::Connect("leader changed".to_owned()),
+        ));
+    }
+
+    #[test]
     fn planned_outage_lease_excludes_a_concurrent_production_removal_attempt() {
         let path = std::env::temp_dir().join(format!(
             "plurx-outage-preflight-removal-race-{}.sqlite",
@@ -9577,6 +10120,7 @@ mod tests {
                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
                    node_id TEXT NOT NULL, operation TEXT NOT NULL, \
                    claim_id TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_operation_lease_releases (claim_id TEXT PRIMARY KEY); \
                  CREATE TABLE media_sessions (\
                    owner_node_id TEXT, state TEXT, lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 10, NULL), ('node-b', 10, NULL); \
@@ -9660,6 +10204,8 @@ mod tests {
                 "CREATE TABLE cluster_operation_leases (\
                    singleton INTEGER PRIMARY KEY, node_id TEXT NOT NULL, \
                    operation TEXT NOT NULL, claim_id TEXT NOT NULL, expires_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_operation_lease_releases (claim_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_operation_lease_intents (claim_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_nodes (\
                    node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL); \
                  CREATE TABLE cluster_node_removal_attempts (\

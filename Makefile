@@ -191,6 +191,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::long_lived_socket_derives_a_fresh_admission_deadline_per_request \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_server::tests::first_snapshot_identity_reports_terminal_status_when_reader_eof_wins \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -487,6 +491,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::aborting_snapshot_owner_publishes_attempt_guarded_terminal_status \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::outbound_snapshot_attempt_bounds_identity_before_supervisor_logging \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -634,7 +642,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::peer_status_cache_is_fresh_for_five_seconds_then_expires \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
-	  http::cluster_operations::tests::full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_source_time \
+	  http::cluster_operations::tests::full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::absent_and_expired_cache_are_unavailable_never_peer_limited \
@@ -655,7 +663,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::cached_inactive_transport_observation_expires_at_five_minutes \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
-	  http::cluster_operations::tests::transport_projection_uses_source_time_and_rejects_unbounded_future_skew \
+	  http::cluster_operations::tests::transport_projection_uses_local_monotonic_age_despite_remote_clock_skew \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::peer_status_refresh_keeps_strict_cycle_overhead_margin \
@@ -688,11 +696,26 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::abort_during_drain_cancels_the_guard_owned_local_fence \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::restart_preparation_claims_and_releases_the_replicated_outage_slot \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::cancelled_maintenance_waiter_does_not_cancel_the_owned_commit \
 	  -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
 	  cluster::membership::tests::planned_outage_lease_excludes_a_concurrent_production_removal_attempt \
 	  -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::released_planned_outage_claim_cannot_be_resurrected_by_a_delayed_write \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::maintenance_and_exact_release_are_safe_in_both_commit_orders \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::ambiguous_operation_acquire_retries_only_while_its_owned_claim_is_live \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
 	  cluster::membership::tests::cache_revocation_capability_covers_the_exact_committed_roster_and_rollback \
 	  -- --exact

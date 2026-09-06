@@ -30,7 +30,7 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | not opened | every current review finding is fixed; moved-base Rust 1.97.1 fast-lane qualification and three replacement adversarial reviews are pending | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · source-time replay aging |
+| M4 · transport status | `codex/cluster-transport-m4` | not opened | every current review finding is fixed; moved-base Rust 1.97.1 fast-lane qualification and three replacement adversarial reviews are pending | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging |
 | M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
@@ -57,7 +57,7 @@ cancellation could orphan a replicated outage claim or leave its local serving
 fence armed, commit-ambiguous credential mutations could release their cache
 fence, console and mixed-version writers could bypass peer revocation, and
 asynchronous UI updates could replace an operator decision or retain obsolete
-sender progress. All findings are implemented. The replacement passed web,
+sender progress. Those findings were implemented. The replacement passed web,
 operations, validation, formatting, diff, and its new exact Rust regressions;
 the complete cluster/WAL lane then exposed an obsolete abandoned-snapshot
 expectation: the new contract correctly retained a first-identity terminal row.
@@ -66,8 +66,24 @@ count, monotonic attempt identity, and persistence after the active install.
 The complete lane passes from the beginning, as do workspace all-target compile,
 root denied-warning Clippy, validation, operations, formatting, and diff checks.
 All four standalone vendored compile and denied-warning Clippy matrices also
-pass. The replacement commit and its three exact-SHA reviews from zero are
-next; the tree will not be pushed or opened beforehand.
+passed. Exact review then rejected committed candidate `cd344bd1`: an aborted
+snapshot owner could leave active status, remote wall-clock skew could corrupt
+cached aging, long-lived sockets reused an expired admission deadline, an
+ambiguous maintenance transaction could land after local unfencing, and an
+ambiguous lease acquisition could land after its cleanup. The corrections now
+publish abort-terminal status, derive each request's admission deadline at
+decode time, use local monotonic cache age, and make planned-outage claims
+one-shot through permanent exact-release receipts. Focused requalification and
+three fresh exact-SHA reviews remain; the tree will not be pushed or opened
+beforehand. A final planned-outage preflight then found that a previous-release
+binary could still bypass the receipt through its raw lease statements and that
+local admission could reopen when exact cleanup outlived the original lease.
+The corrected replicated schema now requires transaction-local intent for every
+lease insert, update, and delete, while the node-owned cleanup retains a local
+unresolved-release latch through every ambiguous result. Previous-release write,
+delayed resurrection, both maintenance/release orders, retry-boundary, and
+post-expiry admission regressions pass. The complete focused lane and all static,
+compile, formatting, and denied-warning matrices pass on the uncommitted tree.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -109,7 +125,8 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 fifth-review corrections | fail · `660e0794` rejected by three fresh tracks | Retained browser evidence aged in the model but failed refreshes did not repaint it in the DOM; old cross-observer completion could hide a demonstrably newer same-fingerprint attempt; the status page was stale; restart and maintenance proved safety before claiming their lifecycle fence; an authentication already reading Store could republish revoked admin proof; and a late first status read renewed producer evidence past its original expiry. This exact tree is not a release candidate. |
 | M4 sixth-review corrections | fail · `b7914f69` rejected after a green lane | Failed automatic refreshes repaint projected transport state without replacing an open decision dialog; cross-observer completion authority is bounded to the five-second freshness cohort; planned outages claim the replicated lifecycle lease before fresh evidence and release it on rejection; Store-backed authentication publishes only across an unchanged revocation generation; and producer stalls retain their real deadline-derived boundary. Three fresh exact-SHA tracks still found seven UI, snapshot-lifecycle, cluster-revocation, and cancellation findings. |
 | M4 seventh-review corrections | fail · `95247348` rejected after green focused requalification | The three exact-SHA tracks found first-select and first-identity snapshot teardown gaps, cancellation windows around both the replicated outage claim and local serving fence, cache authorization gaps on ambiguous writes plus console and mixed-version writers, a manual-refresh/modal race, and stale sender phases outranking durable receiver completion. All findings are assigned to bounded implementation tracks; the corrected tree must repeat focused qualification and three reviews from zero. |
-| M4 eighth-review corrections | pass · committed replacement | Every finding against `95247348` is implemented with deterministic coverage. The complete cluster/WAL lane passes from the beginning, including the strengthened retained-terminal regression; web, operations, validation, workspace compile, root denied-warning Clippy, all four standalone vendored check/Clippy matrices, formatting, and diff checks pass. Three exact-SHA reviews are in progress. |
+| M4 eighth-review corrections | fail · `cd344bd1` rejected after green qualification | Every finding against `95247348` was implemented and the complete lane plus compile/lint matrices passed, but fresh exact review found five snapshot-status, clock, deadline, and planned-outage ordering defects. This exact tree is not a release candidate. |
+| M4 ninth-review corrections | pass · uncommitted replacement | Snapshot-owner abort publishes terminal state; request admission deadlines are fresh per decoded request; remote evidence ages only by local monotonic cache residence; exact planned-outage releases leave permanent one-shot receipts; rolling-upgrade triggers reject old lease writers; and node-owned exact cleanup retains local fencing past expiry. The complete cluster/WAL lane, web, 197 operations contracts, validation, root and all vendored check/Clippy matrices, formatting, and diff checks pass. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -174,6 +191,24 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
     before reading a secret or opening Store. Administrators must use the
     authenticated daemon API; a future console recovery design requires its own
     threat model and review.
+12. **Retain exact planned-outage release receipts.** A disconnected API-server
+    task may submit its prepared claim after any time-based cleanup barrier.
+    Each random UUID claim is therefore one-shot: exact release records a tiny
+    permanent replicated receipt before deleting the active lease, and delayed
+    acquisition checks that receipt. Planned outages are privileged, rare
+    operations; reclaiming these rows later requires a proven bound on detached
+    write lifetime rather than an assumed wall-clock delay.
+13. **Enforce the planned-outage protocol in replicated SQLite during rolling
+    upgrade.** Permanent receipts alone cannot constrain a previous-release
+    coordinator that still submits raw lease statements. Transaction-local
+    intent rows now authorize current insert, update, and delete shapes; durable
+    triggers reject old writers, and the schema-owned heartbeat cleanup creates
+    its own exact receipt and intent before deleting an expired lease.
+14. **Keep local admission fail-closed until exact cleanup is known.** Lease
+    expiry bounds an ordinary preparation, but it cannot authorize serving while
+    a disconnected replicated release is still unresolved. A synchronous local
+    latch survives the original deadline and is cleared only after node-owned,
+    idempotent cleanup receives a definitive result.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 

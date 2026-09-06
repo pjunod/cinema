@@ -36,6 +36,7 @@ struct RestartDrainState {
 struct RestartDrain {
     state: tokio::sync::Mutex<RestartDrainState>,
     admissions: AtomicU64,
+    unresolved_release: AtomicBool,
     changed: tokio::sync::Notify,
 }
 
@@ -238,7 +239,12 @@ impl ServingFence {
     pub(crate) async fn try_restart_admission(&self) -> Option<RestartAdmission> {
         let mut state = self.restart_drain.state.lock().await;
         expire_restart_drain(&mut state);
-        if state.expires_at.is_some() {
+        if state.expires_at.is_some()
+            || self
+                .restart_drain
+                .unresolved_release
+                .load(Ordering::Acquire)
+        {
             return None;
         }
         self.restart_drain.admissions.fetch_add(1, Ordering::AcqRel);
@@ -252,6 +258,13 @@ impl ServingFence {
     /// no local admission was fenced.
     pub(crate) async fn begin_restart_preparation_until(&self, expires_at_unix_ms: u64) -> bool {
         let mut state = self.restart_drain.state.lock().await;
+        if self
+            .restart_drain
+            .unresolved_release
+            .load(Ordering::Acquire)
+        {
+            return false;
+        }
         let now_unix_ms = unix_ms();
         let Some(remaining_ms) = expires_at_unix_ms.checked_sub(now_unix_ms) else {
             state.expires_at = None;
@@ -267,6 +280,17 @@ impl ServingFence {
         state.expires_at = Some(now + Duration::from_millis(remaining_ms));
         state.expires_at_unix_ms = Some(expires_at_unix_ms);
         true
+    }
+
+    /// Keep admissions closed while an exact replicated release has no
+    /// definitive response. This synchronous latch is safe to set from a
+    /// guard's `Drop` before its asynchronous cleanup task can be scheduled.
+    /// Only a confirmed exact release clears it.
+    pub(crate) fn retain_restart_preparation_until_cancelled(&self) {
+        self.restart_drain
+            .unresolved_release
+            .store(true, Ordering::Release);
+        self.restart_drain.changed.notify_waiters();
     }
 
     /// Wait until every admission that won before the drain flag has either
@@ -291,6 +315,9 @@ impl ServingFence {
         active_sessions: usize,
     ) -> RestartDrainStatus {
         let mut state = self.restart_drain.state.lock().await;
+        self.restart_drain
+            .unresolved_release
+            .store(false, Ordering::Release);
         state.expires_at = None;
         state.expires_at_unix_ms = None;
         self.restart_drain.changed.notify_waiters();
@@ -419,7 +446,8 @@ fn restart_drain_status(
 ) -> RestartDrainStatus {
     let admissions_in_flight = drain.admissions.load(Ordering::Acquire);
     RestartDrainStatus {
-        new_admissions_blocked: state.expires_at.is_some(),
+        new_admissions_blocked: state.expires_at.is_some()
+            || drain.unresolved_release.load(Ordering::Acquire),
         admissions_in_flight,
         expires_at_unix_ms: state.expires_at_unix_ms,
         drained: active_sessions == 0 && admissions_in_flight == 0,
@@ -545,6 +573,29 @@ mod tests {
         let status = fence.restart_drain_status(0).await;
         assert_eq!(status.expires_at_unix_ms, Some(replicated_expiry));
         assert!(!fence.begin_restart_preparation_until(unix_ms()).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        assert!(
+            fence
+                .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+                .await
+        );
+        fence.retain_restart_preparation_until_cancelled();
+
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(fence.restart_drain_status(0).await.new_admissions_blocked);
+        assert!(fence.try_restart_admission().await.is_none());
+        assert!(
+            !fence
+                .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+                .await
+        );
+
+        fence.cancel_restart_preparation(0).await;
+        assert!(fence.try_restart_admission().await.is_some());
     }
 
     #[tokio::test]

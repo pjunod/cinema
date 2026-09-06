@@ -1134,10 +1134,38 @@ impl SnapshotAttempt {
 struct SnapshotAttemptGuard {
     attempt_id: u64,
     slot: Arc<StdMutex<Option<Arc<SnapshotAttempt>>>>,
+    snapshot_transport: crate::LocalSnapshotTransportStatus,
+    transport_attempt: crate::transport_status::OutboundSnapshotAttempt,
+    terminal_armed: bool,
+}
+
+impl SnapshotAttemptGuard {
+    fn new(
+        attempt_id: u64,
+        slot: Arc<StdMutex<Option<Arc<SnapshotAttempt>>>>,
+        snapshot_transport: crate::LocalSnapshotTransportStatus,
+        transport_attempt: crate::transport_status::OutboundSnapshotAttempt,
+    ) -> Self {
+        Self {
+            attempt_id,
+            slot,
+            snapshot_transport,
+            transport_attempt,
+            terminal_armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.terminal_armed = false;
+    }
 }
 
 impl Drop for SnapshotAttemptGuard {
     fn drop(&mut self) {
+        if self.terminal_armed {
+            self.snapshot_transport
+                .outbound_failed_owned(&self.transport_attempt, "snapshot_attempt_ended");
+        }
         let mut slot = self
             .slot
             .lock()
@@ -1434,10 +1462,12 @@ where
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *slot = Some(Arc::clone(&attempt));
     }
-    let _attempt_guard = SnapshotAttemptGuard {
+    let mut attempt_guard = SnapshotAttemptGuard::new(
         attempt_id,
-        slot: Arc::clone(&network.snapshot_attempt),
-    };
+        Arc::clone(&network.snapshot_attempt),
+        network.snapshot_transport.clone(),
+        transport_attempt,
+    );
     let stage = attempt.stage.subscribe();
     let local_node_id = network.local_node_id;
     let target_node_id = network.node.id;
@@ -1463,6 +1493,7 @@ where
             .snapshot_transport
             .outbound_failed_owned(&transport_attempt, "snapshot_attempt_ended");
     }
+    attempt_guard.disarm();
     result
 }
 
@@ -3585,13 +3616,33 @@ mod tests {
     fn stale_snapshot_guard_cannot_clear_a_newer_attempt() {
         let slot = Arc::new(StdMutex::new(None));
         let budgets = test_snapshot_budgets();
-        let first = SnapshotAttempt::new(1, "first".into(), budgets);
+        let status =
+            crate::LocalSnapshotTransportStatus::new(1, std::collections::BTreeSet::from([7]));
+        let first_transport = status.next_outbound_attempt("sqlite", 7, 1);
+        let first = SnapshotAttempt::new(first_transport.attempt_id, "first".into(), budgets);
+        status.begin_owned_outbound_attempt(
+            &first_transport,
+            "first",
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            first.transfer_deadline,
+        );
         *slot.lock().expect("snapshot attempt slot") = Some(Arc::clone(&first));
-        let first_guard = SnapshotAttemptGuard {
-            attempt_id: first.id,
-            slot: Arc::clone(&slot),
-        };
-        let second = SnapshotAttempt::new(2, "second".into(), budgets);
+        let first_guard =
+            SnapshotAttemptGuard::new(first.id, Arc::clone(&slot), status.clone(), first_transport);
+        let second_transport = status.next_outbound_attempt("sqlite", 7, 1);
+        let second = SnapshotAttempt::new(second_transport.attempt_id, "second".into(), budgets);
+        status.begin_owned_outbound_attempt(
+            &second_transport,
+            "second",
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            second.transfer_deadline,
+        );
         *slot.lock().expect("snapshot attempt slot") = Some(Arc::clone(&second));
 
         drop(first_guard);
@@ -3603,11 +3654,19 @@ mod tests {
                 .map(|attempt| attempt.id),
             Some(second.id)
         );
-        drop(SnapshotAttemptGuard {
-            attempt_id: second.id,
-            slot: Arc::clone(&slot),
-        });
+        assert_eq!(status.snapshot().observations[0].attempt_id, second.id);
+        assert!(status.snapshot().observations[0].operation_owns_work);
+        drop(SnapshotAttemptGuard::new(
+            second.id,
+            Arc::clone(&slot),
+            status.clone(),
+            second_transport,
+        ));
         assert!(slot.lock().expect("snapshot attempt slot").is_none());
+        assert_eq!(
+            status.snapshot().observations[0].phase,
+            crate::SnapshotTransportPhase::Failed
+        );
     }
 
     #[cfg(feature = "sqlite")]
@@ -3615,12 +3674,30 @@ mod tests {
     async fn caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately() {
         let reset = Arc::new(ConnectionResetState::default());
         let socket_epoch = reset.epoch();
-        let attempt = SnapshotAttempt::new(10, "snapshot".into(), test_snapshot_budgets());
+        let status =
+            crate::LocalSnapshotTransportStatus::new(1, std::collections::BTreeSet::from([7]));
+        let transport_attempt = status.next_outbound_attempt("sqlite", 7, 1);
+        let attempt = SnapshotAttempt::new(
+            transport_attempt.attempt_id,
+            "snapshot".into(),
+            test_snapshot_budgets(),
+        );
+        status.begin_owned_outbound_attempt(
+            &transport_attempt,
+            "snapshot",
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            attempt.transfer_deadline,
+        );
         let attempts = Arc::new(StdMutex::new(Some(Arc::clone(&attempt))));
-        let attempt_guard = SnapshotAttemptGuard {
-            attempt_id: attempt.id,
-            slot: Arc::clone(&attempts),
-        };
+        let attempt_guard = SnapshotAttemptGuard::new(
+            attempt.id,
+            Arc::clone(&attempts),
+            status.clone(),
+            transport_attempt,
+        );
         let (cancel, cancelled) = oneshot::channel();
         let active_rpc = {
             let reset = Arc::clone(&reset);
@@ -3668,11 +3745,64 @@ mod tests {
             attempts.lock().expect("snapshot attempt slot").is_none(),
             "the attempt guard must clear on cancellation"
         );
+        let terminal = &status.snapshot().observations[0];
+        assert_eq!(terminal.phase, crate::SnapshotTransportPhase::Failed);
+        assert_eq!(
+            terminal.last_error_category.as_deref(),
+            Some("snapshot_attempt_ended")
+        );
+        assert!(!terminal.operation_owns_work);
         assert_ne!(
             reset.epoch(),
             socket_epoch,
             "dropping the active RPC guard must request connection reset"
         );
+    }
+
+    #[tokio::test]
+    async fn aborting_snapshot_owner_publishes_attempt_guarded_terminal_status() {
+        let status =
+            crate::LocalSnapshotTransportStatus::new(1, std::collections::BTreeSet::from([7]));
+        let transport_attempt = status.next_outbound_attempt("sqlite", 7, 1);
+        let attempt = SnapshotAttempt::new(
+            transport_attempt.attempt_id,
+            "aborted".into(),
+            test_snapshot_budgets(),
+        );
+        status.begin_owned_outbound_attempt(
+            &transport_attempt,
+            "aborted",
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            attempt.transfer_deadline,
+        );
+        let slot = Arc::new(StdMutex::new(Some(Arc::clone(&attempt))));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let owner = tokio::spawn({
+            let status = status.clone();
+            let slot = Arc::clone(&slot);
+            let started = Arc::clone(&started);
+            async move {
+                let _guard = SnapshotAttemptGuard::new(attempt.id, slot, status, transport_attempt);
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+        started.notified().await;
+
+        owner.abort();
+        assert!(owner.await.expect_err("owner is aborted").is_cancelled());
+        assert!(slot.lock().expect("snapshot attempt slot").is_none());
+        let terminal = &status.snapshot().observations[0];
+        assert_eq!(terminal.attempt_id, transport_attempt.attempt_id);
+        assert_eq!(terminal.phase, crate::SnapshotTransportPhase::Failed);
+        assert_eq!(
+            terminal.last_error_category.as_deref(),
+            Some("snapshot_attempt_ended")
+        );
+        assert!(!terminal.operation_owns_work);
     }
 
     #[test]
