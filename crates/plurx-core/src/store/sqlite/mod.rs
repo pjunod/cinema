@@ -44,7 +44,9 @@ use crate::store::telemetry::{NETWORK_PRIORS_V2_SCHEMA, PLAYBACK_EVENTS_SCHEMA};
 
 /// Ordered, append-only migration list. `PRAGMA user_version` tracks the last
 /// applied index + 1. Never edit an entry that has shipped — append instead.
-const MIGRATIONS: &[&str] = &[
+/// Visible to the import inventory guard, which needs to know which migration
+/// first creates each table it plans to read.
+pub(crate) const MIGRATIONS: &[&str] = &[
     // v1: settings KV — the seed of all replicated durable state.
     "CREATE TABLE settings (
         key        TEXT PRIMARY KEY,

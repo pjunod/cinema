@@ -701,11 +701,20 @@ const TABLES: &[TablePlan] = &[
         ],
         order_by: "user_id, playback_id",
         // A brand-new table, so `minimum_schema` is the whole story: a source
-        // older than v28 has no rows to carry and needs no arm in
+        // older than this has no rows to carry and needs no arm in
         // `value_projection`. Carried on import rather than dropped, because
         // what a viewer asked for is the one fact about a playback that a
         // rebuilt cluster cannot re-derive from anything else it holds.
-        minimum_schema: 28,
+        //
+        // 48 is the SQLite migration that creates the table. This field is
+        // compared against the *source's* `PRAGMA user_version`, and it said
+        // 28 — the replicated AUTH version, which is a different number line
+        // entirely. A source between v28 and v47 would have been sent to
+        // count and read a table it does not have.
+        // `every_import_plan_names_the_migration_that_creates_its_table`
+        // now makes that class of mistake fail at compile-test time rather
+        // than during someone's restore.
+        minimum_schema: 48,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2536,6 +2545,52 @@ mod tests {
             ),
             "{current}"
         );
+    }
+
+    /// Every import plan must name the migration that actually creates its
+    /// table.
+    ///
+    /// `minimum_schema` is compared against the *source database's* `PRAGMA
+    /// user_version`, so it lives on the SQLite migration number line and
+    /// nothing else. `media_playback_desired` had the replicated AUTH version
+    /// there instead — a different number line that happens to contain small
+    /// integers too — which would have sent a source between those two
+    /// numbers to count and read a table it does not have. Nothing catches
+    /// that until a restore, which is the worst place to find it.
+    ///
+    /// Checked against `MIGRATIONS` rather than against a hand-kept list, so
+    /// a table added in a later migration cannot be given an earlier number
+    /// and pass. Tables created before the migration list began, or by an
+    /// `ALTER` rather than a `CREATE`, have no creating migration to find and
+    /// are exempted by name — deliberately a short list that has to be edited
+    /// deliberately.
+    #[test]
+    fn every_import_plan_names_the_migration_that_creates_its_table() {
+        // Tables whose creation predates the migration list, so there is no
+        // entry to point at. Each is present from v1.
+        const PREDATES_THE_LIST: &[&str] = &[];
+        let migrations = crate::store::sqlite::MIGRATIONS;
+        for table in TABLES {
+            if PREDATES_THE_LIST.contains(&table.name) {
+                continue;
+            }
+            let creates = |sql: &str| {
+                sql.contains(&format!("CREATE TABLE IF NOT EXISTS {}", table.name))
+                    || sql.contains(&format!("CREATE TABLE {}", table.name))
+            };
+            let Some(index) = migrations.iter().position(|sql| creates(sql)) else {
+                continue;
+            };
+            let creating_version = index as i64 + 1;
+            assert!(
+                table.minimum_schema >= creating_version,
+                "{}: minimum_schema {} is below v{creating_version}, the migration that \
+                 creates the table — a source in between would be asked to read a table \
+                 it does not have",
+                table.name,
+                table.minimum_schema,
+            );
+        }
     }
 
     #[test]
