@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["bd3f944f"]
+commits = ["dd18c660"]
 points = ["playback.pipeline", "core.media"]
 checks = ["rust-gate"]
 reason = "Preparation admission and prepared commit refused a successor built for an ask the viewer had left, but ordinary activation — the third writer of the same playback pointer — carried no such compare, so the guard was bypassable by changing the selection while an ordinary create was in flight. The expected desired revision now rides inside the committing statement in both backends, threaded from the revision the create recorded at its first step rather than re-read at activation time. SQLite's pointer upsert was unconditional with its result ignored and now decides on the row count, so a refused ask rolls the activation back instead of returning success over a pointer that never moved. an_activation_is_refused_when_the_viewer_has_asked_for_something_else covers both the replacement path and the first activation of a playback, and an_activation_with_no_recorded_ask_is_still_admitted pins that a missing row admits; both run under for_each_backend so the three-voter lane covers them."
