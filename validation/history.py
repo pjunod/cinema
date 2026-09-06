@@ -332,9 +332,16 @@ def _audit_tips(root: Path) -> tuple[str, ...]:
     merge_head = Path(_git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip())
     if not merge_head.is_absolute():
         merge_head = root / merge_head
-    if not merge_head.is_file():
+    try:
+        tips = merge_head.read_text(encoding="ascii").splitlines()
+    except FileNotFoundError:
         return ("HEAD",)
-    tips = [line.strip() for line in merge_head.read_text().splitlines() if line.strip()]
+    except (OSError, UnicodeError) as exc:
+        raise HistoryError(f"cannot read pending merge heads: {exc}") from exc
+    if not tips or any(
+        not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", tip) for tip in tips
+    ):
+        raise HistoryError("pending MERGE_HEAD must contain full Git commit hashes")
     return ("HEAD", *tips)
 
 
