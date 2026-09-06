@@ -988,7 +988,14 @@ fn send_linux_seccomp_listener(
         std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>(), listener);
         message.msg_controllen = (*header).cmsg_len;
     }
-    if unsafe { libc::sendmsg(socket, &raw const message, libc::MSG_NOSIGNAL) } == 1 {
+    if unsafe {
+        libc::sendmsg(
+            socket,
+            &raw const message,
+            libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+        )
+    } == 1
+    {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
@@ -1191,7 +1198,15 @@ fn receive_linux_probe_fork_ready(
 fn acknowledge_linux_probe_fork(socket: std::os::fd::RawFd) -> std::io::Result<()> {
     let byte = b'A';
     loop {
-        if unsafe { libc::send(socket, (&raw const byte).cast(), 1, libc::MSG_NOSIGNAL) } == 1 {
+        if unsafe {
+            libc::send(
+                socket,
+                (&raw const byte).cast(),
+                1,
+                libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+            )
+        } == 1
+        {
             return Ok(());
         }
         let error = std::io::Error::last_os_error();
@@ -1208,7 +1223,15 @@ fn confirm_linux_probe_fork(
 ) -> std::io::Result<()> {
     let byte = b'F';
     loop {
-        if unsafe { libc::send(socket, (&raw const byte).cast(), 1, libc::MSG_NOSIGNAL) } == 1 {
+        if unsafe {
+            libc::send(
+                socket,
+                (&raw const byte).cast(),
+                1,
+                libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+            )
+        } == 1
+        {
             break;
         }
         let error = std::io::Error::last_os_error();
