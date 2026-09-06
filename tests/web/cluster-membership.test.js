@@ -488,6 +488,43 @@ test("private cluster-listener evidence survives a closed public listener", () =
   assert.equal(recovery.text, "installing snapshot");
 });
 
+test("private transport renders while public status is closed for learners and voters", () => {
+  const ui = sandbox();
+  for (const role of ["learner", "voter"]) {
+    const target = node("node-b", 2, role, { bounded_read_ready: false });
+    const membership = status("degraded", [
+      node("node-a", 1, "voter", { is_leader: true }),
+      target,
+    ]);
+    const operations = operationStatus(membership, { unreachable: true });
+    operations.nodes[1].transport = {
+      observing_node_id: 2,
+      observations: [
+        transportObservation("installing", {
+          sample_age_ms: 65_000,
+          snapshot_id: "snapshot-private",
+        }),
+      ],
+    };
+
+    const operationsHtml = ui.clusterNodeOperationsHtml(target, operations);
+    assert.match(operationsHtml, /Not observed/);
+    assert.match(
+      operationsHtml,
+      /Transport<\/span>installing snapshot · observer 2 · 1m ago/,
+    );
+    const nodeHtml = ui.clusterNodeRow(target, "node-a", true, {
+      operations,
+      lifecycleLocked: false,
+    });
+    assert.match(
+      nodeHtml,
+      /Transport<\/span>installing snapshot · observer 2 · 1m ago/,
+      `${role} node card hides private transport evidence`,
+    );
+  }
+});
+
 test("rejected public and wrong-observer transport evidence cannot reappear", () => {
   const ui = sandbox();
   const rejectedPublic = {
@@ -558,6 +595,52 @@ test("transport status shows outbound evidence and expires stale samples", () =>
   );
   assert.equal(watermark.code, "startup_watermark");
   assert.equal(watermark.text, "waiting for startup watermark");
+});
+
+test("receiver completion outranks a split-view sender failure for one snapshot", () => {
+  const ui = sandbox();
+  const snapshotId = "snapshot-split-view";
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("failed", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: snapshotId,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("complete", {
+              observing_node_id: 2,
+              peer_node_id: 1,
+              direction: "inbound",
+              snapshot_id: snapshotId,
+              acknowledged_offset: null,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const waitingForAck = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(waitingForAck.observation.phase, "complete");
+  assert.equal(
+    waitingForAck.text,
+    "snapshot received; sender acknowledgement unconfirmed",
+  );
+  const recovered = ui.clusterTransportExplanation(operations, 2, true);
+  assert.equal(recovered.observation.phase, "complete");
+  assert.equal(recovered.text, "snapshot recovered");
 });
 
 test("stalled transport renders its observer and sample age", () => {

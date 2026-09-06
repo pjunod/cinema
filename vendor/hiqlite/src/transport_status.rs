@@ -5,6 +5,7 @@
 //! create replicated work or retain an unbounded snapshot/request identity.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,6 +22,21 @@ const RETIRED_PEER_ALLOWANCE: usize = 4;
 const OBSERVATIONS_PER_PEER: usize = 4;
 const STALLED_AFTER: Duration = Duration::from_secs(30);
 const EXPIRE_AFTER: Duration = Duration::from_secs(300);
+// OpenRaft-generated snapshot identities are short. Snapshot metadata received
+// from an authenticated peer is nevertheless untrusted input, so diagnostics
+// must not retain or log an attacker-sized identity.
+const MAX_RETAINED_SNAPSHOT_ID_BYTES: usize = 128;
+
+pub(crate) fn retained_snapshot_id(snapshot_id: &str) -> String {
+    if snapshot_id.len() <= MAX_RETAINED_SNAPSHOT_ID_BYTES {
+        snapshot_id.to_owned()
+    } else {
+        format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(snapshot_id.as_bytes()))
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -424,7 +440,7 @@ impl LocalSnapshotTransportStatus {
                     return;
                 }
                 observation.attempt_id = attempt.attempt_id;
-                observation.snapshot_id = Some(snapshot_id.to_owned());
+                observation.snapshot_id = Some(retained_snapshot_id(snapshot_id));
                 observation.socket_epoch = socket.epoch;
                 observation.attempted_offset = None;
                 observation.acknowledged_offset = None;
@@ -699,9 +715,10 @@ impl LocalSnapshotTransportStatus {
         if !self.make_room(&mut state, now, &key) {
             return None;
         }
+        let snapshot_id = retained_snapshot_id(snapshot_id);
         let existing = state.observations.get(&key);
         let changed_snapshot = existing.and_then(|observation| observation.snapshot_id.as_deref())
-            != Some(snapshot_id);
+            != Some(snapshot_id.as_str());
         let existing_attempt_id = existing.map(|observation| observation.attempt_id);
         let existing_end = existing.and_then(|observation| observation.attempted_offset);
         let existing_started = existing.and_then(|observation| observation.attempt_started);
@@ -724,7 +741,7 @@ impl LocalSnapshotTransportStatus {
             raft_group,
             peer_node_id,
             attempt_id,
-            snapshot_id: snapshot_id.to_owned(),
+            snapshot_id,
             socket_epoch,
             attempted_offset,
             total_bytes: done.then_some(attempted_offset),
@@ -1253,6 +1270,97 @@ mod tests {
         assert_eq!(
             status.snapshot().observations[0].phase,
             SnapshotTransportPhase::Complete
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn outbound_snapshot_identity_is_bounded_before_retention() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let oversized = "x".repeat(MAX_RETAINED_SNAPSHOT_ID_BYTES + 1);
+        let expected = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(oversized.as_bytes()))
+        );
+
+        status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            1,
+            &oversized,
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        let bounded = status.snapshot().observations.remove(0);
+        assert_eq!(bounded.snapshot_id.as_deref(), Some(expected.as_str()));
+        assert!(expected.len() <= MAX_RETAINED_SNAPSHOT_ID_BYTES);
+        assert!(!expected.contains(&oversized));
+
+        status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            2,
+            "ordinary-snapshot-id",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        assert_eq!(
+            status.snapshot().observations[0].snapshot_id.as_deref(),
+            Some("ordinary-snapshot-id")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_snapshot_identity_is_bounded_before_retention() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let oversized = "authenticated-peer-input".repeat(64);
+        let expected = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(oversized.as_bytes()))
+        );
+        let status = LocalSnapshotTransportStatus::new(2, BTreeSet::from([1]));
+        let attempt = status
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: &oversized,
+                offset: 0,
+                len: 64,
+                done: false,
+                socket_epoch: 1,
+                deadline,
+            })
+            .expect("track bounded inbound identity");
+        assert_eq!(attempt.snapshot_id, expected);
+        status.inbound_admitted(&attempt, false, deadline);
+        assert_eq!(
+            status.snapshot().observations[0].snapshot_id.as_deref(),
+            Some(expected.as_str())
+        );
+
+        let normal = LocalSnapshotTransportStatus::new(2, BTreeSet::from([1]));
+        let attempt = normal
+            .inbound_received(InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id: "ordinary-snapshot-id",
+                offset: 0,
+                len: 64,
+                done: false,
+                socket_epoch: 1,
+                deadline,
+            })
+            .expect("track ordinary inbound identity");
+        normal.inbound_admitted(&attempt, false, deadline);
+        assert_eq!(
+            normal.snapshot().observations[0].snapshot_id.as_deref(),
+            Some("ordinary-snapshot-id")
         );
     }
 

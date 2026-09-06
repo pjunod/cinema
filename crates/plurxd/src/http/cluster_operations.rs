@@ -39,8 +39,9 @@ use crate::state::AppState;
 pub(crate) const INTERNAL_PATH: &str = "/api/v1/internal/cluster/operations-status";
 const AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
 const PEER_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
+const PEER_DIRECTORY_TIMEOUT: Duration = Duration::from_millis(500);
 const PEER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
-const PEER_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(4);
+const PEER_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const TRANSPORT_OBSERVATION_TTL_MS: u64 = 5 * 60 * 1_000;
 const MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS: u64 = 5_000;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
@@ -673,18 +674,37 @@ impl PeerStatusCache {
         }
     }
 
-    async fn store(
-        &self,
-        statuses: &BTreeMap<String, PeerStatusOutcome>,
-        refresh_started: tokio::time::Instant,
-    ) {
+    async fn store(&self, statuses: &BTreeMap<String, PeerStatusOutcome>) {
         *self.inner.lock().await = Some(CachedPeerStatuses {
-            // Cache availability is bounded from the beginning of the read,
-            // not from when a slow peer fan-out finally returns.
-            stored_at: refresh_started,
+            // Availability starts when the refresh is usable. Transport and
+            // process samples retain their source timestamps and are aged
+            // from those timestamps when the aggregate is rendered.
+            stored_at: tokio::time::Instant::now(),
             statuses: statuses.clone(),
         });
     }
+}
+
+async fn refresh_peer_status_cache_with<Directory, DirectoryFuture, Collect, CollectFuture>(
+    cache: &PeerStatusCache,
+    refresh_started: tokio::time::Instant,
+    directory: Directory,
+    collect: Collect,
+) -> Result<(), String>
+where
+    Directory: FnOnce() -> DirectoryFuture,
+    DirectoryFuture: std::future::Future<Output = Result<Vec<ActivityPeer>, String>>,
+    Collect: FnOnce(Vec<ActivityPeer>, tokio::time::Instant) -> CollectFuture,
+    CollectFuture: std::future::Future<Output = BTreeMap<String, PeerStatusOutcome>>,
+{
+    let directory_deadline = refresh_started + PEER_DIRECTORY_TIMEOUT;
+    let peers = tokio::time::timeout_at(directory_deadline, directory())
+        .await
+        .map_err(|_| "peer directory timed out".to_owned())??;
+    let deadline = deadline_after(AGGREGATE_TIMEOUT);
+    let statuses = collect(peers, deadline).await;
+    cache.store(&statuses).await;
+    Ok(())
 }
 
 fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_ms: u64) {
@@ -734,24 +754,25 @@ pub(crate) async fn peer_status_cache_loop(
 ) {
     loop {
         let refresh_started = tokio::time::Instant::now();
-        match state.membership.operations_peers().await {
-            Ok(peers) => {
-                let deadline = deadline_after(AGGREGATE_TIMEOUT);
-                let statuses = collect_peer_statuses(
-                    peers,
-                    PeerTransport::new(state.membership.clone()),
-                    state.replication.clone(),
-                    deadline,
-                )
-                .await;
-                state
-                    .peer_status_cache
-                    .store(&statuses, refresh_started)
-                    .await;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "could not refresh bounded cluster operations cache");
-            }
+        let membership = state.membership.clone();
+        let transport = PeerTransport::new(state.membership.clone());
+        let replication = state.replication.clone();
+        if let Err(error) = refresh_peer_status_cache_with(
+            &state.peer_status_cache,
+            refresh_started,
+            move || async move {
+                membership
+                    .operations_peers()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            move |peers, deadline| async move {
+                collect_peer_statuses(peers, transport, replication, deadline).await
+            },
+        )
+        .await
+        {
+            tracing::warn!(%error, "could not refresh bounded cluster operations cache");
         }
         tokio::select! {
             () = shutdown.cancelled() => break,
@@ -1744,6 +1765,63 @@ mod tests {
         assert_eq!(MAX_OPERATIONS_PEERS, 8);
     }
 
+    #[tokio::test]
+    async fn production_collector_labels_directory_overflow_without_probing_it() {
+        let peers = (0..(MAX_OPERATIONS_PEERS + 4))
+            .map(|index| ActivityPeer {
+                node_id: format!("node-{index}"),
+                raft_id: index as u64,
+                http_base: Some(format!("http://node-{index}:32400")),
+                reachable: true,
+            })
+            .collect();
+        let public_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let private_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let outcomes = collect_peer_statuses_with_sources(
+            peers,
+            tokio::time::Instant::now() + AGGREGATE_TIMEOUT,
+            {
+                let public_calls = public_calls.clone();
+                move |peer, _peer_deadline| {
+                    public_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    async move {
+                        PeerStatusOutcome {
+                            node_id: peer.node_id,
+                            state: ObservationState::Answered,
+                            status: None,
+                            transport: None,
+                        }
+                    }
+                }
+            },
+            {
+                let private_calls = private_calls.clone();
+                move |_raft_id| {
+                    private_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    async { Ok(None) }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(outcomes.len(), MAX_OPERATIONS_PEERS + 4);
+        assert_eq!(
+            public_calls.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_OPERATIONS_PEERS
+        );
+        assert_eq!(
+            private_calls.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_OPERATIONS_PEERS
+        );
+        assert_eq!(
+            outcomes
+                .values()
+                .filter(|outcome| outcome.state == ObservationState::PeerLimit)
+                .count(),
+            4
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn peer_status_cache_is_fresh_for_five_seconds_then_expires() {
         let cache = PeerStatusCache::default();
@@ -1756,13 +1834,82 @@ mod tests {
                 transport: None,
             },
         )]);
-        cache.store(&statuses, tokio::time::Instant::now()).await;
+        cache.store(&statuses).await;
         assert_eq!(fresh_cache_statuses(cache.fresh().await).len(), 1);
 
         tokio::time::advance(PEER_STATUS_CACHE_TTL - Duration::from_millis(1)).await;
         assert!(matches!(cache.fresh().await, PeerStatusCacheRead::Fresh(_)));
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(matches!(cache.fresh().await, PeerStatusCacheRead::Stale));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_source_time() {
+        assert!(
+            PEER_STATUS_REFRESH_INTERVAL + PEER_DIRECTORY_TIMEOUT + PEER_STATUS_TIMEOUT
+                < PEER_STATUS_CACHE_TTL,
+            "the refresh schedule needs strict overhead beyond directory and peer deadlines"
+        );
+        let cache = PeerStatusCache::default();
+        cache.store(&BTreeMap::new()).await;
+        tokio::time::advance(PEER_STATUS_REFRESH_INTERVAL).await;
+
+        let source_observed_ms = 1_000_000;
+        let mut private_transport = test_transport_status(2, 0, Some(10_000));
+        private_transport.observed_at_unix_ms = source_observed_ms;
+        let refresh_started = tokio::time::Instant::now();
+        refresh_peer_status_cache_with(
+            &cache,
+            refresh_started,
+            || async {
+                tokio::time::sleep(PEER_DIRECTORY_TIMEOUT - Duration::from_millis(1)).await;
+                Ok(vec![ActivityPeer {
+                    node_id: "node-2".to_owned(),
+                    raft_id: 2,
+                    http_base: Some("http://blackhole.invalid:32400".to_owned()),
+                    reachable: true,
+                }])
+            },
+            move |peers, deadline| {
+                let private_transport = private_transport.clone();
+                async move {
+                    collect_peer_statuses_with_sources(
+                        peers,
+                        deadline,
+                        |_peer, _deadline| async move {
+                            std::future::pending::<PeerStatusOutcome>().await
+                        },
+                        move |_raft_id| {
+                            let private_transport = private_transport.clone();
+                            async move { Ok(Some(private_transport)) }
+                        },
+                    )
+                    .await
+                }
+            },
+        )
+        .await
+        .expect("bounded refresh");
+        assert_eq!(
+            tokio::time::Instant::now() - refresh_started,
+            PEER_DIRECTORY_TIMEOUT - Duration::from_millis(1) + PEER_STATUS_TIMEOUT
+        );
+
+        let elapsed = PEER_STATUS_CACHE_TTL
+            - PEER_STATUS_REFRESH_INTERVAL
+            - PEER_DIRECTORY_TIMEOUT
+            - PEER_STATUS_TIMEOUT
+            + Duration::from_millis(1);
+        tokio::time::advance(elapsed).await;
+        let projected = cached_private_transport(
+            cache.fresh().await,
+            "node-2",
+            2,
+            source_observed_ms + PEER_STATUS_CACHE_TTL.as_millis() as u64,
+        );
+        let observation = &projected.observations[0];
+        assert_eq!(observation.sample_age_ms, 5_000);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(5_000));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1780,9 +1927,7 @@ mod tests {
         assert_eq!(rows[1].observation, ObservationState::Unavailable);
         assert_eq!(rows[1].error_class.as_deref(), Some("cache_unavailable"));
 
-        cache
-            .store(&BTreeMap::new(), tokio::time::Instant::now())
-            .await;
+        cache.store(&BTreeMap::new()).await;
         tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
         let rows = join_observations(
             &membership,
@@ -1813,8 +1958,7 @@ mod tests {
                 transport: Some(transport),
             },
         )]);
-        let refresh_started = tokio::time::Instant::now();
-        cache.store(&statuses, refresh_started).await;
+        cache.store(&statuses).await;
 
         tokio::time::advance(Duration::from_millis(999)).await;
         let fresh =
@@ -1856,7 +2000,7 @@ mod tests {
                 transport: Some(transport),
             },
         )]);
-        cache.store(&statuses, tokio::time::Instant::now()).await;
+        cache.store(&statuses).await;
 
         tokio::time::advance(Duration::from_millis(999)).await;
         let still_active =
@@ -1893,7 +2037,7 @@ mod tests {
                 transport: Some(transport),
             },
         )]);
-        cache.store(&statuses, tokio::time::Instant::now()).await;
+        cache.store(&statuses).await;
 
         tokio::time::advance(Duration::from_millis(999)).await;
         let fresh =
@@ -1940,10 +2084,13 @@ mod tests {
     }
 
     #[test]
-    fn peer_status_refresh_keeps_one_second_of_cache_margin() {
+    fn peer_status_refresh_keeps_strict_cycle_overhead_margin() {
         assert_eq!(
-            PEER_STATUS_CACHE_TTL - PEER_STATUS_REFRESH_INTERVAL,
-            Duration::from_secs(1)
+            PEER_STATUS_CACHE_TTL
+                - PEER_STATUS_REFRESH_INTERVAL
+                - PEER_DIRECTORY_TIMEOUT
+                - PEER_STATUS_TIMEOUT,
+            Duration::from_millis(500)
         );
         assert!(PEER_STATUS_REFRESH_INTERVAL < PEER_STATUS_CACHE_TTL);
     }

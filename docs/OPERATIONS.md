@@ -1784,10 +1784,16 @@ progress yet and must be rendered as unavailable.
 
 The Cluster panel joins each node's authenticated operations status with the
 roster using at most eight concurrent peer refreshes, a one-second deadline
-per peer, and a five-second process-local cache. Each refresh probes the public
-and private listeners concurrently, so up to sixteen bounded HTTP requests may
-be in flight. A healthy sender can therefore report outbound evidence for a
-learner whose public listener is still closed.
+per peer, and a five-second process-local cache. It refreshes every three
+seconds and bounds the directory lookup to 500 milliseconds, leaving a strict
+500-millisecond completion margin even when a public probe consumes its full
+deadline. Cache availability begins when that refresh completes; embedded
+status and transport ages still advance from their node-owned source
+timestamps. Each refresh probes the public and private listeners concurrently,
+so up to sixteen bounded HTTP requests may be in flight. Roster members beyond
+the eight-probe bound remain visible as `peer_limit` instead of disappearing.
+A healthy sender can therefore report outbound evidence for a learner whose
+public listener is still closed.
 Inactive status older than five minutes expires instead of continuing to claim
 work. An observation with an active monotonic deadline remains visible past
 five minutes through that deadline; the five-second cache decreases its

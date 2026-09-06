@@ -992,12 +992,12 @@ struct SnapshotAttempt {
 impl SnapshotAttempt {
     #[cfg(test)]
     fn new(id: u64, snapshot_id: String, budgets: SnapshotRpcBudgets) -> Arc<Self> {
-        Self::new_with_transport(id, snapshot_id, budgets, None)
+        Self::new_with_transport(id, &snapshot_id, budgets, None)
     }
 
     fn tracked(
         transport_attempt: crate::transport_status::OutboundSnapshotAttempt,
-        snapshot_id: String,
+        snapshot_id: &str,
         budgets: SnapshotRpcBudgets,
     ) -> Arc<Self> {
         Self::new_with_transport(
@@ -1010,7 +1010,7 @@ impl SnapshotAttempt {
 
     fn new_with_transport(
         id: u64,
-        snapshot_id: String,
+        snapshot_id: &str,
         budgets: SnapshotRpcBudgets,
         transport_attempt: Option<crate::transport_status::OutboundSnapshotAttempt>,
     ) -> Arc<Self> {
@@ -1023,7 +1023,7 @@ impl SnapshotAttempt {
         Arc::new(Self {
             id,
             start,
-            snapshot_id,
+            snapshot_id: crate::transport_status::retained_snapshot_id(snapshot_id),
             transfer_deadline,
             final_install: StdMutex::new(None),
             stage,
@@ -1235,6 +1235,14 @@ impl NetworkConnectionStreaming {
             .map(|attempt| attempt.transfer_deadline)
     }
 
+    fn snapshot_stage_deadline(&self) -> Option<SnapshotStageDeadline> {
+        self.snapshot_attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|attempt| *attempt.stage.borrow())
+    }
+
     fn snapshot_transport_attempt(
         &self,
     ) -> Option<crate::transport_status::OutboundSnapshotAttempt> {
@@ -1345,7 +1353,7 @@ where
     let attempt_id = transport_attempt.attempt_id;
     let attempt = SnapshotAttempt::tracked(
         transport_attempt,
-        snapshot.meta.snapshot_id.clone(),
+        &snapshot.meta.snapshot_id,
         network.snapshot_budgets,
     );
     network.snapshot_transport.begin_owned_outbound_attempt(
@@ -1506,6 +1514,11 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
         let rpc_ttl = self
             .snapshot_rpc_ttl(done, &option)
             .ok_or_else(|| self.snapshot_timeout_error())?;
+        let final_install_deadline = if done {
+            self.snapshot_stage_deadline().map(|stage| stage.deadline)
+        } else {
+            None
+        };
         let transport_attempt = self.snapshot_transport_attempt();
         if let Some(attempt) = transport_attempt.as_ref() {
             self.snapshot_transport.outbound_chunk_owned(
@@ -1527,7 +1540,7 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
                     self.snapshot_transport.outbound_retry_owned(
                         attempt,
                         "transport_unavailable",
-                        self.snapshot_transfer_deadline(),
+                        final_install_deadline.or_else(|| self.snapshot_transfer_deadline()),
                     );
                 }
                 return Err(error);
@@ -1643,6 +1656,11 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
         let rpc_ttl = self
             .snapshot_rpc_ttl(done, &option)
             .ok_or_else(|| self.snapshot_timeout_error())?;
+        let final_install_deadline = if done {
+            self.snapshot_stage_deadline().map(|stage| stage.deadline)
+        } else {
+            None
+        };
         let transport_attempt = self.snapshot_transport_attempt();
         if let Some(attempt) = transport_attempt.as_ref() {
             self.snapshot_transport.outbound_chunk_owned(
@@ -1664,7 +1682,7 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
                     self.snapshot_transport.outbound_retry_owned(
                         attempt,
                         "transport_unavailable",
-                        self.snapshot_transfer_deadline(),
+                        final_install_deadline.or_else(|| self.snapshot_transfer_deadline()),
                     );
                 }
                 return Err(error);
@@ -2546,6 +2564,16 @@ mod tests {
         assert_eq!(append_response_ttl(&option), Duration::from_millis(800));
     }
 
+    #[test]
+    fn outbound_snapshot_attempt_bounds_identity_before_supervisor_logging() {
+        let oversized = "outbound-snapshot-metadata".repeat(64);
+        let expected = crate::transport_status::retained_snapshot_id(&oversized);
+        let attempt = SnapshotAttempt::new(1, oversized.clone(), test_snapshot_budgets());
+
+        assert_eq!(attempt.snapshot_id, expected);
+        assert_ne!(attempt.snapshot_id, oversized);
+    }
+
     fn test_snapshot_budgets() -> SnapshotRpcBudgets {
         SnapshotRpcBudgets {
             chunk: Duration::from_secs(30),
@@ -2808,7 +2836,7 @@ mod tests {
             network.node.id,
             network.transport_connection_id,
         );
-        let attempt = SnapshotAttempt::tracked(transport_attempt, "snapshot".into(), budgets);
+        let attempt = SnapshotAttempt::tracked(transport_attempt, "snapshot", budgets);
         let start = attempt.start;
         transport.begin_owned_outbound_attempt(
             &transport_attempt,
@@ -2895,6 +2923,76 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
+    #[tokio::test(start_paused = true)]
+    async fn production_final_transport_error_retains_final_install_deadline_in_status() {
+        let budgets = test_snapshot_budgets();
+        let (mut network, receiver) = test_network(budgets);
+        let transport = network.snapshot_transport.clone();
+        let transport_attempt = transport.next_outbound_attempt(
+            "sqlite",
+            network.node.id,
+            network.transport_connection_id,
+        );
+        let attempt = SnapshotAttempt::tracked(transport_attempt, "final-transport-error", budgets);
+        let start = attempt.start;
+        transport.begin_owned_outbound_attempt(
+            &transport_attempt,
+            &attempt.snapshot_id,
+            crate::transport_status::OutboundSnapshotSocket {
+                epoch: network.reset.epoch(),
+                connected: network.reset.is_connected(),
+            },
+            attempt.transfer_deadline,
+        );
+        network.snapshot_attempt = Arc::new(StdMutex::new(Some(Arc::clone(&attempt))));
+        time::advance(Duration::from_secs(100)).await;
+
+        let responder = tokio::spawn(async move {
+            let (ack, request) = match receiver
+                .recv_async()
+                .await
+                .expect("receive final snapshot request")
+            {
+                RaftRequest::SnapshotDB(request) => request,
+                request => panic!("unexpected SQLite Raft request: {request:?}"),
+            };
+            assert!(request.done);
+            drop(ack);
+        });
+
+        let result =
+            <NetworkConnectionStreaming as RaftNetwork<TypeConfigSqlite>>::install_snapshot(
+                &mut network,
+                InstallSnapshotRequest {
+                    vote: Vote::new_committed(1, 1),
+                    meta: test_snapshot_meta(),
+                    offset: 0,
+                    data: b"only-final-chunk".to_vec(),
+                    done: true,
+                },
+                RPCOption::new(Duration::from_secs(300)),
+            )
+            .await;
+        responder.await.expect("join dropped-response peer");
+
+        assert!(matches!(result, Err(RPCError::Unreachable(_))));
+        assert_eq!(
+            *attempt.stage.borrow(),
+            SnapshotStageDeadline {
+                phase: SnapshotAttemptPhase::FinalInstall,
+                deadline: start + Duration::from_secs(160),
+            }
+        );
+        let observation = transport.snapshot().observations.remove(0);
+        assert_eq!(observation.phase, crate::SnapshotTransportPhase::Retrying);
+        assert_eq!(observation.active_deadline_remaining_ms, Some(60_000));
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("transport_unavailable")
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn production_higher_vote_response_never_advances_snapshot_acknowledgement() {
         let budgets = test_snapshot_budgets();
@@ -2906,7 +3004,7 @@ mod tests {
             network.transport_connection_id,
         );
         let tracked_attempt =
-            SnapshotAttempt::tracked(transport_attempt, "snapshot-higher-vote".into(), budgets);
+            SnapshotAttempt::tracked(transport_attempt, "snapshot-higher-vote", budgets);
         transport.begin_owned_outbound_attempt(
             &transport_attempt,
             "snapshot-higher-vote",

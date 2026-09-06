@@ -153,7 +153,7 @@
     if(!ops||ops.unavailable) return null;
     return (ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId)||null;
   }
-  function clusterTransportObservation(ops,raftId){
+  function clusterTransportObservation(ops,raftId,boundedReadReady){
     if(!ops||ops.unavailable||raftId===null||raftId===undefined) return null;
     const candidates=[];
     (ops.nodes||[]).forEach(row=>{
@@ -178,13 +178,23 @@
     });
     const priority={stalled:8,installing:7,awaiting_acknowledgement:6,retrying:5,
       transferring:4,connecting:3,failed:2,complete:1};
-    candidates.sort((left,right)=>
-      (priority[right.phase]||0)-(priority[left.phase]||0)||
-      Number(left.sample_age_ms||0)-Number(right.sample_age_ms||0));
+    candidates.sort((left,right)=>{
+      const leftTerminal=left.phase==="failed"||left.phase==="complete";
+      const rightTerminal=right.phase==="failed"||right.phase==="complete";
+      if(leftTerminal&&rightTerminal){
+        const sameSnapshot=left.snapshot_id&&left.snapshot_id===right.snapshot_id;
+        if((sameSnapshot||boundedReadReady)&&left.phase!==right.phase)
+          return left.phase==="complete"?-1:1;
+        const freshness=Number(left.sample_age_ms||0)-Number(right.sample_age_ms||0);
+        if(freshness) return freshness;
+      }
+      return (priority[right.phase]||0)-(priority[left.phase]||0)||
+        Number(left.sample_age_ms||0)-Number(right.sample_age_ms||0);
+    });
     return candidates[0]||null;
   }
   function clusterTransportExplanation(ops,raftId,boundedReadReady){
-    const observation=clusterTransportObservation(ops,raftId);
+    const observation=clusterTransportObservation(ops,raftId,boundedReadReady);
     if(!observation)
       return boundedReadReady
         ? {code:"idle",text:"transport idle; bounded-read proof ready",observation:null}

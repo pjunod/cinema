@@ -4881,7 +4881,6 @@ impl MembershipManager {
             .membership_config
             .nodes()
             .map(|(raft_id, _)| *raft_id)
-            .take(MAX_OPERATIONS_PEERS.saturating_add(2))
             .collect::<BTreeSet<_>>();
         let rows = inner
             .client
@@ -4893,21 +4892,31 @@ impl MembershipManager {
                  WHERE node.node_id != $1 AND node.removed_at IS NULL \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
                      WHERE removal.node_id = node.node_id) \
-                 ORDER BY node.raft_id LIMIT $2",
-                params!(inner.identity.node_id.as_str(), MAX_OPERATIONS_PEERS as i64),
+                 ORDER BY node.raft_id",
+                params!(inner.identity.node_id.as_str()),
             )
             .await?;
-        Ok(rows
-            .into_iter()
+        Ok(Self::operations_peer_directory(now, &members, rows))
+    }
+
+    /// Keep every committed remote identity in the directory result. The
+    /// daemon probes the first [`MAX_OPERATIONS_PEERS`] and renders the rest
+    /// as `peer_limit`; truncating here would make those roster members look
+    /// absent instead of deliberately unprobed.
+    fn operations_peer_directory(
+        now: i64,
+        members: &BTreeSet<u64>,
+        rows: Vec<ActivityPeerRow>,
+    ) -> Vec<ActivityPeer> {
+        rows.into_iter()
             .filter(|row| members.contains(&row.raft_id))
-            .take(MAX_OPERATIONS_PEERS)
             .map(|row| ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,
                 raft_id: row.raft_id,
                 reachable: node_is_reachable(now, row.last_seen_at),
             })
-            .collect())
+            .collect()
     }
 
     /// Ready media-capacity targets, including committed learners.
@@ -8859,6 +8868,28 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operations_peer_directory_preserves_identities_beyond_the_probe_limit() {
+        let now = 1_000_000;
+        let members = (1_u64..=13).collect::<BTreeSet<_>>();
+        let rows = (2_u64..=13)
+            .map(|raft_id| ActivityPeerRow {
+                node_id: format!("node-{raft_id}"),
+                raft_id,
+                last_seen_at: now,
+                http_base: Some(format!("http://node-{raft_id}:32400")),
+            })
+            .collect();
+
+        let peers = MembershipManager::operations_peer_directory(now, &members, rows);
+
+        assert_eq!(peers.len(), 12);
+        assert!(peers.len() > MAX_OPERATIONS_PEERS);
+        assert_eq!(peers.first().map(|peer| peer.raft_id), Some(2));
+        assert_eq!(peers.last().map(|peer| peer.raft_id), Some(13));
+        assert!(peers.iter().all(|peer| peer.reachable));
+    }
 
     // A learner refused every internal peer request — its own operations-status
     // answer to the cluster panel, and every media-session control request it

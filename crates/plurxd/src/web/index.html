@@ -13129,10 +13129,16 @@ function clusterNodeOperationsHtml(n,ops){
   if(ops.unavailable) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
     <div class="clnodeunknown" style="color:var(--bad)">Direct status is unavailable. Keep every available voter running and retry status above.</div></section>`;
   const row=PlurxClusterPanel.clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
+  const transport=PlurxClusterPanel.clusterTransportExplanation(ops,n.raft_id,n.bounded_read_ready);
+  const transportObservation=transport.observation;
+  const transportText=transportObservation
+    ? `${esc(transport.text)} · observer ${esc(String(transportObservation.observing_node_id))} · ${esc(PlurxClusterPanel.clusterOperationAge(transportObservation.sample_age_ms))}`
+    : `<span class="muted">${esc(transport.text)}</span>`;
   if(!row||row.observation!=="answered"||!s){
     const why=PlurxClusterPanel.clusterObservationReason(row&&(row.error_class||row.observation)||"not_observed");
     return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
-      <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div></section>`;
+      <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div>
+      <div class="clnodeopmeta"><div><span>Transport</span>${transportText}</div></div></section>`;
   }
   const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
   const process=s.process&&s.process.live
@@ -13157,11 +13163,6 @@ function clusterNodeOperationsHtml(n,ops){
   const mediaText=`${esc(String(media.local_active_sessions||0))} session${Number(media.local_active_sessions||0)===1?"":"s"} · ${media.drained?"drained":"draining"}`;
   const lastError=wal&&wal.last_error?wal.last_error.message:"None";
   const recovery=wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"None observed";
-  const transport=PlurxClusterPanel.clusterTransportExplanation(ops,n.raft_id,n.bounded_read_ready);
-  const transportObservation=transport.observation;
-  const transportText=transportObservation
-    ? `${esc(transport.text)} · observer ${esc(String(transportObservation.observing_node_id))} · ${esc(PlurxClusterPanel.clusterOperationAge(transportObservation.sample_age_ms))}`
-    : `<span class="muted">${esc(transport.text)}</span>`;
   return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
     <div class="clnodeopmeta"><div><span>Process</span>${process}</div><div><span>Serving</span>${serving}</div>
       <div><span>Raft</span>${raftText}</div><div><span>WAL</span>${walText}</div>

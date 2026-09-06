@@ -403,6 +403,10 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::production_final_transport_error_retains_final_install_deadline_in_status \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::production_higher_vote_response_never_advances_snapshot_acknowledgement \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -436,6 +440,18 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::outbound_snapshot_attempt_bounds_identity_before_supervisor_logging \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::outbound_snapshot_identity_is_bounded_before_retention \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::inbound_snapshot_identity_is_bounded_before_retention \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -540,7 +556,13 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::peer_fanout_never_exceeds_the_eight_peer_bound \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::production_collector_labels_directory_overflow_without_probing_it \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::peer_status_cache_is_fresh_for_five_seconds_then_expires \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_source_time \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::absent_and_expired_cache_are_unavailable_never_peer_limited \
@@ -558,7 +580,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::transport_projection_uses_source_time_and_rejects_unbounded_future_skew \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
-	  http::cluster_operations::tests::peer_status_refresh_keeps_one_second_of_cache_margin \
+	  http::cluster_operations::tests::peer_status_refresh_keeps_strict_cycle_overhead_margin \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::aggregate_request_path_reads_cache_without_peer_network_fanout \
@@ -587,6 +609,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core \
 	  config::tests::snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::operations_peer_directory_preserves_identities_beyond_the_probe_limit \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::migration::tests::production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts \
