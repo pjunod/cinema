@@ -119,6 +119,7 @@ where
         #[cfg(feature = "backup")]
         backups_dir: format!("{}/state_machine/backups", node_config.data_dir),
         id: node_config.node_id,
+        #[cfg(feature = "cache")]
         nodes: node_config.nodes.clone(),
         addr_api: api_addr.clone(),
         snapshot_transport,

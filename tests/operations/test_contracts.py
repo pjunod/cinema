@@ -1620,6 +1620,8 @@ for (const startupDelay of [0, 1600, 7000]) {
             "retired_peers_are_bounded",
             "production_transport_route_enforces_auth_and_returns_memory_only_json",
             "production_transport_client_uses_exact_authenticated_route_and_accepts_404",
+            "snapshot_transport_peer_tracks_current_raft_membership_for_new_learner",
+            "production_transport_client_rejects_oversized_unframed_response_body",
         )
         for test_name in hiqlite_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]

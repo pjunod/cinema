@@ -16,6 +16,9 @@ use tracing::{debug, info};
 pub(crate) const RAFT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "sqlite")]
+const SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+#[cfg(feature = "sqlite")]
 pub(crate) const DB_QUORUM_WATERMARK_MARKER: &str =
     "/* hiqlite-internal:db-quorum-watermark:v1 */ THIS IS NOT SQL";
 
@@ -180,7 +183,7 @@ impl Client {
         Ok(state.snapshot_transport.clone())
     }
 
-    /// Read one node from this embedded node's validated Hiqlite roster.
+    /// Read one node from this embedded node's current committed Raft membership.
     /// A 404 is expected during rolling upgrades and means unavailable.
     #[cfg(feature = "sqlite")]
     pub async fn snapshot_transport_status_sqlite(
@@ -190,13 +193,10 @@ impl Client {
         let state = self.inner.state.as_ref().ok_or_else(|| {
             Error::Connect("peer transport status requires a local node client".into())
         })?;
-        let peer = state
-            .nodes
-            .iter()
-            .find(|node| node.id == peer_node_id)
-            .ok_or_else(|| {
-                Error::Config("transport status peer is absent from the node roster".into())
-            })?;
+        let peer = snapshot_transport_peer_from_current_membership(
+            &state.raft_db.raft.metrics(),
+            peer_node_id,
+        )?;
         request_snapshot_transport_status_sqlite(
             self.inner.client.as_ref().ok_or_else(|| {
                 Error::Connect("snapshot transport HTTP client is unavailable".into())
@@ -205,7 +205,7 @@ impl Client {
                 Error::Connect("snapshot transport API secret is unavailable".into())
             })?,
             self.inner.tls_config.is_some(),
-            peer,
+            &peer,
         )
         .await
     }
@@ -674,6 +674,58 @@ impl Client {
 }
 
 #[cfg(feature = "sqlite")]
+fn snapshot_transport_peer_from_current_membership(
+    metrics: &watch::Receiver<RaftMetrics<NodeId, Node>>,
+    peer_node_id: NodeId,
+) -> Result<Node, Error> {
+    metrics
+        .borrow()
+        .membership_config
+        .membership()
+        .get_node(&peer_node_id)
+        .cloned()
+        .ok_or_else(|| {
+            Error::Config("transport status peer is absent from the current Raft membership".into())
+        })
+}
+
+#[cfg(feature = "sqlite")]
+async fn read_snapshot_transport_status_body(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, Error> {
+    let declared_length = response.content_length();
+    if declared_length
+        .is_some_and(|length| length > SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(Error::Request(format!(
+            "snapshot transport status response exceeds the {} byte limit",
+            SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES
+        )));
+    }
+
+    let initial_capacity = declared_length
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default()
+        .min(SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES);
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response.chunk().await? {
+        let Some(next_length) = body.len().checked_add(chunk.len()) else {
+            return Err(Error::Request(
+                "snapshot transport status response length overflowed".to_owned(),
+            ));
+        };
+        if next_length > SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES {
+            return Err(Error::Request(format!(
+                "snapshot transport status response exceeds the {} byte limit",
+                SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "sqlite")]
 async fn request_snapshot_transport_status_sqlite(
     client: &reqwest::Client,
     api_secret: &str,
@@ -690,19 +742,27 @@ async fn request_snapshot_transport_status_sqlite(
         .timeout(Duration::from_secs(1))
         .send()
         .await?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
-    if response.status().is_success() {
-        return Ok(Some(response.json().await?));
+    let body = read_snapshot_transport_status_body(response).await?;
+    if status.is_success() {
+        return Ok(Some(serde_json::from_slice(&body)?));
     }
-    Err(response.json::<Error>().await?)
+    Err(serde_json::from_slice::<Error>(&body)?)
 }
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
-    use super::{RAFT_SHUTDOWN_TIMEOUT, request_snapshot_transport_status_sqlite};
+    use super::{
+        RAFT_SHUTDOWN_TIMEOUT, SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES,
+        request_snapshot_transport_status_sqlite, snapshot_transport_peer_from_current_membership,
+    };
     use crate::Node;
+    use openraft::{Membership, RaftMetrics, StoredMembership};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -730,6 +790,34 @@ mod tests {
                 .await
                 .expect("write response");
             socket.flush().await.expect("flush response");
+        });
+        (address.to_string(), task)
+    }
+
+    async fn serve_transport_response_without_length(
+        body: Vec<u8>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind private transport test listener");
+        let address = listener.local_addr().expect("read test listener address");
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let read = socket.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..read]).to_ascii_lowercase();
+            assert!(request.starts_with("get /cluster/transport/sqlite http/1.1\r\n"));
+            assert!(request.contains("x-api-secret: exact-test-secret\r\n"));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write response headers");
+            // The client is expected to close as soon as it detects the limit,
+            // so a reset while writing the deliberately oversized tail is valid.
+            let _ = socket.write_all(&body).await;
+            let _ = socket.flush().await;
         });
         (address.to_string(), task)
     }
@@ -776,6 +864,76 @@ mod tests {
                 .is_none()
         );
         server.await.expect("join 404 server");
+    }
+
+    #[test]
+    fn snapshot_transport_peer_tracks_current_raft_membership_for_new_learner() {
+        let voter = Node {
+            id: 1,
+            addr_raft: "127.0.0.1:8101".to_owned(),
+            addr_api: "127.0.0.1:8201".to_owned(),
+        };
+        let learner = Node {
+            id: 3,
+            addr_raft: "127.0.0.1:8103".to_owned(),
+            addr_api: "127.0.0.1:8203".to_owned(),
+        };
+        let mut metrics = RaftMetrics::<u64, Node>::new_initial(1);
+        metrics.membership_config = Arc::new(StoredMembership::new(
+            None,
+            Membership::new(
+                vec![BTreeSet::from([voter.id])],
+                BTreeMap::from([(voter.id, voter)]),
+            ),
+        ));
+        let (sender, receiver) = tokio::sync::watch::channel(metrics.clone());
+        assert!(snapshot_transport_peer_from_current_membership(&receiver, learner.id).is_err());
+
+        metrics.membership_config = Arc::new(StoredMembership::new(
+            None,
+            Membership::new(
+                vec![BTreeSet::from([1])],
+                BTreeMap::from([
+                    (
+                        1,
+                        Node {
+                            id: 1,
+                            addr_raft: "127.0.0.1:8101".to_owned(),
+                            addr_api: "127.0.0.1:8201".to_owned(),
+                        },
+                    ),
+                    (learner.id, learner.clone()),
+                ]),
+            ),
+        ));
+        sender.send_replace(metrics);
+
+        assert_eq!(
+            snapshot_transport_peer_from_current_membership(&receiver, learner.id)
+                .expect("newly committed learner is visible"),
+            learner
+        );
+    }
+
+    #[tokio::test]
+    async fn production_transport_client_rejects_oversized_unframed_response_body() {
+        let oversized_body = vec![b'x'; SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES + 1];
+        let (address, server) = serve_transport_response_without_length(oversized_body).await;
+        let peer = Node {
+            id: 2,
+            addr_raft: "127.0.0.1:1".to_owned(),
+            addr_api: address,
+        };
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build test client");
+        let error =
+            request_snapshot_transport_status_sqlite(&client, "exact-test-secret", false, &peer)
+                .await
+                .expect_err("oversized body must be rejected before JSON decode");
+        server.await.expect("join oversized response server");
+        assert!(error.to_string().contains("exceeds the 262144 byte limit"));
     }
 
     #[test]

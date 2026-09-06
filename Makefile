@@ -469,6 +469,14 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  client::mgmt::tests::production_transport_client_uses_exact_authenticated_route_and_accepts_404 \
 	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::mgmt::tests::snapshot_transport_peer_tracks_current_raft_membership_for_new_learner \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  client::mgmt::tests::production_transport_client_rejects_oversized_unframed_response_body \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::peer_fanout_applies_the_one_second_per_peer_deadline \
 	  -- --exact

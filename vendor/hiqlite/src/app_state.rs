@@ -57,6 +57,7 @@ pub(crate) struct AppState {
     #[cfg(feature = "backup")]
     pub backups_dir: String,
     pub id: NodeId,
+    #[cfg(feature = "cache")]
     pub nodes: Vec<crate::Node>,
     pub addr_api: String,
     pub snapshot_transport: crate::LocalSnapshotTransportStatus,
