@@ -21,6 +21,7 @@ MAX_FIXTURE_PREFIX_BYTES = 32
 MAX_FIXTURE_RECORD_BYTES = (
     MAX_FIXTURE_PREFIX_BYTES + 1 + MAX_DIAGNOSTIC_LINE_BYTES + 1
 )
+MAX_RETAINED_COUNTER = (1 << 64) - 1
 
 CONTRACTS_PATH = (
     Path(__file__).resolve().parents[1]
@@ -55,6 +56,12 @@ LEGACY_REPEAT_PREFIX = re.compile(
 
 class QualificationError(ValueError):
     """A CLI input cannot be interpreted without inventing evidence."""
+
+
+def saturating_count(value: int, increment: int = 1) -> int:
+    """Keep every published diagnostic count inside an unsigned 64-bit bound."""
+
+    return min(MAX_RETAINED_COUNTER, value + increment)
 
 
 @dataclass(frozen=True)
@@ -257,7 +264,7 @@ def qualify(
     with path.open("rb") as fixture:
         for _, raw, oversized in bounded_fixture_lines(fixture, digest):
             if oversized:
-                oversized_lines += 1
+                oversized_lines = saturating_count(oversized_lines)
                 prior_class = None
                 continue
             raw = raw.rstrip(b"\r\n")
@@ -270,45 +277,53 @@ def qualify(
                 or not observed.isascii()
                 or not observed.isdigit()
             ):
-                malformed_lines += 1
+                malformed_lines = saturating_count(malformed_lines)
                 prior_class = None
                 continue
             if len(message_bytes) > MAX_DIAGNOSTIC_LINE_BYTES:
-                oversized_lines += 1
+                oversized_lines = saturating_count(oversized_lines)
                 prior_class = None
                 continue
             try:
                 message = message_bytes.decode("utf-8")
             except UnicodeDecodeError:
-                invalid_utf8_lines += 1
+                invalid_utf8_lines = saturating_count(invalid_utf8_lines)
                 prior_class = None
                 continue
             observed_ms = int(observed)
             if observed_ms < prior_ms:
-                malformed_lines += 1
+                malformed_lines = saturating_count(malformed_lines)
                 prior_class = None
                 continue
             prior_ms = observed_ms
-            valid_records += 1
+            valid_records = saturating_count(valid_records)
 
             repeat = LEGACY_REPEAT.fullmatch(message)
             if repeat is not None:
                 repeated = int(repeat.group("count"))
                 if prior_class == "selected_primary":
-                    selected_repeat_summaries += 1
-                    selected_repeated_messages += repeated
+                    selected_repeat_summaries = saturating_count(
+                        selected_repeat_summaries
+                    )
+                    selected_repeated_messages = saturating_count(
+                        selected_repeated_messages, repeated
+                    )
                 elif prior_class in (None, "repeat_summary"):
-                    ambiguous_repeat_summaries += 1
+                    ambiguous_repeat_summaries = saturating_count(
+                        ambiguous_repeat_summaries
+                    )
                 else:
-                    unrelated_repeat_summaries += 1
+                    unrelated_repeat_summaries = saturating_count(
+                        unrelated_repeat_summaries
+                    )
                 prior_class = "repeat_summary"
                 continue
             if LEGACY_REPEAT_PREFIX.match(message):
-                malformed_lines += 1
+                malformed_lines = saturating_count(malformed_lines)
                 prior_class = None
                 continue
             if SUBORDINATE_NO_FRAME.match(message):
-                subordinate += 1
+                subordinate = saturating_count(subordinate)
                 prior_class = "subordinate"
                 continue
             match = PRIMARY_VIDEO_ERROR.match(message)
@@ -320,13 +335,13 @@ def qualify(
                 prior_class = "other_stream_primary"
                 continue
 
-            primary += 1
+            primary = saturating_count(primary)
             prior_class = "selected_primary"
             if match.group("severity") is not None:
-                severity_qualified += 1
+                severity_qualified = saturating_count(severity_qualified)
             contract_match = matches_action_contract(match, contract)
             if contract_match:
-                contract_qualified += 1
+                contract_qualified = saturating_count(contract_qualified)
             if first_primary is None:
                 first_primary = observed_ms
             lower_bound = observed_ms - VIDEO_DECODE_ERROR_WINDOW_MS

@@ -15,6 +15,7 @@ CONTRACTS = ROOT / "tests/playback/decoder-health/diagnostic-contracts.toml"
 FLEET = ROOT / "tests/playback/decoder-health/fleet-ffmpeg-2026-09-05.toml"
 MEDIA = ROOT / "tests/playback/decoder-media-baseline-2026-09-05.toml"
 HARNESS = ROOT / "scripts/decoder-diagnostic-qualification"
+FORGEJO_TASK_BASE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 
 
 def normalized(text: str) -> str:
@@ -39,8 +40,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_frozen_inventory_and_argument_claims_match_retained_artifacts(self) -> None:
         surfaces = self.inventory["surfaces"]
-        self.assertEqual(len(surfaces), 67)
-        self.assertIn("67 exact IDs", self.status)
+        self.assertEqual(len(surfaces), 72)
+        self.assertIn("bring the inventory to 72", self.status)
 
         names = [case["name"] for case in self.arguments]
         self.assertEqual(len(names), 16)
@@ -70,6 +71,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 )
                 self.assertIn(f"| {label} | {documented_value} |", self.status)
         self.assertIn("| Automatic recovery limit | 1 |", self.status)
+        self.assertRegex(
+            self.harness,
+            r"(?m)^MAX_RETAINED_COUNTER = \(1 << 64\) - 1$",
+        )
+        self.assertIn("| Maximum retained counter | `u64::MAX` |", self.status)
 
         contracts = self.contracts["contracts"]
         self.assertEqual(len(contracts), 1)
@@ -129,6 +135,16 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         ):
             with self.subTest(run=invalid_run):
                 self.assertIn(invalid_run, self.status)
+
+    def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
+        self.assertIn(FORGEJO_TASK_BASE, self.status)
+        self.assertIn("Historical pre-rebase head `01368ce1`", self.status)
+        self.assertIn("has not yet run its final suite", self.status)
+        for falsely_remapped_receipt in (
+            "`d528794b` | `make validate-full`",
+            "`1ad59932` | Independent",
+        ):
+            self.assertNotIn(falsely_remapped_receipt, self.status)
 
 
 if __name__ == "__main__":

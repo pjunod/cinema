@@ -35,9 +35,13 @@ EXPECTED_INVENTORY_IDS = {
     "builder.prepublication_retry",
     "builder.resumable_part",
     "builder.live_hls",
+    "builder.live_tv_hls",
     "process.settings_ffmpeg_version",
     "process.observed_ffmpeg",
     "process.fragmented_ffmpeg",
+    "process.live_tv_producer",
+    "process.live_tv_stderr",
+    "process.live_tv_graph_probe",
     "process.vod_generation",
     "process.vod_head_regeneration",
     "process.vod_pipe_consumer",
@@ -63,6 +67,7 @@ EXPECTED_INVENTORY_IDS = {
     "process.dv_disk_unbound_conversion",
     "process.dv_disk_bound_conversion",
     "renderer.candidates",
+    "renderer.live_tv_filter",
     "renderer.pairing",
     "renderer.residency",
     "renderer.dynamic_range",
@@ -232,6 +237,28 @@ class DecoderDiagnosticQualificationTests(unittest.TestCase):
         self.assertEqual(result.selected_primary_repeated_messages, 6)
         self.assertEqual(result.unrelated_repeat_summaries, 2)
         self.assertEqual(result.ambiguous_repeat_summaries, 2)
+
+    def test_repeat_message_count_saturates_at_unsigned_64_bit_maximum(self) -> None:
+        primary = (
+            "[vist#0:0/rawvideo @ <address>] "
+            "[dec:rawvideo @ <address>] [error] "
+            "Error submitting packet to decoder: invalid data"
+        )
+        maximum = CHECKER["MAX_RETAINED_COUNTER"]
+        lines = [
+            f"0\t{primary}",
+            f"1\tLast message repeated {maximum} times",
+            f"2\t{primary}",
+            f"3\tLast message repeated {maximum + 1} times",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "saturating-repeat.stderr"
+            fixture.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            result = CHECKER["qualify"](fixture)
+
+        self.assertEqual(result.selected_primary_repeat_summaries, 2)
+        self.assertEqual(result.selected_primary_repeated_messages, maximum)
+        self.assertTrue(result.observation_complete)
 
     def test_any_repeat_summary_blocks_action_even_when_unrelated(self) -> None:
         primary = (
@@ -407,7 +434,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         identifiers = [surface["id"] for surface in surfaces]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         self.assertEqual(set(identifiers), EXPECTED_INVENTORY_IDS)
-        self.assertEqual(len(surfaces), 67)
+        self.assertEqual(len(surfaces), 72)
         for surface in surfaces:
             with self.subTest(surface=surface["id"]):
                 source = ROOT / surface["source"]
@@ -420,14 +447,34 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
                 self.assertTrue(surface["obligation"])
 
     def test_every_shipping_hls_builder_is_in_the_m0_inventory(self) -> None:
-        source = (ROOT / "crates/plurxd/src/transcode.rs").read_text(
+        transcode = (ROOT / "crates/plurxd/src/transcode.rs").read_text(
             encoding="utf-8"
         )
         self.assertEqual(
-            source.count("transcode::hls_args("),
+            transcode.count("transcode::hls_args("),
             3,
             "update the M0 inventory when a shipping HLS builder is added or migrated",
         )
+        live_tv = (ROOT / "crates/plurxd/src/live_tv.rs").read_text(
+            encoding="utf-8"
+        ).split("#[cfg(test)]", 1)[0]
+        self.assertEqual(
+            live_tv.count("tokio::process::Command::new("),
+            2,
+            "inventory every direct shipping Live TV FFmpeg command",
+        )
+        for anchor in (
+            "fn live_ffmpeg_command(",
+            "fn spawn_live_ffmpeg(",
+            "fn live_video_filter(",
+            "async fn capture_live_stderr(",
+            "async fn run_graph_probe(\n    ffmpeg: &str,",
+        ):
+            self.assertEqual(
+                live_tv.count(anchor),
+                1,
+                f"Live TV decoder surface moved or multiplied: {anchor}",
+            )
         builders = {
             surface["id"]
             for surface in self.inventory()
@@ -439,6 +486,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
                 "builder.prepublication_retry",
                 "builder.resumable_part",
                 "builder.live_hls",
+                "builder.live_tv_hls",
             },
         )
 
@@ -449,6 +497,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
             "PrepublicationTranscodeRetry::build",
             "ProducerRunner::produce_into",
             "Manager::start_with_audio_offset",
+            "live_ffmpeg_command",
         ):
             self.assertIn(owner, status)
 

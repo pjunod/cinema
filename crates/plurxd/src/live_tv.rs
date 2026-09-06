@@ -2384,6 +2384,19 @@ fn spawn_live_ffmpeg(
     height: u16,
     directory: &Path,
 ) -> Result<tokio::process::Child, LiveTvError> {
+    let mut command = live_ffmpeg_command(system, encoder, software_threads, height, directory)?;
+    command
+        .spawn()
+        .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
+}
+
+fn live_ffmpeg_command(
+    system: &SystemInfo,
+    encoder: Encoder,
+    software_threads: Option<u32>,
+    height: u16,
+    directory: &Path,
+) -> Result<tokio::process::Command, LiveTvError> {
     if system.ffmpeg.trim().is_empty() {
         return Err(LiveTvError::CodecUnsupported(
             "FFmpeg is not configured on the tuner owner".into(),
@@ -2439,9 +2452,8 @@ fn spawn_live_ffmpeg(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
+        .kill_on_drop(true);
+    Ok(command)
 }
 
 /// How long FFmpeg may look at a tuner before it has to start producing.
@@ -4404,6 +4416,97 @@ exec /bin/cat >/dev/null
             probesize >= 512 * 1024,
             "512 KiB was the smallest value measured; below it nothing was \
              won and detection has less to work with"
+        );
+    }
+
+    /// M0 migration fixture: Live TV builds HLS directly instead of using the
+    /// movie transcode builder. Keep its complete software command visible so
+    /// decoder-plan migration cannot leave a second, implicit policy behind.
+    #[test]
+    fn live_tv_software_hls_argument_baseline_is_stable() {
+        let system = SystemInfo {
+            ffmpeg: "/fixture/ffmpeg".to_owned(),
+            ..SystemInfo::default()
+        };
+        let command = live_ffmpeg_command(
+            &system,
+            Encoder::Software,
+            Some(2),
+            720,
+            Path::new("/fixture/live"),
+        )
+        .expect("build live-TV FFmpeg command");
+        let actual = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let expected = [
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostdin",
+            "-y",
+            "-fflags",
+            "+genpts+discardcorrupt",
+            "-probesize",
+            "2097152",
+            "-analyzeduration",
+            "5000000",
+            "-i",
+            "pipe:0",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-sn",
+            "-dn",
+            "-vf",
+            "bwdif=mode=send_frame:parity=auto:deint=interlaced,scale=-2:720,format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-b:v",
+            "4000k",
+            "-maxrate",
+            "6000k",
+            "-bufsize",
+            "8000k",
+            "-profile:v",
+            "high",
+            "-threads",
+            "2",
+            "-force_key_frames",
+            "expr:gte(t,n_forced*4)",
+            "-g",
+            "120",
+            "-keyint_min",
+            "120",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ac",
+            "2",
+            "-f",
+            "hls",
+            "-hls_time",
+            "4",
+            "-hls_list_size",
+            "6",
+            "-hls_delete_threshold",
+            "1",
+            "-hls_flags",
+            "delete_segments+temp_file+independent_segments+omit_endlist",
+            "-hls_segment_filename",
+            "/fixture/live/segment-%06d.ts",
+            "/fixture/live/index.m3u8",
+        ];
+        assert_eq!(actual, expected);
+        assert!(
+            !actual.iter().any(|argument| argument == "-hwaccel"),
+            "the M0 Live TV baseline has no independent hardware decoder choice"
         );
     }
 

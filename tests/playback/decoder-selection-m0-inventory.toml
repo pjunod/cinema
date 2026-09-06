@@ -22,6 +22,13 @@ source = "crates/plurxd/src/transcode.rs"
 anchor = "async fn start_with_audio_offset("
 obligation = "resolve once from the held source for command, identity, and admission"
 
+[[surfaces]]
+id = "builder.live_tv_hls"
+kind = "hls_builder"
+source = "crates/plurxd/src/live_tv.rs"
+anchor = "fn live_ffmpeg_command("
+obligation = "freeze direct Live TV HLS arguments and migrate its decoder choice to the same explicit plan"
+
 # Process owners and consumers. Support-only subprocesses remain explicit so
 # their success cannot be mistaken for decoded-video producer health.
 [[surfaces]]
@@ -44,6 +51,27 @@ kind = "process_owner"
 source = "crates/plurxd/src/transcode.rs"
 anchor = "fn spawn_ffmpeg_pipe("
 obligation = "preserve the media pipe while joining progress and diagnostics"
+
+[[surfaces]]
+id = "process.live_tv_producer"
+kind = "process_owner"
+source = "crates/plurxd/src/live_tv.rs"
+anchor = "fn spawn_live_ffmpeg("
+obligation = "own the tuner producer under the same plan identity, observation result, and recovery budget"
+
+[[surfaces]]
+id = "process.live_tv_stderr"
+kind = "process_observer"
+source = "crates/plurxd/src/live_tv.rs"
+anchor = "async fn capture_live_stderr("
+obligation = "replace substring latching with bounded selected-stream diagnostics and joined completion evidence"
+
+[[surfaces]]
+id = "process.live_tv_graph_probe"
+kind = "support_process"
+source = "crates/plurxd/src/live_tv.rs"
+anchor = "async fn run_graph_probe(\n    ffmpeg: &str,"
+obligation = "bind graph readiness to exact build, device, encoder, renderer, and output surface without qualifying arbitrary media"
 
 [[surfaces]]
 id = "process.vod_generation"
@@ -220,6 +248,13 @@ kind = "renderer_contract"
 source = "crates/plurx-core/src/transcode/pipeline.rs"
 anchor = "pub const CANDIDATES: &[Pipeline]"
 obligation = "preserve deterministic candidate order in explicit plan selection"
+
+[[surfaces]]
+id = "renderer.live_tv_filter"
+kind = "renderer_contract"
+source = "crates/plurxd/src/live_tv.rs"
+anchor = "fn live_video_filter("
+obligation = "validate Live TV deinterlace, scale, pixel format, and upload transitions against the resolved plan"
 
 [[surfaces]]
 id = "renderer.pairing"

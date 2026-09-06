@@ -1,8 +1,13 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0 locally qualified and reviewed; publication pending · **Updated:** 2026-09-05 ·
-**Integration branch:** `effort/decoder-selection-recovery` · **Baseline:**
-`main` at `3d847b58b081dcb15a8d2e566d8d0ac1700882fd`
+**Status:** M0 post-rebase review repairs in progress · **Updated:** 2026-09-05 ·
+**Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
+Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
+
+The original M0 research baseline was `main` at
+`3d847b58b081dcb15a8d2e566d8d0ac1700882fd`. It remains useful as historical
+content evidence, but no command or review performed on that tree is presented
+as exact-tree evidence for the current Forgejo base.
 
 This is the live execution ledger for
 [DECODER_SELECTION_AND_RECOVERY_PLAN.md](DECODER_SELECTION_AND_RECOVERY_PLAN.md).
@@ -15,18 +20,18 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M0 — capture baseline and freeze diagnostic qualification |
 | Task branch | `codex/decoder-selection-m0` |
-| Task PR | [#915](https://github.com/pjunod/plurx/pull/915) · draft; reviewed local head is ahead of the remote branch |
+| Task PR | Not opened; the exact qualified branch will be published to Forgejo |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | History, 11-case playback, 60-capture UI, reader-browser, warmed cluster, and final unit suites pass |
-| Full PR validation | Pre-rebase code head `01368ce1` passed 23/23 runnable checks; authoritative Forgejo requalification is in progress after rebasing the same changes onto current `main` |
-| Blocker | Publishing the reviewed head requires renewed external-transfer approval from the execution sandbox; local qualification continues |
+| Focused validation | Post-rebase inventory and receipt repairs are under focused validation |
+| Full PR validation | Historical pre-rebase head `01368ce1` passed 23/23 runnable checks; it is not current-tree qualification. The repaired Forgejo candidate has not yet run its final suite |
+| Blocker | None; review findings must be fixed and the exact repaired head re-reviewed and qualified before publication |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Locally qualified and reviewed; publication pending | [PR #915](https://github.com/pjunod/plurx/pull/915); focused gates, corrected-head full suite, and two final adversarial reviews pass |
+| M0 · baseline and diagnostic qualification | Post-rebase review repairs in progress | Current-tree focused gates, one corrected-head full suite, and two final adversarial approvals remain required |
 | M1 · explicit plan and facts | Not started | — |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
@@ -42,16 +47,20 @@ The machine-checked inventory is
 [`decoder-selection-m0-inventory.toml`](../tests/playback/decoder-selection-m0-inventory.toml).
 It stores a stable identifier, source file, exact anchor, classification, and
 migration obligation for every row summarized below. The focused inventory
-test fails when an anchor moves or a fourth production `hls_args` call appears.
+test fails when an anchor moves, a fourth movie `hls_args` call appears, or a
+direct shipping Live TV FFmpeg command is added or moved without an inventory
+update.
 
-The production `hls_args` surface has three daemon callers. Core calls below
-`mod tests` are argument regressions, not shipping construction paths.
+The shipping HLS surface has three movie `hls_args` callers and one direct Live
+TV builder. Core calls below `mod tests` are argument regressions, not shipping
+construction paths.
 
 | Caller | Owner | Current purpose | Migration obligation |
 |---|---|---|---|
 | `PrepublicationTranscodeRetry::build` | `crates/plurxd/src/transcode.rs` | Freezes the one-step retry arguments and fingerprint | Freeze a validated reason-specific alternate plan and one shared budget |
 | `ProducerRunner::produce_into` | `crates/plurxd/src/transcode.rs` | Builds each resumable pre-transcode/offline part | Carry plan identity and health evidence across every part and assembly |
 | `Manager::start_with_audio_offset` | `crates/plurxd/src/transcode.rs` | Builds the live HLS producer command | Resolve once from the held source and use that plan for command, identity, and admission |
+| `live_ffmpeg_command` | `crates/plurxd/src/live_tv.rs` | Builds direct tuner-input HLS without the movie builder | Freeze current arguments, then resolve decoder choice through the same bound plan and health model |
 
 The media subprocess ownership surface is broader than the three builders.
 The distinction between owner, consumer, and support process is deliberate:
@@ -60,6 +69,9 @@ The distinction between owner, consumer, and support process is deliberate:
 |---|---|---|
 | `process.observed_ffmpeg` | `transcode::spawn_ffmpeg` owns live, retry, and offline HLS children; progress and stderr readers are detached | Return one owned observed-child handle and join diagnostics before qualification |
 | `process.fragmented_ffmpeg` | `transcode::spawn_ffmpeg_pipe` owns fragmented-copy children | Preserve its pipe split while giving the attempt a complete observer result |
+| `process.live_tv_producer` | `live_tv::spawn_live_ffmpeg` owns the direct tuner HLS child | Use the same plan identity, observation result, and recovery budget as every other decoded producer |
+| `process.live_tv_stderr` | `live_tv::capture_live_stderr` currently owns a bounded substring latch | Replace it with selected-stream, build-bound diagnostics and join it before health classification |
+| `process.live_tv_graph_probe` | `live_tv::run_graph_probe` builds a synthetic startup/capability graph | Bind its result to the exact build, device, encoder, renderer, and surface; never qualify arbitrary media |
 | `process.vod_generation` | `vodserve::spawn_generation` owns the FFmpeg copy producer and hands stdout onward | Classify copied output separately and stop discarding stderr |
 | `process.vod_head_regeneration` | `vodserve::regenerate_init_head` owns a bounded FFmpeg head probe | Keep it probe/head-only; it cannot attest a complete producer |
 | `process.vod_pipe_consumer` | `vodgen::run` consumes the pipe; it does not spawn production FFmpeg | Do not create a second child or health owner here |
@@ -79,6 +91,7 @@ rather than duplicating their decisions:
 | Inventory ID | Frozen constraint |
 |---|---|
 | `renderer.candidates` | `CANDIDATES` defines the deterministic graph order |
+| `renderer.live_tv_filter` | `live_video_filter` independently owns deinterlace, scale, pixel-format, and upload composition for tuner HLS |
 | `renderer.pairing` | `Pipeline::pairs_with` restricts vendor graphs and measured HDR10 encoders |
 | `renderer.residency` | `Pipeline::on_gpu` distinguishes GPU-resident and system-memory frames |
 | `renderer.dynamic_range` | `Pipeline::handles` restricts HDR, HLG, and Dolby Vision inputs |
@@ -117,6 +130,14 @@ normalizes source/output paths and the configured VA-API device path; option
 order and every other token remain exact. The test injects the legacy
 `PLURX_HWDECODE` compatibility choice, so it is hermetic while freezing both
 default and forced-software behavior.
+
+Live TV bypasses `hls_args`, so its complete software-producer argument vector
+is frozen independently by
+`live_tv_software_hls_argument_baseline_is_stable`. The adjacent probe-budget
+and encoder-filter matrix tests freeze its selection-sensitive initialization,
+deinterlace, scale, pixel format, and upload behavior. The M0 vector contains no
+independent `-hwaccel` choice; M1–M2 must introduce any decoder choice through
+the shared bound plan rather than a second Live TV policy.
 
 | Cases | Decoder/renderer/encoder baseline frozen |
 |---|---|
@@ -175,6 +196,7 @@ line. This is development evidence, not production parsing.
 | Automatic recovery limit | 1 | One budget across retry/replacement for a logical playback epoch |
 | Diagnostic drain budget | 2,000 ms | Later implementation must join stderr completion inside this bound |
 | Maximum retained line | 16 KiB | Oversize input makes qualification incomplete while draining continues |
+| Maximum retained counter | `u64::MAX` | Every published count saturates instead of growing without bound |
 
 The harness streams bounded binary records instead of loading a capture into
 memory. An oversize, malformed, invalid-UTF-8, or non-monotonic record marks
@@ -257,20 +279,25 @@ explicitly; they do not silently run an unqualified automatic replacement.
 
 ## Adversarial review ledger
 
-Two independent agents reviewed the first M0 PR head before the full suite.
+Two independent agents reviewed the original pre-rebase M0 candidate before the full suite.
 Their initial verdict was request changes; those repairs were committed before
 both agents performed a second pass. Both second passes also requested changes;
-their repairs were committed at `2e368f42`. Both third passes requested the
-additional repairs committed at `e88216f6`; both fourth passes approved
-`bbc60457` with no actionable findings. The fifth pass found missing direct
-probe-normalization test coverage. That repair is committed at `9d2a0c35`;
-both reviewers approved the repaired tree at `7e1b6a0a` with no remaining
-actionable findings.
-GitHub had deleted the temporary effort base and closed #914; the same effort
-and task refs were restored, and #915 is the active review record.
-Both independent reviewers then approved pre-rebase receipt head `2c266dce` with no
-actionable findings after independently matching the retained full-suite JSON
-and JUnit evidence to this ledger.
+their repairs were committed at pre-rebase `f9d68467`. Both third passes requested
+the additional repairs committed at pre-rebase `195b7574`; both fourth passes
+approved pre-rebase `6009367b` with no actionable findings. The fifth pass found
+missing direct probe-normalization test coverage. That repair is committed at
+pre-rebase `a16db3da`; both reviewers approved pre-rebase `7649ccdd` with no
+remaining actionable findings. Both independent reviewers then approved
+pre-rebase receipt head `2c266dce` after matching the retained full-suite JSON
+and JUnit evidence to the historical ledger.
+
+Those approvals are historical content evidence only. After rebasing onto
+Forgejo `main` at `4a6a0268`, both fresh reviews of `3fbeedb2` requested changes:
+the newly inherited direct Live TV producer/probe/filter/diagnostic path was
+missing from the inventory; historical receipts had been relabeled with rebased
+hashes; the baseline/current checkpoint was stale; and diagnostic counters did
+not saturate. The current working tree addresses those findings. Fresh approval
+and exact-tree qualification remain pending.
 
 | Finding | Resolution on working tree |
 |---|---|
@@ -290,7 +317,7 @@ and JUnit evidence to this ledger.
 | Rawvideo timing replay changed the second #913 offset from 0 to 1 ms | Fixture now preserves `0, 0, 294, 299, 361` and labels grammar versus synthetic timing provenance |
 | Argument baseline inherited `PLURX_HWDECODE` | Compatibility input is injected into the internal builder; default and forced-software cases are both frozen and pass under hostile process environment |
 | VA-API and materially distinct renderers/output grades were absent | Baseline expanded to 16 cases covering every renderer family, normal VideoToolbox, heavy/light VA-API, and forced software decode |
-| Process/renderer/manifest-cache inventory remained incomplete | Inventory expanded to 67 exact IDs with equality, count, and unique-anchor assertions plus the missing subprocess/method/cache owners |
+| Process/renderer/manifest-cache inventory remained incomplete | Pre-rebase inventory expanded to 67 exact IDs with equality, count, and unique-anchor assertions plus the missing subprocess/method/cache owners |
 | No actual media baseline existed | Reproducible H.264, MPEG-4 AVI, and HEVC HDR10 source-to-HLS evidence captured on a build-bound FFmpeg 8 host |
 | Fleet hashes were global and lacked canonical commands | Binary/build/decoder/image hashes are now stored per node with exact capture and byte-canonicalization commands |
 
@@ -300,13 +327,20 @@ and JUnit evidence to this ledger.
 | Address/codec rejection tests were pre-rejected by fixture identity | Structural mismatches are tested directly with a fully validated contract |
 | Fixture hash and parse used different opens | One descriptor now supplies both the streaming digest and classified records before action is decided |
 | Light VA-API and legacy override spellings were not frozen | A sixteenth argv case proves light VA-API stays on software decode; a pure table covers `off`, `0`, `false`, and `no` |
-| `dv_disk` subprocess inventory was incomplete and ambiguous | Capability, bound probe, unbound conversion, and Unix bound conversion have distinct rows; all 67 anchors must occur exactly once |
+| `dv_disk` subprocess inventory was incomplete and ambiguous | Capability, bound probe, unbound conversion, and Unix bound conversion have distinct rows; every retained anchor must occur exactly once |
 | Media evidence was not rerunnable from the ledger | The exact `nynuc` verifier rejected three nondeterminism defects; after repair, two fresh generations matched byte-for-byte and the exact verifier returned `"verified": true` |
 | Image IDs and hardware acceleration lacked exact per-node capture | Exact prefixed image IDs and per-node `-hwaccels` output/hash evidence are retained for all four nodes |
 
 | Fifth-pass finding | Resolution on working tree |
 |---|---|
 | Probe normalization had no direct unit coverage and the ledger overstated the suite | A pure helper now has single, duplicate-identical, empty, and conflicting-row tests; the ledger separates those tests from the remote generation evidence |
+
+| Post-rebase finding | Resolution on working tree |
+|---|---|
+| Current `main` added direct Live TV FFmpeg construction outside the frozen movie builders | Five Live TV builder, producer, stderr, graph-probe, and renderer rows bring the inventory to 72; static discovery and a complete software argv baseline prevent silent omission |
+| Historical receipts were relabeled with rebased hashes | Original hashes are retained as pre-rebase evidence; only commands actually run on the current tree may be recorded as current qualification |
+| Baseline and milestone state remained stale after rebase | The authoritative Forgejo base is explicit and M0 remains pending until repaired-head reviews and qualification finish |
+| Diagnostic counters were unbounded | Every published diagnostic counter saturates at `u64::MAX`; exact maximum and maximum-plus-one repeat summaries are covered |
 
 | Final-review finding | Resolution on working tree |
 |---|---|
@@ -339,63 +373,63 @@ lane and focused tests provide earlier feedback.
 
 | Commit/tree | Command | Result |
 |---|---|---|
-| `ab478314` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 6 tests |
-| `ab478314` | `make operations-check` | Pass · 192 tests; rerun outside restricted socket sandbox |
-| `ab478314` | `make validation-lint` | Pass · 23 points, 28 checks, 1,376 files |
-| `ab478314` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `ab478314` | `git diff --check` | Pass |
-| `886ab400` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 14 tests |
-| `886ab400` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
-| `886ab400` | `make operations-check` | Pass · 200 tests; run outside restricted socket sandbox |
-| `886ab400` | `make validation-lint` | Pass · 23 points, 28 checks, 1,381 files |
-| `886ab400` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `886ab400` | `git diff --check` | Pass |
-| `a3a2094b` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 15 tests, including exact 16 KiB and bounded repeat-count edges |
-| `a3a2094b` | `git diff --check` | Pass |
-| `2e368f42` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 21 tests |
-| `2e368f42` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
-| `2e368f42` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test; hostile environment cannot alter fixture output |
-| `2e368f42` | `make operations-check` | Pass · 207 tests; run outside restricted socket sandbox |
-| `2e368f42` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files after mapping the media baseline |
-| `2e368f42` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `2e368f42` | `sh -n scripts/decoder-media-baseline` | Pass |
-| `2e368f42` | `git diff --check` | Pass |
-| `e88216f6` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 22 tests, including contract provenance and media-verifier mutation controls |
-| `e88216f6` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 16 argument cases |
-| `e88216f6` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_compatibility_override_values_are_stable -- --exact` | Pass · all four legacy false spellings and non-matches |
-| `e88216f6` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · hostile environment cannot alter fixture output |
-| `e88216f6` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
-| `e88216f6` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
-| `e88216f6` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `e88216f6` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
-| `e88216f6` | `git diff --check` | Pass |
-| `9d2a0c35` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 23 tests, including direct single/duplicate/empty/conflicting probe-row coverage |
-| `9d2a0c35` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
-| `9d2a0c35` | `/tmp/codex-decoder-m0-review5/decoder-media-baseline --verify /tmp/codex-decoder-m0-review5/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review8` on `nynuc` | Pass · `"verified": true` |
-| `7e1b6a0a` | Fifth diagnostic and scope adversarial re-reviews | Pass · both approve; no actionable findings |
-| `7e1b6a0a` | `make operations-check` | Pass · 209 tests; run outside restricted socket sandbox |
-| `7e1b6a0a` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
-| `7e1b6a0a` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `14e62d70` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
-| `14e62d70` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
-| `14e62d70` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
-| `14e62d70` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
-| `14e62d70` | two fresh `scripts/decoder-media-baseline` generations on `nynuc` | Pass · every retained artifact digest matches byte-for-byte |
-| `14e62d70` | `/tmp/codex-decoder-m0-review4/decoder-media-baseline --verify /tmp/codex-decoder-m0-review4/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review7` on `nynuc` | Pass · `"verified": true` |
-| `14e62d70` | `git diff --check` | Pass |
-| `ab33874b` | `CARGO='rustup run 1.97.1 cargo' make unit` | Invalid environment run · 143 FFmpeg-backed tests failed because Homebrew FFmpeg could not load retained `libx265.216.dylib`; no non-loader failure observed |
-| `ab33874b` | `PLURX_FFMPEG=/private/tmp/codex-ffmpeg-abi216 PLURX_FFPROBE=/private/tmp/codex-ffprobe-abi216 CARGO='rustup run 1.97.1 cargo' make unit` | Pass · 2,785 tests; 3 declared ignores; task-scoped wrappers use the retained installed x265 ABI 216 library without modifying the host |
-| `c4433a41` | `make validate-full` with the initial task-scoped FFmpeg wrapper | Diagnostic pass · 18 passed, 3 failed, 3 skipped; history lacked five review-doc mappings, playback selected an FFmpeg without `zscale`, cold cluster work exceeded 1,800 s, Playwright was not on `PATH`, and `adb` was unavailable |
-| Working tree | `make history-check` | Pass · 1,322 corrective commits have current evidence; review-only M0 documentation maps to `catalog-contract` and is not ignored |
-| Working tree | `make ui-check` through the existing `plurx-ui` Playwright 1.62.0 environment | Pass · 60 captures and 5,464 structural facts match the golden; no console or page errors |
-| Working tree | `scripts/reader-browser` through the existing `plurx-ui` environment | Pass · online/native/offline handoff, profile isolation, force-relaunch restore, style, TOC, search, finish, stale revision, and hostile-content checks |
-| Working tree | `make cluster-check` with the warmed Rust 1.97.1 targets | Pass · 133 three-voter store contracts, topology/growth/failure drills, 7 activation tests, and 2 activity tests |
-| Working tree | `make unit` with full FFmpeg 9.0.1 | Invalid tool-version run · 2 FFmpeg 8 muxer-identity tests failed; all other tests passed |
-| Working tree | the two failed FFmpeg-sensitive tests with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · copy-segment decode equivalence and mid-film generation identity |
-| Working tree | `make unit` with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · 2,785 tests; 3 declared ignores |
-| Working tree | `make playback-smoke` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Pass · 11/11 Chrome cases, including HDR tone-map, copy-HLS, no-MSE, seek, audio switch, and subtitle toggle |
-| `d528794b` | `make validate-full` with full FFmpeg 8.1.2, retained x265 ABI 216, Playwright 1.62.0, and anonymous pinned Android container preflight | Pass · 23 runnable checks; Android-device was the sole declared skip because `adb` is unavailable; cluster-auth passed in 1,638.3 s |
-| `1ad59932` | Independent diagnostic-safety and milestone-scope adversarial reviews | Pass · both reviewers approved with no actionable findings after checking the retained full-suite JSON and JUnit evidence |
+| Pre-rebase `a9cb879b` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 6 tests |
+| Pre-rebase `a9cb879b` | `make operations-check` | Pass · 192 tests; rerun outside restricted socket sandbox |
+| Pre-rebase `a9cb879b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,376 files |
+| Pre-rebase `a9cb879b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| Pre-rebase `a9cb879b` | `git diff --check` | Pass |
+| Pre-rebase `2d4900e1` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 14 tests |
+| Pre-rebase `2d4900e1` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
+| Pre-rebase `2d4900e1` | `make operations-check` | Pass · 200 tests; run outside restricted socket sandbox |
+| Pre-rebase `2d4900e1` | `make validation-lint` | Pass · 23 points, 28 checks, 1,381 files |
+| Pre-rebase `2d4900e1` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| Pre-rebase `2d4900e1` | `git diff --check` | Pass |
+| Pre-rebase `6c23d17a` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 15 tests, including exact 16 KiB and bounded repeat-count edges |
+| Pre-rebase `6c23d17a` | `git diff --check` | Pass |
+| Pre-rebase `f9d68467` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 21 tests |
+| Pre-rebase `f9d68467` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test |
+| Pre-rebase `f9d68467` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 1 test; hostile environment cannot alter fixture output |
+| Pre-rebase `f9d68467` | `make operations-check` | Pass · 207 tests; run outside restricted socket sandbox |
+| Pre-rebase `f9d68467` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files after mapping the media baseline |
+| Pre-rebase `f9d68467` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| Pre-rebase `f9d68467` | `sh -n scripts/decoder-media-baseline` | Pass |
+| Pre-rebase `f9d68467` | `git diff --check` | Pass |
+| Pre-rebase `195b7574` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 22 tests, including contract provenance and media-verifier mutation controls |
+| Pre-rebase `195b7574` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · 16 argument cases |
+| Pre-rebase `195b7574` | `rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_compatibility_override_values_are_stable -- --exact` | Pass · all four legacy false spellings and non-matches |
+| Pre-rebase `195b7574` | `PLURX_HWDECODE=off PLURX_VAAPI_DEVICE=/unexpected/device rustup run 1.97.1 cargo test -p plurx-core transcode::tests::decoder_selection_m0_argument_baseline_is_stable -- --exact` | Pass · hostile environment cannot alter fixture output |
+| Pre-rebase `195b7574` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
+| Pre-rebase `195b7574` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
+| Pre-rebase `195b7574` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| Pre-rebase `195b7574` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
+| Pre-rebase `195b7574` | `git diff --check` | Pass |
+| Pre-rebase `a16db3da` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 23 tests, including direct single/duplicate/empty/conflicting probe-row coverage |
+| Pre-rebase `a16db3da` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
+| Pre-rebase `a16db3da` | `/tmp/codex-decoder-m0-review5/decoder-media-baseline --verify /tmp/codex-decoder-m0-review5/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review8` on `nynuc` | Pass · `"verified": true` |
+| Pre-rebase `7649ccdd` | Fifth diagnostic and scope adversarial re-reviews | Pass · both approve; no actionable findings |
+| Pre-rebase `7649ccdd` | `make operations-check` | Pass · 209 tests; run outside restricted socket sandbox |
+| Pre-rebase `7649ccdd` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
+| Pre-rebase `7649ccdd` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| Pre-rebase `4ec13f3b` | `make operations-check` | Pass · 208 tests; run outside restricted socket sandbox |
+| Pre-rebase `4ec13f3b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
+| Pre-rebase `4ec13f3b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
+| Pre-rebase `4ec13f3b` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
+| Pre-rebase `4ec13f3b` | two fresh `scripts/decoder-media-baseline` generations on `nynuc` | Pass · every retained artifact digest matches byte-for-byte |
+| Pre-rebase `4ec13f3b` | `/tmp/codex-decoder-m0-review4/decoder-media-baseline --verify /tmp/codex-decoder-m0-review4/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review7` on `nynuc` | Pass · `"verified": true` |
+| Pre-rebase `4ec13f3b` | `git diff --check` | Pass |
+| Pre-rebase `3fe6a6ca` | `CARGO='rustup run 1.97.1 cargo' make unit` | Invalid environment run · 143 FFmpeg-backed tests failed because Homebrew FFmpeg could not load retained `libx265.216.dylib`; no non-loader failure observed |
+| Pre-rebase `3fe6a6ca` | `PLURX_FFMPEG=/private/tmp/codex-ffmpeg-abi216 PLURX_FFPROBE=/private/tmp/codex-ffprobe-abi216 CARGO='rustup run 1.97.1 cargo' make unit` | Pass · 2,785 tests; 3 declared ignores; task-scoped wrappers use the retained installed x265 ABI 216 library without modifying the host |
+| Pre-rebase `ac456b44` | `make validate-full` with the initial task-scoped FFmpeg wrapper | Diagnostic pass · 18 passed, 3 failed, 3 skipped; history lacked five review-doc mappings, playback selected an FFmpeg without `zscale`, cold cluster work exceeded 1,800 s, Playwright was not on `PATH`, and `adb` was unavailable |
+| Pre-rebase working tree before `01368ce1` | `make history-check` | Pass · 1,322 corrective commits had current evidence; review-only M0 documentation mapped to `catalog-contract` and was not ignored |
+| Pre-rebase working tree before `01368ce1` | `make ui-check` through the existing `plurx-ui` Playwright 1.62.0 environment | Pass · 60 captures and 5,464 structural facts matched the golden; no console or page errors |
+| Pre-rebase working tree before `01368ce1` | `scripts/reader-browser` through the existing `plurx-ui` environment | Pass · online/native/offline handoff, profile isolation, force-relaunch restore, style, TOC, search, finish, stale revision, and hostile-content checks |
+| Pre-rebase working tree before `01368ce1` | `make cluster-check` with the warmed Rust 1.97.1 targets | Pass · 133 three-voter store contracts, topology/growth/failure drills, 7 activation tests, and 2 activity tests |
+| Pre-rebase working tree before `01368ce1` | `make unit` with full FFmpeg 9.0.1 | Invalid tool-version run · 2 FFmpeg 8 muxer-identity tests failed; all other tests passed |
+| Pre-rebase working tree before `01368ce1` | the two failed FFmpeg-sensitive tests with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · copy-segment decode equivalence and mid-film generation identity |
+| Pre-rebase working tree before `01368ce1` | `make unit` with full FFmpeg 8.1.2 and retained x265 ABI 216 | Pass · 2,785 tests; 3 declared ignores |
+| Pre-rebase working tree before `01368ce1` | `make playback-smoke` with full FFmpeg 8.1.2 and Playwright 1.62.0 | Pass · 11/11 Chrome cases, including HDR tone-map, copy-HLS, no-MSE, seek, audio switch, and subtitle toggle |
+| Pre-rebase `01368ce1` | `make validate-full` with full FFmpeg 8.1.2, retained x265 ABI 216, Playwright 1.62.0, and anonymous pinned Android container preflight | Pass · 23 runnable checks; Android-device was the sole declared skip because `adb` was unavailable; cluster-auth passed in 1,638.3 s |
+| Pre-rebase `2c266dce` | Independent diagnostic-safety and milestone-scope adversarial reviews | Pass · both reviewers approved with no actionable findings after checking the retained full-suite JSON and JUnit evidence |
 
 ## Remaining evidence before release
 
