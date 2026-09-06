@@ -1067,7 +1067,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-check
 cluster-transport-recovery-check: ## Run Linux 20+20 learner/voter snapshot recovery qualification
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=7 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=14 scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery::tests --lib
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  transport-recovery target/validation/cluster-transport-recovery.json

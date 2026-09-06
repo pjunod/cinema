@@ -2389,7 +2389,7 @@ for (const startupDelay of [0, 1600, 7000]) {
 
         self.assertEqual(len(make_commands), 3)
         self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=7", make_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=14", make_commands[1])
         self.assertIn("scripts/require-test-count", make_commands[1])
         self.assertIn("transport_recovery::tests --lib", make_commands[1])
         self.assertIn(

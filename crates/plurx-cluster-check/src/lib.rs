@@ -116,10 +116,12 @@ pub use topology::{
 pub use transport_recovery::{
     validate_transport_recovery_artifact, AcknowledgedRecoveryWrite,
     ClusterTransportRecoveryArtifact, ProcessResourceCount, RecoveryCycleEvidence,
-    RecoveryImageEvidence, RecoveryRole, RecoveryRoleCampaign, RecoveryRuntimeStatus,
-    RecoveryWriteDigest, SnapshotFileEvidence, TransportRecoveryWorstDurations,
-    TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION, TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
-    TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
+    RecoveryImageEvidence, RecoveryNodeResourceEvidence, RecoveryResourceNodeKind, RecoveryRole,
+    RecoveryRoleCampaign, RecoveryRuntimeStatus, RecoveryWriteDigest, SnapshotFileEvidence,
+    SourceOutboundTransportEvidence, TargetInboundTransportEvidence,
+    TransportRecoveryWorstDurations, TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION,
+    TRANSPORT_RECOVERY_CYCLES_PER_ROLE, TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+    TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
 };
 
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";

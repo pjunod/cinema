@@ -41,6 +41,7 @@ const IMAGE_PADDING_BYTES: u64 = 8 * 1024 * 1024;
 const IMAGE_ROW_BYTES: u64 = 4 * 1024 * 1024;
 const WRITER_INTERVAL_MILLIS: u64 = 1_000;
 const WRITER_MAX_OPERATIONS: u64 = 4_096;
+const MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY: usize = 2;
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(1_500);
 const POST_QUIESCENCE: Duration = Duration::from_secs(2);
 const THREAD_MARGIN: u64 = 4;
@@ -88,6 +89,22 @@ pub struct ProcessResourceCount {
     pub sockets: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryResourceNodeKind {
+    PersistentSourceVoter,
+    RestartedTarget,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryNodeResourceEvidence {
+    pub node_id: u64,
+    pub kind: RecoveryResourceNodeKind,
+    pub baseline: ProcessResourceCount,
+    pub post_quiescence: ProcessResourceCount,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryImageEvidence {
@@ -116,6 +133,39 @@ pub struct AcknowledgedRecoveryWrite {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct SourceOutboundTransportEvidence {
+    pub observing_node_id: u64,
+    pub target_node_id: u64,
+    pub attempt_id: u64,
+    pub attempt_started_at_unix_ms: i64,
+    pub completed_at_unix_ms: i64,
+    pub attempted_bytes: u64,
+    pub acknowledged_bytes: u64,
+    pub total_bytes: u64,
+    pub attempts: u64,
+    pub reconnect_count: u64,
+    pub retry_count: u64,
+    pub elapsed_millis: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetInboundTransportEvidence {
+    pub observing_node_id: u64,
+    pub source_node_id: u64,
+    pub attempt_id: u64,
+    pub receive_started_at_unix_ms: i64,
+    pub last_local_receive_at_unix_ms: i64,
+    pub install_started_at_unix_ms: i64,
+    pub install_completed_at_unix_ms: i64,
+    pub received_bytes: u64,
+    pub total_bytes: u64,
+    pub transfer_millis: u64,
+    pub install_millis: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryCycleEvidence {
     pub role: RecoveryRole,
     pub cycle: u32,
@@ -127,18 +177,13 @@ pub struct RecoveryCycleEvidence {
     pub source_snapshot: SnapshotFileEvidence,
     pub installed_snapshot: SnapshotFileEvidence,
     pub image: RecoveryImageEvidence,
-    pub bytes_transferred: u64,
-    pub transfer_attempts: u64,
-    pub reconnect_count: u64,
-    pub retry_count: u64,
+    pub source_outbound: SourceOutboundTransportEvidence,
+    pub target_inbound: TargetInboundTransportEvidence,
     pub recovery_millis: u64,
-    pub transfer_millis: u64,
-    pub install_millis: u64,
     pub acknowledged_writes: Vec<AcknowledgedRecoveryWrite>,
     pub acknowledged_write_digest: String,
     pub target_write_digest: String,
-    pub baseline_resources: ProcessResourceCount,
-    pub post_quiescence_resources: ProcessResourceCount,
+    pub node_resources: Vec<RecoveryNodeResourceEvidence>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -202,6 +247,7 @@ pub struct RecoveryRuntimeStatus {
     pub purged_index: Option<u64>,
     pub applied_index: Option<u64>,
     pub install_ok_count: u64,
+    pub last_install_observed_at_unix_ms: Option<u64>,
     pub last_install_elapsed_nanos: Option<u64>,
     pub transport: hiqlite::SnapshotTransportStatus,
 }
@@ -232,6 +278,12 @@ impl From<&mut Row<'_>> for RecoveryImageRow {
 struct RecoveryWriteRow {
     key: String,
     value: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryWriteResolution {
+    Exact,
+    Missing,
 }
 
 impl From<&mut Row<'_>> for RecoveryWriteRow {
@@ -536,7 +588,7 @@ async fn exercise_role_campaign(
         .wait_for_members(leader, &voters, &[1, 2, 3, TARGET_NODE])
         .await?;
     tokio::time::sleep(POST_QUIESCENCE).await;
-    let baseline = request_resources(cluster, TARGET_NODE).await?;
+    let baseline_resources = request_resources_for_nodes(cluster, &[1, 2, 3, TARGET_NODE]).await?;
     let mut cycles = Vec::with_capacity(TRANSPORT_RECOVERY_CYCLES_PER_ROLE as usize);
 
     for cycle in 1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE {
@@ -606,6 +658,25 @@ async fn exercise_role_campaign(
             &source_snapshot.snapshot_id,
         )
         .await?;
+        let source_status = wait_for_completed_source_outbound(
+            cluster,
+            leader,
+            TARGET_NODE,
+            &source_snapshot.snapshot_id,
+        )
+        .await?;
+        let source_outbound = source_outbound_evidence(
+            &source_status,
+            TARGET_NODE,
+            &source_snapshot.snapshot_id,
+            source_snapshot.bytes,
+        )?;
+        let target_inbound = target_inbound_evidence(
+            &target_status,
+            leader,
+            &source_snapshot.snapshot_id,
+            source_snapshot.bytes,
+        )?;
         let recovery_finished_at_unix_ms = unix_ms()?;
         let recovery_millis = duration_millis(recovery_started.elapsed());
         std::fs::write(&writer_config.stop_path, b"stop\n")
@@ -648,34 +719,13 @@ async fn exercise_role_campaign(
         let applied_index = target_status
             .applied_index
             .context("target did not publish applied index")?;
-        let observation = installed_observation(
-            &target_status,
-            &source_snapshot.snapshot_id,
-            source_snapshot.bytes,
+        validate_acknowledged_writes(
+            &writer_report.writes,
+            recovery_started_at_unix_ms,
+            recovery_finished_at_unix_ms,
         )?;
-        if !writer_report.writes.iter().any(|write| {
-            write.acknowledged_at_unix_ms >= recovery_started_at_unix_ms
-                && write.acknowledged_at_unix_ms <= recovery_finished_at_unix_ms
-        }) {
-            bail!(
-                "{} cycle {cycle} had no acknowledged write during recovery",
-                role.label()
-            );
-        }
         tokio::time::sleep(POST_QUIESCENCE).await;
-        let post = request_resources(cluster, TARGET_NODE).await?;
-        if post.threads > baseline.threads.saturating_add(THREAD_MARGIN)
-            || post.sockets > baseline.sockets.saturating_add(SOCKET_MARGIN)
-        {
-            bail!(
-                "{} cycle {cycle} leaked resources: baseline {baseline:?}, post {post:?}",
-                role.label()
-            );
-        }
-        let transfer_millis = observation
-            .attempt_age_ms
-            .unwrap_or_default()
-            .saturating_sub(observation.last_local_receive_age_ms.unwrap_or_default());
+        let node_resources = collect_node_resource_evidence(cluster, &baseline_resources).await?;
         cycles.push(RecoveryCycleEvidence {
             role,
             cycle,
@@ -687,19 +737,13 @@ async fn exercise_role_campaign(
             source_snapshot,
             installed_snapshot,
             image,
-            bytes_transferred: observation.locally_received_bytes.unwrap_or_default(),
-            transfer_attempts: observation.retry_count.saturating_add(1),
-            reconnect_count: observation.reconnect_count,
-            retry_count: observation.retry_count,
+            source_outbound,
+            target_inbound,
             recovery_millis,
-            transfer_millis,
-            install_millis: target_status.last_install_elapsed_nanos.unwrap_or_default()
-                / 1_000_000,
             acknowledged_writes: writer_report.writes,
             acknowledged_write_digest: writer_report.digest,
             target_write_digest: target_digest.sha256,
-            baseline_resources: baseline.clone(),
-            post_quiescence_resources: post,
+            node_resources,
         });
     }
 
@@ -787,11 +831,101 @@ async fn wait_for_installed_snapshot(
     }
 }
 
-fn installed_observation<'a>(
-    status: &'a RecoveryRuntimeStatus,
+async fn wait_for_completed_source_outbound(
+    cluster: &mut ClusterProcesses,
+    source: u64,
+    target: u64,
+    snapshot_id: &str,
+) -> Result<RecoveryRuntimeStatus> {
+    let deadline = Instant::now() + RECOVERY_DEADLINE;
+    loop {
+        let status = request_status(cluster, source).await?;
+        let complete = status.transport.observations.iter().any(|observation| {
+            observation.observing_node_id == source
+                && observation.peer_node_id == target
+                && observation.direction == SnapshotTransportDirection::Outbound
+                && observation.snapshot_id.as_deref() == Some(snapshot_id)
+                && observation.phase == SnapshotTransportPhase::Complete
+        });
+        if complete {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            bail!("source {source} did not complete outbound snapshot {snapshot_id} to {target}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn source_outbound_evidence(
+    status: &RecoveryRuntimeStatus,
+    target_node_id: u64,
     snapshot_id: &str,
     snapshot_bytes: u64,
-) -> Result<&'a hiqlite::SnapshotTransportObservation> {
+) -> Result<SourceOutboundTransportEvidence> {
+    let observation = status
+        .transport
+        .observations
+        .iter()
+        .find(|observation| {
+            observation.peer_node_id == target_node_id
+                && observation.direction == SnapshotTransportDirection::Outbound
+                && observation.snapshot_id.as_deref() == Some(snapshot_id)
+                && observation.phase == SnapshotTransportPhase::Complete
+        })
+        .context("completed source outbound snapshot observation is missing")?;
+    if observation.observing_node_id != status.transport.observing_node_id
+        || observation.attempt_id == 0
+        || observation.attempted_offset != Some(snapshot_bytes)
+        || observation.acknowledged_offset != Some(snapshot_bytes)
+        || observation.total_bytes != Some(snapshot_bytes)
+        || observation.operation_owns_work
+    {
+        bail!("completed source outbound counters do not match snapshot: {observation:?}");
+    }
+    let attempt_age_ms = observation
+        .attempt_age_ms
+        .context("source outbound attempt timestamp is missing")?;
+    let acknowledgement_age_ms = observation
+        .last_acknowledgement_age_ms
+        .context("source outbound completion timestamp is missing")?;
+    let attempt_started_at_unix_ms = event_unix_ms(
+        status.transport.observed_at_unix_ms,
+        attempt_age_ms,
+        "source outbound attempt",
+    )?;
+    let completed_at_unix_ms = event_unix_ms(
+        status.transport.observed_at_unix_ms,
+        acknowledgement_age_ms,
+        "source outbound completion",
+    )?;
+    let elapsed_millis = elapsed_event_millis(
+        attempt_started_at_unix_ms,
+        completed_at_unix_ms,
+        "source outbound transfer",
+    )?;
+    Ok(SourceOutboundTransportEvidence {
+        observing_node_id: observation.observing_node_id,
+        target_node_id,
+        attempt_id: observation.attempt_id,
+        attempt_started_at_unix_ms,
+        completed_at_unix_ms,
+        attempted_bytes: snapshot_bytes,
+        acknowledged_bytes: snapshot_bytes,
+        total_bytes: snapshot_bytes,
+        attempts: observation.retry_count.saturating_add(1),
+        reconnect_count: observation.reconnect_count,
+        retry_count: observation.retry_count,
+        elapsed_millis,
+    })
+}
+
+fn target_inbound_evidence(
+    status: &RecoveryRuntimeStatus,
+    source_node_id: u64,
+    snapshot_id: &str,
+    snapshot_bytes: u64,
+) -> Result<TargetInboundTransportEvidence> {
     let observation = status
         .transport
         .observations
@@ -802,13 +936,80 @@ fn installed_observation<'a>(
                 && observation.phase == SnapshotTransportPhase::Complete
         })
         .context("completed inbound snapshot observation is missing")?;
-    if observation.locally_received_bytes != Some(snapshot_bytes)
+    if observation.observing_node_id != status.transport.observing_node_id
+        || observation.peer_node_id != source_node_id
+        || observation.attempt_id == 0
+        || observation.locally_received_bytes != Some(snapshot_bytes)
         || observation.total_bytes != Some(snapshot_bytes)
         || observation.operation_owns_work
     {
         bail!("completed inbound transport counters do not match snapshot: {observation:?}");
     }
-    Ok(observation)
+    let attempt_age_ms = observation
+        .attempt_age_ms
+        .context("target inbound receive timestamp is missing")?;
+    let receive_age_ms = observation
+        .last_local_receive_age_ms
+        .context("target inbound completion timestamp is missing")?;
+    let install_elapsed_nanos = status
+        .last_install_elapsed_nanos
+        .filter(|elapsed| *elapsed > 0)
+        .context("target snapshot install timing is missing or zero")?;
+    let install_millis = install_elapsed_nanos.div_ceil(1_000_000);
+    let receive_started_at_unix_ms = event_unix_ms(
+        status.transport.observed_at_unix_ms,
+        attempt_age_ms,
+        "target inbound receive",
+    )?;
+    let last_local_receive_at_unix_ms = event_unix_ms(
+        status.transport.observed_at_unix_ms,
+        receive_age_ms,
+        "target inbound last local receive",
+    )?;
+    let install_completed_at_unix_ms = i64::try_from(
+        status
+            .last_install_observed_at_unix_ms
+            .context("target snapshot install completion timestamp is missing")?,
+    )?;
+    let install_started_at_unix_ms = install_completed_at_unix_ms
+        .checked_sub(i64::try_from(install_millis)?)
+        .context("target install timestamp underflow")?;
+    let transfer_millis = elapsed_event_millis(
+        receive_started_at_unix_ms,
+        install_started_at_unix_ms,
+        "target inbound receive",
+    )?;
+    if last_local_receive_at_unix_ms < install_completed_at_unix_ms {
+        bail!("target local receive timestamp precedes completed snapshot installation");
+    }
+    Ok(TargetInboundTransportEvidence {
+        observing_node_id: observation.observing_node_id,
+        source_node_id,
+        attempt_id: observation.attempt_id,
+        receive_started_at_unix_ms,
+        last_local_receive_at_unix_ms,
+        install_started_at_unix_ms,
+        install_completed_at_unix_ms,
+        received_bytes: snapshot_bytes,
+        total_bytes: snapshot_bytes,
+        transfer_millis,
+        install_millis,
+    })
+}
+
+fn event_unix_ms(observed_at_unix_ms: u64, age_ms: u64, label: &str) -> Result<i64> {
+    let event = observed_at_unix_ms
+        .checked_sub(age_ms)
+        .with_context(|| format!("{label} age exceeds observation timestamp"))?;
+    i64::try_from(event).with_context(|| format!("{label} timestamp exceeds i64"))
+}
+
+fn elapsed_event_millis(start: i64, finish: i64, label: &str) -> Result<u64> {
+    let elapsed = finish
+        .checked_sub(start)
+        .filter(|elapsed| *elapsed > 0)
+        .with_context(|| format!("{label} timestamps are missing or non-increasing"))?;
+    u64::try_from(elapsed).with_context(|| format!("{label} duration exceeds u64"))
 }
 
 async fn request_status(
@@ -829,6 +1030,45 @@ async fn request_resources(
         Response::ProcessResources { resources } => Ok(resources),
         response => bail!("unexpected process-resource response: {response:?}"),
     }
+}
+
+async fn request_resources_for_nodes(
+    cluster: &mut ClusterProcesses,
+    node_ids: &[u64],
+) -> Result<Vec<(u64, ProcessResourceCount)>> {
+    let mut samples = Vec::with_capacity(node_ids.len());
+    for &node_id in node_ids {
+        samples.push((node_id, request_resources(cluster, node_id).await?));
+    }
+    Ok(samples)
+}
+
+async fn collect_node_resource_evidence(
+    cluster: &mut ClusterProcesses,
+    baselines: &[(u64, ProcessResourceCount)],
+) -> Result<Vec<RecoveryNodeResourceEvidence>> {
+    let mut evidence = Vec::with_capacity(baselines.len());
+    for (node_id, baseline) in baselines {
+        let post_quiescence = request_resources(cluster, *node_id).await?;
+        if post_quiescence.threads > baseline.threads.saturating_add(THREAD_MARGIN)
+            || post_quiescence.sockets > baseline.sockets.saturating_add(SOCKET_MARGIN)
+        {
+            bail!(
+                "node {node_id} leaked resources: baseline {baseline:?}, post {post_quiescence:?}"
+            );
+        }
+        evidence.push(RecoveryNodeResourceEvidence {
+            node_id: *node_id,
+            kind: if *node_id == TARGET_NODE {
+                RecoveryResourceNodeKind::RestartedTarget
+            } else {
+                RecoveryResourceNodeKind::PersistentSourceVoter
+            },
+            baseline: baseline.clone(),
+            post_quiescence,
+        });
+    }
+    Ok(evidence)
 }
 
 async fn spawn_writer(
@@ -956,14 +1196,21 @@ pub async fn run_transport_recovery_writer(config_path: &Path) -> Result<()> {
         }
         let key = format!("{}{ordinal:06}", config.prefix);
         let value = format!("transport-recovery-ack-{ordinal:06}-{}", "x".repeat(128));
-        client
+        let execution = client
             .execute(
-                "INSERT INTO settings (key, value) VALUES ($1, $2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                "INSERT INTO settings (key, value) VALUES ($1, $2)",
                 params!(key.as_str(), value.as_str()),
             )
-            .await
-            .with_context(|| format!("acknowledge recovery write {ordinal}"))?;
+            .await;
+        if let Err(error) = execution {
+            resolve_ambiguous_recovery_write(&client, &key, &value)
+                .await
+                .with_context(|| {
+                    format!(
+                        "recovery write {ordinal} returned {error}; its exact committed value could not be resolved"
+                    )
+                })?;
+        }
         writes.push(AcknowledgedRecoveryWrite {
             key,
             value_sha256: hex::encode(Sha256::digest(value.as_bytes())),
@@ -989,6 +1236,54 @@ pub async fn run_transport_recovery_writer(config_path: &Path) -> Result<()> {
         serde_json::to_string(&RecoveryWriterReport { writes, digest })?
     );
     Ok(())
+}
+
+async fn resolve_ambiguous_recovery_write(client: &Client, key: &str, value: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match client
+            .query_consistent_map::<RecoveryWriteRow, _>(
+                "SELECT key, value FROM settings WHERE key = $1",
+                params!(key),
+            )
+            .await
+        {
+            Ok(rows) => match classify_recovery_write(key, value, &rows)? {
+                RecoveryWriteResolution::Exact => return Ok(()),
+                RecoveryWriteResolution::Missing => {}
+            },
+            Err(error) if Instant::now() < deadline => {
+                eprintln!("cluster-check: retry ambiguous write read for {key:?}: {error}");
+            }
+            Err(error) => {
+                return Err(error).context("read ambiguous recovery write outcome consistently");
+            }
+        }
+        if Instant::now() >= deadline {
+            bail!("ambiguous recovery write {key:?} was not committed before resolution deadline");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn classify_recovery_write(
+    key: &str,
+    value: &str,
+    rows: &[RecoveryWriteRow],
+) -> Result<RecoveryWriteResolution> {
+    match rows {
+        [row] if row.key == key && row.value == value => Ok(RecoveryWriteResolution::Exact),
+        [] => Ok(RecoveryWriteResolution::Missing),
+        [row] => bail!(
+            "ambiguous recovery write {key:?} resolved to unexpected key/value {:?}/{:?}",
+            row.key,
+            row.value
+        ),
+        _ => bail!(
+            "ambiguous recovery write {key:?} resolved to {} rows",
+            rows.len()
+        ),
+    }
 }
 
 fn validate_writer_config(config: &RecoveryWriterConfig) -> Result<()> {
@@ -1123,6 +1418,9 @@ pub(super) async fn recovery_runtime_status(client: &Client) -> Result<RecoveryR
         purged_index: metrics.purged.map(|log| log.index),
         applied_index: metrics.last_applied.map(|log| log.index),
         install_ok_count: snapshot_metrics.install_ok.count,
+        last_install_observed_at_unix_ms: snapshot_metrics
+            .last_install
+            .map(|last| last.observed_at_unix_ms),
         last_install_elapsed_nanos: snapshot_metrics.last_install.map(|last| last.elapsed_nanos),
         transport: client.local_snapshot_transport_status()?.snapshot(),
     })
@@ -1236,6 +1534,45 @@ fn acknowledged_write_digest(writes: &[AcknowledgedRecoveryWrite]) -> String {
     hex::encode(digest.finalize())
 }
 
+fn validate_acknowledged_writes(
+    writes: &[AcknowledgedRecoveryWrite],
+    recovery_started_at_unix_ms: i64,
+    recovery_finished_at_unix_ms: i64,
+) -> Result<()> {
+    let unique_keys = writes
+        .iter()
+        .map(|write| write.key.as_str())
+        .collect::<BTreeSet<_>>();
+    if unique_keys.len() != writes.len()
+        || writes
+            .windows(2)
+            .any(|pair| pair[0].acknowledged_at_unix_ms > pair[1].acknowledged_at_unix_ms)
+    {
+        bail!("recovery writer acknowledgements are duplicated or out of order");
+    }
+    let during_recovery = writes
+        .iter()
+        .filter(|write| {
+            write.acknowledged_at_unix_ms >= recovery_started_at_unix_ms
+                && write.acknowledged_at_unix_ms <= recovery_finished_at_unix_ms
+        })
+        .collect::<Vec<_>>();
+    let cadence_millis = i64::try_from(WRITER_INTERVAL_MILLIS)?;
+    if during_recovery.len() < MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY
+        || !during_recovery.windows(2).any(|pair| {
+            pair[1]
+                .acknowledged_at_unix_ms
+                .saturating_sub(pair[0].acknowledged_at_unix_ms)
+                >= cadence_millis
+        })
+    {
+        bail!(
+            "recovery writer needs at least {MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY} in-window acknowledgements separated by {WRITER_INTERVAL_MILLIS} ms"
+        );
+    }
+    Ok(())
+}
+
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -1249,12 +1586,12 @@ fn worst_durations(cycles: &[RecoveryCycleEvidence]) -> TransportRecoveryWorstDu
             .unwrap_or(0),
         transfer_millis: cycles
             .iter()
-            .map(|cycle| cycle.transfer_millis)
+            .map(|cycle| cycle.target_inbound.transfer_millis)
             .max()
             .unwrap_or(0),
         install_millis: cycles
             .iter()
-            .map(|cycle| cycle.install_millis)
+            .map(|cycle| cycle.target_inbound.install_millis)
             .max()
             .unwrap_or(0),
     }
@@ -1332,41 +1669,52 @@ fn validate_role_campaign(
         bail!("{} recovery campaign shape drifted", role.label());
     }
     let mut snapshot_ids = BTreeSet::new();
+    let mut established_resource_baselines = None;
     for (position, cycle) in campaign.cycles.iter().enumerate() {
         let expected_cycle = u32::try_from(position)?.saturating_add(1);
         let expected_marker = format!("transport-recovery-{}-image-v1", role.label());
         validate_image(&cycle.image, minimum, &expected_marker)?;
+        validate_cycle_transport(cycle)?;
+        validate_cycle_resources(cycle, artifact)?;
+        let cycle_baselines = cycle
+            .node_resources
+            .iter()
+            .map(|sample| (sample.node_id, sample.baseline.clone()))
+            .collect::<Vec<_>>();
+        if established_resource_baselines
+            .as_ref()
+            .is_some_and(|established| established != &cycle_baselines)
+        {
+            bail!(
+                "{} recovery campaign rebased its resource baseline",
+                role.label()
+            );
+        }
+        established_resource_baselines.get_or_insert(cycle_baselines);
+        validate_acknowledged_writes(
+            &cycle.acknowledged_writes,
+            cycle.recovery_started_at_unix_ms,
+            cycle.recovery_finished_at_unix_ms,
+        )?;
         if cycle.role != role
             || cycle.cycle != expected_cycle
-            || cycle.recovery_started_at_unix_ms > cycle.recovery_finished_at_unix_ms
+            || cycle.recovery_started_at_unix_ms >= cycle.recovery_finished_at_unix_ms
             || cycle.recovery_started_at_unix_ms < artifact.started_at_unix_ms
             || cycle.recovery_finished_at_unix_ms > artifact.finished_at_unix_ms
             || cycle.purged_index < cycle.snapshot_index
             || cycle.applied_index < cycle.snapshot_index
             || cycle.source_snapshot != cycle.installed_snapshot
             || cycle.source_snapshot.bytes < minimum
-            || cycle.bytes_transferred != cycle.source_snapshot.bytes
             || !is_sha256(&cycle.source_snapshot.sha256)
-            || cycle.transfer_attempts == 0
-            || cycle.transfer_attempts != cycle.retry_count.saturating_add(1)
-            || cycle.acknowledged_writes.len() < 2
+            || cycle.recovery_millis == 0
+            || cycle.acknowledged_writes.len()
+                < MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY.saturating_add(1)
+            || cycle.acknowledged_writes.first().is_none_or(|write| {
+                write.acknowledged_at_unix_ms >= cycle.recovery_started_at_unix_ms
+            })
             || cycle.acknowledged_write_digest
                 != acknowledged_write_digest(&cycle.acknowledged_writes)
             || cycle.target_write_digest != cycle.acknowledged_write_digest
-            || cycle.post_quiescence_resources.threads
-                > cycle
-                    .baseline_resources
-                    .threads
-                    .saturating_add(artifact.resource_thread_margin)
-            || cycle.post_quiescence_resources.sockets
-                > cycle
-                    .baseline_resources
-                    .sockets
-                    .saturating_add(artifact.resource_socket_margin)
-            || !cycle.acknowledged_writes.iter().any(|write| {
-                write.acknowledged_at_unix_ms >= cycle.recovery_started_at_unix_ms
-                    && write.acknowledged_at_unix_ms <= cycle.recovery_finished_at_unix_ms
-            })
             || cycle.acknowledged_writes.iter().any(|write| {
                 write.key.is_empty()
                     || !is_sha256(&write.value_sha256)
@@ -1381,6 +1729,85 @@ fn validate_role_campaign(
         }
         if !snapshot_ids.insert(cycle.source_snapshot.snapshot_id.clone()) {
             bail!("{} recovery campaign reused a snapshot image", role.label());
+        }
+    }
+    Ok(())
+}
+
+fn validate_cycle_transport(cycle: &RecoveryCycleEvidence) -> Result<()> {
+    let source = &cycle.source_outbound;
+    let target = &cycle.target_inbound;
+    let source_elapsed = elapsed_event_millis(
+        source.attempt_started_at_unix_ms,
+        source.completed_at_unix_ms,
+        "recorded source outbound transfer",
+    )?;
+    let target_transfer = elapsed_event_millis(
+        target.receive_started_at_unix_ms,
+        target.install_started_at_unix_ms,
+        "recorded target inbound receive",
+    )?;
+    let target_install = elapsed_event_millis(
+        target.install_started_at_unix_ms,
+        target.install_completed_at_unix_ms,
+        "recorded target snapshot install",
+    )?;
+    if !(1..TARGET_NODE).contains(&source.observing_node_id)
+        || source.target_node_id != TARGET_NODE
+        || source.attempt_id == 0
+        || source.attempt_started_at_unix_ms < cycle.recovery_started_at_unix_ms
+        || source.completed_at_unix_ms > cycle.recovery_finished_at_unix_ms
+        || source.attempted_bytes != cycle.source_snapshot.bytes
+        || source.acknowledged_bytes != cycle.source_snapshot.bytes
+        || source.total_bytes != cycle.source_snapshot.bytes
+        || source.attempts == 0
+        || source.attempts != source.retry_count.saturating_add(1)
+        || source.elapsed_millis != source_elapsed
+        || target.observing_node_id != TARGET_NODE
+        || target.source_node_id != source.observing_node_id
+        || target.attempt_id == 0
+        || target.receive_started_at_unix_ms < source.attempt_started_at_unix_ms
+        || target.last_local_receive_at_unix_ms < target.install_completed_at_unix_ms
+        || target.last_local_receive_at_unix_ms > source.completed_at_unix_ms
+        || target.install_completed_at_unix_ms > source.completed_at_unix_ms
+        || target.received_bytes != cycle.source_snapshot.bytes
+        || target.total_bytes != cycle.source_snapshot.bytes
+        || target.transfer_millis != target_transfer
+        || target.install_millis != target_install
+    {
+        bail!("recovery cycle transport evidence is incomplete or inconsistent");
+    }
+    Ok(())
+}
+
+fn validate_cycle_resources(
+    cycle: &RecoveryCycleEvidence,
+    artifact: &ClusterTransportRecoveryArtifact,
+) -> Result<()> {
+    if cycle.node_resources.len() != TARGET_NODE as usize {
+        bail!("recovery cycle must sample all four cluster processes");
+    }
+    for (position, sample) in cycle.node_resources.iter().enumerate() {
+        let expected_node = u64::try_from(position)?.saturating_add(1);
+        let expected_kind = if expected_node == TARGET_NODE {
+            RecoveryResourceNodeKind::RestartedTarget
+        } else {
+            RecoveryResourceNodeKind::PersistentSourceVoter
+        };
+        if sample.node_id != expected_node
+            || sample.kind != expected_kind
+            || sample.post_quiescence.threads
+                > sample
+                    .baseline
+                    .threads
+                    .saturating_add(artifact.resource_thread_margin)
+            || sample.post_quiescence.sockets
+                > sample
+                    .baseline
+                    .sockets
+                    .saturating_add(artifact.resource_socket_margin)
+        {
+            bail!("node {expected_node} resource evidence exceeded its fixed contract");
         }
     }
     Ok(())
@@ -1417,8 +1844,9 @@ mod tests {
         let cycles = (1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE)
             .map(|cycle| {
                 let writes = vec![
-                    write(cycle.saturating_mul(2), 110),
-                    write(cycle.saturating_mul(2).saturating_add(1), 150),
+                    write(cycle.saturating_mul(3), 1_500),
+                    write(cycle.saturating_mul(3).saturating_add(1), 2_500),
+                    write(cycle.saturating_mul(3).saturating_add(2), 3_500),
                 ];
                 let digest = acknowledged_write_digest(&writes);
                 let snapshot = SnapshotFileEvidence {
@@ -1429,8 +1857,8 @@ mod tests {
                 RecoveryCycleEvidence {
                     role,
                     cycle,
-                    recovery_started_at_unix_ms: 125,
-                    recovery_finished_at_unix_ms: 175,
+                    recovery_started_at_unix_ms: 2_000,
+                    recovery_finished_at_unix_ms: 7_000,
                     snapshot_index: u64::from(cycle) * 300,
                     purged_index: u64::from(cycle) * 300,
                     applied_index: u64::from(cycle) * 300 + 1,
@@ -1443,24 +1871,55 @@ mod tests {
                         payload_bytes: minimum,
                         content_sha256: "c".repeat(64),
                     },
-                    bytes_transferred: minimum,
-                    transfer_attempts: 1,
-                    reconnect_count: 0,
-                    retry_count: 0,
-                    recovery_millis: 50,
-                    transfer_millis: 40,
-                    install_millis: 10,
+                    source_outbound: SourceOutboundTransportEvidence {
+                        observing_node_id: 1,
+                        target_node_id: TARGET_NODE,
+                        attempt_id: u64::from(cycle),
+                        attempt_started_at_unix_ms: 2_100,
+                        completed_at_unix_ms: 6_000,
+                        attempted_bytes: minimum,
+                        acknowledged_bytes: minimum,
+                        total_bytes: minimum,
+                        attempts: 1,
+                        reconnect_count: 0,
+                        retry_count: 0,
+                        elapsed_millis: 3_900,
+                    },
+                    target_inbound: TargetInboundTransportEvidence {
+                        observing_node_id: TARGET_NODE,
+                        source_node_id: 1,
+                        attempt_id: u64::from(cycle),
+                        receive_started_at_unix_ms: 2_200,
+                        last_local_receive_at_unix_ms: 5_510,
+                        install_started_at_unix_ms: 5_000,
+                        install_completed_at_unix_ms: 5_500,
+                        received_bytes: minimum,
+                        total_bytes: minimum,
+                        transfer_millis: 2_800,
+                        install_millis: 500,
+                    },
+                    recovery_millis: 5_000,
                     acknowledged_writes: writes,
                     acknowledged_write_digest: digest.clone(),
                     target_write_digest: digest,
-                    baseline_resources: ProcessResourceCount {
-                        threads: 12,
-                        sockets: 8,
-                    },
-                    post_quiescence_resources: ProcessResourceCount {
-                        threads: 12,
-                        sockets: 8,
-                    },
+                    node_resources: (1..=TARGET_NODE)
+                        .map(|node_id| RecoveryNodeResourceEvidence {
+                            node_id,
+                            kind: if node_id == TARGET_NODE {
+                                RecoveryResourceNodeKind::RestartedTarget
+                            } else {
+                                RecoveryResourceNodeKind::PersistentSourceVoter
+                            },
+                            baseline: ProcessResourceCount {
+                                threads: 12,
+                                sockets: 8,
+                            },
+                            post_quiescence: ProcessResourceCount {
+                                threads: 12,
+                                sockets: 8,
+                            },
+                        })
+                        .collect(),
                 }
             })
             .collect::<Vec<_>>();
@@ -1479,8 +1938,8 @@ mod tests {
             evidence_scope: EVIDENCE_SCOPE.to_owned(),
             build_sha: "d".repeat(40),
             platform: "linux".to_owned(),
-            started_at_unix_ms: 100,
-            finished_at_unix_ms: 200,
+            started_at_unix_ms: 1_000,
+            finished_at_unix_ms: 10_000,
             snapshot_policy: RecoverySnapshotPolicy {
                 validation_only: true,
                 logs_since_last: TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST,
@@ -1517,7 +1976,7 @@ mod tests {
     fn write_not_acknowledged_during_recovery_is_rejected() {
         let mut value = artifact();
         for write in &mut value.learner.cycles[0].acknowledged_writes {
-            write.acknowledged_at_unix_ms = 110;
+            write.acknowledged_at_unix_ms = 1_500;
         }
         value.learner.cycles[0].acknowledged_write_digest =
             acknowledged_write_digest(&value.learner.cycles[0].acknowledged_writes);
@@ -1547,8 +2006,92 @@ mod tests {
     #[test]
     fn resource_growth_beyond_the_fixed_margin_is_rejected() {
         let mut value = artifact();
-        value.voter.cycles[0].post_quiescence_resources.sockets = 11;
+        value.voter.cycles[0].node_resources[0]
+            .post_quiescence
+            .sockets = 11;
         assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn every_persistent_source_voter_requires_resource_evidence() {
+        let mut value = artifact();
+        value.learner.cycles[0].node_resources.remove(1);
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn persistent_source_resource_baselines_cannot_be_rebased_between_cycles() {
+        let mut value = artifact();
+        value.learner.cycles[1].node_resources[0].baseline.threads += 1;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn outbound_attempt_metrics_must_come_from_a_timed_source_observation() {
+        let mut value = artifact();
+        value.voter.cycles[0]
+            .source_outbound
+            .attempt_started_at_unix_ms = 6_000;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn large_snapshot_receive_and_install_timings_cannot_be_zero() {
+        let mut value = artifact();
+        value.voter.cycles[0].target_inbound.install_millis = 0;
+        value.voter.cycles[0]
+            .target_inbound
+            .install_started_at_unix_ms = 5_500;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn recovery_acknowledgements_must_include_a_cadence_separated_pair() {
+        let mut value = artifact();
+        value.learner.cycles[0].acknowledged_writes[1].acknowledged_at_unix_ms = 2_500;
+        value.learner.cycles[0].acknowledged_writes[2].acknowledged_at_unix_ms = 2_999;
+        value.learner.cycles[0].acknowledged_write_digest =
+            acknowledged_write_digest(&value.learner.cycles[0].acknowledged_writes);
+        value.learner.cycles[0].target_write_digest =
+            value.learner.cycles[0].acknowledged_write_digest.clone();
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn recovery_acknowledgement_identifiers_must_be_unique() {
+        let mut value = artifact();
+        value.learner.cycles[0].acknowledged_writes[2].key =
+            value.learner.cycles[0].acknowledged_writes[1].key.clone();
+        value.learner.cycles[0].acknowledged_write_digest =
+            acknowledged_write_digest(&value.learner.cycles[0].acknowledged_writes);
+        value.learner.cycles[0].target_write_digest =
+            value.learner.cycles[0].acknowledged_write_digest.clone();
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn ambiguous_write_resolution_accepts_only_the_exact_committed_value() {
+        let exact = RecoveryWriteRow {
+            key: "recovery.unique.000001".to_owned(),
+            value: "expected".to_owned(),
+        };
+        assert_eq!(
+            classify_recovery_write("recovery.unique.000001", "expected", &[exact])
+                .expect("classify exact committed value"),
+            RecoveryWriteResolution::Exact
+        );
+        assert_eq!(
+            classify_recovery_write("recovery.unique.000001", "expected", &[])
+                .expect("classify unresolved value"),
+            RecoveryWriteResolution::Missing
+        );
+        let mismatch = RecoveryWriteRow {
+            key: "recovery.unique.000001".to_owned(),
+            value: "different".to_owned(),
+        };
+        assert!(
+            classify_recovery_write("recovery.unique.000001", "expected", &[mismatch]).is_err()
+        );
     }
 
     #[test]

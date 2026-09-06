@@ -84,6 +84,21 @@
         "sockets": { "type": "integer", "minimum": 1 }
       }
     },
+    "resourceNodeKind": {
+      "type": "string",
+      "enum": ["persistent_source_voter", "restarted_target"]
+    },
+    "nodeResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "kind", "baseline", "post_quiescence"],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "kind": { "$ref": "#/$defs/resourceNodeKind" },
+        "baseline": { "$ref": "#/$defs/resources" },
+        "post_quiescence": { "$ref": "#/$defs/resources" }
+      }
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -122,6 +137,68 @@
         "acknowledged_at_unix_ms": { "type": "integer", "minimum": 0 }
       }
     },
+    "sourceOutbound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observing_node_id",
+        "target_node_id",
+        "attempt_id",
+        "attempt_started_at_unix_ms",
+        "completed_at_unix_ms",
+        "attempted_bytes",
+        "acknowledged_bytes",
+        "total_bytes",
+        "attempts",
+        "reconnect_count",
+        "retry_count",
+        "elapsed_millis"
+      ],
+      "properties": {
+        "observing_node_id": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "target_node_id": { "const": 4 },
+        "attempt_id": { "type": "integer", "minimum": 1 },
+        "attempt_started_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "completed_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "attempted_bytes": { "type": "integer", "minimum": 88559616 },
+        "acknowledged_bytes": { "type": "integer", "minimum": 88559616 },
+        "total_bytes": { "type": "integer", "minimum": 88559616 },
+        "attempts": { "type": "integer", "minimum": 1 },
+        "reconnect_count": { "type": "integer", "minimum": 0 },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "elapsed_millis": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "targetInbound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observing_node_id",
+        "source_node_id",
+        "attempt_id",
+        "receive_started_at_unix_ms",
+        "last_local_receive_at_unix_ms",
+        "install_started_at_unix_ms",
+        "install_completed_at_unix_ms",
+        "received_bytes",
+        "total_bytes",
+        "transfer_millis",
+        "install_millis"
+      ],
+      "properties": {
+        "observing_node_id": { "const": 4 },
+        "source_node_id": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "attempt_id": { "type": "integer", "minimum": 1 },
+        "receive_started_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "last_local_receive_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "install_started_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "install_completed_at_unix_ms": { "type": "integer", "minimum": 1 },
+        "received_bytes": { "type": "integer", "minimum": 88559616 },
+        "total_bytes": { "type": "integer", "minimum": 88559616 },
+        "transfer_millis": { "type": "integer", "minimum": 1 },
+        "install_millis": { "type": "integer", "minimum": 1 }
+      }
+    },
     "cycle": {
       "type": "object",
       "additionalProperties": false,
@@ -136,18 +213,13 @@
         "source_snapshot",
         "installed_snapshot",
         "image",
-        "bytes_transferred",
-        "transfer_attempts",
-        "reconnect_count",
-        "retry_count",
+        "source_outbound",
+        "target_inbound",
         "recovery_millis",
-        "transfer_millis",
-        "install_millis",
         "acknowledged_writes",
         "acknowledged_write_digest",
         "target_write_digest",
-        "baseline_resources",
-        "post_quiescence_resources"
+        "node_resources"
       ],
       "properties": {
         "role": { "$ref": "#/$defs/role" },
@@ -160,23 +232,23 @@
         "source_snapshot": { "$ref": "#/$defs/snapshot" },
         "installed_snapshot": { "$ref": "#/$defs/snapshot" },
         "image": { "$ref": "#/$defs/image" },
-        "bytes_transferred": { "type": "integer", "minimum": 88559616 },
-        "transfer_attempts": { "type": "integer", "minimum": 1 },
-        "reconnect_count": { "type": "integer", "minimum": 0 },
-        "retry_count": { "type": "integer", "minimum": 0 },
-        "recovery_millis": { "type": "integer", "minimum": 0 },
-        "transfer_millis": { "type": "integer", "minimum": 0 },
-        "install_millis": { "type": "integer", "minimum": 0 },
+        "source_outbound": { "$ref": "#/$defs/sourceOutbound" },
+        "target_inbound": { "$ref": "#/$defs/targetInbound" },
+        "recovery_millis": { "type": "integer", "minimum": 1 },
         "acknowledged_writes": {
           "type": "array",
-          "minItems": 2,
+          "minItems": 3,
           "maxItems": 4096,
           "items": { "$ref": "#/$defs/write" }
         },
         "acknowledged_write_digest": { "$ref": "#/$defs/sha256" },
         "target_write_digest": { "$ref": "#/$defs/sha256" },
-        "baseline_resources": { "$ref": "#/$defs/resources" },
-        "post_quiescence_resources": { "$ref": "#/$defs/resources" }
+        "node_resources": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/nodeResource" }
+        }
       }
     },
     "worst": {
@@ -184,9 +256,9 @@
       "additionalProperties": false,
       "required": ["recovery_millis", "transfer_millis", "install_millis"],
       "properties": {
-        "recovery_millis": { "type": "integer", "minimum": 0 },
-        "transfer_millis": { "type": "integer", "minimum": 0 },
-        "install_millis": { "type": "integer", "minimum": 0 }
+        "recovery_millis": { "type": "integer", "minimum": 1 },
+        "transfer_millis": { "type": "integer", "minimum": 1 },
+        "install_millis": { "type": "integer", "minimum": 1 }
       }
     },
     "roleCampaign": {
