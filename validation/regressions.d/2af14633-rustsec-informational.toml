@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2af14633"]
+points = ["operations.packaging", "validation.framework"]
+checks = ["operations-contract"]
+reason = "The workflow contract sweep reads every Forgejo workflow and is what keeps this lane's shape reviewed. The change itself is that an informational advisory — unmaintained, unsound, or yanked — can no longer close main: the pinned action still installs cargo-audit and still annotates when Forgejo lets it, and `cargo audit` is now the verdict, exiting non-zero for a real vulnerability while logging notices. A regression would be reinstating the annotation call as the gate, which the same sweep reads. The yanked `chacha20` 0.10.1 that surfaced it is off the lockfile at 0.10.2, and every Rust lane compiles against that lockfile."
