@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["29dd8e88"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["rust-gate", "catalog-contract"]
+reason = "The Rust gate exercises the production sealed-FD FFprobe path, architecture-checked seccomp escapes, deny-all path execution, pidfd-before-reap process-group cleanup, and neutral legacy routing when isolation is unavailable. The catalog contract freezes the new process lifecycle and timing ownership while the decoder recovery status contract preserves exact validation and prerequisite evidence."

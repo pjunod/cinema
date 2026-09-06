@@ -19,6 +19,7 @@ FORGEJO_TASK_BASE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "b0b206df"
+M1_REPAIR_HEAD = "29dd8e88"
 
 
 def normalized(text: str) -> str:
@@ -177,6 +178,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("path and second-memfd exec", self.status)
         self.assertIn("pidfd-before-reap", self.status)
         self.assertIn("Linux 24/24", self.status)
+        self.assertIn(f"Exact code head `{M1_REPAIR_HEAD}`", self.status)
+        self.assertIn("daemon 1,777/1,777", self.status)
         self.assertIn("no exact postcommit history claim", self.status)
         self.assertNotIn("`608dd04d`: history 1,357", self.status)
         self.assertNotIn("Working tree after `0dcbcdf2`", self.status)
