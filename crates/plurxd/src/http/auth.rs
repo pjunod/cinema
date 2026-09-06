@@ -54,6 +54,9 @@ pub async fn login(
         .store
         .create_token(&hash, user.id, req.device.as_deref())
         .await?;
+    state
+        .cache_only_admin_proofs
+        .record_authenticated(hash, &user);
 
     Ok(Json(LoginResponse {
         token,
@@ -67,6 +70,7 @@ pub async fn logout(
     RawToken(token): RawToken,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let hash = auth::hash_token(&token);
+    state.cache_only_admin_proofs.invalidate_digest(&hash);
     state.store.delete_token(&hash).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

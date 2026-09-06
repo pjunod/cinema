@@ -84,6 +84,9 @@ pub async fn update(
                 "cannot remove admin from the last admin account".into(),
             ));
         }
+        if !is_admin {
+            state.cache_only_admin_proofs.invalidate_user(id);
+        }
         state.store.set_admin(id, is_admin).await?;
     }
     if let Some(password) = req.password {
@@ -93,6 +96,7 @@ pub async fn update(
             ));
         }
         let hash = auth::hash_password(&password).map_err(|e| ApiError::Internal(e.to_string()))?;
+        state.cache_only_admin_proofs.invalidate_user(id);
         state.store.set_password(id, &hash).await?;
         // Old sessions die with the old password.
         state.store.delete_tokens_for_user(id).await?;
@@ -127,6 +131,7 @@ pub async fn delete(
         return Err(ApiError::Conflict("cannot delete the last admin".into()));
     }
     // Tokens and watch state go with the user (ON DELETE CASCADE).
+    state.cache_only_admin_proofs.invalidate_user(id);
     state.store.delete_user(id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

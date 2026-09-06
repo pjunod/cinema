@@ -10,7 +10,9 @@ use axum::http::request::Parts;
 use plurx_core::auth;
 use plurx_core::domain::ApiKey;
 use plurx_core::domain::User;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::error::ApiError;
 use crate::state::AppState;
@@ -18,6 +20,81 @@ use crate::state::AppState;
 pub struct AuthUser(pub User);
 /// Guard that requires the caller be an admin; carries the admin's identity.
 pub struct AdminUser(pub User);
+
+/// Store-free proof for the two cluster recovery reads.
+///
+/// A successful ordinary authentication publishes only the SHA-256 token
+/// digest, the user id needed for explicit revocation, and a fixed expiry.
+/// Cache-only reads never renew that expiry and never fall back to Store.
+pub struct CacheOnlyAdminUser;
+
+const CACHE_ONLY_ADMIN_PROOF_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_CACHE_ONLY_ADMIN_PROOFS: usize = 64;
+
+#[derive(Clone, Default)]
+pub(crate) struct CacheOnlyAdminProofCache {
+    inner: Arc<Mutex<BTreeMap<String, CachedAdminProof>>>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedAdminProof {
+    user_id: i64,
+    expires_at: tokio::time::Instant,
+}
+
+impl CacheOnlyAdminProofCache {
+    /// Publish the result of one Store-backed authentication. Non-admin proof
+    /// removes any older admin proof for the same token instead of caching a
+    /// broader user record.
+    pub(crate) fn record_authenticated(&self, token_digest: String, user: &User) {
+        let Ok(mut proofs) = self.inner.lock() else {
+            return;
+        };
+        let now = tokio::time::Instant::now();
+        proofs.retain(|_, proof| proof.expires_at > now);
+        if !user.is_admin {
+            proofs.remove(&token_digest);
+            return;
+        }
+        if !proofs.contains_key(&token_digest) && proofs.len() >= MAX_CACHE_ONLY_ADMIN_PROOFS {
+            let oldest = proofs
+                .iter()
+                .min_by_key(|(_, proof)| proof.expires_at)
+                .map(|(digest, _)| digest.clone());
+            if let Some(oldest) = oldest {
+                proofs.remove(&oldest);
+            }
+        }
+        proofs.insert(
+            token_digest,
+            CachedAdminProof {
+                user_id: user.id,
+                expires_at: now + CACHE_ONLY_ADMIN_PROOF_TTL,
+            },
+        );
+    }
+
+    pub(crate) fn invalidate_digest(&self, token_digest: &str) {
+        if let Ok(mut proofs) = self.inner.lock() {
+            proofs.remove(token_digest);
+        }
+    }
+
+    pub(crate) fn invalidate_user(&self, user_id: i64) {
+        if let Ok(mut proofs) = self.inner.lock() {
+            proofs.retain(|_, proof| proof.user_id != user_id);
+        }
+    }
+
+    fn authenticate(&self, token_digest: &str) -> bool {
+        let Ok(mut proofs) = self.inner.lock() else {
+            return false;
+        };
+        let now = tokio::time::Instant::now();
+        proofs.retain(|_, proof| proof.expires_at > now);
+        proofs.contains_key(token_digest)
+    }
+}
 
 /// Guard for machine callers: a scoped API key, and nothing else.
 ///
@@ -181,11 +258,16 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> Result<Self, Self::Rejection> {
         let token = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
         let hash = auth::hash_token(&token);
-        let user = state
-            .store
-            .user_for_token(&hash)
-            .await?
-            .ok_or(ApiError::Unauthorized)?;
+        let user = match state.store.user_for_token(&hash).await? {
+            Some(user) => user,
+            None => {
+                state.cache_only_admin_proofs.invalidate_digest(&hash);
+                return Err(ApiError::Unauthorized);
+            }
+        };
+        state
+            .cache_only_admin_proofs
+            .record_authenticated(hash, &user);
         Ok(AuthUser(user))
     }
 }
@@ -219,11 +301,31 @@ impl FromRequestParts<AppState> for AdminUser {
     }
 }
 
+impl FromRequestParts<AppState> for CacheOnlyAdminUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
+        let digest = auth::hash_token(&token);
+        state
+            .cache_only_admin_proofs
+            .authenticate(&digest)
+            .then_some(Self)
+            .ok_or(ApiError::Unauthorized)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{key_activity_refresh_due, percent_decode};
+    use super::{
+        key_activity_refresh_due, percent_decode, CacheOnlyAdminProofCache,
+        CACHE_ONLY_ADMIN_PROOF_TTL,
+    };
     use plurx_core::auth;
-    use plurx_core::domain::{scopes, ApiKey};
+    use plurx_core::domain::{scopes, ApiKey, User};
 
     fn key(scopes: &[&str], disabled: bool) -> ApiKey {
         ApiKey {
@@ -235,6 +337,63 @@ mod tests {
             last_used_at: None,
             disabled,
         }
+    }
+
+    fn user(id: i64, is_admin: bool) -> User {
+        User {
+            id,
+            username: format!("user-{id}"),
+            password_hash: String::new(),
+            is_admin,
+            created_at: 1,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let admin_digest = auth::hash_token("admin-token");
+        let viewer_digest = auth::hash_token("viewer-token");
+        cache.record_authenticated(admin_digest.clone(), &user(1, true));
+        cache.record_authenticated(viewer_digest.clone(), &user(2, false));
+
+        assert!(cache.authenticate(&admin_digest));
+        assert!(!cache.authenticate(&viewer_digest));
+        assert!(!cache
+            .inner
+            .lock()
+            .expect("admin proof cache")
+            .contains_key("admin-token"));
+        tokio::time::advance(CACHE_ONLY_ADMIN_PROOF_TTL).await;
+        assert!(!cache.authenticate(&admin_digest));
+    }
+
+    #[test]
+    fn cache_only_admin_proofs_honor_digest_and_user_invalidation() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let first_digest = auth::hash_token("first-admin-token");
+        let second_digest = auth::hash_token("second-admin-token");
+        cache.record_authenticated(first_digest.clone(), &user(3, true));
+        cache.record_authenticated(second_digest.clone(), &user(3, true));
+        cache.invalidate_digest(&first_digest);
+        assert!(!cache.authenticate(&first_digest));
+        assert!(cache.authenticate(&second_digest));
+        cache.invalidate_user(3);
+        assert!(!cache.authenticate(&second_digest));
+    }
+
+    #[test]
+    fn cache_only_admin_proofs_have_a_hard_capacity() {
+        let cache = CacheOnlyAdminProofCache::default();
+        for id in 0..=super::MAX_CACHE_ONLY_ADMIN_PROOFS as i64 {
+            cache.record_authenticated(auth::hash_token(&format!("token-{id}")), &user(id, true));
+        }
+        let proofs = cache.inner.lock().expect("admin proof cache");
+        assert_eq!(proofs.len(), super::MAX_CACHE_ONLY_ADMIN_PROOFS);
+        assert!(proofs.contains_key(&auth::hash_token(&format!(
+            "token-{}",
+            super::MAX_CACHE_ONLY_ADMIN_PROOFS
+        ))));
     }
 
     // The routing rule the whole two-credential design rests on: the prefix

@@ -29,7 +29,7 @@ use zip::{CompressionMethod, ZipWriter};
 
 use super::cluster::api_error;
 use super::error::ApiError;
-use super::extract::AdminUser;
+use super::extract::{AdminUser, CacheOnlyAdminUser};
 use super::peer_transport::{
     deadline_after, exact_auth_from_headers, PeerAuthMode, PeerTransport, PeerTransportError,
 };
@@ -251,7 +251,7 @@ pub(crate) async fn local(
 }
 
 pub(crate) async fn aggregate(
-    _admin: AdminUser,
+    _admin: CacheOnlyAdminUser,
     State(state): State<AppState>,
 ) -> Result<(HeaderMap, Json<ClusterOperationsAggregate>), ApiError> {
     aggregate_response_with(|| collect_aggregate(&state)).await
@@ -482,7 +482,7 @@ where
 }
 
 pub(crate) async fn support_bundle(
-    _admin: AdminUser,
+    _admin: CacheOnlyAdminUser,
     State(state): State<AppState>,
 ) -> Result<Response, ApiError> {
     support_bundle_response_with(
@@ -1060,6 +1060,9 @@ pub(crate) async fn membership_status_cache_loop(
     state: AppState,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
+    if !state.membership.is_replicated() {
+        return;
+    }
     loop {
         let refresh_started = tokio::time::Instant::now();
         let membership = state.membership.clone();
@@ -2203,6 +2206,24 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn unclustered_membership_cache_loop_exits_without_refresh_or_retry() {
+        let (_app, state) = crate::http::tests::test_app_with_state();
+        assert!(!state.membership.is_replicated());
+        let cache = state.membership_status_cache.clone();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(membership_status_cache_loop(state, shutdown));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(PEER_STATUS_REFRESH_INTERVAL * 3).await;
+        assert!(task.is_finished(), "unclustered loop kept retrying");
+        task.await.expect("unclustered cache loop");
+        assert!(matches!(
+            cache.fresh().await,
+            MembershipStatusCacheRead::Unavailable
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn membership_projection_refresh_is_bounded_and_preserves_last_good_sample() {
         let cache = MembershipStatusCache::default();
         let refresh_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2487,8 +2508,52 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_request_reads_only_node_owned_projections() {
-        let (_app, mut state) = crate::http::tests::test_app_with_state();
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (_unused_app, mut state) = crate::http::tests::test_app_with_state();
         state.node_id = "node-1".to_owned();
+        let admin = state
+            .store
+            .create_user("cluster-admin", "unused-test-hash", true)
+            .await
+            .expect("create admin");
+        let token = "cache-only-cluster-status-token";
+        let token_digest = plurx_core::auth::hash_token(token);
+        state
+            .store
+            .create_token(&token_digest, admin.id, Some("cluster-status-test"))
+            .await
+            .expect("create admin token");
+        let app = crate::http::router(state.clone());
+
+        // One ordinary Store-backed request publishes the bounded admin
+        // proof. The two recovery routes below must use only that digest.
+        let authenticated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/me")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("authenticated request"),
+            )
+            .await
+            .expect("authenticated response");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        assert!(state
+            .store
+            .delete_token(&token_digest)
+            .await
+            .expect("make Store proof unavailable"));
+        assert!(state
+            .store
+            .user_for_token(&token_digest)
+            .await
+            .expect("read missing Store proof")
+            .is_none());
 
         // The fixture is deliberately not a replicated cluster. A production
         // request that reaches MembershipManager::status cannot succeed, and
@@ -2518,23 +2583,76 @@ mod tests {
             )]))
             .await;
 
-        let (headers, Json(aggregate)) = aggregate(test_admin(), State(state.clone()))
-            .await
-            .expect("production aggregate handler must use node-owned projections");
-        assert_eq!(aggregate.nodes.len(), 2);
-        assert_eq!(aggregate.nodes[1].observation, ObservationState::Answered);
+        let status_request = Request::builder()
+            .uri("/api/v1/cluster/status")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("cluster status request");
+        let response = tokio::time::timeout(
+            Duration::from_millis(250),
+            app.clone().oneshot(status_request),
+        )
+        .await
+        .expect("cache-only status request must not wait for Store")
+        .expect("cluster status response");
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            headers.get(header::CACHE_CONTROL),
+            response.headers().get(header::CACHE_CONTROL),
             Some(&HeaderValue::from_static("private, no-store"))
         );
-
-        let response = support_bundle(test_admin(), State(state))
+        let bytes = response
+            .into_body()
+            .collect()
             .await
-            .expect("production support handler must use node-owned projections");
+            .expect("cluster status body")
+            .to_bytes();
+        let aggregate: ClusterOperationsAggregate =
+            serde_json::from_slice(&bytes).expect("cluster status JSON");
+        assert_eq!(aggregate.nodes.len(), 2);
+        assert_eq!(aggregate.nodes[1].observation, ObservationState::Answered);
+
+        let support_request = Request::builder()
+            .uri("/api/v1/cluster/support-bundle")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("support bundle request");
+        let response = tokio::time::timeout(
+            Duration::from_millis(250),
+            app.clone().oneshot(support_request),
+        )
+        .await
+        .expect("cache-only support request must not wait for Store")
+        .expect("support bundle response");
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
             Some(&HeaderValue::from_static("application/zip"))
         );
+
+        let logout = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/logout")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("logout request"),
+            )
+            .await
+            .expect("logout response");
+        assert_eq!(logout.status(), StatusCode::OK);
+        let revoked = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/cluster/status")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("revoked cluster status request"),
+            )
+            .await
+            .expect("revoked cluster status response");
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
 
         // Supplemental capability guard: both real handlers above execute the
         // production collector. Keep its narrow wiring explicit so Store and
@@ -2547,6 +2665,7 @@ mod tests {
             .expect("read-only collector source");
         assert!(collector.contains("state.membership_status_cache.fresh()"));
         assert!(collector.contains("state.peer_status_cache.fresh()"));
+        assert!(!collector.contains("state.store"));
         assert!(!collector.contains("state.membership.status()"));
         assert!(!collector.contains("operations_peers"));
         assert!(!collector.contains("collect_peer_statuses"));
@@ -2556,6 +2675,8 @@ mod tests {
             .nth(1)
             .and_then(|tail| tail.split("/// Complete GET response boundary").next())
             .expect("aggregate handler source");
+        assert!(aggregate_handler.contains("_admin: CacheOnlyAdminUser"));
+        assert!(!aggregate_handler.contains("_admin: AdminUser"));
         assert!(aggregate_handler
             .contains("aggregate_response_with(|| collect_aggregate(&state)).await"));
         assert!(!aggregate_handler.contains("state.membership"));
@@ -2566,10 +2687,21 @@ mod tests {
             .nth(1)
             .and_then(|tail| tail.split("/// Complete support response boundary").next())
             .expect("support handler source");
+        assert!(support_handler.contains("_admin: CacheOnlyAdminUser"));
+        assert!(!support_handler.contains("_admin: AdminUser"));
         assert!(support_handler.contains("|| collect_aggregate(&state)"));
         assert!(support_handler.contains("state.cluster_logs.tail(\"trace\", 200)"));
         assert!(!support_handler.contains("state.membership"));
         assert!(!support_handler.contains("collect_peer_statuses"));
+
+        let extractor_source = include_str!("extract.rs");
+        let cache_extractor = extractor_source
+            .split("impl FromRequestParts<AppState> for CacheOnlyAdminUser")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(test)]").next())
+            .expect("cache-only admin extractor source");
+        assert!(!cache_extractor.contains("state.store"));
+        assert!(!cache_extractor.contains(".await"));
     }
 
     #[tokio::test]
@@ -3372,16 +3504,6 @@ mod tests {
                 restart_commands: Vec::new(),
             },
         }
-    }
-
-    fn test_admin() -> AdminUser {
-        AdminUser(plurx_core::domain::User {
-            id: 1,
-            username: "cluster-admin".to_owned(),
-            password_hash: String::new(),
-            is_admin: true,
-            created_at: 1,
-        })
     }
 
     fn test_membership(local_node_id: &str, voters: usize) -> MembershipStatus {

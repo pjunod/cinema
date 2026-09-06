@@ -8,10 +8,13 @@ use axum::response::IntoResponse;
 use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, Payload, upgrade};
 use openraft::error::{Fatal, InstallSnapshotError, RaftError};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 use tokio::task;
+use tokio::time;
 use tracing::{debug, error, warn};
 
 #[cfg(feature = "cache")]
@@ -95,6 +98,29 @@ pub enum RaftStreamResponsePayload {
 pub(crate) enum WsWriteMsg {
     Payload(Vec<u8>),
     Break,
+}
+
+enum RaftWorkSelection<T> {
+    WriterFinished(Result<Result<(), String>, oneshot::error::RecvError>),
+    ReaderFinished(Result<Result<(), String>, oneshot::error::RecvError>),
+    Work(T),
+}
+
+async fn select_raft_work<T, Work>(
+    writer_finished: &mut oneshot::Receiver<Result<(), String>>,
+    reader_finished: &mut oneshot::Receiver<Result<(), String>>,
+    work: Work,
+) -> RaftWorkSelection<T>
+where
+    Work: Future<Output = T>,
+{
+    tokio::pin!(work);
+    tokio::select! {
+        biased;
+        writer = writer_finished => RaftWorkSelection::WriterFinished(writer),
+        reader = reader_finished => RaftWorkSelection::ReaderFinished(reader),
+        result = &mut work => RaftWorkSelection::Work(result),
+    }
 }
 
 impl From<Vec<u8>> for RaftStreamResponse {
@@ -285,28 +311,27 @@ async fn handle_socket(
             req,
             &mut work_connection_closed,
         );
-        tokio::pin!(work);
-        let work_result = tokio::select! {
-            biased;
-            writer = &mut rx_writer_finished => {
-                match writer {
-                    Ok(Ok(())) => error!("Raft server WebSocket writer exited while connected"),
-                    Ok(Err(err)) => error!("Raft server WebSocket writer failed: {err}"),
-                    Err(_) => error!("Raft server WebSocket writer panicked or was cancelled"),
+        let work_result =
+            match select_raft_work(&mut rx_writer_finished, &mut rx_reader_finished, work).await {
+                RaftWorkSelection::WriterFinished(writer) => {
+                    match writer {
+                        Ok(Ok(())) => error!("Raft server WebSocket writer exited while connected"),
+                        Ok(Err(err)) => error!("Raft server WebSocket writer failed: {err}"),
+                        Err(_) => error!("Raft server WebSocket writer panicked or was cancelled"),
+                    }
+                    writer_failed = true;
+                    None
                 }
-                writer_failed = true;
-                None
-            }
-            reader = &mut rx_reader_finished => {
-                match reader {
-                    Ok(Ok(())) => debug!("Raft server WebSocket reader exited"),
-                    Ok(Err(err)) => error!("Raft server WebSocket reader failed: {err}"),
-                    Err(_) => error!("Raft server WebSocket reader panicked or was cancelled"),
+                RaftWorkSelection::ReaderFinished(reader) => {
+                    match reader {
+                        Ok(Ok(())) => debug!("Raft server WebSocket reader exited"),
+                        Ok(Err(err)) => error!("Raft server WebSocket reader failed: {err}"),
+                        Err(_) => error!("Raft server WebSocket reader panicked or was cancelled"),
+                    }
+                    None
                 }
-                None
-            }
-            result = &mut work => Some(result),
-        };
+                RaftWorkSelection::Work(result) => Some(result),
+            };
         let Some(work_result) = work_result else {
             break;
         };
@@ -414,6 +439,48 @@ async fn raft_response_writer<S>(
     let _ = finished.send(outcome);
 }
 
+// `handle_socket` may drop request work when a biased reader/writer branch wins.
+// Keep synchronous ownership of the receipt until the executor publishes a
+// result so cancellation cannot leave an unowned observation looking active.
+struct InboundSnapshotStatusGuard {
+    snapshot_transport: crate::LocalSnapshotTransportStatus,
+    status_attempt: Option<crate::transport_status::InboundSnapshotAttempt>,
+    admission_timeout: Duration,
+}
+
+impl InboundSnapshotStatusGuard {
+    fn new(
+        snapshot_transport: &crate::LocalSnapshotTransportStatus,
+        status_attempt: Option<crate::transport_status::InboundSnapshotAttempt>,
+        admission_timeout: Duration,
+    ) -> Self {
+        Self {
+            snapshot_transport: snapshot_transport.clone(),
+            status_attempt,
+            admission_timeout,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.status_attempt = None;
+    }
+}
+
+impl Drop for InboundSnapshotStatusGuard {
+    fn drop(&mut self) {
+        let Some(status_attempt) = self.status_attempt.as_ref() else {
+            return;
+        };
+        self.snapshot_transport.inbound_request_ended(
+            status_attempt,
+            (!status_attempt.done).then(|| time::Instant::now() + self.admission_timeout),
+            crate::transport_status::InboundSnapshotDisposition::Retrying(
+                "snapshot_connection_closed",
+            ),
+        );
+    }
+}
+
 fn record_inbound_submit_error<C: openraft::RaftTypeConfig>(
     snapshot_transport: &crate::LocalSnapshotTransportStatus,
     status_attempt: Option<&crate::transport_status::InboundSnapshotAttempt>,
@@ -493,6 +560,11 @@ async fn execute_raft_request(
                     deadline: state.raft_db.snapshot_executor.admission_deadline(),
                 },
             );
+            let mut status_guard = InboundSnapshotStatusGuard::new(
+                &state.snapshot_transport,
+                status_attempt.clone(),
+                state.raft_db.snapshot_executor.admission_timeout(),
+            );
             let result = state
                 .raft_db
                 .snapshot_executor
@@ -513,9 +585,11 @@ async fn execute_raft_request(
                         &error,
                         &state.raft_db.snapshot_executor,
                     );
+                    status_guard.disarm();
                     return Err(error);
                 }
             };
+            status_guard.disarm();
             (request_id, RaftStreamResponsePayload::SnapshotDB(result))
         }
         #[cfg(feature = "cache")]
@@ -550,6 +624,11 @@ async fn execute_raft_request(
                     deadline: state.raft_cache.snapshot_executor.admission_deadline(),
                 },
             );
+            let mut status_guard = InboundSnapshotStatusGuard::new(
+                &state.snapshot_transport,
+                status_attempt.clone(),
+                state.raft_cache.snapshot_executor.admission_timeout(),
+            );
             let result = state
                 .raft_cache
                 .snapshot_executor
@@ -570,9 +649,11 @@ async fn execute_raft_request(
                         &error,
                         &state.raft_cache.snapshot_executor,
                     );
+                    status_guard.disarm();
                     return Err(error);
                 }
             };
+            status_guard.disarm();
             (request_id, RaftStreamResponsePayload::SnapshotCache(result))
         }
         #[cfg(feature = "cache")]
@@ -605,6 +686,167 @@ mod tests {
     use fastwebsockets::Role;
     use openraft::Vote;
     use openraft::raft::InstallSnapshotResponse;
+
+    fn track_inbound_attempt(
+        status: &crate::LocalSnapshotTransportStatus,
+        snapshot_id: &str,
+        offset: u64,
+        len: usize,
+        done: bool,
+        socket_epoch: u64,
+    ) -> crate::transport_status::InboundSnapshotAttempt {
+        status
+            .inbound_received(crate::transport_status::InboundSnapshotChunk {
+                raft_group: "sqlite",
+                peer_node_id: 1,
+                snapshot_id,
+                offset,
+                len,
+                done,
+                socket_epoch,
+                deadline: time::Instant::now() + Duration::from_secs(30),
+            })
+            .expect("track inbound snapshot")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn production_biased_socket_close_records_inbound_snapshot_retry_on_work_drop() {
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        let first = track_inbound_attempt(&status, "socket-close", 0, 64, false, 1);
+        status.inbound_admitted(
+            &first,
+            false,
+            time::Instant::now() + Duration::from_secs(30),
+        );
+        status.inbound_finished(
+            &first,
+            64,
+            false,
+            Some(time::Instant::now() + Duration::from_secs(30)),
+            crate::transport_status::InboundSnapshotDisposition::Succeeded,
+        );
+        let second = track_inbound_attempt(&status, "socket-close", 64, 64, false, 1);
+        let status_guard =
+            InboundSnapshotStatusGuard::new(&status, Some(second), Duration::from_secs(1));
+
+        let (keep_writer_open, mut writer_finished) = oneshot::channel();
+        let (reader_done, mut reader_finished) = oneshot::channel();
+        let (connection, mut connection_closed) = watch::channel(false);
+        connection.send_replace(true);
+        reader_done.send(Ok(())).expect("signal reader close");
+
+        let work = async move {
+            let _status_guard = status_guard;
+            connection_closed
+                .changed()
+                .await
+                .expect("connection-close signal");
+        };
+        let selected = select_raft_work(&mut writer_finished, &mut reader_finished, work).await;
+        assert!(matches!(
+            selected,
+            RaftWorkSelection::ReaderFinished(Ok(Ok(())))
+        ));
+        drop(keep_writer_open);
+
+        let observation = &status.snapshot().observations[0];
+        assert_eq!(observation.phase, crate::SnapshotTransportPhase::Retrying);
+        assert_eq!(
+            observation.last_error_category.as_deref(),
+            Some("snapshot_connection_closed")
+        );
+        assert!(!observation.operation_owns_work);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_snapshot_status_guard_preserves_worker_owned_and_completed_results() {
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        let attempt = track_inbound_attempt(&status, "worker-owned", 0, 64, true, 1);
+        let worker_started = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let finish_worker = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let executor = std::sync::Arc::new(
+            crate::network::snapshot_executor::NodeOwnedExecutor::start(Duration::from_secs(1), {
+                let worker_status = status.clone();
+                let worker_attempt = attempt.clone();
+                let worker_started = std::sync::Arc::clone(&worker_started);
+                let finish_worker = std::sync::Arc::clone(&finish_worker);
+                move |()| {
+                    let worker_status = worker_status.clone();
+                    let worker_attempt = worker_attempt.clone();
+                    let worker_started = std::sync::Arc::clone(&worker_started);
+                    let finish_worker = std::sync::Arc::clone(&finish_worker);
+                    async move {
+                        worker_status.inbound_admitted(
+                            &worker_attempt,
+                            true,
+                            time::Instant::now() + Duration::from_secs(30),
+                        );
+                        worker_started.add_permits(1);
+                        finish_worker
+                            .acquire()
+                            .await
+                            .expect("finish-worker gate")
+                            .forget();
+                        worker_status.inbound_finished(
+                            &worker_attempt,
+                            64,
+                            true,
+                            None,
+                            crate::transport_status::InboundSnapshotDisposition::Succeeded,
+                        );
+                    }
+                }
+            }),
+        );
+
+        let (_connection, mut connection_closed) = watch::channel(false);
+        let socket_work = tokio::spawn({
+            let executor = std::sync::Arc::clone(&executor);
+            let status_guard = InboundSnapshotStatusGuard::new(
+                &status,
+                Some(attempt.clone()),
+                Duration::from_secs(1),
+            );
+            async move {
+                let _status_guard = status_guard;
+                executor.submit((), &mut connection_closed).await
+            }
+        });
+        worker_started
+            .acquire()
+            .await
+            .expect("worker-start gate")
+            .forget();
+
+        socket_work.abort();
+        assert!(
+            socket_work
+                .await
+                .expect_err("socket work should be cancelled")
+                .is_cancelled()
+        );
+        let installing = &status.snapshot().observations[0];
+        assert_eq!(installing.phase, crate::SnapshotTransportPhase::Installing);
+        assert!(installing.operation_owns_work);
+        assert_eq!(installing.last_error_category, None);
+
+        finish_worker.add_permits(1);
+        while status.snapshot().observations[0].phase != crate::SnapshotTransportPhase::Complete {
+            tokio::task::yield_now().await;
+        }
+        drop(InboundSnapshotStatusGuard::new(
+            &status,
+            Some(attempt),
+            Duration::from_secs(1),
+        ));
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.phase, crate::SnapshotTransportPhase::Complete);
+        assert!(!completed.operation_owns_work);
+        assert_eq!(completed.last_error_category, None);
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+    }
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]

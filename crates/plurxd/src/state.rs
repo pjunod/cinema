@@ -605,6 +605,10 @@ impl StoreMetricsCache {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    /// Fixed-lifetime, digest-only admin proofs for cluster recovery reads.
+    /// Ordinary authentication populates it; cache-only routes never reach
+    /// Store on a miss.
+    pub(crate) cache_only_admin_proofs: crate::http::CacheOnlyAdminProofCache,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
     pub catalogue: CatalogueReader,
     /// Read-only projection of the selected backend's watch-state convergence.
@@ -859,6 +863,7 @@ impl AppState {
         );
         AppState {
             store,
+            cache_only_admin_proofs: Default::default(),
             catalogue,
             replication,
             peer_activity: crate::http::internal_activity::PeerActivityClient::new(

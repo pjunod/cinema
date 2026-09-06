@@ -37,12 +37,11 @@ change.
 ## Current evidence — Rust 1.97.1 is the compiler of record
 
 The current M4 integration work is based on final M3 PR tip `2c018809`.
-Candidate `7e220e0c` passed its pre-review fast lane but failed its exact-SHA
-adversarial review; that candidate will not be pushed or opened as a pull
-request. All six findings are corrected on the replacement tree, whose focused
-Rust, web, operations, validation, lint, formatting, and diff checks are green.
-Three exact-candidate reviews restart after the replacement commit. The local Homebrew
-default is Rust 1.95.0, so every recorded Rust command uses
+Candidates `7e220e0c` and `d1472a55` passed their pre-review fast lanes but
+failed exact-SHA adversarial review; neither candidate will be pushed or opened
+as a pull request. Every reported finding is corrected on the replacement tree,
+which has passed combined focused requalification. Commit and three new
+exact-candidate reviews remain. The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
 | Check | Result | Detail |
@@ -79,7 +78,8 @@ default is Rust 1.95.0, so every recorded Rust command uses
 | M4 observation-identity and retention corrections | pass · candidate branch | Public fallback transport requires both a matching status envelope and matching transport observer; valid private evidence remains independent of public-listener identity; the authenticated private route returns `Cache-Control: private, no-store`; exact re-review is pending |
 | M4 final review correction | pass · exact candidate pending commit | The combined recovery lane, 28-case daemon module, 23-case transport-status module, 45-case Raft-client module, 197 operations contracts, 23-point validation catalog, membership web suite, all-target compile and denied-warning Clippy, three vendored denied-warning Clippy lanes, formatting, and diff checks pass. Request logging is bounded to operation kind and byte count; natural reconnects advance a physical socket epoch; sender offsets remain monotonic; semantic snapshot identity cannot collide with its bounded display form; fresh snapshot evidence outranks a stale different-snapshot stall; committed membership reads are query-bounded; and aggregate GET/support reads use fresh node-owned caches |
 | M4 exact-candidate replacement | fail · `7e220e0c` rejected | The pre-review focused cluster/WAL lane, executor/status/Raft-client modules, operations contracts, validation catalog, membership web suite, compile, denied-warning Clippy, formatting, and diff checks passed. Three adversarial tracks nevertheless found six correctness or coverage gaps: receipt IDs could diverge from real install order; cancelled admission tickets were unbounded; UI selection was order-dependent; receiver completion could hide stronger sender acknowledgement; mutation preflights used stale peer cache data; and the no-I/O test bypassed the production collector. The replacement must fix every item and repeat the complete focused lane and three reviews from zero. |
-| M4 fourth-review corrections | pass · replacement commit pending | Public attempt ownership now follows actual executor worker start; cancelled admission retention is bounded to two waiters and overflow is explicit; UI evidence selection uses a deterministic two-stage total order and preserves fresh sender acknowledgement; read-only GET/support remain cache-only while maintenance and restart mutation preflights use fresh bounded roster, directory, and authenticated peer evidence; and the no-I/O proof executes both production handlers. The combined `cluster-wal-check`, web suite, 197 operations contracts, 23-point validation catalog, root and three vendor denied-warning Clippy lanes, formatting, and diff checks pass. |
+| M4 fourth-review corrections | fail · `d1472a55` rejected after green pre-review lane | Public attempt ownership follows actual executor worker start; cancelled admission retention is bounded to two waiters and overflow is explicit; UI evidence selection uses a deterministic two-stage total order; read-only GET/support collectors are cache-only while mutation preflights use fresh bounded evidence; and the no-I/O proof executes both production handlers. Exact review still found retained browser evidence that did not age, acknowledged completion losing to predecessor phases, Store-backed authentication before cache-only handlers, an unclustered refresh warning loop, and outer Raft socket cancellation bypassing inbound-status cleanup. |
+| M4 fifth-review corrections | pass · replacement commit pending | Retained browser evidence now ages and crosses deadline/stall/expiry boundaries; a valid sender acknowledgement causally completes only its exact fingerprint; status/support use a fixed-lifetime, digest-only, bounded local admin proof without Store fallback; standalone installs do not start the membership refresh loop; and an RAII status owner reports socket cancellation without overwriting worker-owned or completed results. The combined cluster/WAL lane, web suite, 197 operations contracts, validation catalog, exact Rust 1.97.1 all-target check, root and three vendored denied-warning Clippy lanes, formatting, and diff checks pass; three new exact-candidate reviews remain after commit. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -121,6 +121,13 @@ default is Rust 1.95.0, so every recorded Rust command uses
    The product supports a much smaller operational cluster, so a corrupt or
    unsupported oversized committed roster returns unavailable instead of
    allocating an unbounded query/result set or silently truncating authority.
+9. **Keep public recovery authentication local only after a real admin proof.**
+   A successful ordinary authentication retains the token's SHA-256 digest and
+   user ID for a fixed, non-sliding five minutes, capped at 64 entries. Recovery
+   reads never fall back to Store, and revocation paths invalidate before their
+   Store mutation. This deliberately means a cold process must complete one
+   ordinary authentication before the two public recovery routes are usable;
+   the private cluster listener remains the startup diagnostic path.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 

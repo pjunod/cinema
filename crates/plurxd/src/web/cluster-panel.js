@@ -155,6 +155,37 @@
   }
   function clusterTransportObservation(ops,raftId){
     if(!ops||ops.unavailable||raftId===null||raftId===undefined) return null;
+    const capturedAt=Number(ops.observed_at_unix_ms);
+    const elapsed=Number.isFinite(capturedAt)
+      ?Math.max(0,Date.now()-capturedAt):0;
+    const ageByElapsed=value=>value===null||value===undefined
+      ?value:Number(value)+elapsed;
+    const projectAgeAndDeadline=observation=>{
+      const sourceAge=Number(observation.sample_age_ms||0);
+      const remaining=observation.active_deadline_remaining_ms===null||
+        observation.active_deadline_remaining_ms===undefined
+        ?null:Number(observation.active_deadline_remaining_ms);
+      const deadlineStillActive=remaining!==null&&remaining>elapsed;
+      const deadlineCrossed=remaining!==null&&remaining<=elapsed&&observation.phase!=="stalled";
+      const projectedStalledRetention=deadlineCrossed&&elapsed-remaining<=300000;
+      if(sourceAge+elapsed>300000&&!deadlineStillActive&&!projectedStalledRetention)
+        return null;
+      if(!elapsed&&!deadlineCrossed) return observation;
+      const projected=Object.assign({},observation,{
+        sample_age_ms:sourceAge+elapsed,
+      });
+      for(const field of ["attempt_age_ms","last_acknowledgement_age_ms",
+        "last_local_receive_age_ms"])
+        projected[field]=ageByElapsed(observation[field]);
+      if(remaining!==null)
+        projected.active_deadline_remaining_ms=Math.max(0,remaining-elapsed);
+      if(deadlineCrossed&&["connecting","transferring","awaiting_acknowledgement",
+        "installing","retrying"].includes(observation.phase)){
+        projected.phase="stalled";
+        projected.last_error_category="snapshot_stalled";
+      }
+      return projected;
+    };
     const candidates=[];
     (ops.nodes||[]).forEach(row=>{
       // The private cluster listener remains available while a learner's
@@ -165,15 +196,13 @@
       (transport&&transport.observations||[]).forEach(observation=>{
         if(Number(observation.observing_node_id)!==Number(transport.observing_node_id)) return;
         if(observation.raft_group!=="sqlite") return;
-        const hasActiveDeadline=observation.active_deadline_remaining_ms!==null&&
-          observation.active_deadline_remaining_ms!==undefined;
-        if(Number(observation.sample_age_ms)>300000&&!hasActiveDeadline) return;
         const receiverId=observation.direction==="inbound"
           ?observation.observing_node_id
           :observation.direction==="outbound"
             ?observation.peer_node_id:null;
         if(Number(receiverId)!==Number(raftId)) return;
-        candidates.push(observation);
+        const projected=projectAgeAndDeadline(observation);
+        if(projected) candidates.push(projected);
       });
     });
     const priority={stalled:8,installing:7,awaiting_acknowledgement:6,retrying:5,
@@ -229,6 +258,18 @@
     const representatives=[];
     groups.forEach(group=>{
       let eligible=group.observations;
+      // A flushed sender acknowledgement is causally later than every
+      // receiver-side phase for the same exact snapshot: the receiver had to
+      // finish the install and return that response before the sender could
+      // publish Complete. Apply that authority only to a validated fingerprint;
+      // legacy and malformed identities remain attempt-local.
+      const acknowledged=group.fingerprint
+        ?eligible.filter(acknowledgedComplete):[];
+      if(acknowledged.length){
+        acknowledged.sort((left,right)=>age(left)-age(right)||tieBreak(left,right));
+        representatives.push(acknowledged[0]);
+        return;
+      }
       // A receiver that durably completed this exact fingerprint disproves a
       // sender's failure to observe its reply. Apply that exception once at
       // the group boundary; it does not cover inbound failures, unrelated

@@ -187,6 +187,14 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::production_biased_socket_close_records_inbound_snapshot_retry_on_work_drop \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_server::tests::inbound_snapshot_status_guard_preserves_worker_owned_and_completed_results \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  client::stream::tests::production_api_request_writer_flushes_serialized_request_through_tls \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -632,10 +640,22 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::aggregate_request_reads_only_node_owned_projections \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::unclustered_membership_cache_loop_exits_without_refresh_or_retry \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::mutation_preflight_refreshes_roster_directory_and_bounded_peer_observations \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::mutation_preflight_bounds_the_current_membership_read \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::cache_only_admin_proofs_honor_digest_and_user_invalidation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::cache_only_admin_proofs_have_a_hard_capacity \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::production_collector_preserves_private_transport_when_public_listener_is_closed \

@@ -117,6 +117,9 @@ pub async fn setup(
         .store
         .create_token(&token_hash, user.id, Some("setup"))
         .await?;
+    state
+        .cache_only_admin_proofs
+        .record_authenticated(token_hash, &user);
     Ok(Json(LoginResponse {
         token,
         user: user.into(),

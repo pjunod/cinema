@@ -1772,6 +1772,10 @@ node-owned FIFO executor actually admits that exact request. A queued request
 or later admission waiter cannot displace the running install's identity. This
 keeps `operation_owns_work` tied to the future that currently owns the durable
 state-machine operation, including while an older socket is disappearing.
+If the Raft server's reader or writer ends while socket-owned submission work
+is pending, a synchronous cleanup owner records `snapshot_connection_closed`;
+that cleanup cannot overwrite a worker-owned or completed result, and dropping
+the socket future cannot cancel work the node executor already accepted.
 Admission tickets are reserved synchronously when a socket task calls the
 executor and released or skipped on cancellation, so reverse future polling
 cannot reorder callers that have reached that boundary. Receipt and submit
@@ -1801,14 +1805,33 @@ per peer, and five-second process-local peer and membership caches. Separate
 background refreshes run every three seconds; the page, support bundle, and
 metrics request paths read those node-owned projections and perform no Store
 call or peer network request. An absent or expired membership projection fails
-closed instead of rendering a guessed roster. Directory and membership SQL
+closed instead of rendering a guessed roster. Standalone SQLite installs do
+not start the replicated-membership refresh loop, so an unavailable membership
+backend cannot fill the bounded diagnostics log with periodic warnings.
+
+The public status and support routes also avoid a hidden Store call in their
+admin extractor. Successful ordinary authentication publishes a process-local
+proof containing only the SHA-256 token digest, user ID, and fixed five-minute
+expiry. Recovery reads do not renew it, at most 64 proofs are retained, and a
+miss, expiry, non-admin result, or cache failure returns `401` without falling
+back to Store. Logout, demotion, password reset, and user deletion invalidate
+the proof before attempting their Store mutation, including commit-unknown
+outcomes. A cold process therefore needs one successful ordinary authentication
+before these public recovery reads; the private authenticated cluster-listener
+transport route remains the pre-listener/startup path.
+
+Directory and membership SQL
 receive the exact committed Raft IDs as a bounded parameter, so abandoned join
 rows are never materialized; a committed roster above the explicit 64-member
 diagnostics bound is unavailable rather than truncated. The directory lookup
 is bounded to 500 milliseconds, leaving a strict 500-millisecond completion
 margin even when a public probe consumes its full deadline. Cache availability
 begins when that refresh completes; embedded status and transport ages still
-advance from their node-owned source timestamps. Each peer refresh probes the
+advance from their node-owned source timestamps. If a browser retains the last
+aggregate across failed refreshes, it advances those ages and the active
+deadline from the aggregate's own observation time, crosses to `stalled` at
+zero, and expires after the same five-minute diagnostic window. Each peer
+refresh probes the
 public and private listeners concurrently, so up to sixteen bounded HTTP
 requests may be in flight. Roster members beyond the eight-probe bound remain
 visible as `peer_limit` instead of disappearing. A healthy sender can therefore

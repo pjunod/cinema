@@ -141,6 +141,10 @@ pub(crate) struct NodeOwnedExecutor<Req, Resp> {
 }
 
 impl<Req, Resp> NodeOwnedExecutor<Req, Resp> {
+    pub(crate) fn admission_timeout(&self) -> Duration {
+        self.admission_timeout
+    }
+
     pub(crate) fn admission_deadline(&self) -> time::Instant {
         time::Instant::now() + self.admission_timeout
     }

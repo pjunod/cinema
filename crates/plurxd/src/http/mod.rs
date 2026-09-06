@@ -16,6 +16,7 @@ mod dto;
 mod dv_disk;
 mod error;
 mod extract;
+pub(crate) use extract::CacheOnlyAdminProofCache;
 mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;

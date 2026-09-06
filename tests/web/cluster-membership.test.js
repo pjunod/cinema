@@ -597,6 +597,66 @@ test("transport status shows outbound evidence and expires stale samples", () =>
   assert.equal(watermark.text, "waiting for startup watermark");
 });
 
+test("retained transport evidence ages, stalls, and expires while refreshes fail", () => {
+  const ui = sandbox();
+  const realNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    const inactiveObservation = transportObservation("installing", {
+      sample_age_ms: 40,
+      active_deadline_remaining_ms: null,
+    });
+    const inactive = transportOps([inactiveObservation]);
+    inactive.observed_at_unix_ms = now;
+
+    now += 299_960;
+    let current = ui.clusterTransportExplanation(inactive, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.sample_age_ms, 300_000);
+    now += 1;
+    assert.equal(ui.clusterTransportExplanation(inactive, 2, false).code, "unavailable");
+    assert.equal(inactiveObservation.sample_age_ms, 40, "client aging must not renew the retained payload");
+
+    now = 2_000_000;
+    const activeObservation = transportObservation("installing", {
+      sample_age_ms: 301_000,
+      attempt_age_ms: 302_000,
+      last_local_receive_age_ms: 50,
+      active_deadline_remaining_ms: 1_000,
+      operation_owns_work: true,
+    });
+    const active = transportOps([activeObservation]);
+    active.observed_at_unix_ms = now;
+
+    now += 999;
+    current = ui.clusterTransportExplanation(active, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.sample_age_ms, 301_999);
+    assert.equal(current.observation.attempt_age_ms, 302_999);
+    assert.equal(current.observation.last_local_receive_age_ms, 1_049);
+    assert.equal(current.observation.active_deadline_remaining_ms, 1);
+
+    now += 1;
+    current = ui.clusterTransportExplanation(active, 2, false);
+    assert.equal(current.code, "stalled");
+    assert.equal(current.observation.active_deadline_remaining_ms, 0);
+    assert.equal(current.observation.last_error_category, "snapshot_stalled");
+
+    now += 300_000;
+    assert.equal(
+      ui.clusterTransportExplanation(active, 2, false).code,
+      "stalled",
+      "the projected stall remains visible through its complete diagnostic window",
+    );
+    now += 1;
+    assert.equal(ui.clusterTransportExplanation(active, 2, false).code, "unavailable");
+    assert.equal(activeObservation.phase, "installing", "projection must not rewrite cached evidence");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test("receiver completion outranks a split-view sender failure for one snapshot", () => {
   const ui = sandbox();
   const snapshotId = "snapshot-split-view";
@@ -914,6 +974,108 @@ test("fresh acknowledged sender completion outranks stale receiver completion", 
   assert.equal(current.text, "waiting for startup watermark");
   assert.equal(current.observation.direction, "outbound");
   assert.equal(current.observation.acknowledged_offset, 4096);
+});
+
+test("acknowledged completion supersedes every cached predecessor phase in any row order", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "a".repeat(64);
+  const acknowledged = transportObservation("complete", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "causally-complete-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-sender",
+    attempt_id: 20,
+    socket_epoch: 9,
+    acknowledged_offset: 4096,
+    sample_age_ms: 40,
+  });
+  const phases = [
+    ["connecting", "outbound"],
+    ["transferring", "inbound"],
+    ["awaiting_acknowledgement", "outbound"],
+    ["installing", "inbound"],
+    ["retrying", "inbound"],
+    ["stalled", "inbound"],
+    ["failed", "inbound"],
+    ["complete", "inbound"],
+  ];
+
+  for (const [phase, direction] of phases) {
+    const predecessor = transportObservation(phase, {
+      observing_node_id: direction === "outbound" ? 3 : 2,
+      peer_node_id: direction === "outbound" ? 2 : 1,
+      direction,
+      snapshot_id: "causally-complete-snapshot",
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: `cached-${phase}`,
+      attempt_id: 4,
+      socket_epoch: 2,
+      acknowledged_offset: null,
+      sample_age_ms: 4_000,
+      active_deadline_remaining_ms: phase === "complete" || phase === "failed" ? null : 60_000,
+    });
+    for (const observations of [[acknowledged, predecessor], [predecessor, acknowledged]]) {
+      const operations = {
+        nodes: observations.map((observation) => ({
+          transport: {
+            observing_node_id: observation.observing_node_id,
+            observations: [observation],
+          },
+        })),
+      };
+      const current = ui.clusterTransportExplanation(operations, 2, false);
+      assert.equal(current.code, "startup_watermark", `${phase}: ${observations[0].direction} first`);
+      assert.equal(current.observation.direction, "outbound", phase);
+      assert.equal(current.observation.acknowledged_offset, 4096, phase);
+    }
+  }
+});
+
+test("acknowledged completion never crosses distinct, legacy, or malformed identities", () => {
+  const ui = sandbox();
+  const identities = [
+    ["b".repeat(64), "c".repeat(64), "distinct fingerprints"],
+    [undefined, undefined, "legacy attempts"],
+    ["not-a-fingerprint", "not-a-fingerprint", "malformed fingerprints"],
+  ];
+
+  for (const [ackFingerprint, stalledFingerprint, label] of identities) {
+    const acknowledged = transportObservation("complete", {
+      observing_node_id: 1,
+      peer_node_id: 2,
+      direction: "outbound",
+      snapshot_id: "shared-display-label",
+      snapshot_fingerprint: ackFingerprint,
+      boot_id: "sender",
+      attempt_id: 7,
+      socket_epoch: 4,
+      acknowledged_offset: 4096,
+      sample_age_ms: 40,
+    });
+    const stalled = transportObservation("stalled", {
+      snapshot_id: "shared-display-label",
+      snapshot_fingerprint: stalledFingerprint,
+      boot_id: "receiver",
+      attempt_id: 3,
+      socket_epoch: 2,
+      sample_age_ms: 40,
+    });
+    for (const observations of [[acknowledged, stalled], [stalled, acknowledged]]) {
+      const operations = {
+        nodes: observations.map((observation) => ({
+          transport: {
+            observing_node_id: observation.observing_node_id,
+            observations: [observation],
+          },
+        })),
+      };
+      const current = ui.clusterTransportExplanation(operations, 2, false);
+      assert.equal(current.code, "stalled", label);
+      assert.equal(current.observation.direction, "inbound", label);
+    }
+  }
 });
 
 test("stalled transport renders its observer and sample age", () => {
