@@ -991,6 +991,7 @@ mod tests {
 
     fn relay_control_request(generation: String) -> crate::playback_control::ControlRequestV1 {
         crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation,
             control_epoch: 1,

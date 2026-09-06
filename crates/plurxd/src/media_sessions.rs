@@ -5633,6 +5633,7 @@ mod tests {
             expected_owner_epoch: 1,
             deadline_unix_ms: unix_ms().saturating_add(4_000),
             control: crate::playback_control::ControlRequestV1 {
+                intent: None,
                 protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
                 generation,
                 control_epoch: 1,

@@ -634,6 +634,21 @@ pub struct CreateSession {
     /// With `presentation:"vod"`: the client's ceiling for one blocking
     /// segment fetch, in seconds. Clamped server-side.
     pub block_budget_secs: Option<f64>,
+    /// What the viewer is asking for, as an orderable ask rather than as the
+    /// flat scalars above.
+    ///
+    /// The scalars stay, and they still drive the pipeline — this does not
+    /// replace them and a client that sends neither behaves exactly as before.
+    /// What it adds is the one thing they cannot express: a complete normalized
+    /// selection that keeps Auto, Original and Manual apart, carrying a
+    /// revision that says which of two asks is later.
+    ///
+    /// It is on *create* and not only on control because the control protocol
+    /// can be switched off, and a session created that way has no control
+    /// channel at all. In that configuration the create body is the only thing
+    /// the server ever learns about what the viewer wants, so an ask that
+    /// arrives only through control is, there, an ask that never arrives.
+    pub intent: Option<plurx_core::playback::MediaIntentEnvelope>,
 }
 
 impl CreateSession {
@@ -1570,6 +1585,45 @@ pub async fn create(
             "live_presentation_removed",
             "the growing live HLS presentation has been removed; request VOD",
         ));
+    }
+    // The ask is made durable before anything is built for it, and before this
+    // request can be answered.
+    //
+    // Placed here, above every other decision, rather than beside the response:
+    // a create that goes on to fail is still a viewer who asked, and the row
+    // records the asking, not the outcome. The order that matters is the one
+    // §1 names — canonical desired ownership persisted *before* an
+    // intent-changing request is reported accepted — and answering first would
+    // tell a client its selection was taken while nothing anywhere had recorded
+    // it. A restart or an owner change in that window loses the ask entirely.
+    //
+    // A failed write refuses the create for the same reason the control
+    // exchange refuses: a retry costs one request, and a phantom acceptance
+    // costs a viewer their selection with nothing to point at.
+    if let Some(intent) = req.intent.as_ref() {
+        intent
+            .validate()
+            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+        let selection = intent.selection;
+        state
+            .store
+            .record_desired_selection(
+                user.id,
+                &req.playback_id,
+                &intent.digest(),
+                &selection.canonical_form(),
+                unix_ms(),
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    playback = %req.playback_id,
+                    "recording the viewer's selection on create failed: {error}"
+                );
+                ApiError::ServiceUnavailable(
+                    "this selection could not be recorded; retry shortly".to_owned(),
+                )
+            })?;
     }
     let ingress_serving_authority = state.serving.authority();
     let ingress_serving_generation = ingress_serving_authority.admit().ok_or_else(|| {
@@ -3942,6 +3996,7 @@ pub async fn start(
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
 ) -> Result<Json<StartResponse>, ApiError> {
     let legacy = CreateSession {
+        intent: None,
         // No control exchange precedes a legacy start, so there is no
         // ordering for it to be stale against.
         control_sequence: None,
@@ -11744,6 +11799,7 @@ mod tests {
             updated_at_ms: unix_ms(),
         };
         let request = crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation,
             control_epoch: 1,
@@ -12366,6 +12422,7 @@ mod tests {
         )
         .await;
         let request = crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation: generation.clone(),
             control_epoch: 1,
@@ -12597,6 +12654,7 @@ mod tests {
             )
             .await;
             let request = crate::playback_control::ControlRequestV1 {
+                intent: None,
                 protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
                 generation: generation.clone(),
                 control_epoch: 1,
@@ -14736,6 +14794,7 @@ mod tests {
 
     fn control_request(generation: String) -> crate::playback_control::ControlRequestV1 {
         crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation,
             control_epoch: 1,
@@ -20085,6 +20144,7 @@ mod tests {
     /// A create body with nothing set, to be spread over.
     fn bare_create() -> CreateSession {
         CreateSession {
+            intent: None,
             control_sequence: None,
             playback_id: String::new(),
             request_id: None,
@@ -20130,6 +20190,212 @@ mod tests {
             Default::default(),
             std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
         )
+    }
+
+    fn envelope(
+        recipe: u64,
+        quality: plurx_core::playback::DesiredQuality,
+    ) -> plurx_core::playback::MediaIntentEnvelope {
+        use plurx_core::playback::{
+            DesiredCodec, DesiredDynamicRange, DesiredSelection, DesiredSubtitles,
+            MediaIntentEnvelope,
+        };
+        MediaIntentEnvelope {
+            lifetime_id: "lifetime-a".to_owned(),
+            recipe_revision: recipe,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: DesiredSelection {
+                quality,
+                codec: DesiredCodec::Auto,
+                dynamic_range: DesiredDynamicRange::Auto,
+                audio_track: None,
+                audio_offset_ms: 0,
+                subtitles: DesiredSubtitles::Off,
+            },
+        }
+    }
+
+    fn a_viewer() -> plurx_core::domain::User {
+        plurx_core::domain::User {
+            id: 7,
+            username: "paul".to_owned(),
+            password_hash: String::new(),
+            is_admin: false,
+            created_at: 0,
+        }
+    }
+
+    async fn create_with(
+        state: &AppState,
+        body: CreateSession,
+    ) -> Result<Json<StartResponse>, ApiError> {
+        create(
+            crate::http::extract::AuthUser(a_viewer()),
+            State(state.clone()),
+            AxPath(404_404),
+            HeaderMap::new(),
+            super::super::network::RemoteAddress(None),
+            Json(body),
+        )
+        .await
+    }
+
+    /// The ask is durable before the create is answered — proved by a create
+    /// that is never answered successfully at all.
+    ///
+    /// §1 asks for canonical desired ownership persisted *before* an
+    /// intent-changing request is reported accepted. A test on a create that
+    /// succeeds cannot tell that ordering from the opposite one, because both
+    /// end with a row and a 200. This one asks for a file that does not exist,
+    /// so the create fails — and the row is there anyway. That is only true if
+    /// the write happens before the request is decided, which is the property.
+    ///
+    /// It also happens to be the honest behaviour: a viewer who asked for
+    /// something asked for it, whether or not the session they asked through
+    /// could be built.
+    #[tokio::test]
+    async fn an_ask_on_create_is_recorded_before_the_create_is_answered() {
+        use plurx_core::playback::DesiredQuality;
+        let state = resolver_state();
+        let ask = envelope(1, DesiredQuality::Original);
+
+        let answer = create_with(
+            &state,
+            CreateSession {
+                playback_id: "player-a".into(),
+                intent: Some(ask.clone()),
+                ..bare_create()
+            },
+        )
+        .await;
+        assert!(
+            answer.is_err(),
+            "this create names a file that does not exist and cannot succeed"
+        );
+
+        let recorded = state
+            .store
+            .desired_selection(7, "player-a")
+            .await
+            .expect("reading the desired row");
+        let recorded = recorded.expect("the ask is recorded even though the create failed");
+        assert_eq!(
+            recorded.digest,
+            ask.digest(),
+            "and it is the ask the viewer actually made"
+        );
+        assert_eq!(
+            recorded.canonical_form,
+            ask.selection.canonical_form(),
+            "stored beside its digest so an operator can read it back"
+        );
+    }
+
+    /// The control protocol being off must not make the ask disappear.
+    ///
+    /// This is the configuration the handoff singles out. With the setting off
+    /// a session gets no control bootstrap and therefore no control channel, so
+    /// every rule that lives on the control path stops running. `resolver_state`
+    /// has never written the setting, so it is off here in exactly the way it is
+    /// off in production by default — and the row still lands, because the write
+    /// is on create and reads nothing about control.
+    #[tokio::test]
+    async fn an_ask_survives_the_control_protocol_being_switched_off() {
+        use plurx_core::playback::DesiredQuality;
+        let state = resolver_state();
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                .await
+                .expect("reading the control setting"),
+            None,
+            "the control protocol is off, which is the case under test"
+        );
+
+        let ask = envelope(3, DesiredQuality::Manual { height: 720 });
+        let _ = create_with(
+            &state,
+            CreateSession {
+                playback_id: "player-off".into(),
+                intent: Some(ask.clone()),
+                ..bare_create()
+            },
+        )
+        .await;
+
+        let recorded = state
+            .store
+            .desired_selection(7, "player-off")
+            .await
+            .expect("reading the desired row")
+            .expect("an ask made with control off is still an ask");
+        assert_eq!(recorded.digest, ask.digest());
+    }
+
+    /// An envelope that cannot mean anything is refused, and records nothing.
+    ///
+    /// The second half is the one worth asserting: a validation that runs after
+    /// the write would still return 400 and would look identical from the
+    /// outside, while leaving a row nobody can order against.
+    #[tokio::test]
+    async fn a_malformed_ask_refuses_the_create_and_records_nothing() {
+        use plurx_core::playback::DesiredQuality;
+        let state = resolver_state();
+        let mut broken = envelope(1, DesiredQuality::Auto);
+        broken.recipe_revision = 0;
+
+        let answer = create_with(
+            &state,
+            CreateSession {
+                playback_id: "player-bad".into(),
+                intent: Some(broken),
+                ..bare_create()
+            },
+        )
+        .await;
+        match answer {
+            Err(ApiError::BadRequest(message)) => assert!(
+                message.contains("recipe"),
+                "the refusal names the axis that is wrong, got {message}"
+            ),
+            Err(other) => panic!("a zero revision must be a 400, got {other:?}"),
+            Ok(_) => panic!("a zero revision must be refused, not answered"),
+        }
+        assert!(
+            state
+                .store
+                .desired_selection(7, "player-bad")
+                .await
+                .expect("reading the desired row")
+                .is_none(),
+            "nothing may be recorded for an ask that was refused"
+        );
+    }
+
+    /// A body with no envelope is the body every deployed client sends, and it
+    /// must behave exactly as it did before the field existed.
+    #[tokio::test]
+    async fn a_create_without_an_ask_records_nothing() {
+        let state = resolver_state();
+        let _ = create_with(
+            &state,
+            CreateSession {
+                playback_id: "player-legacy".into(),
+                ..bare_create()
+            },
+        )
+        .await;
+        assert!(
+            state
+                .store
+                .desired_selection(7, "player-legacy")
+                .await
+                .expect("reading the desired row")
+                .is_none(),
+            "an older client asked for nothing new and owns no desired row"
+        );
     }
 
     async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
@@ -20964,6 +21230,7 @@ mod tests {
     #[test]
     fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
         let request = CreateSession {
+            intent: None,
             control_sequence: None,
             playback_id: "player".into(),
             request_id: Some("attempt".into()),
@@ -20996,6 +21263,7 @@ mod tests {
     #[test]
     fn bitmap_fallback_still_carries_an_explicit_burn_request() {
         let request = CreateSession {
+            intent: None,
             control_sequence: None,
             playback_id: "apple-bitmap".into(),
             request_id: None,

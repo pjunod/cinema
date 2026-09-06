@@ -26242,6 +26242,7 @@ pub(crate) mod tests {
         starved: bool,
     ) -> crate::playback_control::ControlRequestV1 {
         crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation: uuid::Uuid::new_v4().to_string(),
             control_epoch: 1,

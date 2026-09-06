@@ -167,6 +167,21 @@ pub(crate) struct ControlRequestV1 {
     /// Unknown names are ignored rather than refused: a client from a later
     /// version must be able to name actions this server has never heard of.
     pub supported_actions: Option<Vec<String>>,
+    /// The same envelope ordinary create carries.
+    ///
+    /// `selection` above says *what* is wanted and this says *which ask* that
+    /// is — which is the half no field on this request has ever carried. The
+    /// four counters that look like they might (`sequence`, `generation`,
+    /// `control_epoch`, and the client's own capture and attachment
+    /// generations) each move for something other than a change of media
+    /// intent, so none of them can order two asks.
+    ///
+    /// Optional so a client that has not been rebuilt keeps working exactly as
+    /// it does today. When it is present it must *agree* with `selection` —
+    /// see [`ControlRequestV1::validate`]. Carrying the ask twice is the price
+    /// of not breaking every deployed client at once; letting the two copies
+    /// disagree would be the price of a bug nobody could see.
+    pub intent: Option<plurx_core::playback::MediaIntentEnvelope>,
 }
 
 impl ControlRequestV1 {
@@ -269,6 +284,25 @@ impl ControlRequestV1 {
                     .any(|name| name.is_empty() || name.len() > MAX_ACTION_NAME_LEN)
             {
                 return Err("supported_actions");
+            }
+        }
+        if let Some(intent) = &self.intent {
+            if intent.validate().is_err() {
+                return Err("intent");
+            }
+            // The ask is on this request twice, in two shapes, and exactly one
+            // of them can be right. Refusing the disagreement is the only
+            // handling that does not silently pick a winner: taking
+            // `selection` would make the envelope decorative, and taking the
+            // envelope would let a client change the recipe through a field
+            // this server's own admission path does not read yet.
+            //
+            // It is also the only reading a client can act on. A 400 naming
+            // `intent` says "your two copies disagree, fix the one that is
+            // wrong"; serving one of them says nothing at all until a viewer
+            // notices the wrong track playing.
+            if intent.selection != self.selection.desired() {
+                return Err("intent.selection");
             }
         }
         Ok(())
@@ -13106,6 +13140,7 @@ mod tests {
 
     fn request() -> ControlRequestV1 {
         ControlRequestV1 {
+            intent: None,
             protocol: PROTOCOL_V1.to_owned(),
             generation: uuid::Uuid::new_v4().to_string(),
             control_epoch: 1,
@@ -15017,6 +15052,73 @@ mod tests {
         assert!(prometheus().contains(
             "plurx_playback_control_actions_total{action=\"prepare\",platform=\"apple\"}"
         ));
+    }
+
+    /// The ask travels on this request twice, and the two copies must agree.
+    ///
+    /// This is the one property the optional envelope needs in order to be
+    /// worth having. `selection` and `intent.selection` are the same statement
+    /// in two shapes, so a request carrying both is either redundant or wrong,
+    /// and there is no third possibility to fall back on. Picking `selection`
+    /// would make the envelope decorative; picking the envelope would let a
+    /// client steer the recipe through a field this server's admission path
+    /// does not read yet. A 400 that names the field is the only answer a
+    /// client can act on, and the only one that cannot be wrong quietly.
+    ///
+    /// The agreement is asserted through `desired()` rather than field by
+    /// field, because that is the normalization the durable ask is built from:
+    /// two spellings that normalize the same *are* the same ask.
+    #[test]
+    fn an_envelope_that_contradicts_the_selection_beside_it_is_refused() {
+        use plurx_core::playback::{DesiredQuality, MediaIntentEnvelope};
+        let target = 60_000;
+
+        let mut agreeing = request();
+        agreeing.intent = Some(MediaIntentEnvelope {
+            lifetime_id: "lifetime-a".to_owned(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: agreeing.selection.desired(),
+        });
+        assert!(
+            agreeing.validate(None, target).is_ok(),
+            "an envelope that says what the selection says is accepted"
+        );
+
+        let mut contradicting = request();
+        let mut elsewhere = contradicting.selection.desired();
+        elsewhere.quality = DesiredQuality::Manual { height: 480 };
+        contradicting.intent = Some(MediaIntentEnvelope {
+            lifetime_id: "lifetime-a".to_owned(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: elsewhere,
+        });
+        assert_eq!(
+            contradicting.validate(None, target),
+            Err("intent.selection"),
+            "and one that says something else is refused, by name"
+        );
+
+        // An envelope that cannot mean anything is refused before its contents
+        // are compared at all — otherwise a zero revision would be reported as
+        // a selection disagreement, which is a different bug to chase.
+        let mut malformed = request();
+        malformed.intent = Some(MediaIntentEnvelope {
+            lifetime_id: String::new(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: malformed.selection.desired(),
+        });
+        assert_eq!(malformed.validate(None, target), Err("intent"));
+
+        // And the field stays optional: every deployed client sends none.
+        let mut absent = request();
+        absent.intent = None;
+        assert!(absent.validate(None, target).is_ok());
     }
 
     #[test]
