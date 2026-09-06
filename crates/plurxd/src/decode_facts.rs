@@ -95,11 +95,12 @@ struct ProbeFileIdentity {
     content_digest: String,
 }
 
-/// Startup-bound FFprobe identity. Linux executes the held snapshot descriptor;
-/// macOS executes a snapshot protected from mutation or replacement by the
-/// user-immutable file flag. Path revalidation before and after collection
-/// detects replacement of the configured executable without allowing a
-/// transient swap to choose a different executable object.
+/// Startup-bound FFprobe identity. Production collection accepts only a
+/// self-contained Linux ELF, copies it into a sealed anonymous executable, and
+/// confines each child so it cannot replace itself with another parser. Path
+/// revalidation before and after collection detects replacement of the
+/// configured artifact without allowing a transient swap to choose another
+/// executable object.
 #[derive(Debug, Clone)]
 pub(crate) struct DecodeProbeIdentity {
     executable: PathBuf,
@@ -113,8 +114,9 @@ pub(crate) struct DecodeProbeIdentity {
 #[derive(Debug)]
 struct ExecutableSnapshot {
     file: std::fs::File,
-    // Retaining the path owns the temporary directory entry for as long as
-    // Linux executes the held descriptor or macOS executes the immutable path.
+    // Non-Linux test fixtures execute an owned temporary path. Production
+    // support is Linux-only and uses a sealed anonymous descriptor.
+    #[cfg(not(target_os = "linux"))]
     _path: tempfile::TempPath,
 }
 
@@ -123,7 +125,7 @@ impl ExecutableSnapshot {
         &self.file
     }
 
-    #[cfg(any(test, not(target_os = "linux")))]
+    #[cfg(not(target_os = "linux"))]
     fn path(&self) -> &Path {
         self._path.as_ref()
     }
@@ -243,38 +245,107 @@ impl DecodeProbeIdentity {
     }
 }
 
-/// Qualified fact collection executes a retained copy of the configured
-/// parser. A script wrapper could select a different parser after discovery,
-/// so only a native executable can participate in the build-bound contract.
+/// Qualified fact collection executes one self-contained parser artifact. A
+/// script, dynamic executable, or unsupported Unix launcher could select or
+/// load parser code outside the retained digest, so production refuses it.
 #[cfg(unix)]
 fn require_direct_probe_executable(file: &std::fs::File) -> Result<(), DecodeFactError> {
+    #[cfg(target_os = "linux")]
+    {
+        require_self_contained_linux_elf(file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        Err(DecodeFactError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn require_self_contained_linux_elf(file: &std::fs::File) -> Result<(), DecodeFactError> {
     use std::os::unix::fs::FileExt;
 
-    let mut magic = [0_u8; 4];
-    let read = file
-        .read_at(&mut magic, 0)
-        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
-    let is_native = read == magic.len()
-        && (magic == *b"\x7fELF"
-            || matches!(
-                magic,
-                [0xce, 0xfa, 0xed, 0xfe]
-                    | [0xfe, 0xed, 0xfa, 0xce]
-                    | [0xcf, 0xfa, 0xed, 0xfe]
-                    | [0xfe, 0xed, 0xfa, 0xcf]
-                    | [0xca, 0xfe, 0xba, 0xbe]
-                    | [0xbe, 0xba, 0xfe, 0xca]
-                    | [0xca, 0xfe, 0xba, 0xbf]
-                    | [0xbf, 0xba, 0xfe, 0xca]
-            ));
-    if is_native {
-        Ok(())
-    } else {
-        Err(DecodeFactError::ProbeIdentity(
-            "configured FFprobe must be a direct native executable; wrappers are not build-bound"
-                .to_owned(),
-        ))
+    fn value(bytes: &[u8], little_endian: bool) -> u64 {
+        let mut padded = [0_u8; 8];
+        padded[..bytes.len()].copy_from_slice(bytes);
+        if little_endian {
+            u64::from_le_bytes(padded)
+        } else {
+            padded[..bytes.len()].reverse();
+            u64::from_le_bytes(padded)
+        }
     }
+
+    let mut header = [0_u8; 64];
+    file.read_exact_at(&mut header, 0).map_err(|error| {
+        DecodeFactError::ProbeIdentity(format!("FFprobe is not a complete ELF executable: {error}"))
+    })?;
+    if header[..4] != *b"\x7fELF" {
+        return Err(DecodeFactError::ProbeIdentity(
+            "configured FFprobe must be a self-contained Linux ELF; wrappers are not build-bound"
+                .to_owned(),
+        ));
+    }
+    let little_endian = match header[5] {
+        1 => true,
+        2 => false,
+        _ => {
+            return Err(DecodeFactError::ProbeIdentity(
+                "configured FFprobe has an unsupported ELF byte order".to_owned(),
+            ));
+        }
+    };
+    let (program_offset, entry_size, entry_count) = match header[4] {
+        1 => (
+            value(&header[28..32], little_endian),
+            value(&header[42..44], little_endian),
+            value(&header[44..46], little_endian),
+        ),
+        2 => (
+            value(&header[32..40], little_endian),
+            value(&header[54..56], little_endian),
+            value(&header[56..58], little_endian),
+        ),
+        _ => {
+            return Err(DecodeFactError::ProbeIdentity(
+                "configured FFprobe has an unsupported ELF class".to_owned(),
+            ));
+        }
+    };
+    if entry_size < 4 || entry_count == 0 || entry_count > 1_024 {
+        return Err(DecodeFactError::ProbeIdentity(
+            "configured FFprobe has an invalid ELF program table".to_owned(),
+        ));
+    }
+    let table_bytes = entry_size
+        .checked_mul(entry_count)
+        .and_then(|bytes| program_offset.checked_add(bytes))
+        .ok_or_else(|| {
+            DecodeFactError::ProbeIdentity("FFprobe ELF program table overflowed".to_owned())
+        })?;
+    if table_bytes
+        > file
+            .metadata()
+            .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?
+            .len()
+    {
+        return Err(DecodeFactError::ProbeIdentity(
+            "configured FFprobe has a truncated ELF program table".to_owned(),
+        ));
+    }
+    let mut program_type = [0_u8; 4];
+    for entry in 0..entry_count {
+        file.read_exact_at(&mut program_type, program_offset + entry * entry_size)
+            .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+        let program_type = value(&program_type, little_endian);
+        if program_type == 2 || program_type == 3 {
+            return Err(DecodeFactError::ProbeIdentity(
+                "configured FFprobe must be statically linked with no interpreter or dynamic dependency closure"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -361,6 +432,117 @@ fn install_probe_child_fds(
     result
 }
 
+#[cfg(target_os = "linux")]
+const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
+#[cfg(target_os = "linux")]
+const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1;
+#[cfg(target_os = "linux")]
+const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LandlockRulesetAttr {
+    handled_access_fs: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: libc::c_int,
+}
+
+/// Restrict the child to executing the already-installed held artifact. This
+/// is installed before the first exec, so a native launcher cannot exec a
+/// second parser outside the build digest.
+#[cfg(target_os = "linux")]
+fn install_linux_execute_confinement(
+    allowed_executables: &[std::os::fd::RawFd],
+) -> std::io::Result<()> {
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if abi < 1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ruleset_attr = LandlockRulesetAttr {
+        handled_access_fs: LANDLOCK_ACCESS_FS_EXECUTE,
+    };
+    let ruleset_fd = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &raw const ruleset_attr,
+            std::mem::size_of::<LandlockRulesetAttr>(),
+            0,
+        )
+    };
+    if ruleset_fd == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    for executable in allowed_executables {
+        let path_attr = LandlockPathBeneathAttr {
+            allowed_access: LANDLOCK_ACCESS_FS_EXECUTE,
+            parent_fd: *executable,
+        };
+        let add_result = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_add_rule,
+                ruleset_fd,
+                LANDLOCK_RULE_PATH_BENEATH,
+                &raw const path_attr,
+                0,
+            )
+        };
+        if add_result == -1 {
+            let error = std::io::Error::last_os_error();
+            unsafe { libc::close(ruleset_fd as libc::c_int) };
+            return Err(error);
+        }
+    }
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(ruleset_fd as libc::c_int) };
+        return Err(error);
+    }
+    let restrict_result = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, 0) };
+    unsafe { libc::close(ruleset_fd as libc::c_int) };
+    if restrict_result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
+fn confine_probe_execution() -> std::io::Result<()> {
+    let allowed_fd =
+        unsafe { libc::open(c"/proc/self/fd/4".as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if allowed_fd == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let result = install_linux_execute_confinement(&[allowed_fd]);
+    unsafe { libc::close(allowed_fd) };
+    result
+}
+
+#[cfg(all(unix, test))]
+fn confine_probe_execution() -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(test)))]
+fn confine_probe_execution() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "qualified FFprobe execution requires Linux Landlock",
+    ))
+}
+
 #[cfg(unix)]
 fn start_probe_session() -> std::io::Result<()> {
     if unsafe { libc::setsid() } == -1 {
@@ -371,14 +553,11 @@ fn start_probe_session() -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-async fn terminate_probe_session(
-    child: &mut tokio::process::Child,
-    process_group: Option<libc::pid_t>,
-) {
+async fn terminate_probe_session(child: &mut tokio::process::Child, session: &ProbeSessionGuard) {
     // This potentially unbounded reap runs only inside an owned task. The
     // caller-facing deadline detaches that task while it retains every source
     // and admission guard needed for safe cleanup.
-    kill_probe_session(process_group);
+    session.kill_once();
     let _ = child.wait().await;
 }
 
@@ -392,32 +571,63 @@ fn kill_probe_session(process_group: Option<libc::pid_t>) {
 }
 
 #[cfg(unix)]
+#[derive(Clone)]
+struct ProbeSessionTerminator {
+    process_group: Arc<std::sync::Mutex<Option<libc::pid_t>>>,
+}
+
+#[cfg(unix)]
+impl ProbeSessionTerminator {
+    fn take_process_group(&self) -> Option<libc::pid_t> {
+        match self.process_group.lock() {
+            Ok(mut process_group) => process_group.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }
+    }
+
+    fn kill_once(&self) {
+        kill_probe_session(self.take_process_group());
+    }
+}
+
+#[cfg(unix)]
 struct ProbeSessionGuard {
-    process_group: Option<libc::pid_t>,
+    terminator: ProbeSessionTerminator,
 }
 
 #[cfg(unix)]
 impl ProbeSessionGuard {
     fn new(process_group: Option<libc::pid_t>) -> Self {
-        Self { process_group }
+        Self {
+            terminator: ProbeSessionTerminator {
+                process_group: Arc::new(std::sync::Mutex::new(process_group)),
+            },
+        }
+    }
+
+    fn terminator(&self) -> ProbeSessionTerminator {
+        self.terminator.clone()
+    }
+
+    fn kill_once(&self) {
+        self.terminator.kill_once();
     }
 }
 
 #[cfg(unix)]
 impl Drop for ProbeSessionGuard {
     fn drop(&mut self) {
-        kill_probe_session(self.process_group);
+        self.kill_once();
     }
 }
 
 #[cfg(unix)]
-fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
-    use std::os::unix::fs::{FileExt, PermissionsExt};
+fn copy_executable(
+    source: &std::fs::File,
+    snapshot: &mut std::fs::File,
+) -> Result<(), DecodeFactError> {
+    use std::os::unix::fs::FileExt;
 
-    let mut snapshot = tempfile::Builder::new()
-        .prefix("plurx-ffprobe-")
-        .tempfile()
-        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
     let mut buffer = [0_u8; 64 * 1024];
     let mut offset = 0_u64;
     loop {
@@ -442,6 +652,47 @@ fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, Dec
     snapshot
         .flush()
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::PermissionsExt;
+
+    let raw_fd = unsafe {
+        libc::memfd_create(
+            c"plurx-ffprobe".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    if raw_fd == -1 {
+        return Err(DecodeFactError::ProbeIdentity(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    copy_executable(source, &mut file)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o500))
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } == -1 {
+        return Err(DecodeFactError::ProbeIdentity(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(ExecutableSnapshot { file })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut snapshot = tempfile::Builder::new()
+        .prefix("plurx-ffprobe-")
+        .tempfile()
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    copy_executable(source, snapshot.as_file_mut())?;
     snapshot
         .as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o700))
@@ -648,31 +899,32 @@ async fn probe_version(
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
-            install_child_fd(executable_fd, HELD_PROBE_FD)
+            install_child_fd(executable_fd, HELD_PROBE_FD)?;
+            confine_probe_execution()
         });
     }
     let mut child = command
         .spawn()
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
-    let task_process_group = process_group;
+    let session = ProbeSessionGuard::new(process_group);
+    let terminator = session.terminator();
     let mut task = tokio::spawn(async move {
         let _version_permit = version_permit;
-        let _session = ProbeSessionGuard::new(task_process_group);
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
-                terminate_probe_session(&mut child, task_process_group).await;
+                terminate_probe_session(&mut child, &session).await;
                 return Err(DecodeFactError::MissingPipe);
             }
         };
         let (stdout, status) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait());
-        kill_probe_session(task_process_group);
+        session.kill_once();
         let stdout = stdout?;
         let status = match status {
             Ok(status) => status,
             Err(error) => {
-                terminate_probe_session(&mut child, task_process_group).await;
+                terminate_probe_session(&mut child, &session).await;
                 return Err(DecodeFactError::Read(error.to_string()));
             }
         };
@@ -689,7 +941,7 @@ async fn probe_version(
             result.map_err(|error| DecodeFactError::Read(error.to_string()))?
         }
         _ = tokio::time::sleep(remaining) => {
-            kill_probe_session(process_group);
+            terminator.kill_once();
             Err(DecodeFactError::Deadline)
         }
     }
@@ -877,7 +1129,7 @@ pub(crate) enum DecodeFactError {
     InvalidJson(String),
     InvalidFacts(String),
     CacheInvariant,
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform,
 }
 
@@ -908,7 +1160,7 @@ impl std::fmt::Display for DecodeFactError {
             Self::CacheInvariant => {
                 formatter.write_str("decoder fact cache ordering is inconsistent")
             }
-            #[cfg(not(unix))]
+            #[cfg(not(target_os = "linux"))]
             Self::UnsupportedPlatform => formatter
                 .write_str("descriptor-bound decoder probing is unsupported on this platform"),
         }
@@ -1025,7 +1277,8 @@ async fn collect(
     unsafe {
         command.pre_exec(move || {
             start_probe_session()?;
-            install_probe_child_fds(source_fd, executable_fd)
+            install_probe_child_fds(source_fd, executable_fd)?;
+            confine_probe_execution()
         });
     }
     let mut child = command
@@ -1036,25 +1289,25 @@ async fn collect(
         .spawn()
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
-    let _session = ProbeSessionGuard::new(process_group);
+    let session = ProbeSessionGuard::new(process_group);
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            terminate_probe_session(&mut child, process_group).await;
+            terminate_probe_session(&mut child, &session).await;
             return Err(DecodeFactError::MissingPipe);
         }
     };
     let stderr = match child.stderr.take() {
         Some(stderr) => stderr,
         None => {
-            terminate_probe_session(&mut child, process_group).await;
+            terminate_probe_session(&mut child, &session).await;
             return Err(DecodeFactError::MissingPipe);
         }
     };
     let outcome = tokio::select! {
         biased;
         _ = wait_for_cancellation(cancelled) => {
-            terminate_probe_session(&mut child, process_group).await;
+            terminate_probe_session(&mut child, &session).await;
             return Err(DecodeFactError::Cancelled);
         }
         outcome = tokio::time::timeout(budget.min(PROBE_DEADLINE), async {
@@ -1069,17 +1322,17 @@ async fn collect(
     let (stdout, stderr, status) = match outcome {
         Ok((stdout, stderr, status)) => (stdout, stderr, status),
         Err(_) => {
-            terminate_probe_session(&mut child, process_group).await;
+            terminate_probe_session(&mut child, &session).await;
             return Err(DecodeFactError::Deadline);
         }
     };
-    kill_probe_session(process_group);
+    session.kill_once();
     let stdout = stdout?;
     let stderr = stderr?;
     let status = match status {
         Ok(status) => status,
         Err(error) => {
-            terminate_probe_session(&mut child, process_group).await;
+            terminate_probe_session(&mut child, &session).await;
             return Err(DecodeFactError::Read(error.to_string()));
         }
     };
@@ -1192,15 +1445,159 @@ mod tests {
         let wrapper = root.path().join("ffprobe-wrapper");
         executable(&wrapper, "#!/bin/sh\nexec /usr/bin/ffprobe \"$@\"\n");
         let wrapper = std::fs::File::open(wrapper).expect("open wrapper");
+        #[cfg(target_os = "linux")]
         assert!(matches!(
             require_direct_probe_executable(&wrapper),
-            Err(DecodeFactError::ProbeIdentity(reason))
-                if reason.contains("wrappers are not build-bound")
+            Err(DecodeFactError::ProbeIdentity(_))
         ));
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            require_direct_probe_executable(&wrapper),
+            Err(DecodeFactError::UnsupportedPlatform)
+        );
 
         let current = std::fs::File::open(std::env::current_exe().expect("current executable"))
             .expect("open current native executable");
-        require_direct_probe_executable(&current).expect("native executable is build-bindable");
+        #[cfg(target_os = "linux")]
+        assert!(matches!(
+            require_direct_probe_executable(&current),
+            Err(DecodeFactError::ProbeIdentity(reason))
+                if reason.contains("statically linked")
+        ));
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            require_direct_probe_executable(&current),
+            Err(DecodeFactError::UnsupportedPlatform)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn self_contained_elf_has_no_external_parser_dependency() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let artifact = root.path().join("static-ffprobe");
+        let mut elf = vec![0_u8; 64 + 56];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[6] = 1;
+        elf[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        elf[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        elf[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        elf[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        elf[64..68].copy_from_slice(&1_u32.to_le_bytes());
+        std::fs::write(&artifact, elf).expect("write structural static ELF");
+        let artifact = std::fs::File::open(artifact).expect("open structural static ELF");
+        require_direct_probe_executable(&artifact).expect("static ELF has no external closure");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sealed_snapshot_refuses_in_place_mutation() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::FileExt;
+
+        let current = std::fs::File::open(std::env::current_exe().expect("current executable"))
+            .expect("open current executable");
+        let snapshot = snapshot_executable(&current).expect("sealed executable snapshot");
+        let seals = unsafe { libc::fcntl(snapshot.as_file().as_raw_fd(), libc::F_GET_SEALS) };
+        assert_eq!(seals & libc::F_SEAL_WRITE, libc::F_SEAL_WRITE);
+        assert!(
+            snapshot.as_file().write_at(b"X", 0).is_err(),
+            "sealed snapshot bytes must reject an in-place overwrite"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_confinement_blocks_a_native_launcher_second_exec() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::FileExt;
+        use std::os::unix::process::CommandExt;
+
+        let shell = std::fs::File::open("/bin/sh").expect("open native launcher");
+        let mut header = [0_u8; 64];
+        shell
+            .read_exact_at(&mut header, 0)
+            .expect("read native launcher ELF header");
+        assert_eq!(&header[..6], b"\x7fELF\x02\x01");
+        let program_offset = u64::from_le_bytes(header[32..40].try_into().expect("program offset"));
+        let entry_size = u16::from_le_bytes(header[54..56].try_into().expect("entry size"));
+        let entry_count = u16::from_le_bytes(header[56..58].try_into().expect("entry count"));
+        let mut interpreter = None;
+        for entry in 0..entry_count {
+            let offset = program_offset + u64::from(entry) * u64::from(entry_size);
+            let mut program = [0_u8; 56];
+            shell
+                .read_exact_at(&mut program, offset)
+                .expect("read native launcher program header");
+            if u32::from_le_bytes(program[..4].try_into().expect("program type")) == 3 {
+                let path_offset =
+                    u64::from_le_bytes(program[8..16].try_into().expect("path offset"));
+                let path_bytes =
+                    u64::from_le_bytes(program[32..40].try_into().expect("path bytes"));
+                let mut path = vec![0_u8; usize::try_from(path_bytes).expect("path size")];
+                shell
+                    .read_exact_at(&mut path, path_offset)
+                    .expect("read native launcher interpreter");
+                if path.last() == Some(&0) {
+                    path.pop();
+                }
+                interpreter = Some(std::path::PathBuf::from(std::ffi::OsString::from_vec(path)));
+                break;
+            }
+        }
+        let interpreter = interpreter.expect("native launcher interpreter");
+        let shell_allowed =
+            unsafe { libc::open(c"/bin/sh".as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        assert_ne!(shell_allowed, -1, "open launcher O_PATH");
+        let shell_allowed = unsafe { std::fs::File::from_raw_fd(shell_allowed) };
+        let interpreter_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+            interpreter.as_os_str(),
+        ))
+        .expect("interpreter path has no NUL");
+        let interpreter_allowed =
+            unsafe { libc::open(interpreter_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        assert_ne!(interpreter_allowed, -1, "open interpreter O_PATH");
+        let interpreter_allowed = unsafe { std::fs::File::from_raw_fd(interpreter_allowed) };
+        let shell_fd = shell_allowed.as_raw_fd();
+        let interpreter_fd = interpreter_allowed.as_raw_fd();
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exec /usr/bin/true"]);
+        unsafe {
+            command
+                .pre_exec(move || install_linux_execute_confinement(&[shell_fd, interpreter_fd]));
+        }
+        let status = match command.status() {
+            Ok(status) => status,
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP)
+                ) =>
+            {
+                return;
+            }
+            Err(error) => panic!("start confined native launcher: {error}"),
+        };
+        assert!(
+            !status.success(),
+            "the retained native artifact must not exec a second parser"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_termination_is_consumed_exactly_once() {
+        let guard = ProbeSessionGuard::new(Some(libc::pid_t::MAX));
+        let terminator = guard.terminator();
+        assert_eq!(terminator.take_process_group(), Some(libc::pid_t::MAX));
+        assert_eq!(terminator.take_process_group(), None);
+        drop(guard);
     }
 
     #[cfg(unix)]
@@ -1440,7 +1837,7 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn snapshot_path_swap_cannot_change_the_executable_object() {
         let root = crate::test_tempdir().expect("tempdir");
@@ -1460,18 +1857,6 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
             .expect("identity");
         let snapshot_path = identity.executable_snapshot.path().to_owned();
         let held_path = snapshot_path.with_extension("held");
-        #[cfg(target_os = "linux")]
-        {
-            std::fs::rename(&snapshot_path, &held_path).expect("move snapshot pathname");
-            executable(
-                &snapshot_path,
-                r###"#!/bin/sh
-touch "$PLURX_TEST_PROBE_PATH.snapshot-b"
-printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","profile":"Main","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
-"###,
-            );
-        }
-        #[cfg(target_os = "macos")]
         assert!(
             std::fs::rename(&snapshot_path, &held_path).is_err(),
             "the immutable snapshot path must refuse replacement"
@@ -1493,11 +1878,6 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","
             !probe.with_extension("snapshot-b").exists(),
             "replacement at the snapshot pathname must never execute"
         );
-        #[cfg(target_os = "linux")]
-        {
-            std::fs::remove_file(&snapshot_path).expect("remove replacement snapshot");
-            std::fs::remove_file(&held_path).expect("remove displaced snapshot link");
-        }
     }
 
     #[cfg(unix)]

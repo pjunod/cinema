@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 exact-head re-review pending · **Updated:** 2026-09-06 ·
+**Status:** M1 adversarial repair in progress · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -23,17 +23,17 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Review-repair working tree: macOS bound FFprobe collector 16/16 in three consecutive runs, pinned Linux 1.97.1 collector 17/17, workspace all-target Clippy with denied warnings, status contract, and the complete Rust unit profile pass; unit totals include core 955/955, store 87/87, and daemon 1,776/1,776 with 3 declared ignores |
-| Exact receipt | `d3747931`: history 1,356, catalog 24/30/10,402, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass; its three subprocess-ownership review findings are repaired on the working tree and awaiting an exact-head receipt and re-review |
+| Focused validation | Second-review repair working tree: macOS collector 17/17, pinned Linux 1.97.1 collector 20/20, macOS and Linux all-target Clippy with denied warnings, 12 ownership/status contracts, catalog and history checks, and the complete Rust unit profile pass; unit totals include core 955/955, store 87/87, and daemon 1,777/1,777 with 3 declared ignores |
+| Exact receipt | `0dcbcdf2`: history 1,356, catalog 24/30/1,434, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass; adversarial re-review found stale ownership counts, missing corrective-history coverage, a reusable process-group ID, mutable Linux snapshot bytes, and an incomplete parser dependency boundary, all now under working-tree repair |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
-| Blocker | Commit the validated subprocess-ownership repairs, obtain exact-head adversarial re-review, and run one clean full-suite qualification after all fixes |
+| Blocker | Validate and commit the second adversarial repair, obtain exact-head approval, and run one clean full-suite qualification after all fixes |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Exact-head re-review pending | The first full attempt on receipt head `2e8c7d48` exposed a two-second test-harness bound under aggregate load; review of its repaired successor `d3747931` then found wrapper build-binding and detached-reaper gaps, now repaired with focused macOS/Linux and complete unit evidence |
+| M1 · explicit plan and facts | Adversarial repair in progress | Repair commit `0dcbcdf2` closed the first subprocess review, but exact-head re-review then found stale ownership evidence plus reusable-PGID, mutable-snapshot, and parser-closure gaps; the next candidate refuses unsupported production platforms and requires a sealed, self-contained Linux parser confined against second exec |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -52,17 +52,18 @@ legacy preference order without making advertised decoder names qualified
 evidence, and keeps the MPEG-4/VideoToolbox compatibility exclusion independent
 of container and profile.
 
-The daemon collector discovers and fingerprints a configured direct native
-FFprobe executable, then executes a private snapshot of those validated bytes:
-Linux launches the retained descriptor and macOS protects the snapshot inode
-from mutation or replacement before launching its path. Indirect script
-wrappers are refused because immutable wrapper bytes cannot bind the parser
-they select later. Every probe owns a process session so timeout or cancellation
-signals the complete process group. The caller-facing deadline may detach the
-owned cleanup task, but that task retains the child, source descriptor, offset
-restoration, and admission permits until reap completes. A process-group guard
-also kills descendants on every post-spawn read, pipe, wait, panic, timeout, and
-cancellation exit. Lease admission is charged to the same end-to-end deadline.
+The daemon collector discovers and fingerprints a configured parser artifact.
+The enforced production boundary requires a self-contained Linux ELF with no
+interpreter or dynamic dependency closure, copies it to a sealed anonymous
+descriptor, and confines execution so a native launcher cannot exec a second
+parser. Unsupported production Unix targets and script, dynamic, or indirect
+launchers fail closed; test-only scripted fixtures do not weaken the shipping
+path. Every probe owns a process session so timeout or cancellation signals the
+complete process group. The caller-facing deadline may detach the owned cleanup
+task, but that task retains the child, source descriptor, offset restoration,
+and admission permits until reap completes. Caller and task share one
+take-once process-group terminator, preventing a delayed guard from signaling a
+reused PGID. Lease admission is charged to the same end-to-end deadline.
 Legacy video ordinals are resolved to
 absolute input indices, and file-level catalog metadata is merged only when the
 selection is the catalog's first non-attached playable stream. The fact digest
@@ -123,13 +124,31 @@ review requested three additional repairs: refuse indirect wrappers whose
 downstream parser can change without changing wrapper bytes; return a bounded
 caller result while a stuck reap retains ownership in a detached task; and kill
 the whole process group on every post-spawn error. Those repairs are present on
-the working tree. Sixteen macOS collector tests pass in three consecutive runs,
+commit `0dcbcdf2`. Sixteen macOS collector tests pass in three consecutive runs,
 and 17 tests pass in the pinned Linux 1.97.1 container, including direct-native
 identity, descriptor execution, detached ownership, and cancellation/reap
 assertions. Test-only scripted identity discovery is serialized so parallel
 fixtures cannot consume one another's production-scale version deadline. The
 complete Rust unit profile also passes after the repairs: core 955/955, store
 87/87, daemon 1,776/1,776, 3 declared ignores, and no failures.
+
+Exact-head re-review of `0dcbcdf2` found that the native-magic check still
+allowed a compiled launcher or replaceable dynamic parser closure, Linux
+snapshot bytes remained owner-writable, explicit and drop cleanup could signal
+a reused numeric PGID, two ownership counters were stale, and the corrective
+commit lacked a history mapping. The working tree requires a self-contained
+Linux ELF, seals its anonymous snapshot, applies an execute-only Landlock rule
+to prevent a second parser exec, rejects other production Unix targets, shares
+take-once termination ownership, updates the inventory, and maps `0dcbcdf2` to
+its Rust and catalog contracts. These changes make unsupported prerequisites a
+typed refusal rather than an unbound best effort.
+
+The second-review repair now passes 17/17 macOS collector tests, 20/20 pinned
+Linux 1.97.1 collector tests, and all-target denied-warning Clippy on both
+platforms. The complete Rust unit profile passes with core 955/955, store
+87/87, daemon 1,777/1,777, 3 declared ignores, and no failures. Twelve combined
+ownership/status contracts, catalog lint, history audit, formatting, and the
+working-tree whitespace check also pass.
 
 ## M0 frozen source inventory
 
@@ -464,6 +483,7 @@ full-base diff. The exact head then passed the full PR suite recorded below.
 | 2026-09-06 | Run qualification through task-scoped `ffmpeg-full` 8.1.2_2 wrappers | The installed full build provides `zscale`; the wrappers add only the retained x265 ABI 216 library path and leave the host installation unchanged |
 | 2026-09-06 | Accept two declared full-suite skips on this Darwin builder | Android device validation requires unavailable `adb`; the two-node Live TV drill is Linux-only. Both remain explicit M8 fleet/client prerequisites rather than passing claims |
 | 2026-09-06 | Reuse warmed cluster targets for the final exact-head suite | The first diagnostic run spent its 1,800-second bound compiling vendor targets. Warm targets change no source or test semantics and let the complete three-node workload run inside the same fixed bound |
+| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. Linux can provide a sealed anonymous executable plus Landlock second-exec confinement; other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name this prerequisite rather than hide it behind a code feature gate |
 
 ## Validation ledger
 
@@ -550,9 +570,14 @@ lane and focused tests provide earlier feedback.
 | Working tree after `2e8c7d48` | `CARGO='rustup run 1.97.1 cargo' make unit` with the qualified FFmpeg wrappers and loopback fixture permission | Pass · core 955/955, store contracts 87/87, daemon 1,774/1,774, and all remaining workspace and documentation tests passed; 3 declared ignores and no failures. A preceding restricted-sandbox diagnostic was invalid because 65 loopback fixtures were denied socket binds |
 | Working tree after `2e8c7d48` | Warmed `CARGO='rustup run 1.97.1 cargo' make cluster-check` | Pass · 133/133 runnable three-voter store contracts with 2 helper-process ignores, topology/growth/failure drills, 7/7 activation tests, and 2/2 activity tests; the formerly cold activation target compiled in 10.06 seconds |
 | `d3747931` | Effort commit hook plus independent plan/scope and subprocess adversarial reviews | Hook pass · history 1,356, catalog 24/30/10,402, operations 211/211, formatting, status contract, and pinned all-target workspace compile; plan/scope review approved, while subprocess review correctly blocked qualification on indirect-wrapper identity, unbounded caller reap, and incomplete post-spawn group cleanup |
-| Working tree after `d3747931` | `cargo test -p plurxd decode_facts::tests:: -- --nocapture` repeated three times after review repair | Pass · 16/16 in every run, including direct-native wrapper refusal, detached cleanup ownership, cancellation/reap, executable/source fences, cache singleflight, and selected-stream binding |
-| Working tree after `d3747931` | pinned Linux 1.97.1 container `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · 17/17, including direct-native identity, descriptor execution, crossed-fd assignment, bounded caller cleanup ownership, and process-group reap |
-| Working tree after `d3747931` | `CARGO='rustup run 1.97.1 cargo' make unit` with qualified FFmpeg 8.1.2 and loopback fixture permission | Pass · core 955/955, store contracts 87/87, daemon 1,776/1,776, all remaining workspace and documentation tests, 3 declared ignores, and no failures |
+| `0dcbcdf2` before exact-head re-review | `cargo test -p plurxd decode_facts::tests:: -- --nocapture` repeated three times after first review repair | Pass · 16/16 in every run, including direct-native wrapper refusal, detached cleanup ownership, cancellation/reap, executable/source fences, cache singleflight, and selected-stream binding |
+| `0dcbcdf2` before exact-head re-review | pinned Linux 1.97.1 container `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · 17/17, including direct-native identity, descriptor execution, crossed-fd assignment, bounded caller cleanup ownership, and process-group reap |
+| `0dcbcdf2` before exact-head re-review | `CARGO='rustup run 1.97.1 cargo' make unit` with qualified FFmpeg 8.1.2 and loopback fixture permission | Pass · core 955/955, store contracts 87/87, daemon 1,776/1,776, all remaining workspace and documentation tests, 3 declared ignores, and no failures |
+| `0dcbcdf2` | Independent plan/scope and subprocess adversarial re-reviews | Changes requested · both identified stale exact-head evidence; plan review found a reusable-PGID double-signal, and subprocess review additionally showed that native launchers, dynamic dependencies, mutable Linux snapshot bytes, and unsupported Unix execution remained outside the claimed build boundary |
+| Working tree after `0dcbcdf2` | macOS and pinned Linux 1.97.1 `cargo test --locked -p plurxd decode_facts::tests:: -- --nocapture` | Pass · macOS 17/17 and Linux 20/20; Linux adds static dependency-closure classification, sealed in-place mutation refusal, native-launcher second-exec denial, descriptor execution/crossing, and take-once group termination |
+| Working tree after `0dcbcdf2` | macOS plus ephemeral pinned Linux 1.97.1 `cargo clippy --locked -p plurxd --all-targets -- -D warnings` | Pass · no warnings on either platform; the Linux run compiled the ELF, memfd, Landlock, and Linux-only regressions |
+| Working tree after `0dcbcdf2` | `CARGO='rustup run 1.97.1 cargo' make unit` with qualified FFmpeg 8.1.2 and loopback fixture permission | Pass · core 955/955, store contracts 87/87, daemon 1,777/1,777, all remaining workspace and documentation tests, 3 declared ignores, and no failures |
+| Working tree after `0dcbcdf2` | ownership/status contracts, `make validation-lint`, `make history-check`, formatting, and diff check | Pass · 12/12 contracts, catalog 24/30/1,435, history 1,357 corrective commits, and clean formatting/whitespace |
 
 ## Remaining evidence before release
 

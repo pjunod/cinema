@@ -1210,7 +1210,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # until the operating-system read ends, the singleflight owner publishes one
 # shared result, and every fixture task is joined before its test returns.
 # None chooses or replaces a rolling producer.
-expected_occurrences = 423
+# 423 -> 425 after bound-cleanup review: one production owner retains the
+# version child, group terminator, and admission permit when its caller times
+# out; one test-only task proves detached cleanup retains its owned permit.
+# Both finish independently of the caller, and neither chooses a producer.
+expected_occurrences = 425
 
 [[module_structures]]
 id = "method-spawn"
@@ -1360,7 +1364,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleeps/timeouts make cancellation, deadline, and ownership races
 # deterministic. Every child deadline is paired with group termination and
 # reap; no timer decides producer recovery or selects a replacement plan.
-expected_occurrences = 626
+# 626 -> 630 after bound-cleanup review: three production constructors bound
+# version admission, detached version cleanup, and the caller-facing fact
+# deadline. One test-only timeout proves cleanup retains ownership after that
+# deadline. None initiates recovery or chooses a replacement plan.
+expected_occurrences = 630
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1408,7 +1416,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # snapshot for version and selected-stream facts; one Linux-only fixture
 # command verifies collision-safe assignment of crossed source/executable
 # descriptors. The fixture waits synchronously and owns no rolling producer.
-expected_occurrences = 73
+# 73 -> 74 after parser-closure review: one Linux-only native-launcher fixture
+# proves Landlock refuses its attempted second exec. The synchronous status is
+# collected before return; this test-only child owns no rolling producer.
+expected_occurrences = 74
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1494,7 +1505,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # the Linux crossed-descriptor fixture calls `.status()`. The former are the
 # bounded process owners described above; the latter waits for one finite
 # shell assertion and ships in no binary.
-expected_occurrences = 240
+# 240 -> 241 after parser-closure review: the Linux native-launcher fixture
+# waits synchronously for Landlock to refuse its attempted downstream exec.
+expected_occurrences = 241
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
