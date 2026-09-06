@@ -9456,6 +9456,106 @@ mod tests {
     }
 
     #[test]
+    fn planned_outage_lease_excludes_a_concurrent_production_removal_attempt() {
+        let path = std::env::temp_dir().join(format!(
+            "plurx-outage-preflight-removal-race-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let connection = rusqlite::Connection::open(&path).expect("membership race fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT, capability TEXT, last_seen_at INTEGER, \
+                   PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_operation_leases (\
+                   singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                   node_id TEXT NOT NULL, operation TEXT NOT NULL, \
+                   claim_id TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL); \
+                 CREATE TABLE media_sessions (\
+                   owner_node_id TEXT, state TEXT, lease_expires_at_ms INTEGER); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', 10, NULL), ('node-b', 10, NULL); \
+                 INSERT INTO cluster_node_capabilities VALUES \
+                   ('node-a', 'membership_removal_attempt_refs_v1', 10), \
+                   ('node-b', 'membership_removal_attempt_refs_v1', 10);",
+            )
+            .expect("production membership lifecycle schema");
+        connection
+            .execute_batch(PROTECT_OPERATION_LEASE_FROM_REMOVAL_SQL)
+            .expect("previous-release removal guard");
+        assert_eq!(
+            connection
+                .execute(
+                    ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                    rusqlite::params!["node-a", "restart", "preflight", 1_000_i64, 100_i64],
+                )
+                .expect("claim planned-outage lease before preflight"),
+            1
+        );
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let removal_path = path.clone();
+        let removal_barrier = barrier.clone();
+        let removal = std::thread::spawn(move || {
+            let connection =
+                rusqlite::Connection::open(removal_path).expect("concurrent removal client");
+            connection
+                .busy_timeout(Duration::from_secs(5))
+                .expect("removal busy timeout");
+            removal_barrier.wait();
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(false),
+                    rusqlite::params!["node-b", "racing-removal", 50_i64],
+                )
+                .expect("lease predicate rejects current removal without a SQL error")
+        });
+
+        // This barrier represents the fresh status/directory/probe collection:
+        // the production lease is already durable before the competing
+        // lifecycle write is allowed to run.
+        barrier.wait();
+        assert_eq!(
+            removal.join().expect("concurrent removal attempt"),
+            0,
+            "membership removal must not cross a lease-protected preflight"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_node_removal_attempts",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .expect("removal attempt count"),
+            0
+        );
+
+        connection
+            .execute("DELETE FROM cluster_operation_leases", [])
+            .expect("finish planned outage");
+        assert_eq!(
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(false),
+                    rusqlite::params!["node-b", "post-preflight-removal", 50_i64],
+                )
+                .expect("removal resumes after lease release"),
+            1
+        );
+        drop(connection);
+        std::fs::remove_file(path).expect("remove membership race fixture");
+    }
+
+    #[test]
     fn previous_release_lifecycle_writes_cannot_cross_an_outage_lease() {
         let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
         connection

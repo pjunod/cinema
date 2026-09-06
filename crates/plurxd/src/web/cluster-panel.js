@@ -257,14 +257,18 @@
     });
     const representatives=[];
     groups.forEach(group=>{
-      let eligible=group.observations;
+      const freshest=Math.min(...group.observations.map(age));
+      let current=group.observations.filter(observation=>age(observation)<=freshest+5000);
       // A flushed sender acknowledgement is causally later than every
-      // receiver-side phase for the same exact snapshot: the receiver had to
-      // finish the install and return that response before the sender could
-      // publish Complete. Apply that authority only to a validated fingerprint;
-      // legacy and malformed identities remain attempt-local.
+      // contemporaneous receiver-side phase for the same exact snapshot: the
+      // receiver had to finish the install and return that response before the
+      // sender could publish Complete. Apply that authority only to a validated
+      // fingerprint and this identity's five-second freshness cohort. An old
+      // leader's retained acknowledgement must not hide a newer attempt after a
+      // receiver restart or leadership change; legacy and malformed identities
+      // remain attempt-local.
       const acknowledged=group.fingerprint
-        ?eligible.filter(acknowledgedComplete):[];
+        ?current.filter(acknowledgedComplete):[];
       if(acknowledged.length){
         acknowledged.sort((left,right)=>age(left)-age(right)||tieBreak(left,right));
         representatives.push(acknowledged[0]);
@@ -274,13 +278,11 @@
       // sender's failure to observe its reply. Apply that exception once at
       // the group boundary; it does not cover inbound failures, unrelated
       // fingerprints, or Complete-vs-Complete evidence.
-      const receiverComplete=eligible.some(observation=>
+      const receiverComplete=current.some(observation=>
         observation.phase==="complete"&&observation.direction==="inbound");
       if(group.fingerprint&&receiverComplete)
-        eligible=eligible.filter(observation=>
+        current=current.filter(observation=>
           !(observation.phase==="failed"&&observation.direction==="outbound"));
-      const freshest=Math.min(...eligible.map(age));
-      const current=eligible.filter(observation=>age(observation)<=freshest+5000);
       current.sort(withinIdentity);
       representatives.push(current[0]);
     });

@@ -33,7 +33,16 @@ const MAX_CACHE_ONLY_ADMIN_PROOFS: usize = 64;
 
 #[derive(Clone, Default)]
 pub(crate) struct CacheOnlyAdminProofCache {
-    inner: Arc<Mutex<BTreeMap<String, CachedAdminProof>>>,
+    inner: Arc<Mutex<CachedAdminProofState>>,
+}
+
+#[derive(Default)]
+struct CachedAdminProofState {
+    /// Changes before and after every explicit revocation. Store-backed
+    /// authentication captures this before its first read and may publish only
+    /// if no revocation crossed that read.
+    generation: u64,
+    proofs: BTreeMap<String, CachedAdminProof>,
 }
 
 #[derive(Clone, Copy)]
@@ -42,30 +51,83 @@ struct CachedAdminProof {
     expires_at: tokio::time::Instant,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CacheOnlyAdminAuthenticationTicket(u64);
+
+enum CacheOnlyAdminRevocationTarget {
+    Digest(String),
+    User(i64),
+}
+
+/// Brackets a Store mutation with two cache generations. The first removes
+/// existing proof before the mutation starts; the second prevents an ordinary
+/// authentication that read the old Store state concurrently from publishing
+/// after the mutation completes.
+pub(crate) struct CacheOnlyAdminRevocation {
+    cache: CacheOnlyAdminProofCache,
+    target: CacheOnlyAdminRevocationTarget,
+}
+
+impl Drop for CacheOnlyAdminRevocation {
+    fn drop(&mut self) {
+        match &self.target {
+            CacheOnlyAdminRevocationTarget::Digest(digest) => {
+                self.cache.invalidate_digest(digest);
+            }
+            CacheOnlyAdminRevocationTarget::User(user_id) => {
+                self.cache.invalidate_user(*user_id);
+            }
+        }
+    }
+}
+
 impl CacheOnlyAdminProofCache {
+    /// Capture the cache generation before beginning Store authentication.
+    /// A poisoned cache refuses publication and cache-only authorization.
+    pub(crate) fn authentication_ticket(&self) -> Option<CacheOnlyAdminAuthenticationTicket> {
+        self.inner
+            .lock()
+            .ok()
+            .map(|state| CacheOnlyAdminAuthenticationTicket(state.generation))
+    }
+
     /// Publish the result of one Store-backed authentication. Non-admin proof
     /// removes any older admin proof for the same token instead of caching a
     /// broader user record.
-    pub(crate) fn record_authenticated(&self, token_digest: String, user: &User) {
-        let Ok(mut proofs) = self.inner.lock() else {
+    pub(crate) fn record_authenticated(
+        &self,
+        ticket: Option<CacheOnlyAdminAuthenticationTicket>,
+        token_digest: String,
+        user: &User,
+    ) {
+        let Some(ticket) = ticket else {
             return;
         };
-        let now = tokio::time::Instant::now();
-        proofs.retain(|_, proof| proof.expires_at > now);
-        if !user.is_admin {
-            proofs.remove(&token_digest);
+        let Ok(mut state) = self.inner.lock() else {
+            return;
+        };
+        if state.generation != ticket.0 {
             return;
         }
-        if !proofs.contains_key(&token_digest) && proofs.len() >= MAX_CACHE_ONLY_ADMIN_PROOFS {
-            let oldest = proofs
+        let now = tokio::time::Instant::now();
+        state.proofs.retain(|_, proof| proof.expires_at > now);
+        if !user.is_admin {
+            state.proofs.remove(&token_digest);
+            return;
+        }
+        if !state.proofs.contains_key(&token_digest)
+            && state.proofs.len() >= MAX_CACHE_ONLY_ADMIN_PROOFS
+        {
+            let oldest = state
+                .proofs
                 .iter()
                 .min_by_key(|(_, proof)| proof.expires_at)
                 .map(|(digest, _)| digest.clone());
             if let Some(oldest) = oldest {
-                proofs.remove(&oldest);
+                state.proofs.remove(&oldest);
             }
         }
-        proofs.insert(
+        state.proofs.insert(
             token_digest,
             CachedAdminProof {
                 user_id: user.id,
@@ -74,25 +136,43 @@ impl CacheOnlyAdminProofCache {
         );
     }
 
+    pub(crate) fn begin_digest_revocation(&self, token_digest: &str) -> CacheOnlyAdminRevocation {
+        self.invalidate_digest(token_digest);
+        CacheOnlyAdminRevocation {
+            cache: self.clone(),
+            target: CacheOnlyAdminRevocationTarget::Digest(token_digest.to_owned()),
+        }
+    }
+
+    pub(crate) fn begin_user_revocation(&self, user_id: i64) -> CacheOnlyAdminRevocation {
+        self.invalidate_user(user_id);
+        CacheOnlyAdminRevocation {
+            cache: self.clone(),
+            target: CacheOnlyAdminRevocationTarget::User(user_id),
+        }
+    }
+
     pub(crate) fn invalidate_digest(&self, token_digest: &str) {
-        if let Ok(mut proofs) = self.inner.lock() {
-            proofs.remove(token_digest);
+        if let Ok(mut state) = self.inner.lock() {
+            state.generation = state.generation.wrapping_add(1);
+            state.proofs.remove(token_digest);
         }
     }
 
     pub(crate) fn invalidate_user(&self, user_id: i64) {
-        if let Ok(mut proofs) = self.inner.lock() {
-            proofs.retain(|_, proof| proof.user_id != user_id);
+        if let Ok(mut state) = self.inner.lock() {
+            state.generation = state.generation.wrapping_add(1);
+            state.proofs.retain(|_, proof| proof.user_id != user_id);
         }
     }
 
     fn authenticate(&self, token_digest: &str) -> bool {
-        let Ok(mut proofs) = self.inner.lock() else {
+        let Ok(mut state) = self.inner.lock() else {
             return false;
         };
         let now = tokio::time::Instant::now();
-        proofs.retain(|_, proof| proof.expires_at > now);
-        proofs.contains_key(token_digest)
+        state.proofs.retain(|_, proof| proof.expires_at > now);
+        state.proofs.contains_key(token_digest)
     }
 }
 
@@ -258,6 +338,7 @@ impl FromRequestParts<AppState> for AuthUser {
     ) -> Result<Self, Self::Rejection> {
         let token = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
         let hash = auth::hash_token(&token);
+        let ticket = state.cache_only_admin_proofs.authentication_ticket();
         let user = match state.store.user_for_token(&hash).await? {
             Some(user) => user,
             None => {
@@ -267,7 +348,7 @@ impl FromRequestParts<AppState> for AuthUser {
         };
         state
             .cache_only_admin_proofs
-            .record_authenticated(hash, &user);
+            .record_authenticated(ticket, hash, &user);
         Ok(AuthUser(user))
     }
 }
@@ -349,13 +430,18 @@ mod tests {
         }
     }
 
+    fn record(cache: &CacheOnlyAdminProofCache, digest: String, user: &User) {
+        let ticket = cache.authentication_ticket();
+        cache.record_authenticated(ticket, digest, user);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins() {
         let cache = CacheOnlyAdminProofCache::default();
         let admin_digest = auth::hash_token("admin-token");
         let viewer_digest = auth::hash_token("viewer-token");
-        cache.record_authenticated(admin_digest.clone(), &user(1, true));
-        cache.record_authenticated(viewer_digest.clone(), &user(2, false));
+        record(&cache, admin_digest.clone(), &user(1, true));
+        record(&cache, viewer_digest.clone(), &user(2, false));
 
         assert!(cache.authenticate(&admin_digest));
         assert!(!cache.authenticate(&viewer_digest));
@@ -363,6 +449,7 @@ mod tests {
             .inner
             .lock()
             .expect("admin proof cache")
+            .proofs
             .contains_key("admin-token"));
         tokio::time::advance(CACHE_ONLY_ADMIN_PROOF_TTL).await;
         assert!(!cache.authenticate(&admin_digest));
@@ -373,8 +460,8 @@ mod tests {
         let cache = CacheOnlyAdminProofCache::default();
         let first_digest = auth::hash_token("first-admin-token");
         let second_digest = auth::hash_token("second-admin-token");
-        cache.record_authenticated(first_digest.clone(), &user(3, true));
-        cache.record_authenticated(second_digest.clone(), &user(3, true));
+        record(&cache, first_digest.clone(), &user(3, true));
+        record(&cache, second_digest.clone(), &user(3, true));
         cache.invalidate_digest(&first_digest);
         assert!(!cache.authenticate(&first_digest));
         assert!(cache.authenticate(&second_digest));
@@ -386,14 +473,142 @@ mod tests {
     fn cache_only_admin_proofs_have_a_hard_capacity() {
         let cache = CacheOnlyAdminProofCache::default();
         for id in 0..=super::MAX_CACHE_ONLY_ADMIN_PROOFS as i64 {
-            cache.record_authenticated(auth::hash_token(&format!("token-{id}")), &user(id, true));
+            record(
+                &cache,
+                auth::hash_token(&format!("token-{id}")),
+                &user(id, true),
+            );
         }
-        let proofs = cache.inner.lock().expect("admin proof cache");
-        assert_eq!(proofs.len(), super::MAX_CACHE_ONLY_ADMIN_PROOFS);
-        assert!(proofs.contains_key(&auth::hash_token(&format!(
+        let state = cache.inner.lock().expect("admin proof cache");
+        assert_eq!(state.proofs.len(), super::MAX_CACHE_ONLY_ADMIN_PROOFS);
+        assert!(state.proofs.contains_key(&auth::hash_token(&format!(
             "token-{}",
             super::MAX_CACHE_ONLY_ADMIN_PROOFS
         ))));
+    }
+
+    #[test]
+    fn logout_revocation_generation_rejects_an_in_flight_store_result() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let digest = auth::hash_token("racing-logout-token");
+        let before_revocation = cache.authentication_ticket();
+
+        let revocation = cache.begin_digest_revocation(&digest);
+        let during_store_delete = cache.authentication_ticket();
+        drop(revocation);
+        cache.record_authenticated(before_revocation, digest.clone(), &user(4, true));
+        cache.record_authenticated(during_store_delete, digest.clone(), &user(4, true));
+
+        assert!(
+            !cache.authenticate(&digest),
+            "a Store result started before logout must not revive the token"
+        );
+    }
+
+    #[test]
+    fn user_revocation_generation_rejects_all_in_flight_store_results() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let first_digest = auth::hash_token("racing-user-token-1");
+        let second_digest = auth::hash_token("racing-user-token-2");
+        let before_revocation = cache.authentication_ticket();
+
+        let revocation = cache.begin_user_revocation(5);
+        let during_store_mutation = cache.authentication_ticket();
+        drop(revocation);
+        cache.record_authenticated(before_revocation, first_digest.clone(), &user(5, true));
+        cache.record_authenticated(during_store_mutation, second_digest.clone(), &user(5, true));
+
+        assert!(!cache.authenticate(&first_digest));
+        assert!(!cache.authenticate(&second_digest));
+    }
+
+    #[test]
+    fn authentication_and_revocation_callers_bracket_store_work_with_generations() {
+        let extractor = include_str!("extract.rs")
+            .split_once("impl FromRequestParts<AppState> for AuthUser")
+            .expect("AuthUser extractor")
+            .1
+            .split_once("impl FromRequestParts<AppState> for RawToken")
+            .expect("AuthUser extractor end")
+            .0;
+        assert!(
+            extractor
+                .find("authentication_ticket()")
+                .expect("auth ticket")
+                < extractor.find("user_for_token(&hash)").expect("Store auth")
+        );
+        assert!(extractor.contains("record_authenticated(ticket, hash, &user)"));
+
+        let auth = include_str!("auth.rs");
+        let login = auth
+            .split_once("pub async fn login(")
+            .expect("login")
+            .1
+            .split_once("pub async fn logout(")
+            .expect("login end")
+            .0;
+        assert!(
+            login.find("authentication_ticket()").expect("login ticket")
+                < login
+                    .find("get_user_by_username")
+                    .expect("login Store read")
+        );
+        assert!(login.contains("record_authenticated(proof_ticket, hash, &user)"));
+        let logout = auth
+            .split_once("pub async fn logout(")
+            .expect("logout")
+            .1
+            .split_once("pub async fn me(")
+            .expect("logout end")
+            .0;
+        assert!(
+            logout
+                .find("begin_digest_revocation")
+                .expect("logout revocation guard")
+                < logout.find("delete_token").expect("logout Store mutation")
+        );
+
+        let setup = include_str!("system.rs")
+            .split_once("pub async fn setup(")
+            .expect("setup")
+            .1
+            .split_once("pub struct SystemDto")
+            .expect("setup end")
+            .0;
+        assert!(
+            setup.find("authentication_ticket()").expect("setup ticket")
+                < setup.find("count_users()").expect("setup Store read")
+        );
+        assert!(setup.contains("record_authenticated(proof_ticket, token_hash, &user)"));
+
+        let users = include_str!("users.rs");
+        let update = users
+            .split_once("pub async fn update(")
+            .expect("user update")
+            .1
+            .split_once("pub async fn delete(")
+            .expect("user update end")
+            .0;
+        assert!(
+            update
+                .find("begin_user_revocation")
+                .expect("demotion revocation guard")
+                < update.find("set_admin").expect("admin Store mutation")
+        );
+        assert!(
+            update.matches("begin_user_revocation").count() >= 2,
+            "demotion and password reset need independent guards"
+        );
+        let delete = users
+            .split_once("pub async fn delete(")
+            .expect("user delete")
+            .1;
+        assert!(
+            delete
+                .find("begin_user_revocation")
+                .expect("delete revocation guard")
+                < delete.find("delete_user").expect("delete Store mutation")
+        );
     }
 
     // The routing rule the whole two-credential design rests on: the prefix

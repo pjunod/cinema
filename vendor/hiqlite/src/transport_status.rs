@@ -348,20 +348,22 @@ impl LocalSnapshotTransportStatus {
             .observations
             .iter_mut()
             .filter_map(|(key, observation)| {
-                let sample_age = now.saturating_duration_since(observation.last_update);
-                let stalled = observation.phase.can_stall()
-                    && observation
+                let stall_boundary = observation.phase.can_stall().then(|| {
+                    observation
                         .deadline
-                        .map_or(sample_age >= STALLED_AFTER, |deadline| now >= deadline);
+                        .unwrap_or(observation.last_update + STALLED_AFTER)
+                });
+                let stalled = stall_boundary.is_some_and(|boundary| now >= boundary);
                 if stalled && observation.phase != SnapshotTransportPhase::Stalled {
                     let previous = observation.phase;
                     observation.phase = SnapshotTransportPhase::Stalled;
                     observation.last_error_category = Some("snapshot_stalled");
-                    // Crossing the stall boundary is a diagnostic event in its
-                    // own right. Retain that newly observed evidence for one
-                    // complete freshness window, but update only on the phase
-                    // transition so repeated reads cannot renew it forever.
-                    observation.last_update = now;
+                    // Anchor the diagnostic window to the producer's actual
+                    // stall boundary, not to the first status read that happens
+                    // to notice it. A late first read must not resurrect hours-old
+                    // work as a fresh stall for another five minutes.
+                    observation.last_update =
+                        stall_boundary.expect("stalled observations have a boundary");
                     log_transition(self.inner.observing_node_id, key, previous, observation);
                 }
                 if observation_expired(observation, now) {
@@ -2358,6 +2360,66 @@ mod tests {
         assert_eq!(stalled.sample_age_ms, 0);
 
         tokio::time::advance(EXPIRE_AFTER + Duration::from_millis(1)).await;
+        assert!(status.snapshot().observations.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_first_snapshot_cannot_resurrect_work_expired_after_its_deadline() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(120);
+        status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            7,
+            "late-deadline-read",
+            OutboundSnapshotSocket {
+                epoch: 3,
+                connected: true,
+            },
+            deadline,
+        );
+
+        tokio::time::advance(Duration::from_secs(120) + EXPIRE_AFTER).await;
+        let boundary = status.snapshot().observations.remove(0);
+        assert_eq!(boundary.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(boundary.sample_age_ms, duration_ms(EXPIRE_AFTER));
+
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(120);
+        status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            8,
+            "expired-deadline-read",
+            OutboundSnapshotSocket {
+                epoch: 4,
+                connected: true,
+            },
+            deadline,
+        );
+        tokio::time::advance(Duration::from_secs(120) + EXPIRE_AFTER + Duration::from_millis(1))
+            .await;
+        assert!(status.snapshot().observations.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_first_snapshot_cannot_resurrect_work_without_a_deadline() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let attempt = status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            7,
+            "late-no-deadline-read",
+            OutboundSnapshotSocket {
+                epoch: 3,
+                connected: true,
+            },
+            deadline,
+        );
+        status.outbound_retry_owned(&attempt, "snapshot_retry", None);
+
+        tokio::time::advance(STALLED_AFTER + EXPIRE_AFTER + Duration::from_millis(1)).await;
         assert!(status.snapshot().observations.is_empty());
     }
 

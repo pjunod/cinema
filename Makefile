@@ -563,6 +563,14 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::late_first_snapshot_cannot_resurrect_work_expired_after_its_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::late_first_snapshot_cannot_resurrect_work_without_a_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  transport_status::tests::live_install_longer_than_five_minutes_remains_visible_through_its_deadline \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -649,6 +657,15 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::mutation_preflight_bounds_the_current_membership_read \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::planned_outage_lease_blocks_membership_mutation_during_fresh_preflight \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::failed_fresh_preflight_releases_its_planned_outage_lease \
+	  -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
+	  cluster::membership::tests::planned_outage_lease_excludes_a_concurrent_production_removal_attempt \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_expire_without_sliding_and_refuse_non_admins \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
@@ -656,6 +673,15 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_have_a_hard_capacity \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::logout_revocation_generation_rejects_an_in_flight_store_result \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::user_revocation_generation_rejects_all_in_flight_store_results \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::authentication_and_revocation_callers_bracket_store_work_with_generations \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::production_collector_preserves_private_transport_when_public_listener_is_closed \

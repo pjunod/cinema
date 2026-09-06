@@ -1789,6 +1789,10 @@ The bounded `snapshot_id` remains display text only;
 cross-observer correlation uses a separate 64-hex SHA-256 fingerprint of the
 original ID. Older peers that omit it stay attempt-local instead of acquiring
 unsafe identity from a potentially colliding display label.
+Cross-observer completion can supersede a predecessor only inside the same
+fingerprint's five-second freshness cohort. A retained acknowledgement or
+receiver completion outside that cohort cannot hide a newer retry, install, or
+failure after a receiver restart or leadership change.
 
 The existing private Hiqlite cluster listener serves
 `GET /cluster/transport/sqlite` with the same `X-API-SECRET` authentication as
@@ -1814,9 +1818,12 @@ admin extractor. Successful ordinary authentication publishes a process-local
 proof containing only the SHA-256 token digest, user ID, and fixed five-minute
 expiry. Recovery reads do not renew it, at most 64 proofs are retained, and a
 miss, expiry, non-admin result, or cache failure returns `401` without falling
-back to Store. Logout, demotion, password reset, and user deletion invalidate
-the proof before attempting their Store mutation, including commit-unknown
-outcomes. A cold process therefore needs one successful ordinary authentication
+back to Store. Store-backed authentication captures the cache revocation
+generation before its read and publishes proof only if that generation is
+unchanged. Logout, demotion, password reset, and user deletion invalidate proof
+and advance the generation both before and after their Store mutation, including
+commit-unknown outcomes; an in-flight stale read therefore cannot republish a
+revoked credential. A cold process therefore needs one successful ordinary authentication
 before these public recovery reads; the private authenticated cluster-listener
 transport route remains the pre-listener/startup path.
 
@@ -1830,21 +1837,29 @@ begins when that refresh completes; embedded status and transport ages still
 advance from their node-owned source timestamps. If a browser retains the last
 aggregate across failed refreshes, it advances those ages and the active
 deadline from the aggregate's own observation time, crosses to `stalled` at
-zero, and expires after the same five-minute diagnostic window. Each peer
-refresh probes the
+zero, and expires after the same five-minute diagnostic window. A failed
+refresh pays a preserving repaint so those projected transport fields change
+on screen. If a Cluster decision dialog is open, the page keeps that dialog
+intact, patches only the independent reading-age cell, and pays the transport
+repaint after the dialog closes. Each peer refresh probes the
 public and private listeners concurrently, so up to sixteen bounded HTTP
 requests may be in flight. Roster members beyond the eight-probe bound remain
 visible as `peer_limit` instead of disappearing. A healthy sender can therefore
 report outbound evidence for a learner whose public listener is still closed.
 Safety-changing maintenance-entry and restart-preparation requests do not use
-those five-second peer projections: they reread committed membership and the
-peer directory, then perform current authenticated probes under one absolute
-two-second preflight deadline. A roster or directory read that does not finish
+those five-second peer projections: they first claim the replicated
+planned-outage lifecycle lease, then reread committed membership and the peer
+directory and perform current authenticated probes under one absolute
+two-second preflight deadline. Collection failure or an unsafe/candidate-mismatch
+verdict releases that exact claim, while its presence prevents a concurrent
+join, promotion, maintenance, or removal from invalidating the safety proof. A roster or directory read that does not finish
 inside its own 500-millisecond share fails closed before mutation.
 Inactive status older than five minutes expires instead of continuing to claim
 work. An observation with an active monotonic deadline remains visible past
 five minutes through that deadline and for the producer's five-minute stalled
-diagnostic window. A cached pre-stall sample projects that one transition
+diagnostic window. That window is anchored to the actual deadline (or the
+producer's last update plus the stall threshold when no deadline exists), so a
+late first read cannot resurrect expired work. A cached pre-stall sample projects that one transition
 without resetting an already-stalled sample's age; the five-second cache
 decreases its reported deadline remainder rather than granting more time. The
 panel reports observer and sample age and keeps
@@ -2260,7 +2275,8 @@ symlink. There is no raw-token argument. Use `--json` when another tool needs
 the exact API document.
 
 Restart preparation acquires one replicated, expiring planned-outage lease
-before the target fences local admissions. Maintenance uses the same lease, so
+before it collects the fresh safety preflight and before the target fences local
+admissions. Maintenance uses the same lease, so
 two safe observations on different nodes cannot turn into two simultaneous
 reboots. Cancellation releases the restart claim; a failed maintenance request
 releases its exact claim; normal heartbeats remove expired claims after a

@@ -97,6 +97,7 @@ pub async fn setup(
     State(state): State<AppState>,
     Json(req): Json<SetupRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
+    let proof_ticket = state.cache_only_admin_proofs.authentication_ticket();
     if state.store.count_users().await? > 0 {
         return Err(ApiError::Conflict("setup already completed".into()));
     }
@@ -119,7 +120,7 @@ pub async fn setup(
         .await?;
     state
         .cache_only_admin_proofs
-        .record_authenticated(token_hash, &user);
+        .record_authenticated(proof_ticket, token_hash, &user);
     Ok(Json(LoginResponse {
         token,
         user: user.into(),

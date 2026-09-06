@@ -16,7 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
-    ActivityPeer, ClusterNodeRecord, MembershipStatus, NodeRole, MAX_OPERATIONS_PEERS,
+    ActivityPeer, ClusterNodeRecord, ClusterOperationLease, MembershipStatus, NodeRole,
+    MAX_OPERATIONS_PEERS,
 };
 use plurx_core::cluster::migration::status::{
     DbSnapshotMetricsSnapshot, SnapshotTransportPhase, SnapshotTransportStatus, WalRuntimeState,
@@ -318,6 +319,81 @@ pub(crate) async fn collect_current_aggregate(
     .await
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum PlannedOutageOperation {
+    Restart,
+    Maintenance,
+}
+
+/// Claim the replicated membership-lifecycle exclusion before collecting the
+/// safety evidence it protects. A failed collection releases the exact claim;
+/// a successful caller owns it until restart preparation or maintenance
+/// consumes/cancels it.
+pub(crate) async fn acquire_planned_outage_preflight(
+    state: &AppState,
+    node_id: &str,
+    duration: Duration,
+    operation: PlannedOutageOperation,
+) -> Result<(ClusterOperationLease, ClusterOperationsAggregate), ApiError> {
+    let acquire_membership = state.membership.clone();
+    let release_membership = state.membership.clone();
+    acquire_then_collect_preflight(
+        move || async move {
+            match operation {
+                PlannedOutageOperation::Restart => acquire_membership
+                    .acquire_restart_preparation(node_id, duration)
+                    .await,
+                PlannedOutageOperation::Maintenance => acquire_membership
+                    .acquire_maintenance_preparation(node_id, duration)
+                    .await,
+            }
+            .map_err(api_error)
+        },
+        || collect_current_aggregate(state),
+        move |lease| async move {
+            if let Err(error) = release_membership
+                .release_cluster_operation_lease(&lease)
+                .await
+            {
+                tracing::warn!(%error, "failed to release planned-outage lease after preflight failure; expiry remains authoritative");
+            }
+        },
+    )
+    .await
+}
+
+async fn acquire_then_collect_preflight<
+    Lease,
+    Evidence,
+    Acquire,
+    AcquireFuture,
+    Collect,
+    CollectFuture,
+    Release,
+    ReleaseFuture,
+>(
+    acquire: Acquire,
+    collect: Collect,
+    release: Release,
+) -> Result<(Lease, Evidence), ApiError>
+where
+    Acquire: FnOnce() -> AcquireFuture,
+    AcquireFuture: std::future::Future<Output = Result<Lease, ApiError>>,
+    Collect: FnOnce() -> CollectFuture,
+    CollectFuture: std::future::Future<Output = Result<Evidence, ApiError>>,
+    Release: FnOnce(Lease) -> ReleaseFuture,
+    ReleaseFuture: std::future::Future<Output = ()>,
+{
+    let lease = acquire().await?;
+    match collect().await {
+        Ok(evidence) => Ok((lease, evidence)),
+        Err(error) => {
+            release(lease).await;
+            Err(error)
+        }
+    }
+}
+
 async fn collect_current_aggregate_with_sources<
     MembershipRead,
     MembershipFuture,
@@ -577,8 +653,22 @@ pub(crate) async fn prepare_restart(
             "restart preparation must be sent directly to the node named in the route",
         ));
     }
-    let preflight = collect_current_aggregate(&state).await?;
+    let duration = Duration::from_secs(request.expires_in_seconds.unwrap_or(900).clamp(60, 3_600));
+    let (lease, preflight) = acquire_planned_outage_preflight(
+        &state,
+        &node_id,
+        duration,
+        PlannedOutageOperation::Restart,
+    )
+    .await?;
     if !preflight.verdict.safe_to_restart_one {
+        if let Err(error) = state
+            .membership
+            .release_cluster_operation_lease(&lease)
+            .await
+        {
+            tracing::warn!(%error, "failed to release rejected restart preparation lease; expiry remains authoritative");
+        }
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "restart_preparation_unsafe",
@@ -586,18 +676,19 @@ pub(crate) async fn prepare_restart(
         ));
     }
     if preflight.verdict.candidate_node_id.as_deref() != Some(state.node_id.as_str()) {
+        if let Err(error) = state
+            .membership
+            .release_cluster_operation_lease(&lease)
+            .await
+        {
+            tracing::warn!(%error, "failed to release restart candidate-mismatch lease; expiry remains authoritative");
+        }
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "restart_preparation_candidate_mismatch",
             "open the candidate node directly; this node is not the current safe restart candidate",
         ));
     }
-    let duration = Duration::from_secs(request.expires_in_seconds.unwrap_or(900).clamp(60, 3_600));
-    let lease = state
-        .membership
-        .acquire_restart_preparation(&node_id, duration)
-        .await
-        .map_err(api_error)?;
     let local_expiry = lease.preparation_expiry_unix_ms(duration);
     if local_expiry.is_none()
         || !state
@@ -2809,7 +2900,9 @@ mod tests {
             .split_once("fn restart_preparation_response(")
             .expect("restart handler end")
             .0;
-        assert!(restart.contains("collect_current_aggregate(&state).await?"));
+        assert!(restart.contains("acquire_planned_outage_preflight("));
+        assert!(restart.contains("PlannedOutageOperation::Restart"));
+        assert!(restart.contains("release_cluster_operation_lease(&lease)"));
         let maintenance_source = include_str!("cluster.rs");
         let maintenance = maintenance_source
             .split_once("pub async fn enter_maintenance(")
@@ -2818,7 +2911,77 @@ mod tests {
             .split_once("pub async fn exit_maintenance(")
             .expect("maintenance handler end")
             .0;
-        assert!(maintenance.contains("collect_current_aggregate(&state).await?"));
+        assert!(maintenance.contains("acquire_planned_outage_preflight("));
+        assert!(maintenance.contains("PlannedOutageOperation::Maintenance"));
+        assert!(maintenance.contains("release_cluster_operation_lease(&lease)"));
+    }
+
+    #[tokio::test]
+    async fn planned_outage_lease_blocks_membership_mutation_during_fresh_preflight() {
+        let lifecycle_fence = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let mutation_crossed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let (lease, ()) = acquire_then_collect_preflight(
+            {
+                let lifecycle_fence = lifecycle_fence.clone();
+                move || async move { Ok::<_, ApiError>(lifecycle_fence.lock_owned().await) }
+            },
+            {
+                let lifecycle_fence = lifecycle_fence.clone();
+                let mutation_crossed = mutation_crossed.clone();
+                move || async move {
+                    let mutation =
+                        tokio::spawn(async move { lifecycle_fence.try_lock_owned().is_ok() });
+                    mutation_crossed.store(
+                        mutation.await.expect("membership mutation attempt"),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    Ok::<_, ApiError>(())
+                }
+            },
+            |lease| async move { drop(lease) },
+        )
+        .await
+        .expect("lease-protected fresh preflight");
+
+        assert!(
+            !mutation_crossed.load(std::sync::atomic::Ordering::Relaxed),
+            "a membership lifecycle mutation must not cross the preflight"
+        );
+        drop(lease);
+        assert!(lifecycle_fence.try_lock_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_fresh_preflight_releases_its_planned_outage_lease() {
+        let lifecycle_fence = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let result = acquire_then_collect_preflight(
+            {
+                let lifecycle_fence = lifecycle_fence.clone();
+                move || async move { Ok::<_, ApiError>(lifecycle_fence.lock_owned().await) }
+            },
+            || async {
+                Err::<(), _>(ApiError::typed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "test_preflight_failed",
+                    "test preflight failed",
+                ))
+            },
+            {
+                let released = released.clone();
+                move |lease| async move {
+                    drop(lease);
+                    released.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(released.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(lifecycle_fence.try_lock_owned().is_ok());
     }
 
     #[tokio::test(start_paused = true)]

@@ -14077,7 +14077,13 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         }catch(error){
           if(error&&error.status===401) throw error;
           if(!settingsCurrent(generation,tab)) return;
-          patchClusterReadingAge();
+          // Retained transport evidence advances locally even when the refresh
+          // fails: active work crosses its deadline into Stalled and eventually
+          // expires. Re-render that projection unless an open decision dialog
+          // owns the current DOM; in that case only the independent age cell is
+          // safe to patch and the next tick will try the preserving repaint.
+          if(clusterRepaintDeferred()) patchClusterReadingAge();
+          else repaintClusterPreserving(renderSettings);
         }
       }
     }

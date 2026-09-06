@@ -1078,6 +1078,97 @@ test("acknowledged completion never crosses distinct, legacy, or malformed ident
   }
 });
 
+test("stale completion evidence never suppresses a newer same-fingerprint successor", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "d".repeat(64);
+  const staleAcknowledged = transportObservation("complete", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "retried-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    acknowledged_offset: 4096,
+    sample_age_ms: 20_000,
+  });
+  const successors = [
+    transportObservation("installing", {
+      snapshot_id: "retried-snapshot",
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "current-receiver",
+      attempt_id: 9,
+      socket_epoch: 7,
+      sample_age_ms: 40,
+      active_deadline_remaining_ms: 60_000,
+    }),
+    transportObservation("failed", {
+      snapshot_id: "retried-snapshot",
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "current-receiver",
+      attempt_id: 10,
+      socket_epoch: 8,
+      sample_age_ms: 40,
+      active_deadline_remaining_ms: null,
+    }),
+  ];
+
+  for (const successor of successors) {
+    for (const observations of [[staleAcknowledged, successor], [successor, staleAcknowledged]]) {
+      const operations = {
+        nodes: observations.map((observation) => ({
+          transport: {
+            observing_node_id: observation.observing_node_id,
+            observations: [observation],
+          },
+        })),
+      };
+      const current = ui.clusterTransportExplanation(operations, 2, false);
+      assert.equal(current.code, successor.phase, `${successor.phase}: ${observations[0].boot_id} first`);
+      assert.equal(current.observation.boot_id, "current-receiver", successor.phase);
+    }
+  }
+});
+
+test("stale receiver completion never suppresses a newer outbound failure", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "e".repeat(64);
+  const staleReceiver = transportObservation("complete", {
+    snapshot_id: "retried-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-receiver",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 20_000,
+  });
+  const currentFailure = transportObservation("failed", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "retried-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-sender",
+    attempt_id: 10,
+    socket_epoch: 8,
+    sample_age_ms: 40,
+  });
+
+  for (const observations of [[staleReceiver, currentFailure], [currentFailure, staleReceiver]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "failed", observations[0].direction);
+    assert.equal(current.observation.boot_id, "current-sender");
+  }
+});
+
 test("stalled transport renders its observer and sample age", () => {
   const ui = sandbox();
   const membership = status("degraded", [
@@ -3435,6 +3526,7 @@ test("transport observer age advances the repaint projection", () => {
 function tickHarness({ cluster, ops, now }) {
   const requests = [];
   const painted = [];
+  const paintedTransport = [];
   const readingAge = { innerHTML: "local now · watermark now" };
   const dialogs = [];
   const document = {
@@ -3446,12 +3538,13 @@ function tickHarness({ cluster, ops, now }) {
   };
   const harness = new Function(
     "document", "location", "api", "settingsTab", "settingsCurrent", "refreshLogs",
-    "refreshClusterLogs", "paintTrakt", "renderSettings", "PlurxClusterPanel", "clock", "dialogs",
+    "refreshClusterLogs", "paintTrakt", "recordRender", "PlurxClusterPanel", "clock", "dialogs",
     `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,
        TRAKT=null,CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=0,
        SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
      const cacheTrakt=(value)=>value;
      const Date={now:clock};
+     const renderSettings=()=>recordRender(SETTINGS_DATA.clusterOps);
      ${shippedSource("isSettingsRoute")}
      ${shippedSource("clusterOpsInterval")}
      ${shippedSource("clusterOpsStamp")}
@@ -3479,12 +3572,16 @@ function tickHarness({ cluster, ops, now }) {
     async () => {},
     async () => {},
     () => {},
-    () => painted.push("render"),
+    (renderedOps) => {
+      painted.push("render");
+      paintedTransport.push(PANEL.clusterTransportExplanation(renderedOps, 2, false).code);
+      readingAge.innerHTML = "rendered";
+    },
     PANEL,
     () => now.value,
     dialogs,
   );
-  return { harness, requests, painted, readingAge, dialogs };
+  return { harness, requests, painted, paintedTransport, readingAge, dialogs };
 }
 
 test("the direct status collects on its own gate, and never overlaps", async () => {
@@ -3544,7 +3641,7 @@ test("the gate is fifteen seconds, and a single machine is never polled", async 
   assert.deepEqual(requests, [], "a non-clustered install polls nothing");
 });
 
-test("a refused collection still moves the freshness row", async () => {
+test("a refused collection repaints retained transport unless a dialog owns the DOM", async () => {
   // A failing collection is exactly when the age of the reading on screen
   // matters most, so the row whose only job is freshness must not be the one
   // that freezes.
@@ -3553,27 +3650,70 @@ test("a refused collection still moves the freshness row", async () => {
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
-  const now = { value: 1_000_000 };
-  const { harness, requests, painted, readingAge } = tickHarness({
-    cluster, ops: operationStatus(cluster), now,
-  });
-  readingAge.innerHTML = "frozen";
-  now.value += 15_000;
-  const refused = harness.settingsTick(1, "cluster");
-  requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
-  await refused;
-  assert.notEqual(readingAge.innerHTML, "frozen");
-  assert.deepEqual(painted, [], "a refusal does not repaint the tab");
-  assert.equal(harness.stamped(), now.value, "the retry is the next gate, not the next tick");
+  const ops = operationStatus(cluster);
+  const realNow = Date.now;
+  let wallNow = 2_000_000;
+  Date.now = () => wallNow;
+  try {
+    ops.observed_at_unix_ms = wallNow;
+    ops.nodes[0].transport = {
+      observing_node_id: 1,
+      observations: [transportObservation("installing", {
+        observing_node_id: 1,
+        peer_node_id: 2,
+        direction: "outbound",
+        active_deadline_remaining_ms: 1_000,
+        operation_owns_work: true,
+      })],
+    };
+    const now = { value: 1_000_000 };
+    const { harness, requests, painted, paintedTransport, readingAge } = tickHarness({
+      cluster, ops, now,
+    });
+    readingAge.innerHTML = "frozen";
+    wallNow += 1_000;
+    now.value += 15_000;
+    const refused = harness.settingsTick(1, "cluster");
+    requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
+    await refused;
+    assert.notEqual(readingAge.innerHTML, "frozen");
+    assert.deepEqual(painted, ["render"], "the locally projected stall is repainted");
+    assert.deepEqual(paintedTransport, ["stalled"]);
+    assert.equal(harness.stamped(), now.value, "the retry is the next gate, not the next tick");
 
-  // A 401 is not an ordinary refusal: it belongs to the logout transition, and
-  // swallowing it here would leave the tab rendering after auth is gone.
-  now.value += 15_000;
-  const unauthorized = harness.settingsTick(1, "cluster");
-  requests[1].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
-  await unauthorized;
-  assert.deepEqual(painted, [], "a 401 paints nothing here either");
-  assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
+    // A modal is an operator decision in progress. Keep it intact even after
+    // the retained observation expires, while continuing to patch its age row.
+    harness.openDialog(true);
+    readingAge.innerHTML = "frozen under modal";
+    wallNow += 300_001;
+    now.value += 15_000;
+    const held = harness.settingsTick(1, "cluster");
+    requests[1].reject(Object.assign(new Error("gateway"), { status: 502 }));
+    await held;
+    assert.deepEqual(painted, ["render"], "the open modal prevented a repaint");
+    assert.notEqual(readingAge.innerHTML, "frozen under modal");
+
+    // Once the modal closes, another failed refresh must pay the deferred local
+    // projection and remove the expired transport evidence from the visible UI.
+    harness.openDialog(false);
+    now.value += 15_000;
+    const expired = harness.settingsTick(1, "cluster");
+    requests[2].reject(Object.assign(new Error("gateway"), { status: 502 }));
+    await expired;
+    assert.deepEqual(painted, ["render", "render"]);
+    assert.deepEqual(paintedTransport, ["stalled", "unavailable"]);
+
+    // A 401 is not an ordinary refusal: it belongs to the logout transition, and
+    // swallowing it here would leave the tab rendering after auth is gone.
+    now.value += 15_000;
+    const unauthorized = harness.settingsTick(1, "cluster");
+    requests[3].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
+    await unauthorized;
+    assert.deepEqual(painted, ["render", "render"], "a 401 paints nothing here");
+    assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 test("the two-second roster poll holds its sample under a dialog too", async () => {
@@ -3860,8 +4000,8 @@ test("every path that rewrites this tab goes through the preserving repaint", ()
   const tick = shippedSource("settingsTick");
   assert.equal(
     (tick.match(/repaintClusterPreserving\(renderSettings\)/g) || []).length,
-    2,
-    "both the roster branch and the direct-status branch preserve",
+    3,
+    "the roster and both successful and failed direct-status branches preserve",
   );
   for (const handler of [
     "refreshClusterOperations",

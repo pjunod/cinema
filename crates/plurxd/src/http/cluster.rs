@@ -11,7 +11,9 @@ use plurx_core::cluster::membership::{
 };
 use serde::Deserialize;
 
-use super::cluster_operations::{collect_current_aggregate, local_owned_media_sessions};
+use super::cluster_operations::{
+    acquire_planned_outage_preflight, local_owned_media_sessions, PlannedOutageOperation,
+};
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
 use crate::state::AppState;
@@ -184,35 +186,46 @@ pub async fn enter_maintenance(
     if state.membership.local_maintenance_active() {
         return state.membership.status().await.map(Json).map_err(api_error);
     }
-    let preflight = collect_current_aggregate(&state).await?;
-    let readiness = preflight
+    let (lease, preflight) = acquire_planned_outage_preflight(
+        &state,
+        &node_id,
+        MAINTENANCE_PREPARATION_DURATION,
+        PlannedOutageOperation::Maintenance,
+    )
+    .await?;
+    let preflight_failure = preflight
         .maintenance
         .iter()
         .find(|verdict| verdict.node_id == state.node_id)
-        .ok_or_else(|| {
-            ApiError::typed(
-                StatusCode::CONFLICT,
-                "maintenance_preflight_unsafe",
-                "the target is absent from the direct cluster observations",
-            )
-        })?;
-    if !readiness.safe_to_enter {
-        let reason = readiness
-            .blockers
-            .first()
-            .map(|finding| finding.message.as_str())
-            .unwrap_or("the direct maintenance preflight did not prove this target safe");
+        .map_or_else(
+            || Some("the target is absent from the direct cluster observations".to_owned()),
+            |readiness| {
+                (!readiness.safe_to_enter).then(|| {
+                    let reason = readiness
+                        .blockers
+                        .first()
+                        .map(|finding| finding.message.as_str())
+                        .unwrap_or(
+                            "the direct maintenance preflight did not prove this target safe",
+                        );
+                    format!("maintenance is not safe for this target: {reason}")
+                })
+            },
+        );
+    if let Some(message) = preflight_failure {
+        if let Err(error) = state
+            .membership
+            .release_cluster_operation_lease(&lease)
+            .await
+        {
+            tracing::warn!(%error, "failed to release rejected maintenance preparation lease; expiry remains authoritative");
+        }
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "maintenance_preflight_unsafe",
-            format!("maintenance is not safe for this target: {reason}"),
+            message,
         ));
     }
-    let lease = state
-        .membership
-        .acquire_maintenance_preparation(&node_id, MAINTENANCE_PREPARATION_DURATION)
-        .await
-        .map_err(api_error)?;
     let local_expiry = lease.preparation_expiry_unix_ms(MAINTENANCE_PREPARATION_DURATION);
     if local_expiry.is_none()
         || !state
