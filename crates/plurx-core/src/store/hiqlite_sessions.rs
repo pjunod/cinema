@@ -981,7 +981,13 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         && activation.response_json.len() <= 64 * 1024
         && activation.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
         && (0..=MAX_MEDIA_MILLIS).contains(&activation.media_origin_ms)
-        && activation.lease_expires_at_ms > activation.now_ms;
+        && activation.lease_expires_at_ms > activation.now_ms
+        // Byte-identical to the SQLite twin, for the same reason every other
+        // validator here is: two backends that refuse different inputs only
+        // disagree during a restore.
+        && activation
+            .expected_desired_revision
+            .is_none_or(|revision| revision > 0);
     valid
         .then_some(())
         .ok_or_else(|| StoreError::Task("invalid media-session activation".to_owned()))
@@ -1588,6 +1594,12 @@ impl MediaSessionStore for HiqliteAuthStore {
                      SELECT 1 FROM media_playback_pointers
                       WHERE user_id = $1 AND playback_id = $2
                         AND current_incarnation_id IN ($7, $3)))
+                   -- On the `SELECT` only. A row the `SELECT` does not produce
+                   -- cannot conflict, so the same predicate on the `ON CONFLICT`
+                   -- arm is unreachable, and a guard no test can tell from its
+                   -- absence is not a guard. Matches the SQLite twin exactly.
+                   AND ($8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                     WHERE user_id = $1 AND playback_id = $2 AND revision != $8))
                  ON CONFLICT(user_id, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
                     updated_at_ms = excluded.updated_at_ms
@@ -1601,7 +1613,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.now_ms,
                     activation.session_id.as_str(),
                     activation.owner_node_id.as_str(),
-                    predecessor_incarnation
+                    predecessor_incarnation,
+                    activation.expected_desired_revision.unwrap_or(0)
                 ),
             ),
             (

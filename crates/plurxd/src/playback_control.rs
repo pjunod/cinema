@@ -20829,6 +20829,7 @@ mod tests {
             .await
             .expect("assign owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation.clone(),
             session_id: session.clone(),
             user_id: 7,
@@ -22257,6 +22258,7 @@ mod tests {
 
         let winner = uuid::Uuid::new_v4().to_string();
         let advance = plurx_core::domain::MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: winner.clone(),
             session_id: uuid::Uuid::new_v4().to_string(),
             user_id: 7,

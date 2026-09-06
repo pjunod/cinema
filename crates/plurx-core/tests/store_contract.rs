@@ -616,6 +616,243 @@ fn analysis_lifecycle_slot(event: &str, reason: &str) -> usize {
         .expect("analysis lifecycle metric")
 }
 
+/// Ordinary activation is the third door into the same pointer, and it had no
+/// compare at all.
+///
+/// Preparation admission and prepared commit both refuse an ask the viewer has
+/// left. Activation did not, which made the whole guard bypassable by the
+/// plainest path in the system: a viewer changes their selection while an
+/// ordinary create is in flight, and the create's own activation advances the
+/// pointer to a session built for the selection they abandoned. Nothing later
+/// notices, because the pointer is the thing everything else reads.
+///
+/// The expectation deliberately is not re-read at activation time. It is the
+/// revision the create recorded at its first step; re-reading would return the
+/// newer ask and the compare would agree with itself.
+#[tokio::test]
+async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("activation-ask", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-activation-ask";
+        let predecessor = "11111111-1111-4111-8111-111111111101";
+        let current = current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            predecessor,
+            "11111111-1111-4111-8111-111111111102",
+            backend,
+        )
+        .await;
+
+        let first_ask = store
+            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record first ask: {error}"));
+        assert_eq!(
+            first_ask.revision, 1,
+            "{backend}: the first ask is revision 1"
+        );
+
+        // The viewer changes their mind while the create is in flight.
+        let second_ask = store
+            .record_desired_selection(
+                user.id,
+                playback,
+                &"b".repeat(64),
+                "v1;quality=original",
+                3_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record second ask: {error}"));
+        assert_eq!(
+            second_ask.revision, 2,
+            "{backend}: a different ask advances"
+        );
+
+        let mut stale = MediaSessionActivation {
+            expected_desired_revision: Some(first_ask.revision),
+            incarnation_id: "11111111-1111-4111-8111-111111111103".to_owned(),
+            session_id: "11111111-1111-4111-8111-111111111104".to_owned(),
+            user_id: user.id,
+            playback_id: playback.to_owned(),
+            expected_predecessor_incarnation_id: Some(predecessor.to_owned()),
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "c".repeat(64),
+            owner_node_id: "staged-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"stale"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 4_000,
+            lease_expires_at_ms: 900_000,
+        };
+        assert!(
+            store
+                .activate_media_session(&stale)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale activation: {error}"))
+                .is_none(),
+            "{backend}: an activation built for an ask the viewer has left must be refused"
+        );
+
+        // The refusal is whole. A partially applied activation would leave the
+        // pointer moved, or the predecessor reaped, or a session row behind.
+        let route = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback still points somewhere"));
+        assert_eq!(
+            route.incarnation_id, predecessor,
+            "{backend}: a refused activation leaves the pointer where it was"
+        );
+        assert_eq!(
+            route.state, "active",
+            "{backend}: and leaves the predecessor serving"
+        );
+        assert!(
+            store
+                .media_session_route(&stale.incarnation_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale route: {error}"))
+                .is_none(),
+            "{backend}: a refused activation writes no session row"
+        );
+
+        // The current ask activates, so the refusal is about the ask and not
+        // about anything else this activation carries.
+        stale.expected_desired_revision = Some(second_ask.revision);
+        assert!(
+            store
+                .activate_media_session(&stale)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: current activation: {error}"))
+                .is_some(),
+            "{backend}: the same activation against the current ask must win"
+        );
+        let advanced = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the playback points somewhere"));
+        assert_eq!(advanced.incarnation_id, stale.incarnation_id);
+        let _ = current;
+
+        // The same refusal on a playback that has no pointer yet.
+        //
+        // Separate because it takes a different route through the statement:
+        // with a pointer present the write lands on the `ON CONFLICT` arm, and
+        // with none it lands on the insert. A predicate on only one of them
+        // passes every test above while leaving the first activation of a
+        // playback — the create that races the viewer's very first change of
+        // mind — completely unguarded.
+        let fresh_playback = "playback-activation-first";
+        let first = store
+            .record_desired_selection(
+                user.id,
+                fresh_playback,
+                &"e".repeat(64),
+                "v1;quality=auto",
+                5_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record fresh ask: {error}"));
+        store
+            .record_desired_selection(
+                user.id,
+                fresh_playback,
+                &"f".repeat(64),
+                "v1;quality=original",
+                6_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: change fresh ask: {error}"));
+        let first_activation = MediaSessionActivation {
+            expected_desired_revision: Some(first.revision),
+            incarnation_id: "11111111-1111-4111-8111-111111111107".to_owned(),
+            session_id: "11111111-1111-4111-8111-111111111108".to_owned(),
+            user_id: user.id,
+            playback_id: fresh_playback.to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "0".repeat(64),
+            owner_node_id: "staged-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"first"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 7_000,
+            lease_expires_at_ms: 900_000,
+        };
+        assert!(
+            store
+                .activate_media_session(&first_activation)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: first stale activation: {error}"))
+                .is_none(),
+            "{backend}: the first activation of a playback is guarded too"
+        );
+        assert!(
+            store
+                .media_session_route_for_playback(user.id, fresh_playback)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: fresh route: {error}"))
+                .is_none(),
+            "{backend}: and it leaves the playback pointing nowhere"
+        );
+    })
+    .await;
+}
+
+/// A playback nobody has recorded an ask for must still activate.
+///
+/// This is the upgrade shape, and getting it wrong would refuse the first play
+/// of every title in the library: an expectation against a missing row has to
+/// admit, because "no ask recorded" is not "a different ask".
+#[tokio::test]
+async fn an_activation_with_no_recorded_ask_is_still_admitted() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("activation-no-ask", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let playback = "playback-activation-no-ask";
+        let activation = MediaSessionActivation {
+            expected_desired_revision: Some(7),
+            incarnation_id: "11111111-1111-4111-8111-111111111105".to_owned(),
+            session_id: "11111111-1111-4111-8111-111111111106".to_owned(),
+            user_id: user.id,
+            playback_id: playback.to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "d".repeat(64),
+            owner_node_id: "staged-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"first"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_000,
+            lease_expires_at_ms: 900_000,
+        };
+        assert!(
+            store
+                .activate_media_session(&activation)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: first activation: {error}"))
+                .is_some(),
+            "{backend}: a playback with no recorded ask must still activate"
+        );
+    })
+    .await;
+}
+
 async fn confirm_media_activation(
     store: &dyn Store,
     activation: &MediaSessionActivation,
@@ -645,6 +882,7 @@ async fn current_media_session(
     backend: &str,
 ) -> MediaSessionActivation {
     let activation = MediaSessionActivation {
+        expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
         user_id,
@@ -760,6 +998,7 @@ async fn media_activation_confirmation_recovers_a_committed_timeout() {
         .await
         .expect("create committed-timeout user");
     let activation = MediaSessionActivation {
+        expected_desired_revision: None,
         incarnation_id: "00000000-0000-4000-8000-00000000fc11".to_owned(),
         session_id: "00000000-0000-4000-8000-00000000fc12".to_owned(),
         user_id: user.id,
@@ -1906,6 +2145,7 @@ async fn media_session_rejoin_cannot_retarget_an_occupied_preparation_after_poin
 
         let current = "00000000-0000-4000-8000-00000000d365";
         let activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: current.to_owned(),
             session_id: "00000000-0000-4000-8000-00000000d366".to_owned(),
             user_id: user.id,
@@ -3564,6 +3804,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         let request_id = "activation-settle-request";
         let incarnation_id = "00000000-0000-4000-8000-0000000000e1";
         let activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e2".to_owned(),
             user_id: user.id,
@@ -3759,6 +4000,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
 
         let race_incarnation = "00000000-0000-4000-8000-0000000000e3";
         let race_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: race_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
             user_id: user.id,
@@ -3886,6 +4128,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         let finite_incarnation = "00000000-0000-4000-8000-0000000000f1";
         let finite_request_id = "activation-finite-handoff";
         let finite_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: finite_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000f2".to_owned(),
             user_id: user.id,
@@ -4126,6 +4369,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
 
         let failed_confirm_incarnation = "00000000-0000-4000-8000-0000000000e6";
         let failed_confirm_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: failed_confirm_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e7".to_owned(),
             user_id: user.id,
@@ -4787,6 +5031,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: assign request owner: {error}")));
 
         let first_activation = MediaSessionActivation {
+            expected_desired_revision: None,
                 incarnation_id: incarnation_a.to_owned(),
                 session_id: session_a.to_owned(),
                 user_id: first_user.id,
@@ -4885,6 +5130,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let session_b = "00000000-0000-4000-8000-0000000000b2";
         let incarnation_b = "00000000-0000-4000-8000-0000000000a3";
         let second_activation = MediaSessionActivation {
+            expected_desired_revision: None,
                 incarnation_id: incarnation_b.to_owned(),
                 session_id: session_b.to_owned(),
                 user_id: second_user.id,
@@ -4925,6 +5171,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let session_a2 = "00000000-0000-4000-8000-0000000000b3";
         let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
         let superseding_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_a2.to_owned(),
             session_id: session_a2.to_owned(),
             user_id: first_user.id,
@@ -5169,6 +5416,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let boundary_session = "00000000-0000-4000-8000-0000000000bb";
         store
             .activate_media_session(&MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: boundary_incarnation.to_owned(),
                 session_id: boundary_session.to_owned(),
                 user_id: second_user.id,
@@ -5250,6 +5498,7 @@ async fn media_session_contract_runs_through_dyn_store() {
 
         let stale = store
             .activate_media_session(&MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a5".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b4".to_owned(),
                 user_id: first_user.id,
@@ -5274,6 +5523,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
         let stale_legacy = store
             .activate_media_session(&MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a8".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b6".to_owned(),
                 user_id: first_user.id,
@@ -5566,6 +5816,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: assign expiring activation: {error}")));
         assert!(store
             .activate_media_session(&MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: expired_activation_incarnation.to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b5".to_owned(),
                 user_id: first_user.id,
@@ -5659,6 +5910,7 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
         let incarnation = "00000000-0000-4000-8000-00000000f001";
         let session = "00000000-0000-4000-8000-00000000f002";
         let terminal_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
             user_id: user.id,
@@ -5786,6 +6038,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
         let session = "00000000-0000-4000-8000-00000000e002";
 
         let takeover_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
             user_id: user.id,
@@ -5975,6 +6228,7 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
         for index in 0_u128..33 {
             let incarnation_id = uuid::Uuid::from_u128(0x4000 + index).to_string();
             let activation = MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id,
                 session_id: uuid::Uuid::from_u128(0x5000 + index).to_string(),
                 user_id: user.id,
@@ -6064,6 +6318,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             let session_id = uuid::Uuid::from_u128(0x2000 + index).to_string();
             let playback_id = format!("cap-playback-{index}");
             let activation = MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id,
                 user_id: user.id,
@@ -6138,6 +6393,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: own capped replacement: {error}")));
         let replacement_activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: replacement.clone(),
             session_id: uuid::Uuid::from_u128(0x4000).to_string(),
             user_id: user.id,
@@ -6244,6 +6500,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     .expect("seed exhausted media lease");
     assert!(store
         .activate_media_session(&MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: max_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
             user_id: user.id,
@@ -6311,6 +6568,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     .expect("mark media owner removed");
     assert!(store
         .activate_media_session(&MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: removed_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c4".to_owned(),
             user_id: user.id,
@@ -6349,6 +6607,7 @@ async fn hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease() {
     let incarnation_id = "00000000-0000-4000-8000-0000000000d1";
     let session_id = "00000000-0000-4000-8000-0000000000d2";
     let activation = MediaSessionActivation {
+        expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
         user_id: user.id,

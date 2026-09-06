@@ -21680,6 +21680,7 @@ pub(crate) mod tests {
             .await
             .expect("assign route owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: generation.to_owned(),
             session_id: session_id.to_owned(),
             user_id: 7,

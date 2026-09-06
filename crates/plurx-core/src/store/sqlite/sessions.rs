@@ -149,7 +149,15 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         && activation.response_json.len() <= 64 * 1024
         && activation.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
         && (0..=MAX_MEDIA_MILLIS).contains(&activation.media_origin_ms)
-        && activation.lease_expires_at_ms > activation.now_ms;
+        && activation.lease_expires_at_ms > activation.now_ms
+        // Zero is the sentinel the statement reads as "no expectation", so an
+        // activation may not state it: a caller that meant "no ask" says
+        // `None`, and one that says `Some(0)` is asking for a revision the
+        // table's own CHECK forbids. Refused here rather than silently
+        // admitting everything.
+        && activation
+            .expected_desired_revision
+            .is_none_or(|revision| revision > 0);
     if valid {
         Ok(())
     } else {
@@ -1123,10 +1131,39 @@ impl MediaSessionStore for SqliteStore {
                 tx.rollback()?;
                 return Ok(None);
             };
-            tx.execute(
+            // The ask rides inside the pointer write, not in front of it.
+            //
+            // Everything else this transaction checks is a separate read plus
+            // a Rust branch, which single-writer SQLite makes safe. This one
+            // is written the other way round on purpose, because it is the
+            // predicate whose replicated twin cannot be a read: the same
+            // compare has to mean the same thing in a transaction that cannot
+            // branch, and the two disagreeing is only discoverable during a
+            // restore. `commit_media_session_preparation` learned this the
+            // expensive way and carries the predicate inline for exactly this
+            // reason.
+            //
+            // A refused ask therefore lands in the same place a lost pointer
+            // race does: no rows, and the whole activation rolled back. The
+            // upsert was previously unconditional and its result ignored, so
+            // the row count is now what decides, and a pointer that did not
+            // advance is a refusal rather than a silent success.
+            //
+            // The predicate is on the `SELECT` only, and deliberately not
+            // repeated on the `ON CONFLICT` arm. A row that the `SELECT` does
+            // not produce cannot conflict, so a second copy there is
+            // unreachable — removing it changes no test, which is the reason
+            // not to ship it: a guard no test can distinguish from its absence
+            // reads as protection and provides none. The insert gate covers
+            // both the first pointer for a playback and the replacement of an
+            // existing one, and there is a case for each.
+            let expected_desired_revision = activation.expected_desired_revision.unwrap_or(0);
+            let pointer_advanced = tx.execute(
                 "INSERT INTO media_playback_pointers
                     (user_id, playback_id, current_incarnation_id, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4)
+                 SELECT ?1, ?2, ?3, ?4
+                  WHERE (?5 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                          WHERE user_id = ?1 AND playback_id = ?2 AND revision != ?5))
                  ON CONFLICT(user_id, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
                     updated_at_ms = excluded.updated_at_ms",
@@ -1135,8 +1172,13 @@ impl MediaSessionStore for SqliteStore {
                     activation.playback_id,
                     activation.incarnation_id,
                     activation.now_ms,
+                    expected_desired_revision,
                 ],
             )?;
+            if pointer_advanced != 1 {
+                tx.rollback()?;
+                return Ok(None);
+            }
             // Re-read inside the transaction instead of fabricating a
             // superseded result. Another first-writer terminal cause may have
             // won before activation; callers must project that durable cause

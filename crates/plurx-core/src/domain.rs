@@ -942,6 +942,22 @@ pub struct MediaSessionActivation {
     pub media_origin_ms: i64,
     pub now_ms: i64,
     pub lease_expires_at_ms: i64,
+    /// The desired revision this activation was decided against, compared
+    /// inside the committing statement.
+    ///
+    /// Preparation admission and prepared commit already carry this. Ordinary
+    /// activation is the third door into the same pointer and had no such
+    /// compare at all, which left the whole guard bypassable by the plainest
+    /// path there is: a viewer who changes their selection while a create is
+    /// in flight gets a pointer advanced to a session built for the selection
+    /// they left.
+    ///
+    /// `None` means no expectation and admits anything — the shape every
+    /// caller that predates this field keeps, and the shape a create that
+    /// carried no ask still has. It is not "revision zero": a playback with no
+    /// recorded ask must still activate, or the first play of every title
+    /// would be refused.
+    pub expected_desired_revision: Option<i64>,
 }
 
 /// Inputs for staging a successor that exists without being current.

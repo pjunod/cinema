@@ -928,6 +928,7 @@ mod tests {
             .await
             .expect("assign relay owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
             user_id,

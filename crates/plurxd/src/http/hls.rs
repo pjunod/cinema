@@ -1600,30 +1600,36 @@ pub async fn create(
     // A failed write refuses the create for the same reason the control
     // exchange refuses: a retry costs one request, and a phantom acceptance
     // costs a viewer their selection with nothing to point at.
+    // `None` for a body that carried no ask: a playback with nothing recorded
+    // must still activate, or the first play of every title would be refused.
+    let mut recorded_ask_revision: Option<i64> = None;
     if let Some(intent) = req.intent.as_ref() {
         intent
             .validate()
             .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
         let selection = intent.selection;
-        state
-            .store
-            .record_desired_selection(
-                user.id,
-                &req.playback_id,
-                &intent.digest(),
-                &selection.canonical_form(),
-                unix_ms(),
-            )
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    playback = %req.playback_id,
-                    "recording the viewer's selection on create failed: {error}"
-                );
-                ApiError::ServiceUnavailable(
-                    "this selection could not be recorded; retry shortly".to_owned(),
+        recorded_ask_revision = Some(
+            state
+                .store
+                .record_desired_selection(
+                    user.id,
+                    &req.playback_id,
+                    &intent.digest(),
+                    &selection.canonical_form(),
+                    unix_ms(),
                 )
-            })?;
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        playback = %req.playback_id,
+                        "recording the viewer's selection on create failed: {error}"
+                    );
+                    ApiError::ServiceUnavailable(
+                        "this selection could not be recorded; retry shortly".to_owned(),
+                    )
+                })?
+                .revision,
+        );
     }
     let ingress_serving_authority = state.serving.authority();
     let ingress_serving_generation = ingress_serving_authority.admit().ok_or_else(|| {
@@ -2348,6 +2354,14 @@ pub async fn create(
     let response_json = serde_json::to_string(&response)?;
     let activation_now_ms = unix_ms();
     let activation = MediaSessionActivation {
+        // The revision this create recorded, not the one that is current now.
+        //
+        // Re-reading here would defeat the compare: a control exchange that
+        // advanced the ask while this create was in flight would be read back
+        // as the expectation, and the pointer would advance to a session built
+        // for the selection the viewer has left. What this activation was
+        // decided against is what create wrote at its very first step.
+        expected_desired_revision: recorded_ask_revision,
         incarnation_id: incarnation_id.clone(),
         session_id: info.session_id.clone(),
         user_id: user.id,
@@ -11854,6 +11868,7 @@ mod tests {
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -11974,6 +11989,7 @@ mod tests {
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -12037,6 +12053,7 @@ mod tests {
         activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -12134,6 +12151,7 @@ mod tests {
         activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -12403,6 +12421,7 @@ mod tests {
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: generation.clone(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -12635,6 +12654,7 @@ mod tests {
             let route = activate_ready(
                 &fixture.store,
                 MediaSessionActivation {
+                    expected_desired_revision: None,
                     incarnation_id: generation.clone(),
                     session_id: session_id.clone(),
                     user_id: user.id,
@@ -13874,6 +13894,7 @@ mod tests {
             let activation = |incarnation: &str, admitted: &RestartAdmission| {
                 let now_ms = crate::media_sessions::unix_ms();
                 plurx_core::domain::MediaSessionActivation {
+                    expected_desired_revision: None,
                     incarnation_id: incarnation.to_owned(),
                     // A restart is a new session taking over one playback, so
                     // the session id moves and the playback id is what the
@@ -14715,6 +14736,7 @@ mod tests {
         activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -14900,6 +14922,7 @@ mod tests {
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -17590,6 +17613,7 @@ mod tests {
         activate_ready(
             &fixture.store,
             MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -17854,6 +17878,7 @@ mod tests {
         let recipe_json = "{}".to_owned();
         let response_json = r#"{"session":"confirmed"}"#.to_owned();
         let activation = MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
             user_id: 7,

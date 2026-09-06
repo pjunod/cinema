@@ -5096,6 +5096,7 @@ mod tests {
         let mut request = RemoteActivateRequest {
             target_generation: 0,
             activation: MediaSessionActivation {
+                expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
                 user_id: 7,
