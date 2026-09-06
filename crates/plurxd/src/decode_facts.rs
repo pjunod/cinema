@@ -31,6 +31,17 @@ fn identity_gate() -> Arc<tokio::sync::Semaphore> {
     Arc::clone(GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
 }
 
+fn version_gate() -> Arc<tokio::sync::Semaphore> {
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
+}
+
+#[cfg(test)]
+fn test_discovery_gate() -> Arc<tokio::sync::Semaphore> {
+    static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    Arc::clone(GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CacheKey {
     source: DecodeSourceIdentity,
@@ -131,11 +142,22 @@ impl Drop for ExecutableSnapshot {
 
 impl DecodeProbeIdentity {
     pub(crate) async fn discover(bin: &str) -> Result<Self, DecodeFactError> {
+        // Unit fixtures are executable scripts and exercise many independent
+        // startup identities in parallel. Serialize their full discovery so
+        // host scheduler load cannot consume a production-scale version
+        // deadline before an individual fixture runs.
+        #[cfg(test)]
+        let _test_discovery = test_discovery_gate()
+            .acquire_owned()
+            .await
+            .map_err(|_| DecodeFactError::CacheInvariant)?;
         let executable = resolve_executable(bin)?;
         let executable_file = Arc::new(
             std::fs::File::open(&executable)
                 .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?,
         );
+        #[cfg(all(unix, not(test)))]
+        require_direct_probe_executable(&executable_file)?;
         let before =
             held_probe_file_identity_within(Arc::clone(&executable_file), IDENTITY_DEADLINE, None)
                 .await?;
@@ -218,6 +240,40 @@ impl DecodeProbeIdentity {
         } else {
             Err(DecodeFactError::ProbeChanged)
         }
+    }
+}
+
+/// Qualified fact collection executes a retained copy of the configured
+/// parser. A script wrapper could select a different parser after discovery,
+/// so only a native executable can participate in the build-bound contract.
+#[cfg(unix)]
+fn require_direct_probe_executable(file: &std::fs::File) -> Result<(), DecodeFactError> {
+    use std::os::unix::fs::FileExt;
+
+    let mut magic = [0_u8; 4];
+    let read = file
+        .read_at(&mut magic, 0)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    let is_native = read == magic.len()
+        && (magic == *b"\x7fELF"
+            || matches!(
+                magic,
+                [0xce, 0xfa, 0xed, 0xfe]
+                    | [0xfe, 0xed, 0xfa, 0xce]
+                    | [0xcf, 0xfa, 0xed, 0xfe]
+                    | [0xfe, 0xed, 0xfa, 0xcf]
+                    | [0xca, 0xfe, 0xba, 0xbe]
+                    | [0xbe, 0xba, 0xfe, 0xca]
+                    | [0xca, 0xfe, 0xba, 0xbf]
+                    | [0xbf, 0xba, 0xfe, 0xca]
+            ));
+    if is_native {
+        Ok(())
+    } else {
+        Err(DecodeFactError::ProbeIdentity(
+            "configured FFprobe must be a direct native executable; wrappers are not build-bound"
+                .to_owned(),
+        ))
     }
 }
 
@@ -319,6 +375,9 @@ async fn terminate_probe_session(
     child: &mut tokio::process::Child,
     process_group: Option<libc::pid_t>,
 ) {
+    // This potentially unbounded reap runs only inside an owned task. The
+    // caller-facing deadline detaches that task while it retains every source
+    // and admission guard needed for safe cleanup.
     kill_probe_session(process_group);
     let _ = child.wait().await;
 }
@@ -329,6 +388,25 @@ fn kill_probe_session(process_group: Option<libc::pid_t>) {
         unsafe {
             libc::kill(-process_group, libc::SIGKILL);
         }
+    }
+}
+
+#[cfg(unix)]
+struct ProbeSessionGuard {
+    process_group: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl ProbeSessionGuard {
+    fn new(process_group: Option<libc::pid_t>) -> Self {
+        Self { process_group }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProbeSessionGuard {
+    fn drop(&mut self) {
+        kill_probe_session(self.process_group);
     }
 }
 
@@ -549,6 +627,15 @@ async fn probe_version(
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
+    let started = std::time::Instant::now();
+    let version_permit = tokio::time::timeout(VERSION_DEADLINE, version_gate().acquire_owned())
+        .await
+        .map_err(|_| DecodeFactError::Deadline)?
+        .map_err(|_| DecodeFactError::CacheInvariant)?;
+    let remaining = VERSION_DEADLINE.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(DecodeFactError::Deadline);
+    }
     let executable_fd = executable.as_file().as_raw_fd();
     let mut command = tokio::process::Command::new(snapshot_execution_path(executable));
     command.as_std_mut().arg0(configured_path);
@@ -568,29 +655,44 @@ async fn probe_version(
         .spawn()
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
-    let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
-    let outcome = tokio::time::timeout(VERSION_DEADLINE, async {
+    let task_process_group = process_group;
+    let mut task = tokio::spawn(async move {
+        let _version_permit = version_permit;
+        let _session = ProbeSessionGuard::new(task_process_group);
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                terminate_probe_session(&mut child, task_process_group).await;
+                return Err(DecodeFactError::MissingPipe);
+            }
+        };
         let (stdout, status) = tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait());
-        (stdout, status)
-    })
-    .await;
-    let (stdout, status) = match outcome {
-        Ok((stdout, status)) => (
-            stdout?,
-            status.map_err(|error| DecodeFactError::Read(error.to_string()))?,
-        ),
-        Err(_) => {
-            terminate_probe_session(&mut child, process_group).await;
-            return Err(DecodeFactError::Deadline);
+        kill_probe_session(task_process_group);
+        let stdout = stdout?;
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                terminate_probe_session(&mut child, task_process_group).await;
+                return Err(DecodeFactError::Read(error.to_string()));
+            }
+        };
+        if stdout.1 || stdout.0.is_empty() || !status.success() {
+            return Err(DecodeFactError::ProbeIdentity(
+                "bounded version probe failed".to_owned(),
+            ));
         }
-    };
-    kill_probe_session(process_group);
-    if stdout.1 || stdout.0.is_empty() || !status.success() {
-        return Err(DecodeFactError::ProbeIdentity(
-            "bounded version probe failed".to_owned(),
-        ));
+        Ok(stdout.0)
+    });
+    tokio::select! {
+        biased;
+        result = &mut task => {
+            result.map_err(|error| DecodeFactError::Read(error.to_string()))?
+        }
+        _ = tokio::time::sleep(remaining) => {
+            kill_probe_session(process_group);
+            Err(DecodeFactError::Deadline)
+        }
     }
-    Ok(stdout.0)
 }
 
 #[cfg(not(unix))]
@@ -702,9 +804,8 @@ impl DecodeFactCache {
             .await;
             (result, gate, source)
         });
-        let (facts, gate, source) = collection
-            .await
-            .map_err(|error| DecodeFactError::Read(error.to_string()))?;
+        let (facts, gate, source) =
+            await_owned_collection(collection, remaining, cancelled).await?;
         let facts = facts?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
         probe.validate_current(remaining, cancelled).await?;
@@ -726,6 +827,30 @@ impl DecodeFactCache {
         order.push_back(key);
         drop(gate);
         Ok(facts)
+    }
+}
+
+/// Wait for caller-visible completion without abandoning cleanup ownership.
+/// Dropping a timed-out join handle detaches the task; the task continues to
+/// own the child, source descriptor, offset restoration, and both permits.
+async fn await_owned_collection<T>(
+    mut collection: tokio::task::JoinHandle<T>,
+    budget: Duration,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<T, DecodeFactError>
+where
+    T: Send + 'static,
+{
+    if budget.is_zero() {
+        return Err(DecodeFactError::Deadline);
+    }
+    tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => Err(DecodeFactError::Cancelled),
+        _ = tokio::time::sleep(budget) => Err(DecodeFactError::Deadline),
+        result = &mut collection => {
+            result.map_err(|error| DecodeFactError::Read(error.to_string()))
+        }
     }
 }
 
@@ -911,8 +1036,21 @@ async fn collect(
         .spawn()
         .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
     let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
-    let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
-    let stderr = child.stderr.take().ok_or(DecodeFactError::MissingPipe)?;
+    let _session = ProbeSessionGuard::new(process_group);
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_probe_session(&mut child, process_group).await;
+            return Err(DecodeFactError::MissingPipe);
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_probe_session(&mut child, process_group).await;
+            return Err(DecodeFactError::MissingPipe);
+        }
+    };
     let outcome = tokio::select! {
         biased;
         _ = wait_for_cancellation(cancelled) => {
@@ -929,17 +1067,22 @@ async fn collect(
         }) => outcome,
     };
     let (stdout, stderr, status) = match outcome {
-        Ok((stdout, stderr, status)) => (
-            stdout?,
-            stderr?,
-            status.map_err(|error| DecodeFactError::Read(error.to_string()))?,
-        ),
+        Ok((stdout, stderr, status)) => (stdout, stderr, status),
         Err(_) => {
             terminate_probe_session(&mut child, process_group).await;
             return Err(DecodeFactError::Deadline);
         }
     };
     kill_probe_session(process_group);
+    let stdout = stdout?;
+    let stderr = stderr?;
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_probe_session(&mut child, process_group).await;
+            return Err(DecodeFactError::Read(error.to_string()));
+        }
+    };
     if stdout.1 || stderr.1 {
         return Err(DecodeFactError::OversizedOutput);
     }
@@ -1040,6 +1183,24 @@ mod tests {
         std::fs::write(path, body).expect("write probe");
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .expect("make probe executable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn qualified_probe_identity_refuses_indirect_wrappers() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let wrapper = root.path().join("ffprobe-wrapper");
+        executable(&wrapper, "#!/bin/sh\nexec /usr/bin/ffprobe \"$@\"\n");
+        let wrapper = std::fs::File::open(wrapper).expect("open wrapper");
+        assert!(matches!(
+            require_direct_probe_executable(&wrapper),
+            Err(DecodeFactError::ProbeIdentity(reason))
+                if reason.contains("wrappers are not build-bound")
+        ));
+
+        let current = std::fs::File::open(std::env::current_exe().expect("current executable"))
+            .expect("open current native executable");
+        require_direct_probe_executable(&current).expect("native executable is build-bindable");
     }
 
     #[cfg(unix)]
@@ -1452,6 +1613,36 @@ touch "$PLURX_TEST_PROBE_PATH.done"
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn caller_deadline_detaches_cleanup_without_releasing_its_ownership() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&gate)
+            .acquire_owned()
+            .await
+            .expect("owned cleanup permit");
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let cleanup = tokio::spawn(async move {
+            let _permit = permit;
+            let _ = released.await;
+            7_u8
+        });
+
+        assert_eq!(
+            await_owned_collection(cleanup, Duration::from_millis(20), None).await,
+            Err(DecodeFactError::Deadline)
+        );
+        assert!(
+            Arc::clone(&gate).try_acquire_owned().is_err(),
+            "detached cleanup must retain its owned permit"
+        );
+        release.send(()).expect("release detached cleanup");
+        let _returned =
+            tokio::time::timeout(Duration::from_secs(1), Arc::clone(&gate).acquire_owned())
+                .await
+                .expect("detached cleanup finishes")
+                .expect("cleanup permit is returned");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_same_key_misses_spawn_one_probe() {
@@ -1624,10 +1815,15 @@ wait
         assert!(offset_gate.clone().try_acquire_owned().is_err());
         cancellation.cancel();
         assert_eq!(collection.await, Err(DecodeFactError::Cancelled));
-        let _permit = offset_gate
-            .clone()
-            .try_acquire_owned()
-            .expect("source lease released only after child reap");
+        assert!(
+            offset_gate.clone().try_acquire_owned().is_err(),
+            "caller cancellation must not release ownership before cleanup"
+        );
+        let _permit =
+            tokio::time::timeout(Duration::from_secs(1), offset_gate.clone().acquire_owned())
+                .await
+                .expect("cleanup must finish after cancellation")
+                .expect("source lease released only after child reap");
         let mut view = source.try_clone().expect("source view");
         assert_eq!(view.stream_position().expect("restored source offset"), 3);
         tokio::time::sleep(Duration::from_millis(1_100)).await;
