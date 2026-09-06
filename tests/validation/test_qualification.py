@@ -38,9 +38,23 @@ class QualificationReceiptCase(unittest.TestCase):
         self.assertEqual(receipt["tested_tree"], "d" * 40)
         self.assertEqual(receipt["jobs"], dict(sorted(self.results().items())))
 
-    def test_receipt_refuses_non_effort_or_non_main_refs(self):
+    def test_receipt_accepts_conflict_resolution_integration_head(self):
+        environment = self.environment()
+        environment["GITHUB_HEAD_REF"] = "integration/playback-control-into-main"
+
+        receipt = build_receipt(
+            environment, self.results(), "a" * 40, "d" * 40
+        )
+
+        self.assertEqual(
+            receipt["head_ref"], "integration/playback-control-into-main"
+        )
+
+    def test_receipt_refuses_non_qualification_or_non_main_refs(self):
         for field, value in (
             ("GITHUB_HEAD_REF", "codex/task"),
+            ("GITHUB_HEAD_REF", "integration/-into-main"),
+            ("GITHUB_HEAD_REF", "integration/playback-control"),
             ("GITHUB_BASE_REF", "effort/playback-control"),
         ):
             with self.subTest(field=field):

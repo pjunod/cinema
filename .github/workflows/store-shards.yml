@@ -28,9 +28,6 @@ on:
           - shadow
           - accelerated
 
-permissions:
-  contents: read
-
 jobs:
   shard:
     name: replicated Store shard ${{ matrix.shard_index }}

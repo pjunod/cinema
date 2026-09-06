@@ -128,12 +128,58 @@ curl -s localhost:32400/api/v1/scan \
 
 Runbook, with monarr's side too: [OPERATIONS.md](OPERATIONS.md).
 
+## 5. Turning on Live TV (one HDHomeRun)
+
+Off on every install, always compiled — there is nothing to rebuild. Two steps,
+in this order: probe the device, *then* enable it.
+
+```bash
+TOKEN=…                # ADMIN token
+HOST=http://localhost:32400
+
+# 1. Configure. The owner is the node id (GET /api/v1/server) of the machine
+#    on the tuner's network. The generation must be the current one.
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"live_tv_config_generation":0,"live_tv_device_ipv4":"192.168.4.20",
+       "live_tv_owner_node_id":"<node id>","live_tv_max_sessions":2,
+       "live_tv_output_height":720}' $HOST/api/v1/settings
+
+# 2. Probe it (admin only) — this is the step that says what is actually wrong.
+curl -s -X POST -H "Authorization: Bearer $TOKEN" $HOST/api/v1/live-tv/readiness/refresh
+
+# 3. Enable, carrying the generation step 1 returned.
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"live_tv_config_generation":1,"live_tv_enabled":true}' $HOST/api/v1/settings
+
+# Then: Live TV appears in the web app and in every first-party client.
+```
+
+| If… | Then… |
+|---|---|
+| `owner_network` fails, rest green | the **owner node** cannot reach the tuner — VLAN/Docker network, wrong address, or a redirect. Test from the owner: `curl http://<device>/discover.json` |
+| `lineup` fails | scan channels **on the HDHomeRun**; plurx never scans for it |
+| `session_limit` fails | `live_tv_max_sessions` exceeds the device's own tuner count |
+| `409` on a PUT | refetch `/api/v1/settings` for the current generation and retry — never force |
+| `tuner_capacity` with tuners free | another HDHomeRun app took one after plurx checked. Retry later |
+| Channel listed, no "Watch live" | DRM-flagged, or a support state this build does not know. No licensed DRM path exists |
+
+Accept it against your actual tuner (occupies tuners for a few minutes, touches
+no running server):
+
+```bash
+make live-tv-hardware-check DEVICE=192.168.4.20 TUNERS=2
+# → target/live-tv-hardware/hardware.json
+```
+
+Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
+
 ## Reference — where everything lives
 
 | Thing | Where |
 |---|---|
 | Web app + API | `http://<host>:32400` |
 | GDM discovery | UDP `32414` (movable host-side via `PLURX_GDM_PORT`) |
+| Live TV device (outbound, from the owner node) | TCP `80` (`discover.json`, and `lineup.json` unless the device advertises it on 5004) and TCP `5004` (stream) on the configured tuner |
 | Data (db, artwork, transcode cache) | `PLURX_DATA_DIR` (default `./data`; Docker bind mount `${PLURX_DATA:-/srv/plurx}` → `/var/lib/plurx`) |
 | Config file | `./plurx.toml` → `/etc/plurx/plurx.toml` (or `PLURX_CONFIG`) |
 | Runtime settings (TMDB key, libraries, users) | In the database, edited in Settings — not the config file |
@@ -180,6 +226,11 @@ master regression so far. Reasoning and the failure they target are in
 | `POST /api/v1/libraries/{id}/root-identity/reset` | Accept an operator-verified replacement for a library mount |
 | `POST /api/v1/system/search-index/rebuild` | Rebuild the node-local search index (admin) |
 | `/api/v1/keys` | Mint/list/revoke scoped API keys (admin token) |
+| `GET /api/v1/live-tv/channels` | The sanitized tuner lineup; DRM channels are listed and marked unplayable (bearer) |
+| `GET /api/v1/live-tv/readiness` | The last readiness verdict, without probing (**admin**) |
+| `POST /api/v1/live-tv/readiness/refresh` | Probe the tuner and report one named check per thing that can be wrong (**admin**) |
+| `POST /api/v1/live-tv/channels/{channel}/sessions` | Start a live session; returns one opaque capability (bearer) |
+| `/api/v1/live-tv/sessions/{capability}/...` | Playlist, segments, status, keepalive, release — **capability only, no account bearer** |
 | Plex-compat façade | `/identity`, `/library/...`, `/:/timeline`, GDM — for Kodi-family Plex clients |
 
 Offline global/per-user quota settings and accounting are in

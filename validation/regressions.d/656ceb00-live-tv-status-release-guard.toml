@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["656ceb00"]
+points = ["live-tv.integration"]
+checks = ["web-static"]
+reason = "The lease regression drives a release whose DELETE is still in flight and requires both status() and keepalive() to return null without issuing a request, so the heartbeat cannot renew the capability its own cleanup is dropping. It was executed against the unguarded implementation and fails there, returning the live status body instead of null."

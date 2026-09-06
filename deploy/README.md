@@ -116,7 +116,7 @@ should pull:
 ```bash
 cd deploy
 printf '%s\n' \
-  'PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:latest' >> .env
+  'PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main' >> .env
 docker compose pull plurxd   # downloads without touching the running voter
 docker compose up -d         # swaps this voter only after the pull completes
 curl -fsS http://127.0.0.1:32400/readyz
@@ -126,10 +126,11 @@ On a replicated cluster, run the final two commands on one voter at a time and
 require `/readyz` to return 200 before advancing. A pull is harmless to the
 running process; the `up -d` is the quorum boundary.
 
-The fleet builder runs `scripts/registry-push` from the repository root. It
-stamps `git describe --tags --always --dirty` into the binary and publishes
-both moving `latest` and immutable `sha-<12hex>` tags. Use the immutable tag
-for rollback:
+The post-merge Forgejo job runs `scripts/registry-push` after the complete
+`main` validation fan-out. It publishes the moving `main` tag only after the
+immutable `sha-<12hex>` image passes its registry-side identity and smoke
+checks. Versioned releases keep the separate `latest` alias. Use the immutable
+tag for rollback:
 
 ```bash
 PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<old-sha> \
@@ -502,3 +503,30 @@ scrape. The same image also contains the read-only `plurx-cluster-check
 inspect-wal` stopped-node tool; the safe preservation and interpretation
 runbook is in
 [`docs/OPERATIONS.md`](../docs/OPERATIONS.md#inspecting-a-stopped-voter-without-changing-it).
+
+The image and Compose default to a five-minute startup health grace: enough for
+the default 120-second snapshot deadline and the three 45-second startup phases,
+without hiding a permanently broken build for an hour. A deployment that raises
+`cluster.install_snapshot_timeout_secs` — in `.env`, or in a production TOML
+this repository never sees — needs a longer grace, and does not have to
+maintain one: leave `PLURX_HEALTH_START_PERIOD` unset and `make docker-up`
+derives it from the resolved timeout plus 135 seconds. Set the variable only to
+choose a grace deliberately. Any resolved grace other than the tracked
+five-minute default counts as chosen — wherever you wrote it — and is used
+exactly as Compose resolved it, refused by name rather than overruled if it
+cannot cover the timeout. The maximum supported pair is shown in
+`.env.example`.
+
+Run `make docker-up` from the repository root for every Compose rollout. Its
+first step derives the grace only if the deployment has not chosen one, its
+second proves the budget it is about to apply — shell variables, `deploy/.env`,
+Compose defaults and overrides, and a readable bind-mounted production TOML all
+at their usual precedence — and only then does `docker compose up` replace a
+container, with the same period that was proved. If a named
+volume or another opaque mount hides the production config, the check assumes
+the source maximum unless the resolved
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` is explicit. This conservative
+fallback prevents a custom 600-second TOML deadline from accidentally shipping
+with the five-minute health grace. An explicit command-line `--config` takes
+precedence over `PLURX_CONFIG`, matching the server. A direct `docker compose
+up` bypasses the preflight.

@@ -542,6 +542,7 @@ pub(crate) async fn local_owned_media_sessions(state: &AppState) -> usize {
     );
     hls.saturating_add(state.streams.active_count())
         .saturating_add(offline)
+        .saturating_add(state.live_tv.activities().len())
 }
 
 fn media_drain_status(

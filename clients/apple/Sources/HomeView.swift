@@ -4,6 +4,7 @@ import SwiftUI
 enum HomeTab: Hashable {
     case home
     case libraries
+    case liveTv
     case search
     case downloads
     case settings
@@ -62,6 +63,10 @@ struct HomeView: View {
             .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
             .tag(HomeTab.libraries)
 
+            NavigationStack { LiveTvView() }
+                .tabItem { Label("Live TV", systemImage: "tv") }
+                .tag(HomeTab.liveTv)
+
             NavigationStack {
                 SearchView()
                     .appDestinations()
@@ -112,6 +117,9 @@ struct HomeView: View {
 
             LibrariesDashboard()
                 .tabItem { Label("Libraries", systemImage: "rectangle.stack") }
+
+            LiveTvView()
+                .tabItem { Label("Live TV", systemImage: "tv") }
 
             SearchView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }

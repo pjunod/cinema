@@ -29,6 +29,9 @@ pub const PATH: &str = "/_internal/v1/activity-snapshot";
 pub const TIMEOUT: Duration = Duration::from_secs(2);
 const ACTIVITY_SNAPSHOT_REUSE: Duration = Duration::from_secs(1);
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+// Four rows, including worst-case six-byte JSON escapes for every bounded
+// string, fit this reservation even when deliveries saturate the response.
+const LIVE_TV_RESPONSE_RESERVE_BYTES: usize = 24 * 1024;
 // A saturated delivery list must not erase every analysis row from a peer's
 // Activity snapshot. Reserve one quarter of the shared wire budget whenever
 // progress exists; unused space remains available when it does not.
@@ -46,6 +49,8 @@ pub struct ActivitySnapshot {
     pub deliveries: Vec<ActivityDelivery>,
     #[serde(default)]
     pub analysis: Vec<crate::state::AnalysisProgress>,
+    #[serde(default)]
+    pub(crate) live_tv: Vec<crate::live_tv::LiveTvActivity>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -384,6 +389,15 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
         && snapshot.node_id.len() <= MAX_NODE_ID_BYTES
         && snapshot.deliveries.len() <= MAX_DELIVERIES
         && snapshot.analysis.len() <= MAX_ANALYSIS_PROGRESS
+        && snapshot.live_tv.len() <= 4
+        && snapshot.live_tv.iter().all(|live| {
+            live.owner_node_id == snapshot.node_id
+                && live.channel_number.len() <= 32
+                && live.channel_name.len() <= 256
+                && live.user.len() <= MAX_USER_BYTES
+                && live.encoder.len() <= 32
+                && live.state.len() <= 32
+        })
         && snapshot.deliveries.iter().all(|delivery| {
             delivery.method.len() <= 32
                 && delivery.user.len() <= MAX_USER_BYTES
@@ -541,7 +555,9 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             progress.title = bounded_text(title.clone(), MAX_TITLE_BYTES);
         }
     }
-    bounded_snapshot(state.node_id.clone(), deliveries, analysis)
+    let mut snapshot = bounded_snapshot(state.node_id.clone(), deliveries, analysis);
+    snapshot.live_tv = state.live_tv.activities().into_iter().take(4).collect();
+    snapshot
 }
 
 #[derive(Debug)]
@@ -627,14 +643,16 @@ fn bounded_snapshot(
         node_id,
         deliveries: Vec::new(),
         analysis: Vec::new(),
+        live_tv: Vec::new(),
     };
     let mut encoded_bytes = serde_json::to_vec(&snapshot)
         .map(|encoded| encoded.len())
         .unwrap_or(MAX_RESPONSE_BYTES);
     let delivery_budget = if analysis.is_empty() {
-        MAX_RESPONSE_BYTES
+        MAX_RESPONSE_BYTES - LIVE_TV_RESPONSE_RESERVE_BYTES
     } else {
-        MAX_RESPONSE_BYTES.saturating_sub(ANALYSIS_RESPONSE_RESERVE_BYTES)
+        MAX_RESPONSE_BYTES
+            .saturating_sub(ANALYSIS_RESPONSE_RESERVE_BYTES + LIVE_TV_RESPONSE_RESERVE_BYTES)
     };
     for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
         let Ok(encoded) = serde_json::to_vec(&delivery) else {
@@ -654,7 +672,8 @@ fn bounded_snapshot(
         };
         let separator = usize::from(!snapshot.analysis.is_empty());
         let added = encoded.len().saturating_add(separator);
-        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES {
+        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES - LIVE_TV_RESPONSE_RESERVE_BYTES
+        {
             continue;
         }
         encoded_bytes += added;
@@ -787,6 +806,7 @@ mod tests {
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
             analysis: Vec::new(),
+            live_tv: Vec::new(),
         };
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
         assert!(!snapshot_is_bounded(&snapshot, "node-c"));
@@ -815,6 +835,44 @@ mod tests {
         assert!(encoded.len() <= MAX_RESPONSE_BYTES);
         assert!(snapshot.deliveries.len() < MAX_DELIVERIES);
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
+    }
+
+    #[test]
+    fn live_tv_activity_reservation_handles_escaped_rows_and_checks_owner_identity() {
+        let node_id = "\0".repeat(MAX_NODE_ID_BYTES);
+        let row = crate::live_tv::LiveTvActivity {
+            channel_number: "\0".repeat(32),
+            channel_name: "\0".repeat(256),
+            user: "\0".repeat(MAX_USER_BYTES),
+            owner_node_id: node_id.clone(),
+            encoder: "\0".repeat(32),
+            age_seconds: u64::MAX,
+            output_height: 1080,
+            state: "\0".repeat(32),
+        };
+        let delivery = ActivityDelivery {
+            method: "direct".into(),
+            presentation: None,
+            user: "\0".repeat(MAX_USER_BYTES),
+            file_id: 1,
+            item_id: 1,
+            title: "\0".repeat(MAX_TITLE_BYTES),
+            started_unix: 0,
+            idle_seconds: 0,
+            delivered_bytes: None,
+            delivered_bps: None,
+        };
+        let mut snapshot =
+            bounded_snapshot(node_id.clone(), vec![delivery; MAX_DELIVERIES], Vec::new());
+        snapshot.live_tv = vec![row; 4];
+        let encoded = serde_json::to_vec(&snapshot).expect("snapshot JSON");
+        assert!(encoded.len() <= MAX_RESPONSE_BYTES);
+        assert!(snapshot_is_bounded(&snapshot, &node_id));
+        let value = serde_json::to_value(&snapshot).expect("public activity fields");
+        assert!(value["live_tv"][0].get("capability").is_none());
+        assert!(value["live_tv"][0].get("activation_token").is_none());
+        snapshot.live_tv[0].owner_node_id = "forged-owner".into();
+        assert!(!snapshot_is_bounded(&snapshot, &node_id));
     }
 
     #[test]
@@ -952,6 +1010,7 @@ mod tests {
             node_id: "node-b".to_owned(),
             deliveries: Vec::new(),
             analysis: Vec::new(),
+            live_tv: Vec::new(),
         })
         .expect("snapshot JSON");
         assert_eq!(

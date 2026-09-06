@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b8cbf21f"]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The first fixture-publication repair used a hard link to avoid replacing an existing destination, but its successful first-publication path exposed the destination before removing the temporary link. Removing that link changed the shared inode's ctime, so another test process could open and fence the destination in the interval and later fail with 'source changed before fragment publication'. Publication now holds an advisory file lock across the absence check, fixture construction, and atomic rename, making the destination visible only after its metadata is final. publication_lock_excludes_an_independent_file_handle proves separate file handles cannot cross that boundary, republishing_a_fixture_leaves_a_held_reader_undisturbed protects the held reader, and the two vodserve tests that failed in CI pass against the corrected publisher."

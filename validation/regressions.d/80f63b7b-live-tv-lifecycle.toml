@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["80f63b7b"]
+points = ["live-tv.integration", "cluster.membership", "server.api"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "resource-bounds", "operations-contract"]
+reason = "Retained regressions cover reserved scratch ownership, explicit stop/drain registry and scratch cleanup, source-bound activation, playlist/segment delivery, tuner socket closure, capability redaction, deinterlacing, relay byte ceilings, and foreground-admission cancellation. The fake-tuner/fake-FFmpeg lifecycle now enters through start_local and checks identical-request recovery and terminal replay. The ten-window fixture checks constructed complete inventories, not real FFmpeg rollover. Route matrices check maintenance/learner admission. Compilation and Clippy establish call-site consistency but are not behavioral proof of partitions, shutdown races, or physical permit release; later M2 fixes add focused tests for those boundaries where present, and hardware/multi-node acceptance remains separately tracked."

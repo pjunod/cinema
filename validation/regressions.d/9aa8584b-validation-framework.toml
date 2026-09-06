@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9aa8584b", "aaa03d7b"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history audit binds the snapshot transport regression mapping and its follow-up metadata correction to the validation framework they change, while the separate runtime entry maps the actual transport and operations behavior to their governed surfaces."

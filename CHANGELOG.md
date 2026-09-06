@@ -10,6 +10,23 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **A Compose deploy no longer refuses over a number nobody was told to
+  maintain.** The readiness grace and the snapshot deadline are one budget, and
+  the preflight has always refused a grace too short to cover it. But the
+  deadline is commonly set in a bind-mounted production `plurx.toml` — a file
+  `deploy/.env` has no reason to mention — so the two halves of the pair sat in
+  different files on different machines, nothing linked them, and the first
+  report of a mismatch was a refused deploy on the box: a node running with
+  `install_snapshot_timeout_secs = 1200` and the tracked five-minute grace
+  could not be deployed at all until somebody worked out that 1,335 belonged in
+  `.env`. `make docker-up` now derives the grace from the same resolved
+  deadline the refusal is computed from, and applies the period it proved, so
+  an unset variable is always the right number instead of one to keep in step.
+  Whether anybody chose a grace is answered by Compose rather than by a second
+  reading of `deploy/.env`: any resolved value other than the tracked default is
+  used exactly as resolved, and refused by name if it is too short. A
+  deliberately short grace surfaces a build that can never become ready, so
+  deriving is only ever for the value nobody chose.
 - **A read-only cluster member can do the work it was admitted for.** Two
   arithmetic guards asked whether the local node was a voter by *assuming* it
   was. `remote_rollout_ready` required `voter_count == peers.len() + 1`, and

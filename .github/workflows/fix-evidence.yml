@@ -4,9 +4,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
 
-permissions:
-  contents: read
-
 jobs:
   revert-proof:
     name: report whether retained Rust tests reject the base implementation

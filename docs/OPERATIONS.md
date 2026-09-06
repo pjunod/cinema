@@ -190,22 +190,31 @@ ssh nuc3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
     --username fleet --password-stdin'
 ```
 
-Build only on nuc4, from the exact checkout being shipped. The script embeds
-the git description in the binary and publishes one rollback tag plus the
-moving fleet tag:
+Every successful Forgejo `main` run ends with
+`publish merged image (Forgejo registry)`. The job waits for the post-merge
+validation fan-out, builds once on an X64 runner, verifies the immutable
+registry copy, and only then moves the fleet tag. It publishes
+`sha-<12hex>` for rollback and `main` for the newest qualified merge.
+Versioned releases own `latest`; fleet merges never overwrite that alias.
+
+If the automatic job must be recovered, run the same guarded publisher on
+nuc4 from the exact Forgejo commit. Supplying both identity variables makes a
+retry reuse an existing immutable image instead of rebuilding it:
 
 ```bash
 ssh nuc4
 cd /opt/noirr/plurx
 git fetch origin
 git switch --detach origin/main
-scripts/registry-push
+PLURX_BUILD_REF="$(git rev-parse HEAD)" \
+PLURX_BUILD_SHA="$(git rev-parse HEAD)" \
+  scripts/registry-push
 ```
 
 Each voter keeps this gitignored setting in `deploy/.env`:
 
 ```bash
-PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:latest
+PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main
 ```
 
 Pulling does not stop the running voter, so it may happen ahead of the rolling
@@ -221,7 +230,7 @@ curl -fsS http://127.0.0.1:32400/api/v1/server
 ```
 
 **Rollback by digest-bearing tag, not by rebuilding an old tree on every
-node.** Replace `latest` in `deploy/.env` with the known-good
+node.** Replace `main` in `deploy/.env` with the known-good
 `sha-<12hex>` tag, then run the same serial `up -d` and readiness gate. The
 Forgejo cleanup rule keeps the ten newest `sha-` tags, which bounds disk use
 and rollback depth together.
@@ -1692,6 +1701,66 @@ remain unchanged. During a rolling upgrade, an old-binary leader keeps its
 fixed 10-second deadline until that voter is upgraded; do not treat the new
 deadline as effective cluster-wide until every possible leader is current.
 
+Compose forwards `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` explicitly and
+pairs it with `PLURX_HEALTH_START_PERIOD`. The default five-minute health grace
+covers the 120-second snapshot deadline plus the three sequential 45-second
+startup phases. Raising the snapshot deadline raises what the grace must be,
+but does not make that your bookkeeping: leave `PLURX_HEALTH_START_PERIOD`
+unset and `make docker-up` derives the grace as the resolved deadline plus 135
+seconds, from the same reading its preflight refuses on. That matters most for
+the case that used to bite — a deadline set in a bind-mounted production TOML,
+where `.env` has no reason to mention readiness at all, and the first report of
+the mismatch was a refused deploy on the box.
+
+Set the variable only to choose a grace deliberately. Whether anybody chose is
+answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
+that is anything other than the interpolation default in
+`deploy/docker-compose.yml` came from a shell variable, an env file, or a
+literal pinned in an override, at Compose's own precedence, and is used exactly
+as resolved. It is never silently raised, because a short grace is a legitimate
+choice: it surfaces a build that can never become ready instead of waiting out
+the deadline. If it cannot cover the resolved deadline the preflight refuses it
+by name. Writing the tracked default itself — five minutes — is indistinguishable
+from writing nothing, and is derived from like anything else. The supported
+maximum pair is
+3,600 seconds and 65 minutes; do not adopt the 65-minute maximum as an ordinary
+default.
+
+Use `make docker-up`, not bare `docker compose up`, for a Compose rollout. It
+derives the period, proves it, and applies that same period — a preflight that
+proves one number while `compose up` applies another proves nothing. The proof
+is a read-only, fail-closed preflight that runs `docker compose config` in
+`deploy/`, so shell variables, `deploy/.env`, interpolation defaults, and
+override files have the same precedence they will have during the rollout.
+It then reads the effective snapshot timeout from the resolved container
+environment or, when the environment is empty, a readable bind-mounted
+production TOML. A resolved command-line `--config` path takes precedence over
+`PLURX_CONFIG`, as it does in the server. The command exits before any Compose
+mutation unless the health start period it is about to apply covers that
+timeout plus all three named startup phases.
+
+If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` in the resolved environment. With
+no explicit value, the preflight assumes the source maximum rather than
+guessing that the hidden TOML uses the default.
+
+Two diagnostics, and they answer different questions. `make
+docker-startup-budget-check` answers "would `make docker-up` succeed here" — it
+derives the same period the rollout would and proves that. To ask instead what
+a bare `docker compose up` would apply, which derives nothing, run the script
+without the deriving step:
+
+```bash
+cd deploy && python3 ../scripts/validate-docker-startup-budget
+```
+
+Run either independently when diagnosing configuration without changing a
+container:
+
+```bash
+make docker-startup-budget-check
+```
+
 **Synchronize clocks before cluster work.** All voters and the external load
 generator must run NTP/chrony (or an equivalent disciplined source), and
 monitor offset continuously. Membership reachability and artwork repair proofs
@@ -2446,6 +2515,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
 | `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Snapshot transfer/install deadline in seconds, bounded 10–3,600; keep identical on every voter |
+| `PLURX_HEALTH_START_PERIOD` | — | derived | Compose-only Docker readiness grace. Unset, `make docker-up` derives the resolved snapshot deadline plus 135 seconds (`5m` when nothing longer resolves). Set it only to choose a grace deliberately: the value is used as written, and refused rather than raised if it cannot cover the deadline |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |
@@ -2508,6 +2578,13 @@ untested, and turn it back off if the device does not visibly improve.
 | 32402 | TCP + TLS | Authenticated internal cluster API; never expose it as public cleartext |
 | 32414 | UDP | GDM discovery so Plex/Kodi clients find the server on the LAN |
 | 5353 | UDP multicast | Bonjour `_plurx._tcp` discovery for native clients |
+
+Live TV adds no listener. It makes **outbound** connections from the owner node
+to the configured tuner on TCP 80 (`discover.json`, and `lineup.json` unless the
+device advertises it on 5004 — those two ports are the only ones accepted from
+an advertised `LineupURL`) and TCP 5004 (the stream). Those are the device's
+ports, and they are why a tuner on a different VLAN from the owner fails
+`owner_network` readiness with everything else green.
 
 GDM discovery only works on 32414 (the protocol hard-codes it), but the *host*
 port is movable via `PLURX_GDM_PORT` when a still-running Plex owns it — you lose
@@ -3655,6 +3732,210 @@ normal: the id says what it is, and enrichment then fills in title, overview
 and artwork on the same pass. An item that keeps its filename as its title
 means enrichment has no TMDB key configured — the scan itself succeeded.
 
+## Live TV (HDHomeRun) — the runbook
+
+Live TV plays one over-the-air tuner live. It records nothing. It is off on
+every install until an administrator turns it on, and it is always compiled —
+there is no build variant to install and no feature flag to rebuild with, so
+"is Live TV in this binary" is never the question. The question is always
+"is it enabled, and did readiness pass".
+
+The whole surface is **Settings → Developer**. It is there in every build,
+including a shipped one, and every mutation on it requires administrator
+access plus the exact current settings generation, so two administrators
+cannot half-apply two configurations.
+
+### Turning it on
+
+Enabling is deliberately two steps, in this order, because enabling a device
+nobody has probed proves nothing.
+
+```bash
+TOKEN=…                     # an ADMIN token
+HOST=http://localhost:32400
+
+# 1. What generation are we at? Every write must carry it.
+curl -s -H "Authorization: Bearer $TOKEN" $HOST/api/v1/settings \
+  | python3 -c 'import json,sys; s=json.load(sys.stdin); print({k:v for k,v in s.items() if k.startswith("live_tv")})'
+
+# 2. Configure the device. The owner is a node id from /api/v1/server.
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"live_tv_config_generation":0,
+       "live_tv_device_ipv4":"192.168.4.20",
+       "live_tv_owner_node_id":"<node id of the machine next to the tuner>",
+       "live_tv_max_sessions":2,
+       "live_tv_output_height":720}' \
+  $HOST/api/v1/settings
+
+# 3. Probe it. This is the step that tells you the truth.
+curl -s -X POST -H "Authorization: Bearer $TOKEN" $HOST/api/v1/live-tv/readiness/refresh
+
+# 4. Only then enable, carrying the generation the PUT above returned.
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"live_tv_config_generation":1,"live_tv_enabled":true}' $HOST/api/v1/settings
+```
+
+A `409` on either PUT means somebody else moved the generation: refetch and
+retry. Do not force it — the generation is what stops a stale form from
+reverting a change you cannot see.
+
+### Reading readiness
+
+`POST /api/v1/live-tv/readiness/refresh` returns one named check per thing that
+can be wrong, which is the point: a single "not ready" hides which of nine
+problems you have. Both readiness routes are **administrator-only** — the
+refresh reaches out to somebody's hardware, so it is not something an ordinary
+token gets to trigger. `GET .../readiness` returns the last verdict without
+probing; `POST .../readiness/refresh` probes.
+
+| Check | What a failure means |
+|---|---|
+| `configuration` | the device address, owner, session limit or height is unset or invalid |
+| `cluster_protocol` | the cluster is mid-upgrade or below the protocol Live TV needs |
+| `serving_authority` | this node is not currently allowed to serve (maintenance, quorum) |
+| `owner_transition` | an owner change is in flight, or wants a drain or attestation |
+| `owner_network` | **the common one.** The owner could not reach the tuner: wrong address, different VLAN, device asleep, or a proxy/redirect in the way |
+| `lineup` | the device answered but its lineup is empty — run a channel scan **on the HDHomeRun**, not here |
+| `session_limit` | `live_tv_max_sessions` is above the tuner count the device reports |
+| `ffmpeg_graph` | the configured output cannot be built with this FFmpeg |
+| `drm_boundary` | informational; never blocks. Protected channels are listed and refused |
+
+Before it is enabled, expect exactly the enablement check to fail and every
+other one to pass. That state — "everything is ready except that it is off" —
+is what you want to see before step 4.
+
+### What a session costs
+
+One session is: **one** HTTP GET against the device's `/auto/vN`, **one**
+FFmpeg process, and a rolling six-segment scratch directory in the data dir. Not
+"about one" — the endless-source pass asserts exactly one tuner GET across ten
+window rollovers. If you see two, something is wrong and it is worth a bug
+report.
+
+Sessions end three ways, all of which release the tuner, the process, the
+scratch and the registry entry:
+
+- a client releases it (`DELETE /api/v1/live-tv/sessions/<capability>`);
+- nobody reads it for 45 s;
+- the producer stops making progress for 30 s, or never starts within 15 s.
+
+A closed browser tab, a killed app, or a lost network all land in the second
+case. **You do not need to clean up after a viewer**, and there is no admin
+"kill session" button because there is nothing that outlives its own timeout.
+
+### Watching it
+
+```bash
+curl -s $HOST/metrics | grep plurx_live_tv
+```
+
+| Metric | Read it as |
+|---|---|
+| `plurx_live_tv_enabled` | the replicated runtime setting, not "is it working" |
+| `plurx_live_tv_device_ready` | whether the configured **owner** last proved the device |
+| `plurx_live_tv_lineup_channels{support="ready"\|"drm_unsupported"}` | how much of the lineup is playable at all |
+| `plurx_live_tv_sessions{state="starting"\|"active"}` | process-local, so read it on the owner |
+| `plurx_live_tv_starts_total{outcome="created"\|"recovered"\|"failed"}` | a climbing `failed` with a flat `created` is the shape of a device problem |
+| `plurx_live_tv_session_ends_total{reason="terminal"}` | sessions that ended in a terminal state |
+| `plurx_live_tv_relay_bytes_total` | bytes a non-owner served by relaying from the owner |
+
+Sessions and starts are **per process**. On a cluster, the owner's numbers are
+the tuner's truth and a relaying node's `relay_bytes` is how much it carried.
+
+### Moving the owner
+
+The owner is a setting, not an election, and there is no timeout-based takeover.
+That is deliberate: elapsed time cannot prove somebody else's FFmpeg process
+closed a tuner socket, and guessing wrong means two processes fighting over one
+piece of hardware.
+
+- **Owner is alive:** change `live_tv_owner_node_id`. The old owner drains, the
+  drain is signed and confirmed, and the change lands.
+- **Owner is gone for good:** disable Live TV, then re-enable with an explicit
+  attestation — `live_tv_fenced_owner` carrying the original
+  `owner_node_id`, the `drain_before_generation` cutoff, and
+  `stopped_and_restart_prevented: true`. You are signing that the old machine
+  is stopped and cannot come back. If it can, do not send this.
+
+Reconfiguration is always possible **while disabled**. Losing the owner ends
+the live session that was in flight; viewers see a named refusal and start
+again, they do not silently get somebody else's tuner.
+
+### What a real device measured
+
+Everything above the previous section was proved against a fixture. This was
+proved against an HDHomeRun FLEX 4K (`HDFX-4K`, firmware `20260326`, four
+tuners) on a real antenna, from a host on the same LAN, with
+`make live-tv-hardware-check`. It is one device on one antenna, not a
+specification -- but it is the only numbers in this document that came from
+hardware, and it says which are which.
+
+| What | Measured |
+|---|---|
+| lineup | 55 channels, 52 playable, 3 DRM-flagged (all on ATSC 3.0 muxes) |
+| ATSC 1.0 channel, asking to fetchable segment | **6.4 s** of a 15 s budget, nearly all of it inside the start request |
+| segment duration | **4.004 s** |
+| source in | MPEG-2 Main, 1080 interlaced, AC-3 5.1 |
+| published out | H.264 720p, AAC stereo, MPEG-TS |
+| signal on the tuned channel | 96-100% strength, 83-93% quality, 100% symbol |
+| capacity | 2 sessions filled the configured limit; the 3rd answered `tuner_capacity`; the device confirmed exactly 2 of its tuners held, then free |
+| DRM channel | refused `drm_unsupported` |
+| after release | 0 bytes of live scratch, 0 tuners held, and a tuner another household client was using untouched throughout |
+
+**ATSC 3.0: three defects found and fixed, latency still unfinished.** Chasing
+one ATSC 3.0 channel on that device found all three, and none of them was a
+codec:
+
+1. Every ATSC 3.0 channel is HEVC **Main 10**, the live filter chain pinned no
+   pixel format, and the software encoder pins `-profile:v high` -- so libx264
+   was handed 10-bit frames and refused ("high profile doesn't support a bit
+   depth of 10"), killing FFmpeg before it published anything. Any 10-bit live
+   source hit this, not only ATSC 3.0.
+2. A flat 15 s startup budget expired before that error could be reported, and
+   gave the same sentence to a channel that was quietly working and one that
+   had sent nothing at all.
+3. `-probesize` was 8 MiB of *tuner stream* -- roughly 23 s of wall time on a
+   2.8 Mbps mux, and 1.5 s of pointless latency even on a strong one.
+
+With all three repaired, **ATSC 3.0 plays on that device**: a HEVC Main 10 1080
+channel with AC-3 5.1 arrived as H.264 720p with AAC stereo, playable **9.0 s**
+after asking against the same 15 s budget, on a mux reading 51% signal quality,
+with the tuner released and no scratch left behind.
+
+What plurx cannot open is **protected** ATSC 3.0, and the distinction matters
+when you are diagnosing. Three channels on that antenna are flagged DRM and are
+refused by name. Two more are *not* flagged and behave exactly like the flagged
+ones: the device accepts the connection and returns nothing after a flat ten
+seconds, while reporting **98%** signal quality. So a channel that will not
+start is not evidence of a weak signal — check whether the mux is protected
+before you go up on the roof.
+
+### Accepting it on real hardware
+
+Everything above is proved against a fixture — a real HDHomeRun-shaped device
+on ports 80 and 5004 — which is honest about the protocol and cannot be honest
+about a tuner. For the numbers that only hardware knows:
+
+```bash
+make live-tv-hardware-check DEVICE=192.168.4.20 TUNERS=2
+```
+
+It boots a throwaway server (nothing you are running is touched), occupies at
+most `TUNERS` tuners for a few minutes, and writes
+`target/live-tv-hardware/hardware.json` with the device's real tuner count,
+real time from asking for a channel to a playable segment against the 15 s
+budget, real segment length, signal strength and quality, what the broadcaster
+actually sends (read straight off the tuner) and what survived the graph, and
+the device's own account — from `/status.json` — of which tuners plurx held and
+that they came back. Anything this device cannot exercise is reported as `NOT
+EXERCISABLE` with a reason rather than counted as a pass.
+
+Pass `--channel <guide number>` to accept a specific channel — that is how the
+ATSC 3.0 finding above was produced. Behind NAT, or from a bridged container,
+add `--host-address <the address the device sees>`: the device reports a
+translated address in its `TargetIP` and attribution falls back to "idle before
+this run, busy now", which is weaker and says so in the evidence.
+
 ## Logs
 
 Structured `tracing` logs are split by job. Settings → System shows the general
@@ -3850,3 +4131,15 @@ the loading overlay a few seconds longer, then playback).
 | 4K starts, then buffers a few seconds in | The session never built a head start — the classic cause was realtime pacing on the copy-video path | Raise **Settings → Playback → Transcode buffering → Head start**; check the stats overlay's Server block for the encode speed |
 | Stutters every 20–40 seconds through a whole film | The encoder cannot keep up: the head start drains at (1 − speed) per second played | Stats overlay (`i`) → Server → encode speed. Below 1× means transcode, not network — pick a lower quality, or check that hardware encoding validated at startup |
 | The transcoder seems to stop partway through | It reached the buffer limit and suspended itself | Expected. `Settings → Activity` marks it held; it resumes when the playhead catches up |
+| Live TV readiness `owner_network` fails, everything else green | The **owner** node cannot reach the configured tuner | Test from the owner, not your laptop: `curl http://<device>/discover.json`. Usual causes are a different VLAN or Docker network from the device, a sleeping device, a wrong address, or a proxy/redirect in the path — redirects are refused on purpose |
+| Live TV readiness `lineup` fails | The device answered and has no channels | Run the channel scan **on the HDHomeRun** (its own web UI or app); plurx never scans for it |
+| Live TV readiness `session_limit` fails | `live_tv_max_sessions` is above the tuner count the device reports | Lower it; the device's own count is the real ceiling |
+| A channel is listed but "Watch live" is not offered | The device flags it DRM, or reports a support state this build does not know | Nothing to fix — there is no licensed DRM path. Protected channels are shown rather than hidden so you can see they exist |
+| `tuner_capacity` with tuners apparently free | Another HDHomeRun client on the network won a tuner in the gap after plurx checked capacity | Retry later. The device arbitrates its own hardware; this `503` is honest |
+| A viewer's session will not start again for ~90 s | Their last attempt failed in a way that might mean a tuner *did* open, so the client is holding its place rather than opening a second one | Expected. It clears itself; see [PLAYBACK.md](PLAYBACK.md) |
+| Live TV settings `PUT` returns `409` | Somebody else moved the settings generation | Refetch `/api/v1/settings` and retry with the current generation. Never force it |
+| `plurx_live_tv_sessions` is `0` on a node people are watching on | Sessions are process-local and only the **owner** creates them | Read the metric on the owner; a relaying node reports `plurx_live_tv_relay_bytes_total` instead |
+| An ATSC 3.0 channel is listed as playable and does not start | The mux is probably protected. On the test antenna two unflagged ATSC 3.0 channels return no bytes after a flat 10 s while reporting 98% signal quality — the same behaviour as the DRM-flagged ones | Not a signal problem, and not fixable here: plurx has no licensed DRM path. Unprotected ATSC 3.0 plays (measured at 9.0 s to first segment on a 51%-quality mux) |
+| A start answers `startup_timeout` saying the tuner sent no data | The device accepted the connection and delivered nothing — the channel has no signal on this device | Reception. Check that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
+| A start answers `startup_timeout` naming a byte count | The tuner is feeding but the producer published no segment inside the producer-progress budget | A real producer problem rather than a missing signal. Check `Settings → Logs` on the owner; the byte count is there so the two cases are distinguishable |
+| An ATSC 3.0 channel returns no picture and no error from the device itself | The device accepted the connection and sent zero bytes — two channels on one test antenna do this | Reception, not software. Check signal on that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |

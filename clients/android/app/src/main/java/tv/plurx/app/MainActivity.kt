@@ -42,6 +42,10 @@ import tv.plurx.app.ui.SearchScreen
 import tv.plurx.app.ui.SettingsScreen
 import tv.plurx.app.ui.components.LoadingBox
 import tv.plurx.app.ui.theme.PlurxTheme
+import tv.plurx.app.livetv.LiveTvPlayer
+import tv.plurx.app.livetv.LiveTvScreen
+import tv.plurx.app.livetv.LiveTvDeveloperScreen
+import androidx.compose.ui.platform.LocalContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,6 +68,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppRoot(vm: AppViewModel) {
+    val liveTv = LiveTvPlayer.get(LocalContext.current)
     val phase by vm.phase.collectAsStateWithLifecycle()
     val busy by vm.busy.collectAsStateWithLifecycle()
     val authError by vm.authError.collectAsStateWithLifecycle()
@@ -71,6 +76,7 @@ private fun AppRoot(vm: AppViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_START) { vm.onForeground() }
     LaunchedEffect(phase) {
         if (phase == Phase.Ready) vm.onForeground()
+        else liveTv.stop(clearProfile = true)
     }
 
     when (phase) {
@@ -95,6 +101,7 @@ private fun MainNav(vm: AppViewModel) {
                 onSearch = { nav.navigate("search") },
                 onOpenDownloads = { nav.navigate("downloads") },
                 onOpenSettings = { nav.navigate("settings") },
+                onOpenLiveTv = { nav.navigate("live-tv") },
             )
         }
         composable(
@@ -158,7 +165,13 @@ private fun MainNav(vm: AppViewModel) {
             )
         }
         composable("settings") {
-            SettingsScreen(vm = vm, onBack = { nav.popBackStack() })
+            SettingsScreen(vm = vm, onBack = { nav.popBackStack() }, onOpenDeveloper = { nav.navigate("developer") })
+        }
+        composable("live-tv") {
+            LiveTvScreen(origin = vm.origin, onBack = { nav.popBackStack() })
+        }
+        composable("developer") {
+            LiveTvDeveloperScreen(origin = vm.origin, onBack = { nav.popBackStack() })
         }
         composable("downloads") {
             DownloadsScreen(

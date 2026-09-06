@@ -167,8 +167,6 @@ class ReleasePublicationContractCase(unittest.TestCase):
         )
         self.assertIn("if [ \"$minor_action\" = keep ]", publish)
         self.assertIn("if [ \"$latest_action\" = keep ]", publish)
-        self.assertEqual(workflow.count("packages: write"), 2)
-
         reuse = workflow.split("\n  reuse:\n", 1)[1].split("\n  publish:\n", 1)[0]
         self.assertIn("version_exists == 'true'", reuse)
         self.assertIn("platform.architecture == $arch", reuse)

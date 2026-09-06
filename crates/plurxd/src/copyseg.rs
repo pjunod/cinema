@@ -26,12 +26,11 @@
 #[cfg(any(test, feature = "live-hls-recovery"))]
 use std::path::{Path, PathBuf};
 
-use plurx_core::domain::MediaFile;
-use plurx_core::fmp4::Init;
 #[cfg(any(test, feature = "live-hls-recovery"))]
-use plurx_core::fmp4::{
-    self, FragmentReader, Published, SegmentCounts, Segmenter, TrackKind, Unit,
-};
+use plurx_core::domain::MediaFile;
+use plurx_core::fmp4::{self, Init};
+#[cfg(any(test, feature = "live-hls-recovery"))]
+use plurx_core::fmp4::{FragmentReader, Published, SegmentCounts, Segmenter, TrackKind, Unit};
 #[cfg(any(test, feature = "live-hls-recovery"))]
 use plurx_core::transcode::{
     COPY_FIRST_SEGMENT_SECONDS, COPY_PUBLISH_GATE_SECS, COPY_SEGMENT_MAX_BYTES,

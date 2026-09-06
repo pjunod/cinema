@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["db2afc8d"]
+points = ["live-tv.integration"]
+checks = ["rust-gate"]
+reason = "`-probesize` is a byte budget, and a tuner delivers bytes at the broadcaster's rate rather than at disk speed, so on a live stream the old 8 MiB was a time budget nobody had measured -- about 23 s of wall time on the test antenna's 2.8 Mbps ATSC 3.0 mux, longer than the entire startup budget. Measured on a real HDHomeRun FLEX 4K with the producer's own argument list against the strongest channel on the antenna: 8192 KiB reached the first segment at 7.06 s, 2048 KiB at 5.55 s, and 512 KiB at 5.54 s, so the curve flattens at 2 MiB. A latency budget has no branch to assert, which is precisely how it drifts back, so the budget was extracted into a named function beside the filter decision that is already one for the same reason, and the coverage pins it to the measured value and to the bracket the measurements actually cover -- never above 2 MiB, never below the smallest value measured. It also asserts the stream-time bound is still present, because lowering the byte bound is only safe while the bound that does not depend on bitrate remains."

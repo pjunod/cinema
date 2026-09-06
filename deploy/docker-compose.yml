@@ -63,6 +63,31 @@ services:
     image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurxd
     restart: unless-stopped
+    # This must cover the effective snapshot deadline plus the three startup
+    # allowances (135s total). Keeping that pair in step used to be an
+    # operator's job, and it does not work: the deadline commonly lives in a
+    # bind-mounted plurx.toml that `.env` never mentions, so the two halves are
+    # in different files on different machines and the first report of a
+    # mismatch is a refused deploy. `make docker-up` now derives this value
+    # from the same deadline its preflight reads, so leaving it unset is always
+    # the right number rather than a number somebody has to maintain.
+    #
+    # Set it in `.env` only to *choose* a grace — a longer one, or a
+    # deliberately short one that surfaces a broken build fast. Anything that
+    # resolves to something other than the default written below was chosen by
+    # somebody, wherever they wrote it, and is used exactly as Compose resolved
+    # it: nothing here re-reads `.env` and second-guesses that. It is never
+    # raised past you; if it cannot cover the deadline the preflight refuses it
+    # by name. Five minutes is the unset default for a deployment
+    # that never resolves anything longer: it covers the 120s default without
+    # hiding a broken build for the one-hour maximum, and `.env.example` shows
+    # the maximum pair. Invoking `docker compose up` directly derives nothing
+    # and proves nothing.
+    healthcheck:
+      test: ["CMD", "plurxd", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"
     # At the supported 3,600s snapshot-transfer maximum, a recovering voter can
     # spend 45s becoming healthy, 45s confirming admission, 3,645s catching up,
     # and 30s draining Hiqlite's writer/Raft tasks. Docker's 10-second default
@@ -94,6 +119,10 @@ services:
       PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"
       PLURX_BIND: "0.0.0.0:32400"
       PLURX_DATA_DIR: "/var/lib/plurx"
+      # Empty leaves a TOML value (or the built-in 120s default) authoritative.
+      # `make docker-up` checks readable bind-mounted TOML too; when set in
+      # .env, pair this with PLURX_HEALTH_START_PERIOD above.
+      PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: "${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"
       # Multicast cannot escape a Docker bridge. The host-network discovery
       # companion below owns Bonjour so this container does not publish a
       # duplicate service on the private `media` bridge.

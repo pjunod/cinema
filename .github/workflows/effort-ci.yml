@@ -147,9 +147,6 @@ jobs:
     if: needs.scope.outputs.android_jvm == 'true'
     runs-on: [self-hosted, Linux, X64, lab, android-kvm]
     timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v4
       - name: Reuse the pinned Android toolchain image from Forgejo

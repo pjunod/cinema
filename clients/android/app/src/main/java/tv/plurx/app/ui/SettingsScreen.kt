@@ -58,7 +58,7 @@ internal fun appVersionLabel(versionName: String, versionCode: Int): String =
     "$versionName ($versionCode)"
 
 @Composable
-fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
+fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> Unit = {}) {
     val preferences by vm.preferences.collectAsStateWithLifecycle()
     val offlineRecords by vm.offlineRecords.collectAsStateWithLifecycle()
     val offlineBookRecords by vm.offlineBookRecords.collectAsStateWithLifecycle()
@@ -200,6 +200,10 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
                         if (currentProfileHasDownloads) confirmingSignOut = true else vm.logout()
                     },
                 )
+            }
+
+            SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
+                PreferenceAction("HDHomeRun Live TV setup and enablement", onClick = onOpenDeveloper)
             }
 
             SettingsSection("About", null) {

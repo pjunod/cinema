@@ -63,9 +63,18 @@ def build_receipt(
 
     head_ref = environment.get("GITHUB_HEAD_REF", "")
     base_ref = environment.get("GITHUB_BASE_REF", "")
-    if not head_ref.startswith("effort/"):
+    integration_prefix = "integration/"
+    integration_suffix = "-into-main"
+    is_effort_head = head_ref.startswith("effort/")
+    is_integration_head = (
+        head_ref.startswith(integration_prefix)
+        and head_ref.endswith(integration_suffix)
+        and len(head_ref) > len(integration_prefix) + len(integration_suffix)
+    )
+    if not (is_effort_head or is_integration_head):
         raise QualificationError(
-            f"qualification head must match effort/**; found {head_ref!r}"
+            "qualification head must match effort/** or "
+            f"integration/*-into-main; found {head_ref!r}"
         )
     if base_ref != "main":
         raise QualificationError(

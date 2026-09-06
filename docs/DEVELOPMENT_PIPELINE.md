@@ -110,6 +110,9 @@ When the project is complete:
    work.
 3. **Open `effort/<project>` into `main`.** The main workflow recognizes that
    head/base pair and replaces normal path selection with the complete fan-out.
+   If resolving the final merge requires a separate branch, name it
+   `integration/<project>-into-main`; the workflow treats that narrowly named
+   branch as the same qualification candidate.
 4. **Require `Main promotion gate` to pass.** For a qualification, skipped is
    not success: Rust, cluster, browser, Apple, Android, cross-build, and
    container jobs must all report `success`.

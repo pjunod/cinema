@@ -208,6 +208,11 @@ const SETTINGS_METHODS: &[&str] = &[
     "put_setting_if_absent_if_artwork_repair_current",
     "prune_unreferenced_book_cover_origins",
     "put_settings",
+    // The generation-fenced settings write. It belongs beside `put_settings`
+    // rather than in a Live TV group: nothing about it is Live TV specific,
+    // and any caller that needs a settings batch to land only against an
+    // expected generation uses it.
+    "put_settings_if_generation",
     "instance_id",
 ];
 const DV_CONVERSION_METHODS: &[&str] = &[
@@ -15795,7 +15800,10 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 294, "review the Store method count");
+    // 291 on main, plus this branch's four: the two desired-selection
+    // methods it reintroduces (main carries none of that work) and the two
+    // validation-only reads the pointer fence is proved with.
+    assert_eq!(declared.len(), 295, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
