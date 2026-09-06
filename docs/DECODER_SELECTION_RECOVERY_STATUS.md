@@ -24,7 +24,7 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63), open against the effort; current repair/receipt head published, with exact-head approval and final qualification pending |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Exact code head `4c1abfaf`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 34/34, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup. Its explicit transitive post-fork helper inventory statically rejects common allocation and panic forms. Single-interruption success plus persistent expiry at ready send, acknowledgement, first seccomp receive, and first response are covered; an invalidated first notification separately proves bounded teardown |
+| Focused validation | Exact code head `22d89d27`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 35/35, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup. Its explicit transitive post-fork helper inventory statically rejects common allocation and panic forms. Single-interruption success plus persistent expiry at ready send, acknowledgement, first seccomp receive, first response, and steady-state response are covered; an invalidated first notification separately proves bounded teardown |
 | Exact receipt | `123b522a`: exact mapped history audit 1,370, catalog 24/30/1,443, status/ownership contracts 13/13, operations 211/211, formatting, and the pinned all-target workspace compile pass. Historical receipt `fa9e27d7` predates the latest notification-receive repair and is not presented as its evidence |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
 | Blocker | Obtain new exact-head adversarial approval, implement any findings, then run the one clean full-suite qualification |
@@ -34,7 +34,7 @@ An unchecked item is not implied by a nearby passing check.
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Exact-head repair review pending | `4c1abfaf` makes seccomp notification receive one-shot after each fresh readiness poll, adds persistent phase-by-phase deadline/cleanup coverage, and retains the earlier offset-ownership, provenance, and scope repairs; mandatory pinned-Linux collector regressions pass 34/34 |
+| M1 · explicit plan and facts | Exact-head repair review pending | `22d89d27` makes notification receive one-shot after each fresh readiness poll, bounds bootstrap and steady-state response retries by the shared deadline/stop signal, and retains the earlier offset-ownership, provenance, and scope repairs; mandatory pinned-Linux collector regressions pass 35/35 |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -232,6 +232,18 @@ waits for supervisor ownership to return after teardown. A static source audit
 enumerates the complete transitive pre-exec helper set and rejects common
 allocation and panic forms. This is source-level enforcement of the enumerated
 forms, not a general proof that arbitrary future Rust code cannot allocate.
+Review of the published `c7a339fb` receipt found the analogous steady-state
+response loop could still retry forever on repeated `EINTR`. Commits
+`b8646183` through `22d89d27` bind that denial response to the same absolute
+launch deadline and supervisor stop signal. A production-composed second-exec
+regression forces persistent response interruption, observes caller timeout
+while ownership remains held through a deliberately slow reap, and then proves
+the supervisor join and version permit return. Its ownership counter is
+isolated from parallel bootstrap regressions. A pre-existing 400 ms
+kill-domain assertion passed alone but failed once under the expanded parallel
+Linux suite; its outer observation window is now 1.5 seconds, while the escaped
+fixture still writes invalidating output after 500 ms, so the safety mutation
+continues to fail deterministically.
 
 The security contract is deliberately narrower than a general parser sandbox.
 Production binds the immutable primary self-contained ELF, prevents a
@@ -698,6 +710,8 @@ lane and focused tests provide earlier feedback.
 | `b38523be` | Three independent exact-head adversarial reviews on Forgejo PR #63 | Changes requested · one reviewer approved; two found the direct post-`EINTR` notification receive could block after invalidation, the single-interruption regression did not prove expiry or teardown, and the post-fork source audit omitted transitive helpers and common allocation forms |
 | `4c1abfaf` | Latest notification-receive repair and exact focused qualification | Pass · receive is single-attempt after fresh poll; persistent interruption covers all four bootstrap phases and invalidated-notification teardown. Planner 35/35, macOS collector 20/20, pinned Linux 1.97.1 collector 34/34, both real neutral-timeout producer regressions, and macOS/Linux all-target Clippy with warnings denied pass. Its tracked precommit source hook passed history 1,369, catalog 24/30/1,443, operations 211/211, formatting, and pinned workspace compile; exact post-map policy evidence is recorded separately at `123b522a`. The first local final-producer invocation selected a broken Homebrew FFmpeg link; the exact rerun used the installed `ffmpeg-full` binary and passed |
 | `123b522a` | Exact post-map interrupted-receive receipt | Pass · history 1,370, catalog 24/30/1,443, status/ownership contracts 13/13, operations 211/211, formatting, diff check, and the pinned all-target workspace compile |
+| `c7a339fb` | Three independent exact-head adversarial reviews | Changes requested · all found the already-published PR's stale “pending push” wording; probe review additionally found unbounded repeated `EINTR` in the steady-state notification-response loop and missing production-composed teardown coverage |
+| `22d89d27` | Steady-response repair and exact focused Linux qualification | Pass · steady denial retries observe the shared launch deadline and supervisor stop; the production-composed second-notification test proves detached ownership returns after slow reap and bounded join. Pinned Linux 1.97.1 all-target Clippy passes and the collector passes 35/35 in parallel; the scheduler-sensitive kill-domain test also passes alone on the preceding exact tree and in the final parallel suite after its observation-window correction |
 
 ## Remaining evidence before release
 
