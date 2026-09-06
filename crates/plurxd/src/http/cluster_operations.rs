@@ -331,6 +331,7 @@ pub(crate) struct PlannedOutageLeaseGuard {
     lease: Option<ClusterOperationLease>,
     membership: MembershipManager,
     serving: crate::serving_fence::ServingFence,
+    operation: PlannedOutageOperation,
     local_fence_armed: bool,
     release_runtime: tokio::runtime::Handle,
 }
@@ -340,11 +341,13 @@ impl PlannedOutageLeaseGuard {
         lease: ClusterOperationLease,
         membership: MembershipManager,
         serving: crate::serving_fence::ServingFence,
+        operation: PlannedOutageOperation,
     ) -> Self {
         Self {
             lease: Some(lease),
             membership,
             serving,
+            operation,
             local_fence_armed: false,
             release_runtime: tokio::runtime::Handle::current(),
         }
@@ -356,6 +359,7 @@ impl PlannedOutageLeaseGuard {
             lease: None,
             membership: MembershipManager::unavailable(),
             serving,
+            operation: PlannedOutageOperation::Restart,
             local_fence_armed: true,
             release_runtime: tokio::runtime::Handle::current(),
         }
@@ -367,6 +371,32 @@ impl PlannedOutageLeaseGuard {
 
     pub(crate) fn arm_local_fence(&mut self) {
         self.local_fence_armed = true;
+    }
+
+    fn retain_local_fence(&self) {
+        match self.operation {
+            PlannedOutageOperation::Restart => {
+                self.serving.retain_restart_preparation_until_cancelled()
+            }
+            PlannedOutageOperation::Maintenance => self
+                .serving
+                .retain_maintenance_preparation_until_cancelled(),
+        }
+    }
+
+    async fn cancel_local_fence(&self, active_sessions: usize) {
+        match self.operation {
+            PlannedOutageOperation::Restart => {
+                self.serving
+                    .cancel_restart_preparation(active_sessions)
+                    .await;
+            }
+            PlannedOutageOperation::Maintenance => {
+                self.serving
+                    .cancel_maintenance_preparation(active_sessions)
+                    .await;
+            }
+        }
     }
 
     /// Order an exact replicated release before any local unfence. This is
@@ -381,7 +411,7 @@ impl PlannedOutageLeaseGuard {
             // Maintenance calls this lower-level barrier directly. Latch here,
             // before the release await, so every caller remains fail-closed
             // across an ambiguous response and the original lease deadline.
-            self.serving.retain_restart_preparation_until_cancelled();
+            self.retain_local_fence();
         }
         self.membership
             .release_cluster_operation_lease(lease)
@@ -393,7 +423,7 @@ impl PlannedOutageLeaseGuard {
 
     pub(crate) async fn release(mut self) {
         if self.local_fence_armed {
-            self.serving.retain_restart_preparation_until_cancelled();
+            self.retain_local_fence();
         }
         if let Err(error) = self.release_replicated_claim().await {
             tracing::warn!(
@@ -401,13 +431,13 @@ impl PlannedOutageLeaseGuard {
                 "planned-outage release failed definitively; Drop will retry the exact claim"
             );
             if self.local_fence_armed {
-                self.serving.cancel_restart_preparation(0).await;
+                self.cancel_local_fence(0).await;
                 self.local_fence_armed = false;
             }
             return;
         }
         if self.local_fence_armed {
-            self.serving.cancel_restart_preparation(0).await;
+            self.cancel_local_fence(0).await;
             self.local_fence_armed = false;
         }
     }
@@ -428,22 +458,37 @@ impl Drop for PlannedOutageLeaseGuard {
         if cancel_local_fence {
             // Latch synchronously: the configured deadline could expire
             // before the async Drop cleanup first runs.
-            self.serving.retain_restart_preparation_until_cancelled();
+            self.retain_local_fence();
         }
         let membership = self.membership.clone();
         let serving = self.serving.clone();
+        let operation = self.operation;
         self.release_runtime.spawn(async move {
             if let Some(lease) = lease {
                 if let Err(error) = membership.release_cluster_operation_lease(&lease).await {
                     tracing::warn!(%error, "cancelled planned-outage release failed definitively after ambiguous results were exhausted");
                     if cancel_local_fence {
-                        serving.cancel_restart_preparation(0).await;
+                        match operation {
+                            PlannedOutageOperation::Restart => {
+                                serving.cancel_restart_preparation(0).await;
+                            }
+                            PlannedOutageOperation::Maintenance => {
+                                serving.cancel_maintenance_preparation(0).await;
+                            }
+                        }
                     }
                     return;
                 }
             }
             if cancel_local_fence {
-                serving.cancel_restart_preparation(0).await;
+                match operation {
+                    PlannedOutageOperation::Restart => {
+                        serving.cancel_restart_preparation(0).await;
+                    }
+                    PlannedOutageOperation::Maintenance => {
+                        serving.cancel_maintenance_preparation(0).await;
+                    }
+                }
             }
         });
     }
@@ -497,6 +542,7 @@ pub(crate) async fn acquire_planned_outage_preflight(
         prepared_lease,
         state.membership.clone(),
         state.serving.clone(),
+        operation,
     );
     let membership = state.membership.clone();
     let lease = run_planned_outage_task(async move {
@@ -3232,7 +3278,7 @@ mod tests {
             .expect("exact planned-outage release end")
             .0;
         let local_latch = exact_release
-            .find("retain_restart_preparation_until_cancelled")
+            .find("retain_local_fence()")
             .expect("synchronous unresolved-release latch");
         let replicated_release = exact_release
             .find("release_cluster_operation_lease(lease)")

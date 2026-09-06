@@ -227,7 +227,7 @@ pub async fn enter_maintenance(
     if local_expiry.is_none()
         || !state
             .serving
-            .begin_restart_preparation_until(local_expiry.unwrap_or_default())
+            .begin_maintenance_preparation_until(local_expiry.unwrap_or_default())
             .await
     {
         lease.release().await;
@@ -344,7 +344,7 @@ pub async fn exit_maintenance(
         .map_err(api_error)?;
     state
         .serving
-        .cancel_restart_preparation(active_sessions)
+        .cancel_maintenance_preparation(active_sessions)
         .await;
     Ok(Json(status))
 }
@@ -621,8 +621,8 @@ mod tests {
             .find("preparation_expiry_unix_ms")
             .expect("committed lease bounds local fence");
         let begin = enter
-            .find("begin_restart_preparation")
-            .expect("restart fence begins");
+            .find("begin_maintenance_preparation")
+            .expect("maintenance fence begins");
         let wait = enter
             .find("wait_for_restart_admissions")
             .expect("in-flight admissions settle");
@@ -655,7 +655,7 @@ mod tests {
             .find("release_replicated_claim().await")
             .expect("exact replicated release");
         let local_unfence = guard_source
-            .find("cancel_restart_preparation(0).await")
+            .find("cancel_local_fence(0).await")
             .expect("local serving unfence");
         assert!(
             replicated_release < local_unfence,
@@ -679,6 +679,7 @@ mod tests {
             "local direct streams and offline work must drain before the durable fence clears"
         );
         assert!(exit.contains("node_id != state.node_id"));
+        assert!(exit.contains("cancel_maintenance_preparation"));
 
         let inventory = include_str!("cluster_operations.rs")
             .split_once("pub(crate) async fn local_owned_media_sessions")

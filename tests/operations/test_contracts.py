@@ -1703,7 +1703,9 @@ for (const startupDelay of [0, 1600, 7000]) {
             "identity_mismatch_discards_peer_local_state",
             "public_transport_fallback_requires_matching_observer_identity",
             "unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline",
+            "restart_cancellation_cannot_clear_a_maintenance_owned_fence",
             "restart_preparation_claims_and_releases_the_replicated_outage_slot",
+            "credential_revocation_uses_the_exact_committed_security_roster",
         )
         for test_name in daemon_transport_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1718,11 +1720,13 @@ for (const startupDelay of [0, 1600, 7000]) {
             "snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override",
             "operations_peer_directory_preserves_identities_beyond_the_probe_limit",
             "operations_peer_query_materializes_only_the_committed_roster",
+            "cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission",
             "status_protocol_query_materializes_only_the_committed_roster",
             "committed_roster_bound_fails_closed_instead_of_truncating",
             "released_planned_outage_claim_cannot_be_resurrected_by_a_delayed_write",
             "maintenance_and_exact_release_are_safe_in_both_commit_orders",
             "ambiguous_operation_acquire_retries_only_while_its_owned_claim_is_live",
+            "previous_release_lifecycle_writes_cannot_cross_an_outage_lease",
             "production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts",
             "immediate_watermark_errors_cannot_starve_due_startup_log",
         )

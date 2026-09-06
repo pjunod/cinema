@@ -134,7 +134,7 @@ impl ClusterCacheRevocation {
 async fn peer_directory(state: &AppState) -> Result<Vec<ActivityPeer>, ApiError> {
     let peers = state
         .membership
-        .operations_peers()
+        .cache_admin_revocation_peers()
         .await
         .map_err(|_| propagation_error())?;
     if peers.len() > MAX_OPERATIONS_PEERS {
@@ -239,6 +239,19 @@ mod tests {
     use crate::http::extract::CacheOnlyAdminProofCache;
     use plurx_core::auth;
     use plurx_core::domain::User;
+
+    #[test]
+    fn credential_revocation_uses_the_exact_committed_security_roster() {
+        let source = include_str!("internal_auth_revocation.rs")
+            .split_once("async fn peer_directory(")
+            .expect("revocation peer directory")
+            .1
+            .split_once("async fn fanout(")
+            .expect("revocation peer directory end")
+            .0;
+        assert!(source.contains("cache_admin_revocation_peers()"));
+        assert!(!source.contains("operations_peers()"));
+    }
 
     fn admin(id: i64) -> User {
         User {

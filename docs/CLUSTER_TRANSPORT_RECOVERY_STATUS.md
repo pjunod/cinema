@@ -84,7 +84,17 @@ unresolved-release latch through every ambiguous result. Previous-release write,
 delayed resurrection, both maintenance/release orders, retry-boundary, and
 post-expiry admission regressions pass. The complete focused lane and all static,
 compile, formatting, and denied-warning matrices pass on exact candidate
-`7981061a`; three adversarial reviews are running from zero.
+`7981061a`. Exact-head review of the following status checkpoint `7130f456`
+found that a direct heartbeat delete conflicted with the new rolling-upgrade
+guard, restart cancellation could clear a maintenance-owned local fence, and
+credential revocation reused a diagnostics roster that omitted pending-removal
+members. The replacement delegates expiry solely to the schema-owned heartbeat
+trigger, makes local fences operation-owned, and uses a dedicated exact committed
+revocation roster that fails closed on missing members or endpoints. Its complete
+focused cluster/WAL lane, 197 operations contracts, web and validation suites,
+workspace check and denied-warning Clippy, all four prescribed vendored matrices,
+formatting, and diff hygiene pass on Rust 1.97.1. Three fresh exact-head reviews
+are the next gate.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -127,7 +137,8 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 sixth-review corrections | fail · `b7914f69` rejected after a green lane | Failed automatic refreshes repaint projected transport state without replacing an open decision dialog; cross-observer completion authority is bounded to the five-second freshness cohort; planned outages claim the replicated lifecycle lease before fresh evidence and release it on rejection; Store-backed authentication publishes only across an unchanged revocation generation; and producer stalls retain their real deadline-derived boundary. Three fresh exact-SHA tracks still found seven UI, snapshot-lifecycle, cluster-revocation, and cancellation findings. |
 | M4 seventh-review corrections | fail · `95247348` rejected after green focused requalification | The three exact-SHA tracks found first-select and first-identity snapshot teardown gaps, cancellation windows around both the replicated outage claim and local serving fence, cache authorization gaps on ambiguous writes plus console and mixed-version writers, a manual-refresh/modal race, and stale sender phases outranking durable receiver completion. All findings are assigned to bounded implementation tracks; the corrected tree must repeat focused qualification and three reviews from zero. |
 | M4 eighth-review corrections | fail · `cd344bd1` rejected after green qualification | Every finding against `95247348` was implemented and the complete lane plus compile/lint matrices passed, but fresh exact review found five snapshot-status, clock, deadline, and planned-outage ordering defects. This exact tree is not a release candidate. |
-| M4 ninth-review corrections | pass · exact candidate `7981061a` under review | Snapshot-owner abort publishes terminal state; request admission deadlines are fresh per decoded request; remote evidence ages only by local monotonic cache residence; exact planned-outage releases leave permanent one-shot receipts; rolling-upgrade triggers reject old lease writers; and node-owned exact cleanup retains local fencing past expiry. The complete cluster/WAL lane, web, 197 operations contracts, validation, root and all vendored check/Clippy matrices, formatting, and diff checks pass. |
+| M4 ninth-review corrections | fail · exact head `7130f456` rejected | The transport reviewer was clean, but the other exact-head tracks found a heartbeat/delete-trigger deadlock, a cross-operation local-fence cancellation race, and a pending-removal credential-revocation omission. This exact tree is not a release candidate. |
+| M4 tenth-review corrections | pass · awaiting exact-head review | Heartbeat expiry is owned only by the intent-aware schema trigger; restart and maintenance have distinct timed and unresolved local-fence ownership; and credential revocation materializes every exact committed remote member, including pending removals. The complete focused lane and compiler/lint matrices pass; three fresh exact-head reviews remain. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -210,6 +221,20 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
     a disconnected replicated release is still unresolved. A synchronous local
     latch survives the original deadline and is cleared only after node-owned,
     idempotent cleanup receives a definitive result.
+15. **Let the schema-owned heartbeat trigger expire planned-outage leases.** A
+    leading raw delete in the current heartbeat conflicts with the mixed-version
+    delete guard and prevents the later node update from firing its authorized
+    cleanup. Current and previous-release heartbeats now share the same trigger
+    path, which records an exact receipt before deletion.
+16. **Separate security rosters from diagnostics rosters.** Operations status
+    intentionally hides a removal-pending node; credential revocation cannot.
+    Revocation now uses every exact committed remote Raft member and refuses the
+    Store mutation if any identity or HTTP endpoint is unavailable.
+17. **Make local planned-outage fences operation-owned.** Restart and
+    maintenance share admission mechanics but not cancellation authority. Timed
+    state and unresolved-release latches retain their owner, so restart
+    cancellation cannot clear an in-flight or outcome-unknown maintenance fence,
+    and maintenance exit cannot clear restart preparation.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 

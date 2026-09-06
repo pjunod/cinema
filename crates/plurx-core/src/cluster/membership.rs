@@ -685,6 +685,17 @@ const OPERATIONS_PEERS_SQL: &str = "SELECT node.node_id, node.raft_id, node.last
        AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
          WHERE removal.node_id = node.node_id) \
      ORDER BY node.raft_id";
+// Credential revocation must reach every exact committed member, including a
+// node whose removal is pending and may roll back. Diagnostics intentionally
+// omit that node, so this security roster has its own query contract.
+const CACHE_ADMIN_REVOCATION_PEERS_SQL: &str =
+    "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+            http.public_http_url \
+     FROM cluster_nodes node \
+     LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+     WHERE node.node_id != $1 AND node.removed_at IS NULL \
+       AND node.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($2)) \
+     ORDER BY node.raft_id";
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
 // Exact-request proofs are accepted on the public listener. Bound the work
@@ -3592,10 +3603,6 @@ impl MembershipManager {
         let to_sql = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let mut statements = vec![
             (
-                "DELETE FROM cluster_operation_leases WHERE expires_at <= $1".to_owned(),
-                params!(now),
-            ),
-            (
                 "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
                        last_seen_at = excluded.last_seen_at"
@@ -5203,6 +5210,55 @@ impl MembershipManager {
             )
             .await?;
         Ok(Self::operations_peer_directory(now, &members, rows))
+    }
+
+    /// Resolve every exact committed remote member for cache-admin revocation.
+    /// A pending removal is still a serving authority until Raft membership no
+    /// longer contains it, so omission, missing identity, or missing endpoint
+    /// fails the credential mutation closed instead of shortening the fanout.
+    pub async fn cache_admin_revocation_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let now = unix_ms()?;
+        let members = inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .nodes()
+            .map(|(raft_id, _)| *raft_id)
+            .collect::<BTreeSet<_>>();
+        let members_json = bounded_committed_raft_ids_json(&members)?;
+        let rows = inner
+            .client
+            .query_consistent_map::<ActivityPeerRow, _>(
+                CACHE_ADMIN_REVOCATION_PEERS_SQL,
+                params!(inner.identity.node_id.as_str(), members_json),
+            )
+            .await?;
+        Self::cache_admin_revocation_peer_directory(now, &members, inner.identity.raft_id, rows)
+    }
+
+    fn cache_admin_revocation_peer_directory(
+        now: i64,
+        members: &BTreeSet<u64>,
+        local_raft_id: u64,
+        rows: Vec<ActivityPeerRow>,
+    ) -> Result<Vec<ActivityPeer>, MembershipError> {
+        if !members.contains(&local_raft_id) {
+            return Err(MembershipError::Internal(
+                "local node is absent from the committed revocation roster".to_owned(),
+            ));
+        }
+        let peers = Self::operations_peer_directory(now, members, rows);
+        let expected = members.len().saturating_sub(1);
+        if peers.len() != expected || peers.iter().any(|peer| peer.http_base.is_none()) {
+            return Err(MembershipError::Internal(
+                "a committed member has no usable cache-admin revocation endpoint".to_owned(),
+            ));
+        }
+        Ok(peers)
     }
 
     /// Keep every committed remote identity in the directory result. The
@@ -8693,6 +8749,7 @@ struct MembershipMetricsRow {
     removal_pending: bool,
 }
 
+#[derive(Clone)]
 struct ActivityPeerRow {
     node_id: String,
     raft_id: u64,
@@ -9346,6 +9403,97 @@ mod tests {
     }
 
     #[test]
+    fn cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, \
+                   last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_http (\
+                   node_id TEXT PRIMARY KEY, public_http_url TEXT); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+                 INSERT INTO cluster_nodes VALUES \
+                   ('node-1', 1, 1000000, NULL), \
+                   ('node-2', 2, 1000000, NULL), \
+                   ('node-3', 3, 1000000, NULL), \
+                   ('abandoned', 99, 1000000, NULL); \
+                 INSERT INTO cluster_node_http VALUES \
+                   ('node-1', 'http://node-1:32400'), \
+                   ('node-2', 'http://node-2:32400'), \
+                   ('node-3', 'http://node-3:32400'), \
+                   ('abandoned', 'http://abandoned:32400'); \
+                 INSERT INTO cluster_node_removals VALUES ('node-2');",
+            )
+            .expect("create revocation roster fixture");
+        let members = BTreeSet::from([1_u64, 2, 3]);
+        let members_json =
+            bounded_committed_raft_ids_json(&members).expect("bounded committed roster");
+        let read = |sql| {
+            let mut statement = connection.prepare(sql).expect("prepare roster query");
+            statement
+                .query_map(rusqlite::params!["node-1", members_json.as_str()], |row| {
+                    let raft_id: i64 = row.get(1)?;
+                    Ok(ActivityPeerRow {
+                        node_id: row.get(0)?,
+                        raft_id: u64::try_from(raft_id).unwrap_or_default(),
+                        last_seen_at: row.get(2)?,
+                        http_base: row.get(3)?,
+                    })
+                })
+                .expect("query committed roster")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect committed roster")
+        };
+
+        let operations = read(OPERATIONS_PEERS_SQL);
+        assert_eq!(
+            operations
+                .iter()
+                .map(|peer| peer.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["node-3"]
+        );
+        let revocation = read(CACHE_ADMIN_REVOCATION_PEERS_SQL);
+        assert_eq!(
+            revocation
+                .iter()
+                .map(|peer| peer.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["node-2", "node-3"]
+        );
+        assert!(MembershipManager::cache_admin_revocation_peer_directory(
+            1_000_000,
+            &members,
+            1,
+            revocation.clone(),
+        )
+        .is_ok());
+
+        let missing_pending_member = revocation
+            .iter()
+            .filter(|peer| peer.raft_id != 2)
+            .cloned()
+            .collect();
+        assert!(MembershipManager::cache_admin_revocation_peer_directory(
+            1_000_000,
+            &members,
+            1,
+            missing_pending_member,
+        )
+        .is_err());
+        let mut missing_endpoint = revocation;
+        missing_endpoint[0].http_base = None;
+        assert!(MembershipManager::cache_admin_revocation_peer_directory(
+            1_000_000,
+            &members,
+            1,
+            missing_endpoint,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn status_protocol_query_materializes_only_the_committed_roster() {
         let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
         connection
@@ -9921,8 +10069,8 @@ mod tests {
                 .expect("replace expired claimant"),
             1
         );
-        assert!(production_source()
-            .contains("DELETE FROM cluster_operation_leases WHERE expires_at <= $1"));
+        assert!(EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL
+            .contains("DELETE FROM cluster_operation_leases WHERE expires_at <= NEW.last_seen_at"));
         drop(connection);
         std::fs::remove_file(path).expect("remove lease fixture");
     }
@@ -10198,6 +10346,18 @@ mod tests {
 
     #[test]
     fn previous_release_lifecycle_writes_cannot_cross_an_outage_lease() {
+        let source = production_source();
+        let heartbeat_source = source
+            .split_once("async fn commit_heartbeat(")
+            .expect("production heartbeat")
+            .1
+            .split_once("async fn refresh_local_maintenance(")
+            .expect("production heartbeat end")
+            .0;
+        assert!(
+            !heartbeat_source.contains("DELETE FROM cluster_operation_leases"),
+            "the heartbeat UPDATE owns expiry through the schema trigger; a leading raw delete would be rejected by the rolling-upgrade guard",
+        );
         let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
         connection
             .execute_batch(

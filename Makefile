@@ -699,6 +699,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  serving_fence::tests::unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  serving_fence::tests::restart_cancellation_cannot_clear_a_maintenance_owned_fence \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::restart_preparation_claims_and_releases_the_replicated_outage_slot \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
@@ -715,6 +718,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::ambiguous_operation_acquire_retries_only_while_its_owned_claim_is_live \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::previous_release_lifecycle_writes_cannot_cross_an_outage_lease \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
 	  cluster::membership::tests::cache_revocation_capability_covers_the_exact_committed_roster_and_rollback \
@@ -751,6 +757,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::internal_auth_revocation::tests::digest_and_user_revocation_on_a_invalidate_primed_b_before_success \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::credential_revocation_uses_the_exact_committed_security_roster \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_have_a_hard_capacity \
@@ -794,6 +803,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::operations_peer_query_materializes_only_the_committed_roster \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::membership::tests::cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission \
 	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
 	  cluster::membership::tests::status_protocol_query_materializes_only_the_committed_roster \

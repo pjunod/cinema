@@ -5,7 +5,7 @@
 //! watermark is already a short monotonic lease refreshed by the replication
 //! monitor. This projection turns that lease into one process-wide watch.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,17 +26,30 @@ pub(crate) struct RestartDrainStatus {
     pub(crate) drained: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlannedOutageFenceOwner {
+    Restart = 1,
+    Maintenance = 2,
+}
+
+impl PlannedOutageFenceOwner {
+    const fn encoded(self) -> u8 {
+        self as u8
+    }
+}
+
 #[derive(Default)]
 struct RestartDrainState {
     expires_at: Option<tokio::time::Instant>,
     expires_at_unix_ms: Option<u64>,
+    owner: Option<PlannedOutageFenceOwner>,
 }
 
 #[derive(Default)]
 struct RestartDrain {
     state: tokio::sync::Mutex<RestartDrainState>,
     admissions: AtomicU64,
-    unresolved_release: AtomicBool,
+    unresolved_release_owner: AtomicU8,
     changed: tokio::sync::Notify,
 }
 
@@ -242,8 +255,9 @@ impl ServingFence {
         if state.expires_at.is_some()
             || self
                 .restart_drain
-                .unresolved_release
+                .unresolved_release_owner
                 .load(Ordering::Acquire)
+                != 0
         {
             return None;
         }
@@ -257,11 +271,37 @@ impl ServingFence {
     /// expires. Returning `false` means consensus consumed the whole lease and
     /// no local admission was fenced.
     pub(crate) async fn begin_restart_preparation_until(&self, expires_at_unix_ms: u64) -> bool {
+        self.begin_planned_outage_preparation_until(
+            expires_at_unix_ms,
+            PlannedOutageFenceOwner::Restart,
+        )
+        .await
+    }
+
+    pub(crate) async fn begin_maintenance_preparation_until(
+        &self,
+        expires_at_unix_ms: u64,
+    ) -> bool {
+        self.begin_planned_outage_preparation_until(
+            expires_at_unix_ms,
+            PlannedOutageFenceOwner::Maintenance,
+        )
+        .await
+    }
+
+    async fn begin_planned_outage_preparation_until(
+        &self,
+        expires_at_unix_ms: u64,
+        owner: PlannedOutageFenceOwner,
+    ) -> bool {
         let mut state = self.restart_drain.state.lock().await;
+        expire_restart_drain(&mut state);
         if self
             .restart_drain
-            .unresolved_release
+            .unresolved_release_owner
             .load(Ordering::Acquire)
+            != 0
+            || state.expires_at.is_some()
         {
             return false;
         }
@@ -269,16 +309,19 @@ impl ServingFence {
         let Some(remaining_ms) = expires_at_unix_ms.checked_sub(now_unix_ms) else {
             state.expires_at = None;
             state.expires_at_unix_ms = None;
+            state.owner = None;
             return false;
         };
         if remaining_ms == 0 {
             state.expires_at = None;
             state.expires_at_unix_ms = None;
+            state.owner = None;
             return false;
         }
         let now = tokio::time::Instant::now();
         state.expires_at = Some(now + Duration::from_millis(remaining_ms));
         state.expires_at_unix_ms = Some(expires_at_unix_ms);
+        state.owner = Some(owner);
         true
     }
 
@@ -287,9 +330,20 @@ impl ServingFence {
     /// guard's `Drop` before its asynchronous cleanup task can be scheduled.
     /// Only a confirmed exact release clears it.
     pub(crate) fn retain_restart_preparation_until_cancelled(&self) {
+        self.retain_planned_outage_preparation_until_cancelled(PlannedOutageFenceOwner::Restart);
+    }
+
+    pub(crate) fn retain_maintenance_preparation_until_cancelled(&self) {
+        self.retain_planned_outage_preparation_until_cancelled(
+            PlannedOutageFenceOwner::Maintenance,
+        );
+    }
+
+    fn retain_planned_outage_preparation_until_cancelled(&self, owner: PlannedOutageFenceOwner) {
         self.restart_drain
-            .unresolved_release
-            .store(true, Ordering::Release);
+            .unresolved_release_owner
+            .compare_exchange(0, owner.encoded(), Ordering::AcqRel, Ordering::Acquire)
+            .ok();
         self.restart_drain.changed.notify_waiters();
     }
 
@@ -314,12 +368,36 @@ impl ServingFence {
         &self,
         active_sessions: usize,
     ) -> RestartDrainStatus {
+        self.cancel_planned_outage_preparation(active_sessions, PlannedOutageFenceOwner::Restart)
+            .await
+    }
+
+    pub(crate) async fn cancel_maintenance_preparation(
+        &self,
+        active_sessions: usize,
+    ) -> RestartDrainStatus {
+        self.cancel_planned_outage_preparation(
+            active_sessions,
+            PlannedOutageFenceOwner::Maintenance,
+        )
+        .await
+    }
+
+    async fn cancel_planned_outage_preparation(
+        &self,
+        active_sessions: usize,
+        owner: PlannedOutageFenceOwner,
+    ) -> RestartDrainStatus {
         let mut state = self.restart_drain.state.lock().await;
-        self.restart_drain
-            .unresolved_release
-            .store(false, Ordering::Release);
-        state.expires_at = None;
-        state.expires_at_unix_ms = None;
+        if state.owner == Some(owner) {
+            state.expires_at = None;
+            state.expires_at_unix_ms = None;
+            state.owner = None;
+        }
+        let _ = self
+            .restart_drain
+            .unresolved_release_owner
+            .compare_exchange(owner.encoded(), 0, Ordering::AcqRel, Ordering::Acquire);
         self.restart_drain.changed.notify_waiters();
         restart_drain_status(&self.restart_drain, &state, active_sessions)
     }
@@ -436,6 +514,7 @@ fn expire_restart_drain(state: &mut RestartDrainState) {
     }) {
         state.expires_at = None;
         state.expires_at_unix_ms = None;
+        state.owner = None;
     }
 }
 
@@ -447,7 +526,7 @@ fn restart_drain_status(
     let admissions_in_flight = drain.admissions.load(Ordering::Acquire);
     RestartDrainStatus {
         new_admissions_blocked: state.expires_at.is_some()
-            || drain.unresolved_release.load(Ordering::Acquire),
+            || drain.unresolved_release_owner.load(Ordering::Acquire) != 0,
         admissions_in_flight,
         expires_at_unix_ms: state.expires_at_unix_ms,
         drained: active_sessions == 0 && admissions_in_flight == 0,
@@ -595,6 +674,29 @@ mod tests {
         );
 
         fence.cancel_restart_preparation(0).await;
+        assert!(fence.try_restart_admission().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn restart_cancellation_cannot_clear_a_maintenance_owned_fence() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        assert!(
+            fence
+                .begin_maintenance_preparation_until(unix_ms().saturating_add(60_000))
+                .await
+        );
+
+        let status = fence.cancel_restart_preparation(0).await;
+        assert!(status.new_admissions_blocked);
+        assert!(fence.try_restart_admission().await.is_none());
+
+        fence.retain_maintenance_preparation_until_cancelled();
+        let status = fence.cancel_restart_preparation(0).await;
+        assert!(status.new_admissions_blocked);
+        assert!(fence.try_restart_admission().await.is_none());
+
+        let status = fence.cancel_maintenance_preparation(0).await;
+        assert!(!status.new_admissions_blocked);
         assert!(fence.try_restart_admission().await.is_some());
     }
 
