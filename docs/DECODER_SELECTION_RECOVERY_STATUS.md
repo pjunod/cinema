@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 diagnostic full-suite repairs in progress · **Updated:** 2026-09-06 ·
+**Status:** M1 repairs approved; exact qualification pending · **Updated:** 2026-09-06 ·
 **Integration branch:** `effort/decoder-selection-recovery` · **Authoritative task base:**
 Forgejo `main` at `4a6a0268bd314ad5587cb3037f12ebd992c0074e`
 
@@ -23,17 +23,17 @@ An unchecked item is not implied by a nearby passing check.
 | Task PR | Not opened; the corrected branch will be published to Forgejo after exact-head approval and a clean full-suite qualification |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | M1 code head `c03a98b3`: selector matrix 34/34, macOS bound FFprobe collector 14/14, Linux collector 15/15, and neutral observation policy 1/1 pass; default-feature Clippy denies warnings |
-| Exact receipt | `8cc77fa6`: history 1,353, catalog 24/30/1,431, operations 211/211, formatting, pinned all-target workspace compile, status contract, and effort-base diff check pass |
+| Focused validation | M1 code head `cc464663`: selector matrix 34/34, macOS bound FFprobe collector 14/14, Linux collector 15/15, neutral observation policy 1/1, ownership inventory 7/7, status 5/5, formatting, diff check, and workspace all-target Clippy with denied warnings pass |
+| Effort receipt | `da1b704e`: history 1,354, catalog 24/30/1,431, operations 211/211, formatting, and pinned all-target workspace compile pass; its validation-framework self-map is staged for the exact receipt |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `bb25576c`: 20 passed, 3 failed, 2 declared skips; the rejected run found stale ownership counts and two test-only Clippy findings, then exhausted disk during cluster compilation after all preceding cluster tests passed |
-| Blocker | None; generated build artifacts were reclaimed, the diagnostic findings are being repaired, and only a later clean exact-head run can qualify M1 |
+| Blocker | None; both adversarial reviewers approve exact code head `cc464663`, and only a clean isolated exact-head full-suite run can qualify M1 |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Diagnostic repairs | Code head `c03a98b3` and exact receipt `8cc77fa6` passed focused and fast validation; diagnostic full-suite head `bb25576c` rejected stale ownership counts and two test-only Clippy findings, while cluster compilation later exhausted disk rather than failing a test |
+| M1 · explicit plan and facts | Qualification pending | Exact code head `cc464663` closes the diagnostic findings and has two independent approvals; effort receipt `da1b704e` passes the fast lane, and the clean isolated full suite remains |
 | M2 · arguments and identity use one plan | Not started | — |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
@@ -105,12 +105,14 @@ reports the same 116 pre-existing dead-code diagnostics on the exact M0 base;
 M1's no-default `cargo check` passes, while default-feature Clippy is clean.
 
 Fresh independent reviews cover the pure planner and the bound probe/cache
-owner separately. Their latest requests exposed incomplete Profile 5
+owner separately. Their earlier requests exposed incomplete Profile 5
 compatibility validation, neutral observation budget erosion, Linux snapshot
-writer ownership, and crossed fixed descriptors. Code head `c03a98b3` closes
-those gaps; both reviewers are being asked to verify the documentation-only
-successor to exact validation receipt `8cc77fa6` before the single full suite
-and Forgejo PR.
+writer ownership, and crossed fixed descriptors. Exact code head `cc464663`
+closes those gaps plus the diagnostic full-suite inventory and lint findings;
+both reviewers approve it with no actionable findings. One concurrent reviewer
+run briefly exceeded the five-second version deadline while two Cargo workloads
+contended in the same checkout; the standalone test and three subsequent full
+group runs passed, so final qualification is intentionally isolated.
 
 ## M0 frozen source inventory
 
@@ -519,6 +521,9 @@ lane and focused tests provide earlier feedback.
 | `59d0a4d1` | First current-base `make validate-full` diagnostic run | Diagnostic pass · 20 passed, 3 failed, 2 skipped; failures were the non-full FFmpeg missing `zscale`/x265 ABI and cold cluster compilation exceeding 1,800 seconds, not product assertions |
 | `59d0a4d1` | `make playback-smoke`; `scripts/reader-browser`; warmed `make cluster-check` plus exact `cluster_activity` rerun, all through the corrected FFmpeg wrapper where media was involved | Pass · browser playback 11/11, reader online/offline lifecycle, 135 cluster store contracts with 2 helpers ignored, topology/growth/failure drills, 7 activation tests, and 2 activity tests |
 | `59d0a4d1` | `PATH=/private/tmp/plurx-toolbin:/private/tmp/plurx-full-venv/bin:... PLURX_FFMPEG=/private/tmp/plurx-toolbin/ffmpeg PLURX_FFPROBE=/private/tmp/plurx-toolbin/ffprobe CARGO='rustup run 1.97.1 cargo' make validate-full` | Pass · 23 passed, 0 failed, 2 declared skips; generated `2026-09-06T06:46:16Z`, aggregate 2,794.94 check-seconds; Rust gate 130.9 s, UI 72 captures / 6,648 facts, playback 11/11, Apple tvOS 357/357, cluster 1,651.4 s; skips were missing `adb` and Linux-only two-node Live TV |
+| `bb25576c` | Same full-suite command and environment as the qualified M0 run | Rejected diagnostic · 20 passed, 3 failed, 2 declared skips; ownership inventory had eight stale M1 counts, Rust gate found two test-only Clippy findings, and cluster compilation exhausted disk after its preceding tests passed |
+| `cc464663` | M1 focused tests, workspace all-target Clippy, ownership/status contracts, formatting, and diff check on Rust 1.97.1 | Pass · planner 34/34, macOS collector 14/14, Linux collector 15/15, neutral policy 1/1, ownership 7/7, status 5/5; both adversarial reviewers approve exact code head with no actionable findings |
+| `da1b704e` | Effort commit hook | Pass · history 1,354, catalog 24/30/1,431, operations 211/211, formatting, and pinned all-target workspace compile |
 
 ## Remaining evidence before release
 
