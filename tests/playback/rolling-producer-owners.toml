@@ -1416,9 +1416,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 after the second adversarial review: the internal-relay preparation replay
 # regression reads the in-process response status before asserting its retained
 # canonical body. It launches no child and owns no process.
-# 217 -> 226 with M4: all nine additions are in-process membership or HTTP
+# 217 -> 226 with M4: seven net additions are in-process membership or HTTP
 # response `status()` reads used by maintenance/status handlers and acceptance
-# tests. No addition constructs, launches, or owns an operating-system process.
+# tests. The other two are the node-runtime cleanup spawns inventoried under
+# `runtime-handle-method-spawn` above. None constructs, launches, or owns an
+# operating-system process.
 expected_occurrences = 226
 
 [[module_structures]]
