@@ -42,6 +42,7 @@ const PEER_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_STATUS_CACHE_TTL: Duration = Duration::from_secs(5);
 const PEER_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(4);
 const TRANSPORT_OBSERVATION_TTL_MS: u64 = 5 * 60 * 1_000;
+const MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS: u64 = 5_000;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FRESH_AGE_MS: u64 = 5_000;
 
@@ -174,6 +175,9 @@ pub(crate) enum ObservationState {
     HttpError,
     InvalidResponse,
     IdentityMismatch,
+    /// No cache-backed direct observation is currently available. The
+    /// `error_class` distinguishes an uninitialized cache from an expired one.
+    Unavailable,
     PeerLimit,
 }
 
@@ -263,9 +267,9 @@ pub(crate) async fn collect_aggregate(
             "the committed cluster roster could not be read",
         )
     })?;
-    let observed_at_unix_ms = unix_ms();
     let local_status = local_snapshot(state).await;
-    let remote = state.peer_status_cache.fresh().await.unwrap_or_default();
+    let remote = state.peer_status_cache.fresh().await;
+    let observed_at_unix_ms = unix_ms();
     let observations = join_observations(
         &membership,
         &state.node_id,
@@ -639,61 +643,62 @@ pub(crate) struct PeerStatusCache {
 #[derive(Clone)]
 struct CachedPeerStatuses {
     stored_at: tokio::time::Instant,
-    sample_age_anchor: tokio::time::Instant,
     statuses: BTreeMap<String, PeerStatusOutcome>,
 }
 
+enum PeerStatusCacheRead {
+    Fresh(BTreeMap<String, PeerStatusOutcome>),
+    Unavailable,
+    Stale,
+}
+
+impl From<BTreeMap<String, PeerStatusOutcome>> for PeerStatusCacheRead {
+    fn from(statuses: BTreeMap<String, PeerStatusOutcome>) -> Self {
+        Self::Fresh(statuses)
+    }
+}
+
 impl PeerStatusCache {
-    async fn fresh(&self) -> Option<BTreeMap<String, PeerStatusOutcome>> {
+    async fn fresh(&self) -> PeerStatusCacheRead {
         let cache = self.inner.lock().await;
-        cache.as_ref().and_then(|cached| {
-            let now = tokio::time::Instant::now();
-            (now.saturating_duration_since(cached.stored_at) < PEER_STATUS_CACHE_TTL).then(|| {
-                let mut statuses = cached.statuses.clone();
-                age_cached_transport_observations(
-                    &mut statuses,
-                    now.saturating_duration_since(cached.sample_age_anchor),
-                );
-                statuses
-            })
-        })
+        let Some(cached) = cache.as_ref() else {
+            return PeerStatusCacheRead::Unavailable;
+        };
+        if tokio::time::Instant::now().saturating_duration_since(cached.stored_at)
+            < PEER_STATUS_CACHE_TTL
+        {
+            PeerStatusCacheRead::Fresh(cached.statuses.clone())
+        } else {
+            PeerStatusCacheRead::Stale
+        }
     }
 
     async fn store(
         &self,
         statuses: &BTreeMap<String, PeerStatusOutcome>,
-        sample_age_anchor: tokio::time::Instant,
+        refresh_started: tokio::time::Instant,
     ) {
         *self.inner.lock().await = Some(CachedPeerStatuses {
-            stored_at: tokio::time::Instant::now(),
-            sample_age_anchor,
+            // Cache availability is bounded from the beginning of the read,
+            // not from when a slow peer fan-out finally returns.
+            stored_at: refresh_started,
             statuses: statuses.clone(),
         });
-    }
-}
-
-fn age_cached_transport_observations(
-    statuses: &mut BTreeMap<String, PeerStatusOutcome>,
-    elapsed: Duration,
-) {
-    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-    for outcome in statuses.values_mut() {
-        if let Some(transport) = outcome.transport.as_mut() {
-            age_transport_observations(transport, elapsed_ms);
-        }
-        if let Some(transport) = outcome
-            .status
-            .as_mut()
-            .and_then(|status| status.transport.as_mut())
-        {
-            age_transport_observations(transport, elapsed_ms);
-        }
     }
 }
 
 fn age_transport_observations(transport: &mut SnapshotTransportStatus, elapsed_ms: u64) {
     transport.observations.retain_mut(|observation| {
         observation.sample_age_ms = observation.sample_age_ms.saturating_add(elapsed_ms);
+        for age_ms in [
+            &mut observation.attempt_age_ms,
+            &mut observation.last_acknowledgement_age_ms,
+            &mut observation.last_local_receive_age_ms,
+        ] {
+            if let Some(age_ms) = age_ms.as_mut() {
+                *age_ms = age_ms.saturating_add(elapsed_ms);
+            }
+        }
         let deadline_still_active = observation
             .active_deadline_remaining_ms
             .is_some_and(|remaining_ms| remaining_ms > elapsed_ms);
@@ -792,7 +797,7 @@ async fn collect_peer_statuses(
 }
 
 async fn collect_peer_statuses_with_sources<Public, PublicFuture, Private, PrivateFuture>(
-    peers: Vec<ActivityPeer>,
+    mut peers: Vec<ActivityPeer>,
     deadline: tokio::time::Instant,
     public: Public,
     private: Private,
@@ -803,7 +808,8 @@ where
     Private: Fn(u64) -> PrivateFuture + Clone,
     PrivateFuture: std::future::Future<Output = Result<Option<SnapshotTransportStatus>, String>>,
 {
-    stream::iter(peers.into_iter().take(MAX_OPERATIONS_PEERS).map(|peer| {
+    let omitted = peers.split_off(peers.len().min(MAX_OPERATIONS_PEERS));
+    let mut outcomes: BTreeMap<_, _> = stream::iter(peers.into_iter().map(|peer| {
         let public = public.clone();
         let private = private.clone();
         async move {
@@ -831,12 +837,25 @@ where
     }))
     .buffer_unordered(MAX_OPERATIONS_PEERS)
     .collect()
-    .await
+    .await;
+    outcomes.extend(omitted.into_iter().map(|peer| {
+        let node_id = peer.node_id;
+        (
+            node_id.clone(),
+            PeerStatusOutcome {
+                node_id,
+                state: ObservationState::PeerLimit,
+                status: None,
+                transport: None,
+            },
+        )
+    }));
+    outcomes
 }
 
 #[cfg(test)]
 async fn collect_peer_statuses_with<F, Fut>(
-    peers: Vec<ActivityPeer>,
+    mut peers: Vec<ActivityPeer>,
     deadline: tokio::time::Instant,
     fetch: F,
 ) -> BTreeMap<String, PeerStatusOutcome>
@@ -844,7 +863,8 @@ where
     F: Fn(ActivityPeer, tokio::time::Instant) -> Fut + Clone,
     Fut: std::future::Future<Output = PeerStatusOutcome>,
 {
-    stream::iter(peers.into_iter().take(MAX_OPERATIONS_PEERS).map(|peer| {
+    let omitted = peers.split_off(peers.len().min(MAX_OPERATIONS_PEERS));
+    let mut outcomes: BTreeMap<_, _> = stream::iter(peers.into_iter().map(|peer| {
         let fetch = fetch.clone();
         async move {
             let node_id = peer.node_id.clone();
@@ -862,7 +882,20 @@ where
     }))
     .buffer_unordered(MAX_OPERATIONS_PEERS)
     .collect()
-    .await
+    .await;
+    outcomes.extend(omitted.into_iter().map(|peer| {
+        let node_id = peer.node_id;
+        (
+            node_id.clone(),
+            PeerStatusOutcome {
+                node_id,
+                state: ObservationState::PeerLimit,
+                status: None,
+                transport: None,
+            },
+        )
+    }));
+    outcomes
 }
 
 async fn fetch_peer_status(
@@ -917,13 +950,31 @@ async fn fetch_peer_status(
     }
 }
 
-fn join_observations(
+fn join_observations<Remote>(
     membership: &MembershipStatus,
     local_node_id: &str,
     mut local: ClusterNodeOperationsStatus,
-    mut remote: BTreeMap<String, PeerStatusOutcome>,
+    remote: Remote,
     aggregate_observed_ms: u64,
-) -> Vec<ClusterNodeObservation> {
+) -> Vec<ClusterNodeObservation>
+where
+    Remote: Into<PeerStatusCacheRead>,
+{
+    let (mut remote, missing_state, missing_error_class) = match remote.into() {
+        PeerStatusCacheRead::Fresh(statuses) => {
+            (statuses, ObservationState::Unavailable, "not_observed")
+        }
+        PeerStatusCacheRead::Unavailable => (
+            BTreeMap::new(),
+            ObservationState::Unavailable,
+            "cache_unavailable",
+        ),
+        PeerStatusCacheRead::Stale => (
+            BTreeMap::new(),
+            ObservationState::Unavailable,
+            "cache_stale",
+        ),
+    };
     let mut rows = Vec::with_capacity(membership.nodes.len());
     for member in &membership.nodes {
         let (mut state, mut status, transport, mut error_class) = if member.node_id == local_node_id
@@ -933,7 +984,9 @@ fn join_observations(
                 .transport
                 .take()
                 .filter(|_| local.raft_id == Some(member.raft_id))
-                .and_then(|transport| sanitize_transport(transport, member.raft_id));
+                .and_then(|transport| {
+                    sanitize_transport(transport, member.raft_id, aggregate_observed_ms)
+                });
             (
                 ObservationState::Answered,
                 Some(local.clone()),
@@ -950,11 +1003,12 @@ fn join_observations(
                     .then_some(transport)
                     .flatten()
             });
-            let private_transport = outcome
-                .transport
-                .and_then(|transport| sanitize_transport(transport, member.raft_id));
-            let fallback_transport = fallback_transport
-                .and_then(|transport| sanitize_transport(transport, member.raft_id));
+            let private_transport = outcome.transport.and_then(|transport| {
+                sanitize_transport(transport, member.raft_id, aggregate_observed_ms)
+            });
+            let fallback_transport = fallback_transport.and_then(|transport| {
+                sanitize_transport(transport, member.raft_id, aggregate_observed_ms)
+            });
             (
                 outcome.state,
                 outcome.status,
@@ -963,10 +1017,10 @@ fn join_observations(
             )
         } else {
             (
-                ObservationState::PeerLimit,
+                missing_state,
                 None,
                 None,
-                Some("peer_limit".to_owned()),
+                Some(missing_error_class.to_owned()),
             )
         };
         if status
@@ -999,13 +1053,26 @@ fn join_observations(
 fn sanitize_transport(
     mut transport: SnapshotTransportStatus,
     expected_observer: u64,
+    aggregate_observed_ms: u64,
 ) -> Option<SnapshotTransportStatus> {
     if transport.observing_node_id != expected_observer {
         return None;
     }
+    let source_age_ms = if transport.observed_at_unix_ms > aggregate_observed_ms {
+        let clock_skew_ms = transport
+            .observed_at_unix_ms
+            .saturating_sub(aggregate_observed_ms);
+        if clock_skew_ms > MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS {
+            return None;
+        }
+        0
+    } else {
+        aggregate_observed_ms.saturating_sub(transport.observed_at_unix_ms)
+    };
     transport
         .observations
         .retain(|observation| observation.observing_node_id == expected_observer);
+    age_transport_observations(&mut transport, source_age_ms);
     Some(transport)
 }
 
@@ -1478,6 +1545,7 @@ fn observation_error_class(state: ObservationState) -> &'static str {
         ObservationState::HttpError => "http_error",
         ObservationState::InvalidResponse => "invalid_response",
         ObservationState::IdentityMismatch => "identity_mismatch",
+        ObservationState::Unavailable => "unavailable",
         ObservationState::PeerLimit => "peer_limit",
     }
 }
@@ -1546,6 +1614,29 @@ fn local_hostname() -> String {
 mod tests {
     use super::*;
     use plurx_core::cluster::membership::{ClusterRecoveryStatus, NodeRole};
+
+    fn fresh_cache_statuses(read: PeerStatusCacheRead) -> BTreeMap<String, PeerStatusOutcome> {
+        match read {
+            PeerStatusCacheRead::Fresh(statuses) => statuses,
+            PeerStatusCacheRead::Unavailable => panic!("cache is unavailable"),
+            PeerStatusCacheRead::Stale => panic!("cache is stale"),
+        }
+    }
+
+    fn cached_private_transport(
+        read: PeerStatusCacheRead,
+        node_id: &str,
+        expected_observer: u64,
+        aggregate_observed_ms: u64,
+    ) -> SnapshotTransportStatus {
+        let mut statuses = fresh_cache_statuses(read);
+        let transport = statuses
+            .remove(node_id)
+            .and_then(|outcome| outcome.transport)
+            .expect("cached private transport evidence");
+        sanitize_transport(transport, expected_observer, aggregate_observed_ms)
+            .expect("valid cached private transport evidence")
+    }
 
     fn test_transport_status(
         observing_node_id: u64,
@@ -1642,7 +1733,14 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcomes.len(), MAX_OPERATIONS_PEERS);
+        assert_eq!(outcomes.len(), MAX_OPERATIONS_PEERS + 4);
+        assert_eq!(
+            outcomes
+                .values()
+                .filter(|outcome| outcome.state == ObservationState::PeerLimit)
+                .count(),
+            4
+        );
         assert_eq!(MAX_OPERATIONS_PEERS, 8);
     }
 
@@ -1659,75 +1757,86 @@ mod tests {
             },
         )]);
         cache.store(&statuses, tokio::time::Instant::now()).await;
-        assert_eq!(cache.fresh().await.expect("fresh cache").len(), 1);
+        assert_eq!(fresh_cache_statuses(cache.fresh().await).len(), 1);
 
         tokio::time::advance(PEER_STATUS_CACHE_TTL - Duration::from_millis(1)).await;
-        assert!(cache.fresh().await.is_some());
+        assert!(matches!(cache.fresh().await, PeerStatusCacheRead::Fresh(_)));
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(cache.fresh().await.is_none());
+        assert!(matches!(cache.fresh().await, PeerStatusCacheRead::Stale));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absent_and_expired_cache_are_unavailable_never_peer_limited() {
+        let membership = test_membership("node-1", 2);
+        let cache = PeerStatusCache::default();
+        let aggregate_observed_ms = unix_ms();
+        let rows = join_observations(
+            &membership,
+            "node-1",
+            test_local_status("node-1", Some(1)),
+            cache.fresh().await,
+            aggregate_observed_ms,
+        );
+        assert_eq!(rows[1].observation, ObservationState::Unavailable);
+        assert_eq!(rows[1].error_class.as_deref(), Some("cache_unavailable"));
+
+        cache
+            .store(&BTreeMap::new(), tokio::time::Instant::now())
+            .await;
+        tokio::time::advance(PEER_STATUS_CACHE_TTL).await;
+        let rows = join_observations(
+            &membership,
+            "node-1",
+            test_local_status("node-1", Some(1)),
+            cache.fresh().await,
+            aggregate_observed_ms,
+        );
+        assert_eq!(rows[1].observation, ObservationState::Unavailable);
+        assert_eq!(rows[1].error_class.as_deref(), Some("cache_stale"));
+        assert!(rows
+            .iter()
+            .all(|row| row.observation != ObservationState::PeerLimit));
     }
 
     #[tokio::test(start_paused = true)]
     async fn cached_active_transport_observation_ages_past_five_minutes_and_deadline_counts_down() {
         let cache = PeerStatusCache::default();
+        let source_observed_ms = 1_000_000;
+        let mut transport = test_transport_status(2, 301_000, Some(4_000));
+        transport.observed_at_unix_ms = source_observed_ms;
         let statuses = BTreeMap::from([(
             "node-2".to_owned(),
             PeerStatusOutcome {
                 node_id: "node-2".to_owned(),
                 state: ObservationState::Unreachable,
                 status: None,
-                transport: Some(test_transport_status(2, 301_000, Some(4_000))),
+                transport: Some(transport),
             },
         )]);
         let refresh_started = tokio::time::Instant::now();
         cache.store(&statuses, refresh_started).await;
 
         tokio::time::advance(Duration::from_millis(999)).await;
-        let fresh = cache.fresh().await.expect("cache itself is still fresh");
+        let fresh =
+            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 999);
+        assert_eq!(fresh.observations[0].sample_age_ms, 301_999);
         assert_eq!(
-            fresh["node-2"]
-                .transport
-                .as_ref()
-                .expect("cached private transport evidence")
-                .observations[0]
-                .sample_age_ms,
-            301_999
-        );
-        assert_eq!(
-            fresh["node-2"]
-                .transport
-                .as_ref()
-                .expect("cached private transport evidence")
-                .observations[0]
-                .active_deadline_remaining_ms,
+            fresh.observations[0].active_deadline_remaining_ms,
             Some(3_001)
         );
 
         tokio::time::advance(Duration::from_millis(3_000)).await;
-        let fresh = cache
-            .fresh()
-            .await
-            .expect("cache remains inside five seconds");
-        let observation = &fresh["node-2"]
-            .transport
-            .as_ref()
-            .expect("cached private transport evidence")
-            .observations[0];
+        let fresh =
+            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 3_999);
+        let observation = &fresh.observations[0];
         assert_eq!(observation.sample_age_ms, 304_999);
         assert_eq!(observation.active_deadline_remaining_ms, Some(1));
 
         tokio::time::advance(Duration::from_millis(1)).await;
-        let fresh = cache
-            .fresh()
-            .await
-            .expect("cache remains inside five seconds");
+        let fresh =
+            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 4_000);
         assert!(
-            fresh["node-2"]
-                .transport
-                .as_ref()
-                .expect("cached private transport evidence")
-                .observations
-                .is_empty(),
+            fresh.observations.is_empty(),
             "an already-stale observation expires at its active deadline"
         );
     }
@@ -1735,35 +1844,32 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero() {
         let cache = PeerStatusCache::default();
+        let source_observed_ms = 1_000_000;
+        let mut transport = test_transport_status(2, 1_000, Some(1_000));
+        transport.observed_at_unix_ms = source_observed_ms;
         let statuses = BTreeMap::from([(
             "node-2".to_owned(),
             PeerStatusOutcome {
                 node_id: "node-2".to_owned(),
                 state: ObservationState::Unreachable,
                 status: None,
-                transport: Some(test_transport_status(2, 1_000, Some(1_000))),
+                transport: Some(transport),
             },
         )]);
         cache.store(&statuses, tokio::time::Instant::now()).await;
 
         tokio::time::advance(Duration::from_millis(999)).await;
-        let still_active = cache.fresh().await.expect("cache itself is still fresh");
-        let observation = &still_active["node-2"]
-            .transport
-            .as_ref()
-            .expect("cached private transport evidence")
-            .observations[0];
+        let still_active =
+            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 999);
+        let observation = &still_active.observations[0];
         assert_eq!(observation.phase, SnapshotTransportPhase::Transferring);
         assert_eq!(observation.active_deadline_remaining_ms, Some(1));
         assert_eq!(observation.last_error_category, None);
 
         tokio::time::advance(Duration::from_millis(1)).await;
-        let expired = cache.fresh().await.expect("cache itself remains fresh");
-        let observation = &expired["node-2"]
-            .transport
-            .as_ref()
-            .expect("cached private transport evidence")
-            .observations[0];
+        let expired =
+            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 1_000);
+        let observation = &expired.observations[0];
         assert_eq!(observation.phase, SnapshotTransportPhase::Stalled);
         assert_eq!(observation.active_deadline_remaining_ms, Some(0));
         assert_eq!(
@@ -1775,40 +1881,62 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cached_inactive_transport_observation_expires_at_five_minutes() {
         let cache = PeerStatusCache::default();
+        let source_observed_ms = 1_000_000;
+        let mut transport = test_transport_status(2, 299_000, None);
+        transport.observed_at_unix_ms = source_observed_ms;
         let statuses = BTreeMap::from([(
             "node-2".to_owned(),
             PeerStatusOutcome {
                 node_id: "node-2".to_owned(),
                 state: ObservationState::Unreachable,
                 status: None,
-                transport: Some(test_transport_status(2, 299_000, None)),
+                transport: Some(transport),
             },
         )]);
         cache.store(&statuses, tokio::time::Instant::now()).await;
 
         tokio::time::advance(Duration::from_millis(999)).await;
-        let fresh = cache.fresh().await.expect("cache itself is still fresh");
-        assert_eq!(
-            fresh["node-2"]
-                .transport
-                .as_ref()
-                .expect("cached private transport evidence")
-                .observations[0]
-                .sample_age_ms,
-            299_999
-        );
+        let fresh =
+            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 999);
+        assert_eq!(fresh.observations[0].sample_age_ms, 299_999);
 
         tokio::time::advance(Duration::from_millis(2)).await;
-        let fresh = cache
-            .fresh()
-            .await
-            .expect("cache remains inside five seconds");
-        assert!(fresh["node-2"]
-            .transport
-            .as_ref()
-            .expect("cached private transport evidence")
-            .observations
-            .is_empty());
+        let fresh =
+            cached_private_transport(cache.fresh().await, "node-2", 2, source_observed_ms + 1_001);
+        assert!(fresh.observations.is_empty());
+    }
+
+    #[test]
+    fn transport_projection_uses_source_time_and_rejects_unbounded_future_skew() {
+        let source_observed_ms = 1_000_000;
+        let mut transport = test_transport_status(2, 1_000, Some(20_000));
+        transport.observed_at_unix_ms = source_observed_ms;
+        let projected = sanitize_transport(transport, 2, source_observed_ms + 6_000)
+            .expect("bounded source timestamp");
+        let observation = &projected.observations[0];
+        assert_eq!(observation.sample_age_ms, 7_000);
+        assert_eq!(observation.attempt_age_ms, Some(6_100));
+        assert_eq!(observation.last_local_receive_age_ms, Some(6_010));
+        assert_eq!(observation.active_deadline_remaining_ms, Some(14_000));
+
+        let mut replayed = test_transport_status(2, 301_000, Some(30_000));
+        replayed.observed_at_unix_ms = source_observed_ms;
+        let projected = sanitize_transport(replayed, 2, source_observed_ms + 40_000)
+            .expect("old source timestamp is valid but ages conservatively");
+        assert!(
+            projected.observations.is_empty(),
+            "replaying an old response cannot renew its elapsed active deadline"
+        );
+
+        let mut bounded_future = test_transport_status(2, 0, Some(1_000));
+        bounded_future.observed_at_unix_ms =
+            source_observed_ms + MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS;
+        assert!(sanitize_transport(bounded_future, 2, source_observed_ms).is_some());
+
+        let mut unbounded_future = test_transport_status(2, 0, Some(1_000));
+        unbounded_future.observed_at_unix_ms =
+            source_observed_ms + MAX_TRANSPORT_SOURCE_CLOCK_SKEW_MS + 1;
+        assert!(sanitize_transport(unbounded_future, 2, source_observed_ms).is_none());
     }
 
     #[test]

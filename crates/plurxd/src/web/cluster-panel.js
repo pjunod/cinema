@@ -456,6 +456,9 @@
     identity_mismatch:"the answer came back under a different node identity",
     raft_identity_mismatch:"the answer came back under a different Raft id",
     stale_peer_sample:"its answer was older than one refresh window",
+    unavailable:"no cache-backed direct observation is available yet",
+    cache_unavailable:"the background direct-observation cache is not ready yet",
+    cache_stale:"the background direct-observation cache has expired",
     peer_limit:"the roster is larger than one refresh may sample",
     not_observed:"this refresh has not sampled it",
   };

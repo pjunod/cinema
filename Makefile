@@ -543,6 +543,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  http::cluster_operations::tests::peer_status_cache_is_fresh_for_five_seconds_then_expires \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::absent_and_expired_cache_are_unavailable_never_peer_limited \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::cached_active_transport_observation_ages_past_five_minutes_and_deadline_counts_down \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
@@ -550,6 +553,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::cached_inactive_transport_observation_expires_at_five_minutes \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::transport_projection_uses_source_time_and_rejects_unbounded_future_skew \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::peer_status_refresh_keeps_one_second_of_cache_margin \

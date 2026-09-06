@@ -968,9 +968,16 @@ test("every observation code the aggregator can emit has a sentence", () => {
   assert.ok(codes.includes("refused"), `refused missing from ${codes.join(", ")}`);
   assert.ok(codes.includes("unreachable"));
   assert.ok(codes.length >= 7, `only found ${codes.length} codes`);
-  // Plus the two classes the join stamps directly rather than through the map,
+  // Plus the classes the join stamps directly rather than through the map,
   // and the panel's own "no row at all" case.
-  for (const code of [...codes, "raft_identity_mismatch", "stale_peer_sample", "not_observed"]) {
+  for (const code of [
+    ...codes,
+    "raft_identity_mismatch",
+    "stale_peer_sample",
+    "cache_unavailable",
+    "cache_stale",
+    "not_observed",
+  ]) {
     if (code === "none") continue;
     const sentence = PANEL.clusterObservationReason(code);
     assert.notEqual(
