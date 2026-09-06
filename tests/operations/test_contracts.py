@@ -2387,9 +2387,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         recovery = jobs["cluster_transport_recovery"]
         make_commands = make_dry_run_commands("cluster-transport-recovery-check")
 
-        self.assertEqual(len(make_commands), 11)
+        self.assertEqual(len(make_commands), 14)
         self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=21", make_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=23", make_commands[1])
         self.assertIn("scripts/require-test-count", make_commands[1])
         self.assertIn("transport_recovery::tests --lib", make_commands[1])
         exact_regressions = (
@@ -2397,21 +2397,25 @@ for (const startupDelay of [0, 1600, 7000]) {
             "two_early_acknowledgements_cannot_hide_a_long_recovery_gap",
             "writer_must_cover_the_end_of_recovery",
             "whole_recovery_duration_cannot_exceed_the_absolute_deadline",
+            "worst_transfer_duration_covers_the_complete_source_series",
+            "artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result",
             "owned_async_task_growth_has_no_resource_slack",
             "owned_async_task_guard_tracks_abort_safe_lifetime",
             "recovery_series_preserves_failed_retry_and_resets_after_completion",
+            "recovery_series_counts_every_replacement_client_connection_attempt",
             "production_snapshot_executor_worker_is_counted_until_joined",
         )
         for offset, regression in enumerate(exact_regressions, start=2):
             self.assertIn(regression, make_commands[offset])
             self.assertIn("scripts/require-test-count", make_commands[offset])
             self.assertIn("--lib -- --exact", make_commands[offset])
-        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[7])
-        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[8])
         self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[9])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[10])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[11])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[12])
         self.assertIn(
             "transport-recovery target/validation/cluster-transport-recovery.json",
-            make_commands[10],
+            make_commands[13],
         )
 
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", recovery)

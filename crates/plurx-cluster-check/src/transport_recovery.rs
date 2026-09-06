@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -334,6 +334,7 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
     // must bind PLURX_BUILD_SHA while compiling/running this command.
     let build_sha = resolve_build_sha()
         .context("resolve transport-recovery candidate SHA before campaign start")?;
+    prepare_artifact_output(output)?;
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("transport-recovery campaign root")?;
     let started_at_unix_ms = unix_ms()?;
@@ -384,14 +385,9 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
         voter,
     };
     validate_transport_recovery_artifact(&artifact)?;
-    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create transport-recovery artifact directory {parent:?}"))?;
-    }
     let mut bytes = serde_json::to_vec_pretty(&artifact)?;
     bytes.push(b'\n');
-    std::fs::write(output, bytes)
-        .with_context(|| format!("write transport-recovery artifact {output:?}"))?;
+    publish_artifact_atomically(output, &bytes)?;
     println!(
         "cluster-check: transport-recovery artifact {}",
         output.display()
@@ -1914,6 +1910,51 @@ fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn artifact_parent(output: &Path) -> &Path {
+    output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn prepare_artifact_output(output: &Path) -> Result<()> {
+    let parent = artifact_parent(output);
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create transport-recovery artifact directory {parent:?}"))?;
+    match std::fs::remove_file(output) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("remove stale transport-recovery artifact {output:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn publish_artifact_atomically(output: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = artifact_parent(output);
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary transport-recovery artifact in {parent:?}"))?;
+    temporary
+        .as_file_mut()
+        .write_all(bytes)
+        .context("write temporary transport-recovery artifact")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .context("sync temporary transport-recovery artifact")?;
+    temporary
+        .persist(output)
+        .map_err(|error| error.error)
+        .with_context(|| format!("publish transport-recovery artifact {output:?}"))?;
+    File::open(parent)
+        .with_context(|| format!("open transport-recovery artifact directory {parent:?}"))?
+        .sync_all()
+        .with_context(|| format!("sync transport-recovery artifact directory {parent:?}"))?;
+    Ok(())
+}
+
 fn remaining_before(deadline: Instant, phase: &str) -> Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
@@ -1930,7 +1971,7 @@ fn worst_durations(cycles: &[RecoveryCycleEvidence]) -> TransportRecoveryWorstDu
             .unwrap_or(0),
         transfer_millis: cycles
             .iter()
-            .map(|cycle| cycle.target_inbound.transfer_millis)
+            .map(|cycle| cycle.source_outbound.elapsed_millis)
             .max()
             .unwrap_or(0),
         install_millis: cycles
@@ -2329,6 +2370,50 @@ mod tests {
     #[test]
     fn complete_twenty_plus_twenty_artifact_is_accepted() {
         validate_transport_recovery_artifact(&artifact()).expect("valid recovery artifact");
+    }
+
+    #[test]
+    fn worst_transfer_duration_covers_the_complete_source_series() {
+        let mut campaign =
+            role_campaign(RecoveryRole::Learner, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES);
+        campaign.cycles[0].source_outbound.attempts = 3;
+        campaign.cycles[0].source_outbound.retry_count = 1;
+        campaign.cycles[0]
+            .source_outbound
+            .attempt_started_at_unix_ms = 2_001;
+        campaign.cycles[0].source_outbound.elapsed_millis = 3_999;
+        campaign.worst_durations = worst_durations(&campaign.cycles);
+
+        assert_eq!(campaign.worst_durations.transfer_millis, 3_999);
+        assert!(
+            campaign.worst_durations.transfer_millis
+                > campaign.cycles[0].target_inbound.transfer_millis
+        );
+    }
+
+    #[test]
+    fn artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result() {
+        let root = tempfile::tempdir().expect("artifact publication root");
+        let output = root.path().join("nested/recovery.json");
+        std::fs::create_dir_all(output.parent().expect("artifact parent"))
+            .expect("create stale artifact parent");
+        std::fs::write(&output, b"stale evidence").expect("write stale artifact");
+
+        prepare_artifact_output(&output).expect("clear stale artifact");
+        assert!(!output.exists());
+        publish_artifact_atomically(&output, b"{\"complete\":true}\n")
+            .expect("publish complete artifact");
+
+        assert_eq!(
+            std::fs::read(&output).expect("read published artifact"),
+            b"{\"complete\":true}\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(output.parent().expect("artifact parent"))
+                .expect("list artifact directory")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

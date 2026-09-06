@@ -185,6 +185,11 @@ class CiLaneReceiptCase(unittest.TestCase):
                 receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
                 self.assertNotIn("evidence", receipt)
 
+                evidence.write_bytes(b'{"build_sha":')
+                self.assertEqual(main([*common, "--result", "failure"]), 0)
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                self.assertNotIn("evidence", receipt)
+
     def test_receipt_refuses_unknown_lanes_results_or_empty_commands(self):
         for overrides in (
             {"lane": "cluster-wal"},

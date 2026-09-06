@@ -1067,7 +1067,7 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-check
 cluster-transport-recovery-check: ## Run Linux 20+20 learner/voter snapshot recovery qualification
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=21 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=23 scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery::tests --lib
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
@@ -1082,6 +1082,12 @@ cluster-transport-recovery-check: ## Run Linux 20+20 learner/voter snapshot reco
 	  transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline \
 	  --lib -- --exact
 	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
 	  transport_recovery::tests::owned_async_task_growth_has_no_resource_slack \
 	  --lib -- --exact
 	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
@@ -1091,6 +1097,10 @@ cluster-transport-recovery-check: ## Run Linux 20+20 learner/voter snapshot reco
 	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  transport_status::tests::recovery_series_preserves_failed_retry_and_resets_after_completion \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  transport_status::tests::recovery_series_counts_every_replacement_client_connection_attempt \
 	  --lib -- --exact
 	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \

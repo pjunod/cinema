@@ -205,10 +205,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.log.is_file():
             raise LaneReceiptError(f"lane log does not exist: {args.log}")
-        evidence_path = (
-            args.evidence if args.evidence and args.evidence.is_file() else None
-        )
-        if args.evidence and evidence_path is None and args.result == "success":
+        evidence_path = None
+        if args.result == "success" and args.evidence and args.evidence.is_file():
+            evidence_path = args.evidence
+        if args.result == "success" and args.evidence and evidence_path is None:
             raise LaneReceiptError(f"lane evidence does not exist: {args.evidence}")
         evidence_metadata = read_evidence(evidence_path) if evidence_path else None
         receipt = build_receipt(

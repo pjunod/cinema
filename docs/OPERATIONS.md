@@ -1972,8 +1972,12 @@ binds the exact Git SHA and records, per cycle, the source and installed
 snapshot ID/size/SHA-256, snapshot/purge/applied indexes, transferred bytes,
 source-leader outbound attempt/reconnect/retry counts, and target-local inbound
 byte and installation evidence. Attempt, final acknowledgement, local receive,
-and install times are explicit; missing or zero large-image durations fail the
-artifact instead of becoming zero-valued evidence. The artifact also records
+and install times are explicit. The source attempt clock begins with the first
+full-snapshot attempt in one recovery series and survives failed replacement
+attempts, so the role's worst transfer duration includes their reconnect and
+retry time rather than measuring only the final successful transfer. Missing
+or zero large-image durations fail the artifact instead of becoming zero-valued
+evidence. The artifact also records
 the readiness acknowledgement, every in-recovery acknowledgement, their
 target-local digest, the recovered SQLite content digest, and baseline plus
 post-quiescence OS-thread, socket, and Hiqlite-owned async-task counts for
@@ -1993,11 +1997,13 @@ Main-bound cluster changes run this command in the dedicated
 `cluster_transport_recovery` CI job and retain the evidence, log, and exact
 lane receipt. A successful receipt verifies that the artifact's `build_sha`
 equals the tested commit and binds the artifact's SHA-256 and byte count, so a
-different or replaced JSON file is not qualification evidence. A failed run
-can still retain a log-only receipt when the campaign stops before creating
-the artifact. An effort is not qualified when that selected job is skipped or
-fails. Ordinary effort task PRs retain their compile-only development gate;
-the 40-cycle campaign belongs to the final effort-to-main qualification.
+different or replaced JSON file is not qualification evidence. The campaign
+removes any prior output before starting, then syncs a temporary complete JSON
+file and atomically publishes it. A failed lane always records a log-only
+receipt and does not parse a stale or interrupted evidence file. An effort is
+not qualified when that selected job is skipped or fails. Ordinary effort task
+PRs retain their compile-only development gate; the 40-cycle campaign belongs
+to the final effort-to-main qualification.
 
 Set the variable only to choose a grace deliberately. Whether anybody chose is
 answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
