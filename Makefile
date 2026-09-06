@@ -339,6 +339,62 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
 	  network::raft_client::tests::cache_install_snapshot_preserves_mismatch_for_offset_reset \
 	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::final_install_deadline_latches_once_and_mismatch_restores_transfer_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::final_install_respects_the_first_rpc_hard_cap_and_transfer_expiry \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::mismatch_cannot_reenter_final_install_after_transfer_expiry \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::watchable_snapshot_deadline_switches_to_the_active_phase \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::unanswered_non_final_rpc_expires_at_chunk_budget_and_resets_socket \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::repeated_mismatch_style_resets_expire_at_the_original_transfer_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::final_install_may_exceed_chunk_window_but_cannot_renew_install_window \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::stale_snapshot_guard_cannot_clear_a_newer_attempt \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  network::raft_client::tests::caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core \
+	  config::tests::snapshot_install_timeout_is_bounded_and_env_values_are_parsed \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core \
+	  config::tests::snapshot_chunk_and_transfer_timeouts_validate_bounds_and_relationship \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core \
+	  config::tests::snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store \
+	  cluster::migration::tests::production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts \
+	  --lib -- --exact
 	@OPENRAFT_MANIFEST="$$( $(CARGO) metadata --locked \
 	  --manifest-path vendor/hiqlite/Cargo.toml --format-version 1 \
 	  | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["manifest_path"] for p in data["packages"] if p["name"] == "openraft" and p["version"] == "0.9.25"))' )"; \

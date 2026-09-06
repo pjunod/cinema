@@ -1699,28 +1699,39 @@ milliseconds, and an incomplete server authentication exchange still loses the
 existing five-second connection allowance. These are transport bounds, not
 database execution or snapshot-installation timeouts.
 
-`cluster.install_snapshot_timeout_secs` is bounded from 10 through 3,600 and
-defaults to 120 seconds. It is the deadline OpenRaft applies while sending and
-installing snapshot segments because Hiqlite leaves its separate non-final
-segment timeout disabled. The previous fixed 10-second deadline repeatedly
-restarted a 72 MiB snapshot after about 50 MiB on the production LAN; 120
-seconds completed the same transfer. Keep the value identical on every voter
-so leadership changes do not change catch-up behavior. Snapshot frequency,
-WAL size/sync, disaster-recovery log retention, heartbeat, and election timers
-remain unchanged. During a rolling upgrade, an old-binary leader keeps its
-fixed 10-second deadline until that voter is upgraded; do not treat the new
-deadline as effective cluster-wide until every possible leader is current.
+Snapshot recovery has three independent budgets. Keep all three identical on
+every voter so a leadership change does not change catch-up behavior:
 
-Compose forwards `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` explicitly and
-pairs it with `PLURX_HEALTH_START_PERIOD`. The default five-minute health grace
-covers the 120-second snapshot deadline plus the three sequential 45-second
-startup phases. Raising the snapshot deadline raises what the grace must be,
-but does not make that your bookkeeping: leave `PLURX_HEALTH_START_PERIOD`
-unset and `make docker-up` derives the grace as the resolved deadline plus 135
-seconds, from the same reading its preflight refuses on. That matters most for
-the case that used to bite — a deadline set in a bind-mounted production TOML,
-where `.env` has no reason to mention readiness at all, and the first report of
-the mismatch was a refused deploy on the box.
+- `cluster.snapshot_chunk_timeout_secs` is bounded from 5 through 300 and
+  defaults to 30 seconds. It bounds one non-final chunk RPC, including queue
+  admission, frame delivery, and its reply. It does not bound a complete
+  advancing transfer or final database restore.
+- `cluster.snapshot_transfer_timeout_secs` is bounded from 60 through 14,400
+  and defaults to 1,200 seconds. It is one absolute transfer-stage deadline;
+  progress, reconnects, retries, and typed mismatch recovery do not renew it.
+- `cluster.install_snapshot_timeout_secs` remains bounded from 10 through
+  3,600 and defaults to 120 seconds. It caps the final chunk and installation
+  RPC. The final stage may exceed the chunk watchdog, but cannot renew this
+  install allowance or extend the overall attempt beyond transfer plus install.
+
+The chunk budget must not exceed the transfer budget. Values are converted to
+milliseconds with checked arithmetic before reaching Hiqlite. Snapshot
+frequency, WAL size/sync, disaster-recovery log retention, heartbeat, and
+election timers remain unchanged. During a rolling upgrade, an old-binary
+leader still uses its old per-RPC snapshot behavior. The wire format is
+unchanged, but do not call the bounded recovery contract fleet-wide until every
+possible leader is current.
+
+Compose forwards all three snapshot settings. The startup/readiness pair uses
+only the two sequential stages: `snapshot transfer + final install + 135s` for
+the three named startup allowances. The independent non-final chunk watchdog
+does not add another stage. The default 1,200-second transfer and 120-second
+install require 1,455 seconds, covered by the tracked 25-minute health grace.
+Raising either stage raises what the grace must be, but does not make that your
+bookkeeping: leave `PLURX_HEALTH_START_PERIOD` unset and `make docker-up`
+derives the grace from both resolved stage settings plus 135 seconds. That
+matters most when one or both deadlines live in a bind-mounted production TOML,
+where `.env` has no reason to mention readiness.
 
 Set the variable only to choose a grace deliberately. Whether anybody chose is
 answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
@@ -1730,11 +1741,11 @@ literal pinned in an override, at Compose's own precedence, and is used exactly
 as resolved. It is never silently raised, because a short grace is a legitimate
 choice: it surfaces a build that can never become ready instead of waiting out
 the deadline. If it cannot cover the resolved deadline the preflight refuses it
-by name. Writing the tracked default itself — five minutes — is indistinguishable
+by name. Writing the tracked default itself — 25 minutes — is indistinguishable
 from writing nothing, and is derived from like anything else. The supported
-maximum pair is
-3,600 seconds and 65 minutes; do not adopt the 65-minute maximum as an ordinary
-default.
+maximum transfer/install pair requires 18,135 seconds; choose at least `5h3m`
+when setting a rounded Docker duration. Do not adopt that maximum as an
+ordinary default.
 
 Use `make docker-up`, not bare `docker compose up`, for a Compose rollout. It
 derives the period, proves it, and applies that same period — a preflight that
@@ -1742,17 +1753,21 @@ proves one number while `compose up` applies another proves nothing. The proof
 is a read-only, fail-closed preflight that runs `docker compose config` in
 `deploy/`, so shell variables, `deploy/.env`, interpolation defaults, and
 override files have the same precedence they will have during the rollout.
-It then reads the effective snapshot timeout from the resolved container
-environment or, when the environment is empty, a readable bind-mounted
-production TOML. A resolved command-line `--config` path takes precedence over
-`PLURX_CONFIG`, as it does in the server. The command exits before any Compose
-mutation unless the health start period it is about to apply covers that
-timeout plus all three named startup phases.
+It then reads the effective chunk, transfer, and install timeouts from the resolved
+container environment or, when an environment value is empty, a readable
+bind-mounted production TOML. A resolved command-line `--config` path takes
+precedence over `PLURX_CONFIG`, as it does in the server. The command reports
+all three values and their sources, validates that the chunk budget does not
+exceed the transfer budget, and exits before any Compose mutation unless the
+health start period it is about to apply covers the two sequential stages plus
+all three named startup phases.
 
 If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
-`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` in the resolved environment. With
-no explicit value, the preflight assumes the source maximum rather than
-guessing that the hidden TOML uses the default.
+`PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS`,
+`PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS`, and
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` in the resolved environment.
+With any value missing, the preflight assumes that budget's source maximum
+rather than guessing that the hidden TOML uses the default.
 
 Two diagnostics, and they answer different questions. `make
 docker-startup-budget-check` answers "would `make docker-up` succeed here" — it
@@ -2524,8 +2539,10 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Cluster-wide opt-in and Authority-read kill switch for the named lag-gated catalogue slice. Enable only after every voter advertises the current bounded-read protocol |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
-| `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Snapshot transfer/install deadline in seconds, bounded 10–3,600; keep identical on every voter |
-| `PLURX_HEALTH_START_PERIOD` | — | derived | Compose-only Docker readiness grace. Unset, `make docker-up` derives the resolved snapshot deadline plus 135 seconds (`5m` when nothing longer resolves). Set it only to choose a grace deliberately: the value is used as written, and refused rather than raised if it cannot cover the deadline |
+| `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS` | `cluster.snapshot_chunk_timeout_secs` | `30` | One non-final snapshot chunk RPC in seconds, bounded 5–300; must not exceed the transfer timeout and must match on every voter |
+| `PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS` | `cluster.snapshot_transfer_timeout_secs` | `1200` | Absolute snapshot transfer stage in seconds, bounded 60–14,400; retries, reconnects, and mismatches cannot renew it |
+| `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Final chunk/install RPC cap in seconds, bounded 10–3,600; keep identical on every voter |
+| `PLURX_HEALTH_START_PERIOD` | — | derived | Compose-only Docker readiness grace. Unset, `make docker-up` derives transfer plus install plus 135 seconds (`25m` when defaults resolve). Set it only to choose a grace deliberately: the value is used as written, and refused rather than raised if it cannot cover both stages |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |

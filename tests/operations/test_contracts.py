@@ -422,7 +422,17 @@ for (const startupDelay of [0, 1600, 7000]) {
             "stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}", compose
         )
         self.assertIn(
-            'start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"', compose
+            'start_period: "${PLURX_HEALTH_START_PERIOD:-25m}"', compose
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS:-}"',
+            compose,
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS:-}"',
+            compose,
         )
         self.assertIn(
             'PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: '
@@ -585,12 +595,22 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertEqual(compose_start_seconds, start_period_seconds)
 
         config_source = read("crates/plurx-core/src/config.rs")
-        default_snapshot = re.search(
+        default_transfer = re.search(
+            r"(?m)^pub const DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = "
+            r"([\d_]+);$",
+            config_source,
+        )
+        default_install = re.search(
             r"(?m)^pub const DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = "
             r"([\d_]+);$",
             config_source,
         )
-        source_max_snapshot = re.search(
+        source_max_transfer = re.search(
+            r"(?m)^pub const MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = "
+            r"([\d_]+);$",
+            config_source,
+        )
+        source_max_install = re.search(
             r"(?m)^pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);$",
             config_source,
         )
@@ -607,42 +627,66 @@ for (const startupDelay of [0, 1600, 7000]) {
             )
             for name in phase_names
         }
-        self.assertIsNotNone(default_snapshot)
-        self.assertIsNotNone(source_max_snapshot)
+        self.assertIsNotNone(default_transfer)
+        self.assertIsNotNone(default_install)
+        self.assertIsNotNone(source_max_transfer)
+        self.assertIsNotNone(source_max_install)
         self.assertTrue(all(value is not None for value in phases.values()))
-        assert default_snapshot is not None and source_max_snapshot is not None
+        assert default_transfer is not None and default_install is not None
+        assert source_max_transfer is not None and source_max_install is not None
 
-        # Dockerfile owns the image default. Compose exposes a paired override
-        # for operators who deliberately extend the snapshot deadline.
+        # Dockerfile owns the image default. Compose exposes independent
+        # transfer/install overrides while the startup grace covers both.
         supported_default_startup_seconds = int(
-            default_snapshot.group(1).replace("_", "")
+            default_transfer.group(1).replace("_", "")
+        ) + int(
+            default_install.group(1).replace("_", "")
         ) + sum(int(value.group(1)) for value in phases.values() if value)
         self.assertGreaterEqual(
             start_period_seconds, supported_default_startup_seconds
         )
 
         env_example = read("deploy/.env.example")
-        max_snapshot = re.search(
+        rollout_transfer = re.search(
+            r"# PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS=(\d+)", env_example
+        )
+        rollout_install = re.search(
             r"# PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS=(\d+)", env_example
         )
-        max_health = re.search(
+        rollout_health = re.search(
             r"# PLURX_HEALTH_START_PERIOD=(\d+)([smh])", env_example
         )
-        self.assertIsNotNone(max_snapshot)
-        self.assertIsNotNone(max_health)
-        assert max_snapshot is not None and max_health is not None
-        env_max_snapshot_seconds = int(max_snapshot.group(1))
-        source_max_snapshot_seconds = int(
-            source_max_snapshot.group(1).replace("_", "")
+        self.assertIsNotNone(rollout_transfer)
+        self.assertIsNotNone(rollout_install)
+        self.assertIsNotNone(rollout_health)
+        assert rollout_transfer is not None and rollout_install is not None
+        assert rollout_health is not None
+        rollout_transfer_seconds = int(rollout_transfer.group(1))
+        rollout_install_seconds = int(rollout_install.group(1))
+        self.assertEqual(
+            rollout_transfer_seconds,
+            int(default_transfer.group(1).replace("_", "")),
         )
-        self.assertEqual(env_max_snapshot_seconds, source_max_snapshot_seconds)
-        max_health_seconds = parse_duration(
-            "".join(max_health.groups()), ".env.example maximum health period"
+        self.assertEqual(rollout_install_seconds, 1200)
+        rollout_health_seconds = parse_duration(
+            "".join(rollout_health.groups()), ".env.example rollout health period"
         )
-        supported_max_startup_seconds = source_max_snapshot_seconds + sum(
+        supported_rollout_startup_seconds = (
+            rollout_transfer_seconds
+            + rollout_install_seconds
+            + sum(int(value.group(1)) for value in phases.values() if value)
+        )
+        self.assertGreaterEqual(
+            rollout_health_seconds, supported_rollout_startup_seconds
+        )
+
+        supported_max_startup_seconds = int(
+            source_max_transfer.group(1).replace("_", "")
+        ) + int(source_max_install.group(1).replace("_", "")) + sum(
             int(value.group(1)) for value in phases.values() if value
         )
-        self.assertGreaterEqual(max_health_seconds, supported_max_startup_seconds)
+        self.assertEqual(supported_max_startup_seconds, 18135)
+        self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
@@ -1265,6 +1309,17 @@ for (const startupDelay of [0, 1600, 7000]) {
             "repeated_connection_failures_return_supervised_tasks_to_baseline",
             "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
             "cache_install_snapshot_preserves_mismatch_for_offset_reset",
+            "snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window",
+            "final_install_deadline_latches_once_and_mismatch_restores_transfer_deadline",
+            "final_install_respects_the_first_rpc_hard_cap_and_transfer_expiry",
+            "mismatch_cannot_reenter_final_install_after_transfer_expiry",
+            "watchable_snapshot_deadline_switches_to_the_active_phase",
+            "advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry",
+            "unanswered_non_final_rpc_expires_at_chunk_budget_and_resets_socket",
+            "repeated_mismatch_style_resets_expire_at_the_original_transfer_deadline",
+            "final_install_may_exceed_chunk_window_but_cannot_renew_install_window",
+            "stale_snapshot_guard_cannot_clear_a_newer_attempt",
+            "caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately",
         )
         for test_name in hiqlite_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1278,6 +1333,19 @@ for (const startupDelay of [0, 1600, 7000]) {
                 "--no-default-features --features auto-heal,cache,macros,sqlite",
                 command,
             )
+            self.assertIn("--lib -- --exact", command)
+
+        core_snapshot_tests = (
+            "snapshot_install_timeout_is_bounded_and_env_values_are_parsed",
+            "snapshot_chunk_and_transfer_timeouts_validate_bounds_and_relationship",
+            "snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override",
+            "production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts",
+        )
+        for test_name in core_snapshot_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurx-core", command)
             self.assertIn("--lib -- --exact", command)
 
         proxy_writer_test = (

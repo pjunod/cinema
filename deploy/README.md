@@ -504,18 +504,19 @@ inspect-wal` stopped-node tool; the safe preservation and interpretation
 runbook is in
 [`docs/OPERATIONS.md`](../docs/OPERATIONS.md#inspecting-a-stopped-voter-without-changing-it).
 
-The image and Compose default to a five-minute startup health grace: enough for
-the default 120-second snapshot deadline and the three 45-second startup phases,
-without hiding a permanently broken build for an hour. A deployment that raises
+The image and Compose default to a 25-minute startup health grace: enough for
+the default 1,200-second snapshot transfer stage, 120-second final install, and
+three 45-second startup phases. The independent 30-second non-final chunk
+watchdog does not extend that formula. A deployment that raises either
+`cluster.snapshot_transfer_timeout_secs` or
 `cluster.install_snapshot_timeout_secs` — in `.env`, or in a production TOML
 this repository never sees — needs a longer grace, and does not have to
 maintain one: leave `PLURX_HEALTH_START_PERIOD` unset and `make docker-up`
-derives it from the resolved timeout plus 135 seconds. Set the variable only to
-choose a grace deliberately. Any resolved grace other than the tracked
-five-minute default counts as chosen — wherever you wrote it — and is used
+derives it from both resolved stage timeouts plus 135 seconds. Set the variable
+only to choose a grace deliberately. Any resolved grace other than the tracked
+25-minute default counts as chosen — wherever you wrote it — and is used
 exactly as Compose resolved it, refused by name rather than overruled if it
-cannot cover the timeout. The maximum supported pair is shown in
-`.env.example`.
+cannot cover both stages. The fleet rollout pair is shown in `.env.example`.
 
 Run `make docker-up` from the repository root for every Compose rollout. Its
 first step derives the grace only if the deployment has not chosen one, its
@@ -524,9 +525,11 @@ Compose defaults and overrides, and a readable bind-mounted production TOML all
 at their usual precedence — and only then does `docker compose up` replace a
 container, with the same period that was proved. If a named
 volume or another opaque mount hides the production config, the check assumes
-the source maximum unless the resolved
-`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` is explicit. This conservative
-fallback prevents a custom 600-second TOML deadline from accidentally shipping
-with the five-minute health grace. An explicit command-line `--config` takes
+the source maximum for each snapshot budget unless all three
+`PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS`,
+`PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS` and
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` are explicit. This conservative
+fallback prevents custom TOML deadlines from accidentally shipping with a
+shorter health grace. An explicit command-line `--config` takes
 precedence over `PLURX_CONFIG`, matching the server. A direct `docker compose
 up` bypasses the preflight.

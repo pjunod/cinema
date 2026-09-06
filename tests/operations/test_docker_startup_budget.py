@@ -18,7 +18,7 @@ BudgetError = CHECKER["BudgetError"]
 
 def compose_document(
     *,
-    start_period: str = "5m0s",
+    start_period: str = "25m0s",
     environment: dict[str, str] | None = None,
     volumes: list[dict[str, str]] | None = None,
     command: list[str] | None = None,
@@ -39,11 +39,15 @@ class DockerStartupBudgetTests(unittest.TestCase):
     def test_product_defaults_fit_the_compose_health_grace(self):
         budget = CHECKER["validate_document"](compose_document())
 
-        self.assertEqual(budget.snapshot_seconds, 120)
+        self.assertEqual(budget.chunk_seconds, 30)
+        self.assertEqual(budget.transfer_seconds, 1200)
+        self.assertEqual(budget.install_seconds, 120)
         self.assertEqual(budget.startup_allowance_seconds, 135)
-        self.assertEqual(budget.required_seconds, 255)
-        self.assertEqual(int(budget.health_seconds), 300)
-        self.assertEqual(budget.snapshot_source, "built-in default")
+        self.assertEqual(budget.required_seconds, 1455)
+        self.assertEqual(int(budget.health_seconds), 1500)
+        self.assertEqual(budget.chunk_source, "built-in default")
+        self.assertEqual(budget.transfer_source, "built-in default")
+        self.assertEqual(budget.install_source, "built-in default")
 
     def test_resolved_environment_timeout_fails_closed_before_deployment(self):
         document = compose_document(
@@ -52,18 +56,138 @@ class DockerStartupBudgetTests(unittest.TestCase):
             }
         )
 
-        with self.assertRaisesRegex(BudgetError, r"600s.*requires at least 735s"):
+        with self.assertRaisesRegex(BudgetError, r"600s.*requires at least 1935s"):
             CHECKER["validate_document"](document)
 
     def test_environment_timeout_parsing_matches_the_server(self):
+        for variable, value in (
+            ("PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS", " 30 "),
+            ("PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS", " 1200 "),
+            ("PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS", " 120 "),
+        ):
+            with self.subTest(variable=variable):
+                document = compose_document(environment={variable: value})
+                with self.assertRaisesRegex(BudgetError, r"must be an integer"):
+                    CHECKER["validate_document"](document)
+
+    def test_transfer_environment_override_is_a_separate_startup_stage(self):
+        document = compose_document(
+            start_period="34m15s",
+            environment={
+                "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS": "1800",
+            },
+        )
+
+        budget = CHECKER["validate_document"](document)
+
+        self.assertEqual(budget.transfer_seconds, 1800)
+        self.assertEqual(budget.install_seconds, 120)
+        self.assertEqual(budget.required_seconds, 2055)
+        self.assertEqual(
+            budget.transfer_source,
+            "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS",
+        )
+        self.assertEqual(budget.install_source, "built-in default")
+
+    def test_both_changed_stage_settings_contribute_once(self):
+        document = compose_document(
+            start_period="42m15s",
+            environment={
+                "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS": "1800",
+                "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "600",
+            },
+        )
+
+        budget = CHECKER["validate_document"](document)
+
+        self.assertEqual(budget.required_seconds, 2535)
+        self.assertEqual(int(budget.health_seconds), 2535)
+        self.assertIn("TRANSFER", budget.transfer_source)
+        self.assertIn("INSTALL", budget.install_source)
+
+    def test_stage_minima_and_maxima_match_the_server_contract(self):
+        cases = (
+            ("3m25s", "5", "60", "10", 205),
+            ("5h3m", "300", "14400", "3600", 18135),
+        )
+        for start_period, chunk, transfer, install, required in cases:
+            with self.subTest(chunk=chunk, transfer=transfer, install=install):
+                budget = CHECKER["validate_document"](
+                    compose_document(
+                        start_period=start_period,
+                        environment={
+                            "PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS": chunk,
+                            "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS": transfer,
+                            "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": install,
+                        },
+                    )
+                )
+                self.assertEqual(budget.required_seconds, required)
+                self.assertGreaterEqual(budget.health_seconds, required)
+
+    def test_stage_values_outside_server_bounds_are_refused(self):
+        cases = (
+            ("PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS", "4", "5s"),
+            ("PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS", "301", "300s"),
+            ("PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS", "59", "60s"),
+            ("PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS", "14401", "14400s"),
+            ("PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS", "9", "10s"),
+            ("PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS", "3601", "3600s"),
+        )
+        for variable, value, boundary in cases:
+            with self.subTest(variable=variable, value=value):
+                with self.assertRaisesRegex(BudgetError, boundary):
+                    CHECKER["validate_document"](
+                        compose_document(environment={variable: value})
+                    )
+
+    def test_chunk_timeout_cannot_exceed_transfer_timeout(self):
         document = compose_document(
             environment={
-                "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": " 120 ",
+                "PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS": "300",
+                "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS": "60",
             }
         )
 
-        with self.assertRaisesRegex(BudgetError, r"must be an integer"):
+        with self.assertRaisesRegex(BudgetError, r"chunk timeout 300s.*exceeds.*60s"):
             CHECKER["validate_document"](document)
+
+    def test_empty_stage_overrides_preserve_readable_toml_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "plurx.toml"
+            config.write_text(
+                "[cluster]\nsnapshot_chunk_timeout_secs = 45\n"
+                "snapshot_transfer_timeout_secs = 600\n"
+                "install_snapshot_timeout_secs = 300\n",
+                encoding="utf-8",
+            )
+            document = compose_document(
+                start_period="17m15s",
+                environment={
+                    "PLURX_CONFIG": "/etc/plurx/plurx.toml",
+                    "PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS": "",
+                    "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS": "",
+                    "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "",
+                },
+                volumes=[
+                    {
+                        "type": "bind",
+                        "source": str(config),
+                        "target": "/etc/plurx/plurx.toml",
+                    }
+                ],
+            )
+
+            budget = CHECKER["validate_document"](document)
+
+        self.assertEqual(
+            (budget.chunk_seconds, budget.transfer_seconds, budget.install_seconds),
+            (45, 600, 300),
+        )
+        self.assertEqual(
+            (budget.chunk_source, budget.transfer_source, budget.install_source),
+            (str(config),) * 3,
+        )
 
     def test_resolved_environment_overrides_a_bind_mounted_toml(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -88,11 +212,13 @@ class DockerStartupBudgetTests(unittest.TestCase):
 
             budget = CHECKER["validate_document"](document)
 
-        self.assertEqual(budget.snapshot_seconds, 120)
+        self.assertEqual(budget.transfer_seconds, 1200)
+        self.assertEqual(budget.install_seconds, 120)
         self.assertEqual(
-            budget.snapshot_source,
+            budget.install_source,
             "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS",
         )
+        self.assertEqual(budget.transfer_source, f"{config} (built-in default)")
 
     def test_bind_mounted_production_toml_is_included_in_the_budget(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -102,7 +228,7 @@ class DockerStartupBudgetTests(unittest.TestCase):
                 encoding="utf-8",
             )
             document = compose_document(
-                start_period="12m15s",
+                start_period="32m15s",
                 environment={"PLURX_CONFIG": "/etc/plurx/plurx.toml"},
                 volumes=[
                     {
@@ -115,10 +241,11 @@ class DockerStartupBudgetTests(unittest.TestCase):
 
             budget = CHECKER["validate_document"](document)
 
-        self.assertEqual(budget.snapshot_seconds, 600)
-        self.assertEqual(budget.required_seconds, 735)
-        self.assertEqual(int(budget.health_seconds), 735)
-        self.assertEqual(budget.snapshot_source, str(config))
+        self.assertEqual(budget.transfer_seconds, 1200)
+        self.assertEqual(budget.install_seconds, 600)
+        self.assertEqual(budget.required_seconds, 1935)
+        self.assertEqual(int(budget.health_seconds), 1935)
+        self.assertEqual(budget.install_source, str(config))
 
     def test_cli_config_path_takes_precedence_over_config_environment(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -133,7 +260,7 @@ class DockerStartupBudgetTests(unittest.TestCase):
                 encoding="utf-8",
             )
             document = compose_document(
-                start_period="12m15s",
+                start_period="32m15s",
                 environment={"PLURX_CONFIG": "/etc/plurx/env.toml"},
                 volumes=[
                     {
@@ -147,8 +274,8 @@ class DockerStartupBudgetTests(unittest.TestCase):
 
             budget = CHECKER["validate_document"](document)
 
-        self.assertEqual(budget.snapshot_seconds, 600)
-        self.assertEqual(budget.snapshot_source, str(cli_config))
+        self.assertEqual(budget.install_seconds, 600)
+        self.assertEqual(budget.install_source, str(cli_config))
 
     def test_opaque_config_mount_conservatively_uses_the_source_maximum(self):
         document = compose_document(
@@ -163,7 +290,7 @@ class DockerStartupBudgetTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            BudgetError, r"3600s.*opaque config mount.*requires at least 3735s"
+            BudgetError, r"14400s.*3600s.*opaque config mount.*requires at least 18135s"
         ):
             CHECKER["validate_document"](document)
 
@@ -247,9 +374,10 @@ class DockerStartupBudgetTests(unittest.TestCase):
 
         value, explanation = CHECKER["start_period_for_deployment"](document)
 
-        self.assertEqual(value, "1335s")
+        self.assertEqual(value, "2535s")
         self.assertIn("derived", explanation)
-        self.assertIn("1200s", explanation)
+        self.assertIn("snapshot transfer timeout 1200s", explanation)
+        self.assertIn("install timeout 1200s", explanation)
 
     def test_a_deadline_only_a_production_toml_knows_still_derives_the_grace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -273,13 +401,13 @@ class DockerStartupBudgetTests(unittest.TestCase):
         # The failure this closes: the deadline lives in a bind-mounted file
         # `.env` never mentions, so nothing paired the readiness grace to it
         # and the first report was a refused deploy on the host.
-        self.assertEqual(value, "1335s")
+        self.assertEqual(value, "2535s")
         self.assertIn(str(config), explanation)
 
     def test_a_default_deployment_keeps_the_compose_default_untouched(self):
         value, _ = CHECKER["start_period_for_deployment"](compose_document())
 
-        self.assertEqual(value, "300s")
+        self.assertEqual(value, "1500s")
 
     def test_a_grace_this_deployment_chose_is_left_as_written_and_refused(self):
         # Anything other than the tracked interpolation default was chosen by
@@ -296,18 +424,18 @@ class DockerStartupBudgetTests(unittest.TestCase):
 
         self.assertEqual(value, "60s")
         self.assertIn("chosen by this deployment", explanation)
-        with self.assertRaisesRegex(BudgetError, r"60s.*requires at least 1335s"):
+        with self.assertRaisesRegex(BudgetError, r"60s.*requires at least 2535s"):
             CHECKER["validate_document"](document)
 
     def test_a_longer_grace_than_the_budget_needs_is_kept(self):
         document = compose_document(
-            start_period="40m0s",
+            start_period="45m0s",
             environment={"PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS": "1200"},
         )
 
         value, explanation = CHECKER["start_period_for_deployment"](document)
 
-        self.assertEqual(value, "2400s")
+        self.assertEqual(value, "2700s")
         self.assertIn("covers the budget", explanation)
         CHECKER["validate_document"](document)
 
@@ -319,7 +447,7 @@ class DockerStartupBudgetTests(unittest.TestCase):
         # outranks the operator's own file.
         self.assertEqual(
             CHECKER["tracked_default_health_seconds"](),
-            CHECKER["parse_duration"]("5m", "expected tracked default"),
+            CHECKER["parse_duration"]("25m", "expected tracked default"),
         )
         with tempfile.TemporaryDirectory() as directory:
             pinned = Path(directory) / "docker-compose.yml"
@@ -353,7 +481,7 @@ class DockerStartupBudgetTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "1335s")
+        self.assertEqual(result.stdout.strip(), "2535s")
         self.assertIn("start period", result.stderr)
 
 

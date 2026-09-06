@@ -144,9 +144,9 @@ USER plurx
 # awaiting admission, then the 120s snapshot timeout plus another 45s reaching
 # its quorum watermark. Five minutes covers that 255s budget with margin while
 # still exposing a broken build promptly. Compose can lengthen the grace when
-# an operator lengthens the snapshot timeout; a successful probe ends startup
+# an operator lengthens either snapshot stage; a successful probe ends startup
 # grace immediately and later failures use the normal retry cadence.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5m \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=25m \
     CMD ["plurxd", "healthcheck"]
 
 ENTRYPOINT ["plurxd"]

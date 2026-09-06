@@ -78,21 +78,21 @@ services:
     # somebody, wherever they wrote it, and is used exactly as Compose resolved
     # it: nothing here re-reads `.env` and second-guesses that. It is never
     # raised past you; if it cannot cover the deadline the preflight refuses it
-    # by name. Five minutes is the unset default for a deployment
-    # that never resolves anything longer: it covers the 120s default without
-    # hiding a broken build for the one-hour maximum, and `.env.example` shows
-    # the maximum pair. Invoking `docker compose up` directly derives nothing
-    # and proves nothing.
+    # by name. Twenty-five minutes is the unset default for a deployment that
+    # never resolves anything longer: it covers the 1,200s transfer stage,
+    # 120s final install, and 135s of named startup phases. `.env.example`
+    # shows the fleet rollout pair. Invoking `docker compose up` directly
+    # derives nothing and proves nothing.
     healthcheck:
       test: ["CMD", "plurxd", "healthcheck"]
       interval: 30s
       timeout: 5s
-      start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"
-    # At the supported 3,600s snapshot-transfer maximum, a recovering voter can
-    # spend 45s becoming healthy, 45s confirming admission, 3,645s catching up,
-    # and 30s draining Hiqlite's writer/Raft tasks. Docker's 10-second default
-    # kills that bounded path midway and leaves crash sentinels behind. The
-    # default covers the full maximum plus margin; ordinary stops exit sooner.
+      start_period: "${PLURX_HEALTH_START_PERIOD:-25m}"
+    # At the supported 3,600s final-install maximum, a recovering voter can
+    # spend that full allowance in node-owned storage work plus shutdown
+    # cleanup. Docker's 10-second default kills that bounded path midway and
+    # leaves crash sentinels behind. The default covers the install maximum
+    # plus margin; ordinary stops exit sooner.
     stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}
     # Keep the base service on ordinary Docker networking. Host-specific
     # overrides commonly attach plurxd to an external media network, and
@@ -119,9 +119,14 @@ services:
       PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"
       PLURX_BIND: "0.0.0.0:32400"
       PLURX_DATA_DIR: "/var/lib/plurx"
-      # Empty leaves a TOML value (or the built-in 120s default) authoritative.
-      # `make docker-up` checks readable bind-mounted TOML too; when set in
-      # .env, pair this with PLURX_HEALTH_START_PERIOD above.
+      # Empty leaves TOML (or built-in defaults) authoritative. The 30s chunk
+      # watchdog is independent of startup grace; the preflight derives grace
+      # from the 1,200s transfer and 120s final-install stages. It also checks
+      # readable bind-mounted TOML. When either stage is set in .env, pair it
+      # with PLURX_HEALTH_START_PERIOD above or leave that grace unset so
+      # `make docker-up` derives it.
+      PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS: "${PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS:-}"
+      PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS: "${PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS:-}"
       PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: "${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"
       # Multicast cannot escape a Docker bridge. The host-network discovery
       # companion below owns Bonjour so this container does not publish a
