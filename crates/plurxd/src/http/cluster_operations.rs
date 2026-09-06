@@ -1713,22 +1713,42 @@ where
             let node_id = peer.node_id.clone();
             let peer_node_id = peer.raft_id;
             let peer_deadline = deadline.min(tokio::time::Instant::now() + PEER_STATUS_TIMEOUT);
-            let public = tokio::time::timeout_at(peer_deadline, public(peer, peer_deadline));
+            let public = async {
+                let outcome =
+                    tokio::time::timeout_at(peer_deadline, public(peer, peer_deadline)).await;
+                (outcome, tokio::time::Instant::now())
+            };
             let private_deadline =
                 peer_deadline.min(tokio::time::Instant::now() + Duration::from_millis(900));
-            let private = tokio::time::timeout_at(private_deadline, private(peer_node_id));
-            let (public_outcome, private_transport) = tokio::join!(public, private);
+            let private = async {
+                let outcome =
+                    tokio::time::timeout_at(private_deadline, private(peer_node_id)).await;
+                (outcome, tokio::time::Instant::now())
+            };
+            let ((public_outcome, public_receipt), (private_transport, private_receipt)) =
+                tokio::join!(public, private);
             let mut outcome = public_outcome.unwrap_or_else(|_| PeerStatusOutcome {
                 node_id: node_id.clone(),
                 state: ObservationState::TimedOut,
                 status: None,
                 transport: None,
             });
+            if let Some(transport) = outcome
+                .status
+                .as_mut()
+                .and_then(|status| status.transport.as_mut())
+            {
+                transport.local_receipt_at = Some(public_receipt);
+            }
             outcome.transport = private_transport
                 .ok()
                 .and_then(Result::ok)
                 .flatten()
-                .filter(|status| status.observing_node_id == peer_node_id);
+                .filter(|status| status.observing_node_id == peer_node_id)
+                .map(|mut status| {
+                    status.local_receipt_at = Some(private_receipt);
+                    status
+                });
             (node_id, outcome)
         }
     }))
@@ -1962,7 +1982,7 @@ where
 fn sanitize_transport(
     mut transport: SnapshotTransportStatus,
     expected_observer: u64,
-    locally_elapsed_ms: u64,
+    fallback_elapsed_ms: u64,
 ) -> Option<SnapshotTransportStatus> {
     if transport.observing_node_id != expected_observer {
         return None;
@@ -1970,6 +1990,17 @@ fn sanitize_transport(
     transport
         .observations
         .retain(|observation| observation.observing_node_id == expected_observer);
+    let locally_elapsed_ms = transport
+        .local_receipt_at
+        .map(|receipt| {
+            u64::try_from(
+                tokio::time::Instant::now()
+                    .saturating_duration_since(receipt)
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX)
+        })
+        .unwrap_or(fallback_elapsed_ms);
     age_transport_observations(&mut transport, locally_elapsed_ms);
     Some(transport)
 }
@@ -4313,6 +4344,72 @@ mod tests {
                 .and_then(|status| status.observations.first())
                 .map(|observation| observation.locally_received_bytes),
             Some(Some(64))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_transport_age_is_normalized_from_each_monotonic_receipt() {
+        let peers = vec![
+            ActivityPeer {
+                node_id: "node-2".to_owned(),
+                raft_id: 2,
+                http_base: None,
+                reachable: true,
+            },
+            ActivityPeer {
+                node_id: "node-3".to_owned(),
+                raft_id: 3,
+                http_base: None,
+                reachable: true,
+            },
+        ];
+        let mut remote = collect_peer_statuses_with_sources(
+            peers,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            |peer, _deadline| async move {
+                PeerStatusOutcome {
+                    node_id: peer.node_id,
+                    state: ObservationState::Unreachable,
+                    status: None,
+                    transport: None,
+                }
+            },
+            |raft_id| async move {
+                if raft_id == 3 {
+                    tokio::time::sleep(Duration::from_millis(900)).await;
+                }
+                let mut transport = test_transport_status(raft_id, 0, Some(20_000));
+                transport.observations[0].attempt_age_ms =
+                    Some(if raft_id == 2 { 1_000 } else { 1_400 });
+                Ok(Some(transport))
+            },
+        )
+        .await;
+
+        let old = sanitize_transport(
+            remote
+                .remove("node-2")
+                .and_then(|outcome| outcome.transport)
+                .expect("early private transport"),
+            2,
+            0,
+        )
+        .expect("valid early private transport");
+        let successor = sanitize_transport(
+            remote
+                .remove("node-3")
+                .and_then(|outcome| outcome.transport)
+                .expect("delayed private transport"),
+            3,
+            0,
+        )
+        .expect("valid delayed private transport");
+
+        assert_eq!(old.observations[0].attempt_age_ms, Some(1_900));
+        assert_eq!(successor.observations[0].attempt_age_ms, Some(1_400));
+        assert!(
+            successor.observations[0].attempt_age_ms < old.observations[0].attempt_age_ms,
+            "a later peer response must not make its newer attempt look older"
         );
     }
 

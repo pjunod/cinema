@@ -112,6 +112,15 @@ pub struct SnapshotTransportStatus {
     pub observing_node_id: u64,
     pub observed_at_unix_ms: u64,
     pub observations: Vec<SnapshotTransportObservation>,
+    /// Process-local receipt time assigned by an authenticated collector.
+    ///
+    /// This is deliberately absent from the wire schema. It lets a collector
+    /// age independently completed peer responses to one local monotonic
+    /// selection instant instead of pretending every response was sampled at
+    /// the beginning of the fanout.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub local_receipt_at: Option<Instant>,
 }
 
 pub(crate) struct InboundSnapshotChunk<'a> {
@@ -429,6 +438,7 @@ impl LocalSnapshotTransportStatus {
             observing_node_id: self.inner.observing_node_id,
             observed_at_unix_ms,
             observations,
+            local_receipt_at: None,
         }
     }
 

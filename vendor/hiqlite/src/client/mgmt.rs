@@ -829,6 +829,7 @@ mod tests {
             observing_node_id: 2,
             observed_at_unix_ms: 17,
             observations: Vec::new(),
+            local_receipt_at: None,
         };
         let (address, server) = serve_transport_response(
             "200 OK",
