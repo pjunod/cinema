@@ -10370,7 +10370,7 @@ async fn handle_request(
             status: transport_recovery::recovery_runtime_status(client).await?,
         }),
         Request::ProcessResources => Ok(Response::ProcessResources {
-            resources: transport_recovery::process_resources()?,
+            resources: transport_recovery::process_resources(client)?,
         }),
         Request::ForceCompaction {
             ref phase,

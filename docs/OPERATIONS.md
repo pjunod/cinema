@@ -1946,6 +1946,15 @@ writer cadence. If an API execute result is ambiguous, the writer performs one
 or more bounded consistent reads of that identifier and accepts only the exact
 value; it never replays the write blindly.
 
+The controller owns the writer process throughout the recovery window. An
+unexpected exit fails the cycle immediately, and a 35-second interval without
+a new acknowledgement is a stalled workload, not evidence of continuing
+load. The artifact requires every adjacent acknowledgement gap and the tail
+from the last acknowledgement to recovery completion to stay within that same
+35-second bound. Node readiness, target installation, and source completion
+share one absolute 1,500-second recovery deadline; moving between phases never
+renews it.
+
 The campaign's 256-log snapshot trigger exists only in the cluster validation
 launch payload. It is absent from `plurxd`, TOML, environment variables, and
 the Settings UI, so it cannot change production snapshot frequency. The
@@ -1962,12 +1971,17 @@ and install times are explicit; missing or zero large-image durations fail the
 artifact instead of becoming zero-valued evidence. The artifact also records
 the readiness acknowledgement, every in-recovery acknowledgement, their
 target-local digest, the recovered SQLite content digest, and baseline plus
-post-quiescence thread/socket counts for persistent voters 1–3 and restarted
-node 4. The summary records the worst recovery, transfer, and install duration
-for each role. Do not accept an artifact if its build SHA differs from the
-candidate, either role has fewer than 20 cycles, the source and installed
-snapshot hashes differ, an acknowledged-write digest differs, any required
-timestamp is absent, or any node exceeds the fixed resource margins.
+post-quiescence OS-thread, socket, and Hiqlite-owned async-task counts for
+persistent voters 1–3 and restarted node 4. Before taking the baseline, the
+target must apply and hash the seeded image exactly. Baseline and post-cycle
+counts are each accepted only after two identical idle samples separated by a
+three-second cleanup/backoff horizon; active snapshot work resets that proof.
+The summary records the worst recovery, transfer, and install duration for each
+role. Do not accept an artifact if its build SHA differs from the candidate,
+either role has fewer than 20 cycles, recovery exceeds 1,500 seconds, the
+source and installed snapshot hashes differ, an acknowledged-write digest
+differs, any required timestamp is absent, or any node exceeds the fixed
+resource margins. Owned async tasks have no growth allowance.
 
 Main-bound cluster changes run this command in the dedicated
 `cluster_transport_recovery` CI job and retain the evidence, log, and exact

@@ -261,7 +261,7 @@ timeout_seconds = 1800
 
 [[checks]]
 id = "cluster-transport-recovery"
-title = "Twenty-cycle learner and voter TLS snapshot recovery campaign"
+title = "Supervised twenty-cycle learner and voter TLS snapshot recovery campaign"
 command = "make cluster-transport-recovery-check"
 profiles = ["full", "nightly"]
 platforms = ["linux"]

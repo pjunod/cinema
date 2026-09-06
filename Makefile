@@ -1067,8 +1067,31 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 .PHONY: cluster-transport-recovery-check
 cluster-transport-recovery-check: ## Run Linux 20+20 learner/voter snapshot recovery qualification
 	test "$$(uname -s)" = Linux
-	PLURX_EXPECT_TEST_COUNT=14 scripts/require-test-count $(CARGO) test --locked \
+	PLURX_EXPECT_TEST_COUNT=19 scripts/require-test-count $(CARGO) test --locked \
 	  -p plurx-cluster-check transport_recovery::tests --lib
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::writer_must_cover_the_end_of_recovery \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline \
+	  --lib -- --exact
+	$(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::owned_async_task_growth_has_no_resource_slack \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  transport_status::tests::owned_async_task_guard_tracks_abort_safe_lifetime \
+	  --lib -- --exact
+	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  network::snapshot_executor::tests::production_snapshot_executor_worker_is_counted_until_joined \
+	  --lib -- --exact
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  transport-recovery target/validation/cluster-transport-recovery.json
 

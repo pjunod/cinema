@@ -828,6 +828,7 @@ mod tests {
             schema_version: 1,
             observing_node_id: 2,
             observed_at_unix_ms: 17,
+            owned_async_tasks: 0,
             observations: Vec::new(),
             local_request_started_at: None,
             local_receipt_at: None,

@@ -20,6 +20,7 @@ use plurx_core::store::{AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_SCHEMA_VERSIO
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
+use tokio::task::JoinHandle;
 
 use super::topology::{resolve_build_sha, unix_ms};
 use super::{
@@ -42,10 +43,14 @@ const IMAGE_ROW_BYTES: u64 = 4 * 1024 * 1024;
 const WRITER_INTERVAL_MILLIS: u64 = 1_000;
 const WRITER_MAX_OPERATIONS: u64 = 4_096;
 const MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY: usize = 2;
+const WRITER_MAX_ACK_GAP: Duration = Duration::from_secs(35);
+const WRITER_PROGRESS_POLL: Duration = Duration::from_millis(100);
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(1_500);
-const POST_QUIESCENCE: Duration = Duration::from_secs(2);
+const RESOURCE_CLEANUP_HORIZON: Duration = Duration::from_secs(3);
+const RESOURCE_STABLE_SAMPLES: usize = 2;
 const THREAD_MARGIN: u64 = 4;
 const SOCKET_MARGIN: u64 = 2;
+const OWNED_ASYNC_TASK_MARGIN: u64 = 0;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +92,7 @@ pub struct RecoveryTransportContract {
 pub struct ProcessResourceCount {
     pub threads: u64,
     pub sockets: u64,
+    pub owned_async_tasks: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -217,6 +223,9 @@ pub struct ClusterTransportRecoveryArtifact {
     pub transport: RecoveryTransportContract,
     pub resource_thread_margin: u64,
     pub resource_socket_margin: u64,
+    pub resource_owned_async_task_margin: u64,
+    pub resource_cleanup_horizon_millis: u64,
+    pub resource_stable_samples: usize,
     pub learner: RecoveryRoleCampaign,
     pub voter: RecoveryRoleCampaign,
 }
@@ -227,6 +236,7 @@ struct RecoveryWriterConfig {
     addresses: Vec<String>,
     prefix: String,
     ready_path: PathBuf,
+    progress_path: PathBuf,
     start_path: PathBuf,
     stop_path: PathBuf,
     interval_millis: u64,
@@ -238,6 +248,26 @@ struct RecoveryWriterConfig {
 struct RecoveryWriterReport {
     writes: Vec<AcknowledgedRecoveryWrite>,
     digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryWriterProgress {
+    acknowledged_writes: usize,
+    last_acknowledged_at_unix_ms: i64,
+}
+
+struct RecoveryWriter {
+    child: Child,
+    stdout: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+}
+
+impl Drop for RecoveryWriter {
+    fn drop(&mut self) {
+        if let Some(stdout) = self.stdout.take() {
+            stdout.abort();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -342,6 +372,9 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
         },
         resource_thread_margin: THREAD_MARGIN,
         resource_socket_margin: SOCKET_MARGIN,
+        resource_owned_async_task_margin: OWNED_ASYNC_TASK_MARGIN,
+        resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
+        resource_stable_samples: RESOURCE_STABLE_SAMPLES,
         learner,
         voter,
     };
@@ -507,6 +540,7 @@ async fn admit_learner(
         executable,
         cluster,
         recovery_launch(TARGET_NODE, cluster_root, specs, RecoveryRole::Learner),
+        Instant::now() + RECOVERY_DEADLINE,
     )
     .await?;
     cluster
@@ -587,8 +621,38 @@ async fn exercise_role_campaign(
     cluster
         .wait_for_members(leader, &voters, &[1, 2, 3, TARGET_NODE])
         .await?;
-    tokio::time::sleep(POST_QUIESCENCE).await;
-    let baseline_resources = request_resources_for_nodes(cluster, &[1, 2, 3, TARGET_NODE]).await?;
+    let seeded_index = request_status(cluster, leader)
+        .await?
+        .applied_index
+        .context("seeded recovery image has no applied index")?;
+    wait_for_applied_index(
+        cluster,
+        TARGET_NODE,
+        seeded_index,
+        Instant::now() + RECOVERY_DEADLINE,
+    )
+    .await?;
+    let target_image = match cluster
+        .request(
+            TARGET_NODE,
+            Request::RecoveryImageDigest {
+                minimum_bytes: minimum_sqlite_bytes,
+            },
+        )
+        .await?
+    {
+        Response::RecoveryImage { evidence } => evidence,
+        response => bail!("unexpected baseline recovery image response: {response:?}"),
+    };
+    if target_image != expected_image {
+        bail!("target recovery image did not converge before resource baseline");
+    }
+    let baseline_resources = wait_for_stable_idle_resources(
+        cluster,
+        &[1, 2, 3, TARGET_NODE],
+        Instant::now() + RECOVERY_DEADLINE,
+    )
+    .await?;
     let mut cycles = Vec::with_capacity(TRANSPORT_RECOVERY_CYCLES_PER_ROLE as usize);
 
     for cycle in 1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE {
@@ -635,34 +699,51 @@ async fn exercise_role_campaign(
         std::fs::write(&writer_config.start_path, b"start\n")
             .context("signal recovery writer to begin recovery-window writes")?;
         let recovery_started = Instant::now();
-        spawn_recovery_node(
-            executable,
-            cluster,
-            recovery_launch(TARGET_NODE, cluster_root, specs, role),
-        )
-        .await?;
-        cluster
-            .request(TARGET_NODE, Request::Open)
-            .await?
-            .require_ok()?;
-        if role == RecoveryRole::Learner {
+        let recovery_deadline = recovery_started
+            .checked_add(RECOVERY_DEADLINE)
+            .context("recovery deadline overflow")?;
+        let recovery = async {
+            spawn_recovery_node(
+                executable,
+                cluster,
+                recovery_launch(TARGET_NODE, cluster_root, specs, role),
+                recovery_deadline,
+            )
+            .await?;
             cluster
-                .request(TARGET_NODE, Request::StartHeartbeatLoop)
+                .request(TARGET_NODE, Request::Open)
                 .await?
                 .require_ok()?;
-        }
-        let target_status = wait_for_installed_snapshot(
-            cluster,
-            TARGET_NODE,
-            snapshot_index,
-            &source_snapshot.snapshot_id,
-        )
-        .await?;
-        let source_status = wait_for_completed_source_outbound(
-            cluster,
-            leader,
-            TARGET_NODE,
-            &source_snapshot.snapshot_id,
+            if role == RecoveryRole::Learner {
+                cluster
+                    .request(TARGET_NODE, Request::StartHeartbeatLoop)
+                    .await?
+                    .require_ok()?;
+            }
+            let target_status = wait_for_installed_snapshot(
+                cluster,
+                TARGET_NODE,
+                snapshot_index,
+                &source_snapshot.snapshot_id,
+                recovery_deadline,
+            )
+            .await?;
+            let source_status = wait_for_completed_source_outbound(
+                cluster,
+                leader,
+                TARGET_NODE,
+                &source_snapshot.snapshot_id,
+                recovery_deadline,
+            )
+            .await?;
+            Ok::<_, anyhow::Error>((target_status, source_status))
+        };
+        let (target_status, source_status) = supervise_recovery_writer(
+            &mut writer,
+            &writer_config,
+            ready_acknowledged_at_unix_ms,
+            recovery_deadline,
+            recovery,
         )
         .await?;
         let source_outbound = source_outbound_evidence(
@@ -724,8 +805,13 @@ async fn exercise_role_campaign(
             recovery_started_at_unix_ms,
             recovery_finished_at_unix_ms,
         )?;
-        tokio::time::sleep(POST_QUIESCENCE).await;
-        let node_resources = collect_node_resource_evidence(cluster, &baseline_resources).await?;
+        let post_resources = wait_for_stable_idle_resources(
+            cluster,
+            &[1, 2, 3, TARGET_NODE],
+            Instant::now() + RECOVERY_DEADLINE,
+        )
+        .await?;
+        let node_resources = collect_node_resource_evidence(&baseline_resources, &post_resources)?;
         cycles.push(RecoveryCycleEvidence {
             role,
             cycle,
@@ -807,8 +893,8 @@ async fn wait_for_installed_snapshot(
     target: u64,
     snapshot_index: u64,
     snapshot_id: &str,
+    deadline: Instant,
 ) -> Result<RecoveryRuntimeStatus> {
-    let deadline = Instant::now() + RECOVERY_DEADLINE;
     loop {
         let status = request_status(cluster, target).await?;
         let complete = status.snapshot_index == Some(snapshot_index)
@@ -836,8 +922,8 @@ async fn wait_for_completed_source_outbound(
     source: u64,
     target: u64,
     snapshot_id: &str,
+    deadline: Instant,
 ) -> Result<RecoveryRuntimeStatus> {
-    let deadline = Instant::now() + RECOVERY_DEADLINE;
     loop {
         let status = request_status(cluster, source).await?;
         let complete = status.transport.observations.iter().any(|observation| {
@@ -1043,15 +1129,84 @@ async fn request_resources_for_nodes(
     Ok(samples)
 }
 
-async fn collect_node_resource_evidence(
+async fn wait_for_applied_index(
     cluster: &mut ClusterProcesses,
+    node_id: u64,
+    expected_index: u64,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        let status = request_status(cluster, node_id).await?;
+        if status
+            .applied_index
+            .is_some_and(|applied| applied >= expected_index)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("node {node_id} did not apply seeded image index {expected_index}: {status:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_stable_idle_resources(
+    cluster: &mut ClusterProcesses,
+    node_ids: &[u64],
+    deadline: Instant,
+) -> Result<Vec<(u64, ProcessResourceCount)>> {
+    let mut previous = None;
+    let mut stable_samples = 0_usize;
+    loop {
+        let mut idle = true;
+        for &node_id in node_ids {
+            let status = request_status(cluster, node_id).await?;
+            if status
+                .transport
+                .observations
+                .iter()
+                .any(|observation| observation.operation_owns_work)
+            {
+                idle = false;
+            }
+        }
+        let current = request_resources_for_nodes(cluster, node_ids).await?;
+        if idle && previous.as_ref() == Some(&current) {
+            stable_samples = stable_samples.saturating_add(1);
+        } else if idle {
+            stable_samples = 1;
+        } else {
+            stable_samples = 0;
+        }
+        if stable_samples >= RESOURCE_STABLE_SAMPLES {
+            return Ok(current);
+        }
+        previous = Some(current);
+        let remaining = remaining_before(deadline, "stable idle resource sampling")?;
+        tokio::time::sleep(RESOURCE_CLEANUP_HORIZON.min(remaining)).await;
+    }
+}
+
+fn collect_node_resource_evidence(
     baselines: &[(u64, ProcessResourceCount)],
+    post_resources: &[(u64, ProcessResourceCount)],
 ) -> Result<Vec<RecoveryNodeResourceEvidence>> {
+    if baselines.len() != post_resources.len() {
+        bail!("resource baseline and post-quiescence node counts differ");
+    }
     let mut evidence = Vec::with_capacity(baselines.len());
-    for (node_id, baseline) in baselines {
-        let post_quiescence = request_resources(cluster, *node_id).await?;
+    for ((node_id, baseline), (post_node_id, post_quiescence)) in
+        baselines.iter().zip(post_resources)
+    {
+        if node_id != post_node_id {
+            bail!("resource baseline and post-quiescence node order differs");
+        }
         if post_quiescence.threads > baseline.threads.saturating_add(THREAD_MARGIN)
             || post_quiescence.sockets > baseline.sockets.saturating_add(SOCKET_MARGIN)
+            || post_quiescence.owned_async_tasks
+                > baseline
+                    .owned_async_tasks
+                    .saturating_add(OWNED_ASYNC_TASK_MARGIN)
         {
             bail!(
                 "node {node_id} leaked resources: baseline {baseline:?}, post {post_quiescence:?}"
@@ -1065,7 +1220,7 @@ async fn collect_node_resource_evidence(
                 RecoveryResourceNodeKind::PersistentSourceVoter
             },
             baseline: baseline.clone(),
-            post_quiescence,
+            post_quiescence: post_quiescence.clone(),
         });
     }
     Ok(evidence)
@@ -1076,7 +1231,7 @@ async fn spawn_writer(
     root: &Path,
     specs: &[NodeSpec],
     prefix: &str,
-) -> Result<(Child, RecoveryWriterConfig)> {
+) -> Result<(RecoveryWriter, RecoveryWriterConfig)> {
     let control = root.join("transport-recovery-writers");
     std::fs::create_dir_all(&control).context("create recovery writer control directory")?;
     let stem = prefix.trim_end_matches('.').replace('.', "-");
@@ -1084,6 +1239,7 @@ async fn spawn_writer(
         addresses: specs[..3].iter().map(|node| node.api.clone()).collect(),
         prefix: prefix.to_owned(),
         ready_path: control.join(format!("{stem}.ready")),
+        progress_path: control.join(format!("{stem}.progress.json")),
         start_path: control.join(format!("{stem}.start")),
         stop_path: control.join(format!("{stem}.stop")),
         interval_millis: WRITER_INTERVAL_MILLIS,
@@ -1092,7 +1248,7 @@ async fn spawn_writer(
     let config_path = control.join(format!("{stem}.json"));
     std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)
         .context("write recovery writer config")?;
-    let child = Command::new(executable)
+    let mut child = Command::new(executable)
         .arg("transport-recovery-writer")
         .arg(&config_path)
         .stdin(Stdio::null())
@@ -1101,25 +1257,110 @@ async fn spawn_writer(
         .kill_on_drop(true)
         .spawn()
         .context("spawn separate recovery writer")?;
-    Ok((child, config))
-}
-
-async fn wait_writer(child: &mut Child) -> Result<RecoveryWriterReport> {
     let stdout = child.stdout.take().context("recovery writer stdout")?;
-    let mut bytes = Vec::new();
-    let read = tokio::spawn(async move {
+    let stdout = tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let mut stdout = stdout;
+        let mut bytes = Vec::new();
         stdout.read_to_end(&mut bytes).await?;
-        Ok::<_, std::io::Error>(bytes)
+        Ok(bytes)
     });
-    let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
+    Ok((
+        RecoveryWriter {
+            child,
+            stdout: Some(stdout),
+        },
+        config,
+    ))
+}
+
+async fn supervise_recovery_writer<T, F>(
+    writer: &mut RecoveryWriter,
+    config: &RecoveryWriterConfig,
+    ready_acknowledged_at_unix_ms: i64,
+    recovery_deadline: Instant,
+    recovery: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::pin!(recovery);
+    let mut writer_exit = Box::pin(writer.child.wait());
+    let mut progress_tick = tokio::time::interval(WRITER_PROGRESS_POLL);
+    progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut acknowledged_writes = 1_usize;
+    let mut last_acknowledged_at_unix_ms = ready_acknowledged_at_unix_ms;
+    let mut last_progress = Instant::now();
+    let deadline = tokio::time::Instant::from_std(recovery_deadline);
+
+    loop {
+        tokio::select! {
+            biased;
+            status = &mut writer_exit => {
+                let status = status.context("wait for recovery writer during recovery")?;
+                bail!("recovery writer exited before recovery completed with {status}");
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                bail!("recovery exceeded its single absolute {} ms deadline", duration_millis(RECOVERY_DEADLINE));
+            }
+            result = &mut recovery => return result,
+            _ = progress_tick.tick() => {
+                if let Ok(progress) = read_writer_progress(&config.progress_path) {
+                    if progress.acknowledged_writes < acknowledged_writes
+                        || progress.last_acknowledged_at_unix_ms < last_acknowledged_at_unix_ms
+                    {
+                        bail!("recovery writer progress moved backwards: {progress:?}");
+                    }
+                    if progress.acknowledged_writes > acknowledged_writes {
+                        acknowledged_writes = progress.acknowledged_writes;
+                        last_acknowledged_at_unix_ms = progress.last_acknowledged_at_unix_ms;
+                        last_progress = Instant::now();
+                    }
+                }
+                if last_progress.elapsed() > WRITER_MAX_ACK_GAP {
+                    bail!(
+                        "recovery writer published no acknowledgement for more than {} ms",
+                        duration_millis(WRITER_MAX_ACK_GAP)
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn read_writer_progress(path: &Path) -> Result<RecoveryWriterProgress> {
+    serde_json::from_slice(
+        &std::fs::read(path).with_context(|| format!("read recovery writer progress {path:?}"))?,
+    )
+    .context("decode recovery writer progress")
+}
+
+fn publish_writer_progress(
+    config: &RecoveryWriterConfig,
+    writes: &[AcknowledgedRecoveryWrite],
+) -> Result<()> {
+    let last = writes.last().context("publish empty writer progress")?;
+    let progress = RecoveryWriterProgress {
+        acknowledged_writes: writes.len(),
+        last_acknowledged_at_unix_ms: last.acknowledged_at_unix_ms,
+    };
+    std::fs::write(&config.progress_path, serde_json::to_vec(&progress)?)
+        .context("publish recovery writer progress")
+}
+
+async fn wait_writer(writer: &mut RecoveryWriter) -> Result<RecoveryWriterReport> {
+    let status = tokio::time::timeout(Duration::from_secs(30), writer.child.wait())
         .await
         .context("recovery writer did not stop")??;
     if !status.success() {
         bail!("recovery writer exited with {status}");
     }
-    let bytes = read.await.context("join recovery writer stdout reader")??;
+    let bytes = writer
+        .stdout
+        .take()
+        .context("recovery writer stdout reader missing")?
+        .await
+        .context("join recovery writer stdout reader")??;
     serde_json::from_slice(&bytes).context("decode recovery writer report")
 }
 
@@ -1216,6 +1457,7 @@ pub async fn run_transport_recovery_writer(config_path: &Path) -> Result<()> {
             value_sha256: hex::encode(Sha256::digest(value.as_bytes())),
             acknowledged_at_unix_ms: unix_ms()?,
         });
+        publish_writer_progress(&config, &writes)?;
         if ordinal == 0 {
             let acknowledged_at = writes
                 .last()
@@ -1297,6 +1539,9 @@ fn validate_writer_config(config: &RecoveryWriterConfig) -> Result<()> {
         || config.interval_millis > 1_000
         || config.max_operations < 2
         || config.max_operations > WRITER_MAX_OPERATIONS
+        || config.progress_path == config.ready_path
+        || config.progress_path == config.start_path
+        || config.progress_path == config.stop_path
         || config.ready_path == config.stop_path
         || config.ready_path == config.start_path
         || config.start_path == config.stop_path
@@ -1426,7 +1671,7 @@ pub(super) async fn recovery_runtime_status(client: &Client) -> Result<RecoveryR
     })
 }
 
-pub(super) fn process_resources() -> Result<ProcessResourceCount> {
+pub(super) fn process_resources(_client: &Client) -> Result<ProcessResourceCount> {
     #[cfg(target_os = "linux")]
     {
         let threads = u64::try_from(std::fs::read_dir("/proc/self/task")?.count())?;
@@ -1440,7 +1685,14 @@ pub(super) fn process_resources() -> Result<ProcessResourceCount> {
                 sockets = sockets.saturating_add(1);
             }
         }
-        Ok(ProcessResourceCount { threads, sockets })
+        let owned_async_tasks = _client
+            .local_snapshot_transport_status()?
+            .owned_async_task_count();
+        Ok(ProcessResourceCount {
+            threads,
+            sockets,
+            owned_async_tasks,
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1503,6 +1755,7 @@ async fn spawn_recovery_node(
     executable: &Path,
     cluster: &mut ClusterProcesses,
     launch: NodeLaunch,
+    deadline: Instant,
 ) -> Result<()> {
     if launch.root != cluster.root {
         bail!("recovery node root did not match the running cluster");
@@ -1515,7 +1768,9 @@ async fn spawn_recovery_node(
         bail!("recovery node {} is already running", launch.node_id);
     }
     let mut process = NodeProcess::spawn(executable, &launch)?;
-    process.wait_ready_with_timeout(RECOVERY_DEADLINE).await?;
+    process
+        .wait_ready_with_timeout(remaining_before(deadline, "recovery node readiness")?)
+        .await?;
     cluster.nodes[index] = Some(process);
     Ok(())
 }
@@ -1558,6 +1813,13 @@ fn validate_acknowledged_writes(
         })
         .collect::<Vec<_>>();
     let cadence_millis = i64::try_from(WRITER_INTERVAL_MILLIS)?;
+    let max_gap_millis = i64::try_from(duration_millis(WRITER_MAX_ACK_GAP))?;
+    let first_in_window = during_recovery
+        .first()
+        .context("recovery writer did not publish an acknowledgement during recovery")?;
+    let last_in_window = during_recovery
+        .last()
+        .context("recovery writer did not publish an acknowledgement during recovery")?;
     if during_recovery.len() < MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY
         || !during_recovery.windows(2).any(|pair| {
             pair[1]
@@ -1565,9 +1827,22 @@ fn validate_acknowledged_writes(
                 .saturating_sub(pair[0].acknowledged_at_unix_ms)
                 >= cadence_millis
         })
+        || during_recovery.windows(2).any(|pair| {
+            pair[1]
+                .acknowledged_at_unix_ms
+                .saturating_sub(pair[0].acknowledged_at_unix_ms)
+                > max_gap_millis
+        })
+        || first_in_window
+            .acknowledged_at_unix_ms
+            .saturating_sub(recovery_started_at_unix_ms)
+            > max_gap_millis
+        || recovery_finished_at_unix_ms.saturating_sub(last_in_window.acknowledged_at_unix_ms)
+            > max_gap_millis
     {
         bail!(
-            "recovery writer needs at least {MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY} in-window acknowledgements separated by {WRITER_INTERVAL_MILLIS} ms"
+            "recovery writer needs at least {MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY} in-window acknowledgements at {WRITER_INTERVAL_MILLIS} ms cadence with no gap or final tail above {} ms",
+            duration_millis(WRITER_MAX_ACK_GAP)
         );
     }
     Ok(())
@@ -1575,6 +1850,13 @@ fn validate_acknowledged_writes(
 
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn remaining_before(deadline: Instant, phase: &str) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .with_context(|| format!("recovery deadline expired before {phase}"))
 }
 
 fn worst_durations(cycles: &[RecoveryCycleEvidence]) -> TransportRecoveryWorstDurations {
@@ -1636,6 +1918,9 @@ pub fn validate_transport_recovery_artifact(
         || !artifact.transport.separate_writer_process
         || artifact.resource_thread_margin != THREAD_MARGIN
         || artifact.resource_socket_margin != SOCKET_MARGIN
+        || artifact.resource_owned_async_task_margin != OWNED_ASYNC_TASK_MARGIN
+        || artifact.resource_cleanup_horizon_millis != duration_millis(RESOURCE_CLEANUP_HORIZON)
+        || artifact.resource_stable_samples != RESOURCE_STABLE_SAMPLES
     {
         bail!("transport-recovery artifact identity or execution contract drifted");
     }
@@ -1696,6 +1981,12 @@ fn validate_role_campaign(
             cycle.recovery_started_at_unix_ms,
             cycle.recovery_finished_at_unix_ms,
         )?;
+        let recorded_wall_recovery = elapsed_event_millis(
+            cycle.recovery_started_at_unix_ms,
+            cycle.recovery_finished_at_unix_ms,
+            "recorded whole recovery",
+        )?;
+        let duration_drift = cycle.recovery_millis.abs_diff(recorded_wall_recovery);
         if cycle.role != role
             || cycle.cycle != expected_cycle
             || cycle.recovery_started_at_unix_ms >= cycle.recovery_finished_at_unix_ms
@@ -1707,6 +1998,9 @@ fn validate_role_campaign(
             || cycle.source_snapshot.bytes < minimum
             || !is_sha256(&cycle.source_snapshot.sha256)
             || cycle.recovery_millis == 0
+            || cycle.recovery_millis > duration_millis(RECOVERY_DEADLINE)
+            || recorded_wall_recovery > duration_millis(RECOVERY_DEADLINE)
+            || duration_drift > 1_000
             || cycle.acknowledged_writes.len()
                 < MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY.saturating_add(1)
             || cycle.acknowledged_writes.first().is_none_or(|write| {
@@ -1806,6 +2100,11 @@ fn validate_cycle_resources(
                     .baseline
                     .sockets
                     .saturating_add(artifact.resource_socket_margin)
+            || sample.post_quiescence.owned_async_tasks
+                > sample
+                    .baseline
+                    .owned_async_tasks
+                    .saturating_add(artifact.resource_owned_async_task_margin)
         {
             bail!("node {expected_node} resource evidence exceeded its fixed contract");
         }
@@ -1913,10 +2212,12 @@ mod tests {
                             baseline: ProcessResourceCount {
                                 threads: 12,
                                 sockets: 8,
+                                owned_async_tasks: 10,
                             },
                             post_quiescence: ProcessResourceCount {
                                 threads: 12,
                                 sockets: 8,
+                                owned_async_tasks: 10,
                             },
                         })
                         .collect(),
@@ -1955,6 +2256,9 @@ mod tests {
             },
             resource_thread_margin: THREAD_MARGIN,
             resource_socket_margin: SOCKET_MARGIN,
+            resource_owned_async_task_margin: OWNED_ASYNC_TASK_MARGIN,
+            resource_cleanup_horizon_millis: duration_millis(RESOURCE_CLEANUP_HORIZON),
+            resource_stable_samples: RESOURCE_STABLE_SAMPLES,
             learner: role_campaign(RecoveryRole::Learner, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES),
             voter: role_campaign(RecoveryRole::Voter, TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES),
         }
@@ -2055,6 +2359,93 @@ mod tests {
         value.learner.cycles[0].target_write_digest =
             value.learner.cycles[0].acknowledged_write_digest.clone();
         assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn two_early_acknowledgements_cannot_hide_a_long_recovery_gap() {
+        let mut value = artifact();
+        let cycle = &mut value.learner.cycles[0];
+        cycle.recovery_finished_at_unix_ms = 102_000;
+        cycle.recovery_millis = 100_000;
+        cycle.acknowledged_writes[1].acknowledged_at_unix_ms = 2_500;
+        cycle.acknowledged_writes[2].acknowledged_at_unix_ms = 40_000;
+        cycle.acknowledged_write_digest = acknowledged_write_digest(&cycle.acknowledged_writes);
+        cycle.target_write_digest = cycle.acknowledged_write_digest.clone();
+        value.finished_at_unix_ms = 103_000;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn writer_must_cover_the_end_of_recovery() {
+        let mut value = artifact();
+        let cycle = &mut value.learner.cycles[0];
+        cycle.recovery_finished_at_unix_ms = 50_000;
+        cycle.recovery_millis = 48_000;
+        cycle.acknowledged_write_digest = acknowledged_write_digest(&cycle.acknowledged_writes);
+        cycle.target_write_digest = cycle.acknowledged_write_digest.clone();
+        value.finished_at_unix_ms = 51_000;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn whole_recovery_duration_cannot_exceed_the_absolute_deadline() {
+        let mut value = artifact();
+        value.learner.cycles[0].recovery_millis =
+            duration_millis(RECOVERY_DEADLINE).saturating_add(1);
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[test]
+    fn owned_async_task_growth_has_no_resource_slack() {
+        let mut value = artifact();
+        value.voter.cycles[0].node_resources[0]
+            .post_quiescence
+            .owned_async_tasks += 1;
+        assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[tokio::test]
+    async fn writer_exit_after_readiness_fails_the_recovery_promptly() {
+        use tokio::io::AsyncReadExt;
+
+        let root = tempfile::tempdir().expect("writer supervisor root");
+        let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", "transport_recovery_no_such_test"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn short-lived writer stand-in");
+        let mut stdout = child.stdout.take().expect("stand-in stdout");
+        let stdout = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).await?;
+            Ok(bytes)
+        });
+        let mut writer = RecoveryWriter {
+            child,
+            stdout: Some(stdout),
+        };
+        let config = RecoveryWriterConfig {
+            addresses: vec!["one".into(), "two".into(), "three".into()],
+            prefix: "writer-supervisor.".into(),
+            ready_path: root.path().join("ready"),
+            progress_path: root.path().join("progress"),
+            start_path: root.path().join("start"),
+            stop_path: root.path().join("stop"),
+            interval_millis: WRITER_INTERVAL_MILLIS,
+            max_operations: WRITER_MAX_OPERATIONS,
+        };
+        let error = supervise_recovery_writer(
+            &mut writer,
+            &config,
+            1,
+            Instant::now() + Duration::from_secs(2),
+            std::future::pending::<Result<()>>(),
+        )
+        .await
+        .expect_err("writer exit must fail recovery");
+        assert!(error
+            .to_string()
+            .contains("exited before recovery completed"));
     }
 
     #[test]

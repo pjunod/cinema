@@ -119,6 +119,8 @@ pub struct SnapshotTransportStatus {
     pub schema_version: u32,
     pub observing_node_id: u64,
     pub observed_at_unix_ms: u64,
+    #[serde(default)]
+    pub owned_async_tasks: u64,
     pub observations: Vec<SnapshotTransportObservation>,
     /// Process-local receipt time assigned by an authenticated collector.
     ///
@@ -244,7 +246,24 @@ struct Inner {
     boot_id: String,
     next_outbound_attempt: AtomicU64,
     next_outbound_connection: AtomicU64,
+    owned_async_tasks: AtomicU64,
     state: Mutex<State>,
+}
+
+/// Lifetime token for an async transport task owned by this node.
+///
+/// The counter is deliberately process-local diagnostic state. Dropping the
+/// future that owns this token decrements the count even when the task is
+/// aborted, which lets validation distinguish a terminated task from one
+/// that merely stopped holding a socket.
+pub(crate) struct OwnedAsyncTaskGuard {
+    inner: Arc<Inner>,
+}
+
+impl Drop for OwnedAsyncTaskGuard {
+    fn drop(&mut self) {
+        self.inner.owned_async_tasks.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Cloneable handle for one node's in-memory snapshot transport state.
@@ -265,6 +284,7 @@ impl LocalSnapshotTransportStatus {
                 boot_id: format!("{observing_node_id}-{boot_nanos}"),
                 next_outbound_attempt: AtomicU64::new(0),
                 next_outbound_connection: AtomicU64::new(0),
+                owned_async_tasks: AtomicU64::new(0),
                 state: Mutex::new(State {
                     next_inbound_attempt: 0,
                     next_inbound_socket_epoch: 0,
@@ -349,6 +369,20 @@ impl LocalSnapshotTransportStatus {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.next_inbound_socket_epoch = state.next_inbound_socket_epoch.saturating_add(1);
         state.next_inbound_socket_epoch
+    }
+
+    /// Number of currently alive Raft/API transport and snapshot-executor
+    /// tasks owned by this embedded node.
+    #[must_use]
+    pub fn owned_async_task_count(&self) -> u64 {
+        self.inner.owned_async_tasks.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn owned_async_task(&self) -> OwnedAsyncTaskGuard {
+        self.inner.owned_async_tasks.fetch_add(1, Ordering::AcqRel);
+        OwnedAsyncTaskGuard {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     #[must_use]
@@ -449,6 +483,7 @@ impl LocalSnapshotTransportStatus {
             schema_version: 1,
             observing_node_id: self.inner.observing_node_id,
             observed_at_unix_ms,
+            owned_async_tasks: self.owned_async_task_count(),
             observations,
             local_request_started_at: None,
             local_receipt_at: None,
@@ -1402,6 +1437,21 @@ mod tests {
             Membership::new(vec![voters], nodes),
         ));
         metrics
+    }
+
+    #[test]
+    fn owned_async_task_guard_tracks_abort_safe_lifetime() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        assert_eq!(status.owned_async_task_count(), 0);
+        let first = status.owned_async_task();
+        assert_eq!(status.owned_async_task_count(), 1);
+        {
+            let _second = status.owned_async_task();
+            assert_eq!(status.owned_async_task_count(), 2);
+        }
+        assert_eq!(status.owned_async_task_count(), 1);
+        drop(first);
+        assert_eq!(status.owned_async_task_count(), 0);
     }
 
     #[tokio::test(start_paused = true)]

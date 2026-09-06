@@ -15,6 +15,9 @@
     "transport",
     "resource_thread_margin",
     "resource_socket_margin",
+    "resource_owned_async_task_margin",
+    "resource_cleanup_horizon_millis",
+    "resource_stable_samples",
     "learner",
     "voter"
   ],
@@ -29,6 +32,9 @@
     "transport": { "$ref": "#/$defs/transport" },
     "resource_thread_margin": { "const": 4 },
     "resource_socket_margin": { "const": 2 },
+    "resource_owned_async_task_margin": { "const": 0 },
+    "resource_cleanup_horizon_millis": { "const": 3000 },
+    "resource_stable_samples": { "const": 2 },
     "learner": { "$ref": "#/$defs/roleCampaign" },
     "voter": { "$ref": "#/$defs/roleCampaign" }
   },
@@ -78,10 +84,11 @@
     "resources": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["threads", "sockets"],
+      "required": ["threads", "sockets", "owned_async_tasks"],
       "properties": {
         "threads": { "type": "integer", "minimum": 1 },
-        "sockets": { "type": "integer", "minimum": 1 }
+        "sockets": { "type": "integer", "minimum": 1 },
+        "owned_async_tasks": { "type": "integer", "minimum": 1 }
       }
     },
     "resourceNodeKind": {
@@ -234,7 +241,7 @@
         "image": { "$ref": "#/$defs/image" },
         "source_outbound": { "$ref": "#/$defs/sourceOutbound" },
         "target_inbound": { "$ref": "#/$defs/targetInbound" },
-        "recovery_millis": { "type": "integer", "minimum": 1 },
+        "recovery_millis": { "type": "integer", "minimum": 1, "maximum": 1500000 },
         "acknowledged_writes": {
           "type": "array",
           "minItems": 3,
@@ -256,7 +263,7 @@
       "additionalProperties": false,
       "required": ["recovery_millis", "transfer_millis", "install_millis"],
       "properties": {
-        "recovery_millis": { "type": "integer", "minimum": 1 },
+        "recovery_millis": { "type": "integer", "minimum": 1, "maximum": 1500000 },
         "transfer_millis": { "type": "integer", "minimum": 1 },
         "install_millis": { "type": "integer", "minimum": 1 }
       }
