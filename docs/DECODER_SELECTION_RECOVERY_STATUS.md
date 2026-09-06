@@ -728,6 +728,7 @@ lane and focused tests provide earlier feedback.
 | `bc3c3bee` | Exact post-map mutation-proof receipt | Pass · history 1,378, catalog 24/30/1,443, status/ownership contracts 13/13, operations 211/211, formatting, diff check, and the pinned all-target workspace compile |
 | `077c2bd0` | Three independent exact-head adversarial reviews | One approve, two changes requested · runtime, security, scope, dormancy, ownership, and mutation-sensitive evidence are clean; two reviewers found the focused-validation row incorrectly attributed unchanged-path macOS/planner/fallback results to exact Linux code head `07c8f905` |
 | `8702b05d` | Three independent exact-head adversarial re-reviews | Changes requested · all confirmed the evidence split and runtime proof, then found its implementation-scope sentence incorrectly called production-compiled, inert Linux hook plumbing entirely `cfg(test)`-confined |
+| `87f869e3` | Three independent exact-head adversarial re-reviews | Two approve, one changes requested · wording is accurate and runtime approval holds; the remaining reviewer showed the status contract did not pin the test-only observer-activation clause |
 
 ## Remaining evidence before release
 

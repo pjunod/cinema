@@ -190,6 +190,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "test-evidence plumbing",
             self.status,
         )
+        self.assertIn(
+            "whose observer activation is exclusive to "
+            '`cfg(all(test, target_os = "linux"))` launch modes',
+            self.status,
+        )
         self.assertIn("whose shipping defaults are inert", self.status)
         self.assertIn("one-shot exec supervision", self.status)
         self.assertIn("invalidated first notification", self.status)
