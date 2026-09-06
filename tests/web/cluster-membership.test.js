@@ -903,6 +903,49 @@ test("fresh attempt wins over a stale stall for the same snapshot fingerprint", 
   assert.equal(current.observation.boot_id, "current-boot");
 });
 
+test("sub-five-second successor attempt outranks same-fingerprint stalled predecessor", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "e".repeat(64);
+  const predecessor = transportObservation("stalled", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "restarted-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-boot",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 4_000,
+  });
+  const successor = transportObservation("installing", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+    snapshot_id: "restarted-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-boot",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 0,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [[predecessor, successor], [successor, predecessor]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "current-boot");
+    assert.equal(current.observation.attempt_id, 9);
+  }
+});
+
 test("bounded display collisions do not correlate distinct snapshot fingerprints", () => {
   const ui = sandbox();
   const collidingDisplay = `sha256:${"a".repeat(64)}`;

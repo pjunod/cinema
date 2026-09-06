@@ -300,8 +300,25 @@
       if(group.fingerprint&&receiverComplete)
         current=current.filter(observation=>
           observation.direction!=="outbound"||acknowledgedComplete(observation));
-      current.sort(withinIdentity);
-      representatives.push(current[0]);
+      // A fingerprint can survive a boot, retry, or socket replacement. First
+      // reduce observations that describe the same concrete attempt, then let
+      // freshness choose between attempts. Otherwise an older failed/stalled
+      // attempt inside the five-second cohort can hide its live successor.
+      const attempts=new Map();
+      current.forEach(observation=>{
+        const key=attemptIdentity(observation);
+        if(!attempts.has(key)) attempts.set(key,[]);
+        attempts.get(key).push(observation);
+      });
+      const attemptRepresentatives=[];
+      attempts.forEach(observations=>{
+        observations.sort(withinIdentity);
+        attemptRepresentatives.push(observations[0]);
+      });
+      attemptRepresentatives.sort((left,right)=>
+        age(left)-age(right)||
+        (priority[right.phase]||0)-(priority[left.phase]||0)||tieBreak(left,right));
+      representatives.push(attemptRepresentatives[0]);
     });
     // Identity representatives form one total order: freshness first, then
     // phase severity, then stable observation fields. Input row order cannot

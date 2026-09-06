@@ -356,9 +356,15 @@ impl LocalSnapshotTransportStatus {
             .iter_mut()
             .filter_map(|(key, observation)| {
                 let stall_boundary = observation.phase.can_stall().then(|| {
-                    observation
-                        .deadline
-                        .unwrap_or(observation.last_update + STALLED_AFTER)
+                    match (observation.phase, observation.deadline) {
+                        // A deadline-less observation is re-anchored to its
+                        // effective boundary when it first becomes Stalled.
+                        // Reusing the active-state fallback here would move
+                        // that boundary another 30 seconds on every read.
+                        (SnapshotTransportPhase::Stalled, None) => observation.last_update,
+                        (_, Some(deadline)) => deadline,
+                        (_, None) => observation.last_update + STALLED_AFTER,
+                    }
                 });
                 let stalled = stall_boundary.is_some_and(|boundary| now >= boundary);
                 if stalled && observation.phase != SnapshotTransportPhase::Stalled {
@@ -2580,6 +2586,12 @@ mod tests {
         assert_eq!(stalled.phase, SnapshotTransportPhase::Stalled);
         assert_eq!(stalled.active_deadline_remaining_ms, Some(0));
         assert_eq!(stalled.sample_age_ms, 0);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let repeated = &status.snapshot().observations[0];
+        assert_eq!(repeated.phase, SnapshotTransportPhase::Stalled);
+        assert_eq!(repeated.active_deadline_remaining_ms, Some(0));
+        assert_eq!(repeated.sample_age_ms, 1_000);
     }
 
     #[tokio::test(start_paused = true)]
