@@ -18,7 +18,7 @@ HARNESS = ROOT / "scripts/decoder-diagnostic-qualification"
 FORGEJO_TASK_BASE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
-M1_RECEIPT_HEAD = "adce1125"
+M1_RECEIPT_HEAD = "2baf0861"
 M1_REPAIR_HEAD = "31dc5d26"
 
 
@@ -170,8 +170,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_m1_review_repair_distinguishes_exact_and_working_tree_evidence(self) -> None:
         self.assertIn(
-            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact post-map history audit 1,361, "
-            "catalog 24/30/1,437",
+            f"Exact receipt | `{M1_RECEIPT_HEAD}`: exact post-map history audit 1,362, "
+            "catalog 24/30/1,438",
             self.status,
         )
         self.assertIn("sealed, self-contained Linux FFprobe artifact", self.status)

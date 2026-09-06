@@ -24,9 +24,9 @@ An unchecked item is not implied by a nearby passing check.
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | Exact code head `31dc5d26`: macOS collector 17/17, pinned Linux 1.97.1 collector 27/27, neutral legacy route 1/1, cross-platform all-target Clippy with warnings denied, status/ownership contracts 13/13, catalog 24/30/1,438, history 1,362, and operations 211/211. Linux composes production discovery, sealed-FD execution, one-shot supervised `execveat`, deny-all path execution, pidfd-before-reap cleanup, bound source FD 3, JSON parsing, direct and `/proc/self/fd` second-memfd denial, FD-reuse denial, session-escape denial, executable-source refusal, and injected pidfd failure ownership |
-| Exact receipt | `adce1125`: exact post-map history audit 1,361, catalog 24/30/1,437, operations 211/211, formatting, status contract, and pinned all-target workspace compile pass. Both exact-head reviews requested the fourth repair; this receipt is not approval evidence |
+| Exact receipt | `2baf0861`: exact post-map history audit 1,362, catalog 24/30/1,438, operations 211/211, formatting, status/ownership contracts 13/13, and pinned all-target workspace compile pass. Earlier receipt `adce1125` remains the rejected third-repair review record |
 | Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 diagnostic head `2e8c7d48`: 21 passed, 2 failed, 2 declared skips; the Rust gate exposed two loaded-host readiness-test timeouts and the cluster gate reached its 1,800-second outer bound while compiling a cold vendor target after its earlier workloads passed |
-| Blocker | Commit and audit the `31dc5d26` evidence mapping, then obtain new exact-head adversarial approval before the one clean full-suite qualification |
+| Blocker | Obtain new exact-head adversarial approval before the one clean full-suite qualification |
 
 ## Milestones
 
@@ -615,6 +615,7 @@ lane and focused tests provide earlier feedback.
 | Working tree after `adce1125` | macOS focused tests, cross-platform all-target Clippy, repository contracts, and policy audits | Pass · macOS collector 17/17, neutral legacy routing 1/1, no Clippy warnings on macOS or pinned Linux, status/ownership 13/13, catalog 24/30/1,437, history 1,361, operations 211/211, formatting, and diff check |
 | `31dc5d26` source tree | Effort hook and focused validation | Pass · the commit hook reran catalog 24/30/1,437, history 1,361, operations 211/211, formatting, status contract, and pinned all-target workspace compile after the focused macOS 17/17, Linux 27/27, neutral-route 1/1, and cross-platform denied-warning Clippy passes |
 | Working tree after `31dc5d26` | Corrective-history and evidence-map audits | Pass · catalog 24/30/1,438 and history 1,362 with the supervised-probe mapping present; status/ownership contracts remain 13/13 and formatting/diff checks are clean |
+| `2baf0861` | Exact post-map receipt | Pass · history 1,362, catalog 24/30/1,438, operations 211/211, formatting, status/ownership contracts 13/13, and pinned all-target workspace compile |
 
 ## Remaining evidence before release
 
