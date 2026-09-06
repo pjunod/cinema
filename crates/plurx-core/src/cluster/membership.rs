@@ -11608,7 +11608,7 @@ mod tests {
             .split_once("async fn commit_heartbeat(")
             .expect("production heartbeat")
             .1
-            .split_once("async fn refresh_local_maintenance(")
+            .split_once(concat!("async fn refresh_local_", "maintenance("))
             .expect("production heartbeat end")
             .0;
         assert!(
