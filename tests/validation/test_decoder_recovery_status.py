@@ -143,6 +143,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             with self.subTest(run=invalid_run):
                 self.assertIn(invalid_run, self.status)
 
+        self.assertIn(
+            "python3 -m unittest tests.operations.test_decoder_diagnostic_qualification "
+            "tests.validation.test_decoder_recovery_status",
+            self.status,
+        )
+        self.assertNotIn("tests.validation.test_decoder_selection_inventory", self.status)
+
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_TASK_BASE, self.status)
         self.assertIn("Historical pre-rebase head `01368ce1`", self.status)
