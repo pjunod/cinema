@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["39a2e92b"]
+points = ["live-tv.integration"]
+checks = ["rust-gate"]
+reason = "The exact production Live TV graph is executed against a real video-only MPEG-TS fixture. FFmpeg 8.1.2 emits an empty quoted stream-map label when the required audio map is absent; the classifier unit matrix freezes that build spelling, while the real-media test proves the H.264/AAC profile neither publishes nor reports an unrelated stream failure."
