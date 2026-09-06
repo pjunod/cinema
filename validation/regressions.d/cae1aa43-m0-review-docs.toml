@@ -8,6 +8,6 @@ commits = [
   "6009367b",
   "7649ccdd",
 ]
-points = []
+points = ["validation.framework"]
 checks = ["catalog-contract"]
-reason = "These commits record M0 adversarial-review findings, evidence, and validation results in project documentation; the catalog contract verifies their governed documentation and validation metadata."
+reason = "These commits record M0 adversarial-review findings, evidence, and validation results in project documentation; the catalog contract reads the governed status page and verifies its frozen artifacts, safety boundaries, review repairs, and invalid-run labels."

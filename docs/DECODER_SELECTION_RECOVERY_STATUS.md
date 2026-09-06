@@ -305,6 +305,10 @@ and task refs were restored, and #915 is the active review record.
 |---|---|
 | Probe normalization had no direct unit coverage and the ledger overstated the suite | A pure helper now has single, duplicate-identical, empty, and conflicting-row tests; the ledger separates those tests from the remote generation evidence |
 
+| Final-review finding | Resolution on working tree |
+|---|---|
+| The historical mapping named `catalog-contract` without a test that read the mapped status page | The page is now catalog-governed and a validation contract cross-checks its frozen artifacts, safety boundaries, review repairs, and invalid-run labels |
+
 ## Decisions and deviations
 
 | Date | Decision | Reason |
@@ -320,7 +324,7 @@ and task refs were restored, and #915 is the active review record.
 | 2026-09-05 | Bind automatic diagnostic action to one exact build/codec grammar | Structural matching remains useful for observation, but cannot safely authorize recovery across unqualified FFmpeg builds |
 | 2026-09-05 | Use MP4 and explicit single-thread encoder controls for generated media evidence | The exact remote verifier proved Matroska/x265 and unconstrained encoder scheduling were not byte reproducible |
 | 2026-09-05 | Collapse only identical repeated probe rows | FFprobe may emit the same selected-stream fact more than once; conflicting rows remain an evidence failure |
-| 2026-09-05 | Map review-only documentation commits to `catalog-contract` instead of ignoring them | Retains positive current evidence and avoids weakening the historical regression ledger |
+| 2026-09-05 | Map review-only documentation commits to a status contract inside `catalog-contract` instead of ignoring them | The governed test reads the page and verifies its frozen artifacts, safety boundaries, review repairs, and invalid-run labels |
 | 2026-09-05 | Use full Homebrew FFmpeg 8.1.2 plus its retained x265 ABI 216 library for local qualification | The default FFmpeg 8.1.2 lacks `zscale`; FFmpeg 9.0.1 has `zscale` but changes muxer output identities expected by the repository's FFmpeg 8 contracts |
 
 ## Validation ledger
