@@ -21,7 +21,7 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|
 | Milestone | M1 — explicit plans and bound facts |
 | Task branch | `codex/decoder-selection-m1` |
-| Task PR | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63), open against the effort; repair head pending push and exact-head approval |
+| Task PR | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63), open against the effort; current repair/receipt head published, with exact-head approval and final qualification pending |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Focused validation | Exact code head `4c1abfaf`: Rust 1.97.1 planner 35/35, macOS collector 20/20, pinned Linux collector 34/34, and both real neutral-timeout producer regressions pass; all-target Clippy passes with warnings denied on macOS and Linux. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup. Its explicit transitive post-fork helper inventory statically rejects common allocation and panic forms. Single-interruption success plus persistent expiry at ready send, acknowledgement, first seccomp receive, and first response are covered; an invalidated first notification separately proves bounded teardown |

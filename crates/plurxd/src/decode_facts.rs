@@ -82,6 +82,8 @@ enum ProbeLaunchMode {
     #[cfg(all(test, target_os = "linux"))]
     ProductionBootstrapInterruptedUntilDeadline(LinuxBootstrapPhase),
     #[cfg(all(test, target_os = "linux"))]
+    ProductionSteadyResponseInterruptedUntilDeadline,
+    #[cfg(all(test, target_os = "linux"))]
     ProductionFdExport(std::os::fd::RawFd),
 }
 
@@ -98,6 +100,7 @@ impl ProbeLaunchMode {
             | Self::ProductionSupervisorReceiveFailure
             | Self::ProductionBootstrapInterrupted
             | Self::ProductionBootstrapInterruptedUntilDeadline(_)
+            | Self::ProductionSteadyResponseInterruptedUntilDeadline
             | Self::ProductionFdExport(_) => true,
         }
     }
@@ -123,7 +126,9 @@ impl ProbeLaunchMode {
     fn inject_slow_reap(self) -> bool {
         matches!(
             self,
-            Self::ProductionPidfdOpenFailure | Self::ProductionPidfdReadFailure
+            Self::ProductionPidfdOpenFailure
+                | Self::ProductionPidfdReadFailure
+                | Self::ProductionSteadyResponseInterruptedUntilDeadline
         )
     }
 
@@ -182,6 +187,12 @@ impl ProbeLaunchMode {
                 };
                 return interrupts;
             }
+            Self::ProductionSteadyResponseInterruptedUntilDeadline => {
+                return LinuxBootstrapInterrupts {
+                    steady_notification_response: u8::MAX,
+                    ..LinuxBootstrapInterrupts::default()
+                };
+            }
             _ => {}
         }
         LinuxBootstrapInterrupts::default()
@@ -195,6 +206,9 @@ impl ProbeLaunchMode {
             Self::ProductionSupervisorDelay => Some(&DELAYED_SUPERVISOR_OWNERS),
             Self::ProductionSupervisorReceiveFailure => Some(&FAILED_SUPERVISOR_OWNERS),
             Self::ProductionBootstrapInterruptedUntilDeadline(_) => {
+                Some(&INTERRUPTED_SUPERVISOR_OWNERS)
+            }
+            Self::ProductionSteadyResponseInterruptedUntilDeadline => {
                 Some(&INTERRUPTED_SUPERVISOR_OWNERS)
             }
             _ => None,
@@ -987,6 +1001,7 @@ struct LinuxBootstrapInterrupts {
     acknowledgement_send: u8,
     first_notification_receive: u8,
     first_notification_response: u8,
+    steady_notification_response: u8,
     invalidate_first_notification_on_interrupt: bool,
     first_notification_invalidated: bool,
 }
@@ -1058,22 +1073,17 @@ fn receive_linux_seccomp_notification(
 }
 
 #[cfg(target_os = "linux")]
-fn answer_linux_seccomp_notification(
-    listener: std::os::fd::RawFd,
-    response: &mut LinuxSeccompResponse,
-) -> std::io::Result<()> {
-    let mut interrupts = 0;
-    answer_linux_seccomp_notification_until(listener, response, None, &mut interrupts)
-}
-
-#[cfg(target_os = "linux")]
 fn answer_linux_seccomp_notification_until(
     listener: std::os::fd::RawFd,
     response: &mut LinuxSeccompResponse,
     deadline: Option<std::time::Instant>,
+    stop: Option<&AtomicBool>,
     injected_interrupts: &mut u8,
 ) -> std::io::Result<()> {
     loop {
+        if stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+            return Ok(());
+        }
         ensure_linux_probe_deadline(deadline)?;
         let injected = consume_linux_bootstrap_interrupt(injected_interrupts);
         let answered = if injected {
@@ -1508,6 +1518,7 @@ fn supervise_linux_probe_execs(
             listener.as_raw_fd(),
             &mut denied,
             Some(launch_deadline),
+            None,
             &mut interrupts.first_notification_response,
         );
         return Err(std::io::Error::new(
@@ -1528,6 +1539,7 @@ fn supervise_linux_probe_execs(
         listener.as_raw_fd(),
         &mut allowed,
         Some(launch_deadline),
+        None,
         &mut interrupts.first_notification_response,
     )?;
 
@@ -1574,7 +1586,13 @@ fn supervise_linux_probe_execs(
             error: -libc::EPERM,
             ..LinuxSeccompResponse::default()
         };
-        match answer_linux_seccomp_notification(listener.as_raw_fd(), &mut denied) {
+        match answer_linux_seccomp_notification_until(
+            listener.as_raw_fd(),
+            &mut denied,
+            Some(launch_deadline),
+            Some(stop.as_ref()),
+            &mut interrupts.steady_notification_response,
+        ) {
             Ok(()) => {}
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
             Err(error) => return Err(error),
@@ -3764,6 +3782,45 @@ void probe_main(unsigned long *stack) {
                 "phase {phase:?} supervisor is reclaimed only after cleanup"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn persistent_steady_response_eintr_cannot_wedge_detached_cleanup() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let probe = root.path().join("second-exec-static-ffprobe");
+        build_static_probe(&probe, 2);
+        let identity = DecodeProbeIdentity::discover(probe.to_str().expect("probe path"))
+            .await
+            .expect("production probe identity and version");
+        assert_eq!(INTERRUPTED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
+        let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_version_with_deadline_on(
+                &identity.executable_snapshot,
+                identity.executable(),
+                ProbeLaunchMode::ProductionSteadyResponseInterruptedUntilDeadline,
+                Duration::from_millis(100),
+                Arc::clone(&ownership),
+            )
+            .await,
+            Err(DecodeFactError::Deadline)
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the caller must detach at the shared launch deadline"
+        );
+        assert!(
+            Arc::clone(&ownership).try_acquire_owned().is_err(),
+            "the version owner remains held during deliberately slow reap"
+        );
+        assert_eq!(INTERRUPTED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 1);
+        let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
+            .await
+            .expect("steady-response cleanup cannot wedge supervisor join")
+            .expect("version ownership returns after reap and supervisor teardown");
+        assert_eq!(INTERRUPTED_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
     }
 
     #[cfg(target_os = "linux")]

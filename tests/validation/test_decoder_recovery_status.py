@@ -166,6 +166,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             self.status,
         )
         self.assertNotIn("has not yet run its final suite", self.status)
+        self.assertNotIn("repair head pending push", self.status)
         for falsely_remapped_receipt in (
             "`d528794b` | `make validate-full`",
             "`1ad59932` | Independent",
