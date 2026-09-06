@@ -73,6 +73,11 @@ runs:
           echo "::error::Cannot derive the pinned Rust toolchain"
           exit 1
         }
+        # Before anything expensive: a runner that cannot fit this build
+        # reports a linker bus error rather than a full disk, and that message
+        # costs an hour to read correctly. 20G is a fitted build tree plus the
+        # temp space the linker needs, not a guess at the cache budget.
+        "$GITHUB_WORKSPACE/scripts/ci-require-disk" "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" 20
         mapfile -t cache_paths < <(
           "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-prepare" \
             "$RUNNER_TOOL_CACHE" "$runner_name" "$toolchain" "$CACHE_LANE"
