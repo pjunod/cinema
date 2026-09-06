@@ -184,6 +184,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("pidfd-before-reap", self.status)
         self.assertIn("macOS collector 20/20", self.status)
         self.assertIn("pinned Linux collector 36/36", self.status)
+        self.assertIn("Unchanged-path evidence last run at `22d89d27`", self.status)
+        self.assertIn("Changes after `22d89d27` are confined", self.status)
         self.assertIn("one-shot exec supervision", self.status)
         self.assertIn("invalidated first notification", self.status)
         self.assertIn("source-level enforcement", self.status)
@@ -200,7 +202,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "no full unsupported-architecture compile pass is claimed",
             self.flat_status,
         )
-        self.assertIn(f"Exact code head `{M1_REPAIR_HEAD}`", self.status)
+        self.assertIn(f"Exact Linux code head `{M1_REPAIR_HEAD}`", self.status)
         self.assertIn("daemon 1,777/1,777", self.status)
         self.assertIn("no exact postcommit history claim", self.status)
         self.assertNotIn("`608dd04d`: history 1,357", self.status)
