@@ -213,33 +213,23 @@ pub async fn enter_maintenance(
             },
         );
     if let Some(message) = preflight_failure {
-        if let Err(error) = state
-            .membership
-            .release_cluster_operation_lease(&lease)
-            .await
-        {
-            tracing::warn!(%error, "failed to release rejected maintenance preparation lease; expiry remains authoritative");
-        }
+        lease.release().await;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "maintenance_preflight_unsafe",
             message,
         ));
     }
-    let local_expiry = lease.preparation_expiry_unix_ms(MAINTENANCE_PREPARATION_DURATION);
+    let local_expiry = lease
+        .claim()
+        .preparation_expiry_unix_ms(MAINTENANCE_PREPARATION_DURATION);
     if local_expiry.is_none()
         || !state
             .serving
             .begin_restart_preparation_until(local_expiry.unwrap_or_default())
             .await
     {
-        if let Err(error) = state
-            .membership
-            .release_cluster_operation_lease(&lease)
-            .await
-        {
-            tracing::warn!(%error, "failed to release exhausted maintenance preparation lease");
-        }
+        lease.release().await;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "maintenance_preparation_expired",
@@ -250,13 +240,7 @@ pub async fn enter_maintenance(
     let active_sessions = local_owned_media_sessions(&state).await;
     let drain = state.serving.restart_drain_status(active_sessions).await;
     if !drain.new_admissions_blocked {
-        if let Err(error) = state
-            .membership
-            .release_cluster_operation_lease(&lease)
-            .await
-        {
-            tracing::warn!(%error, "failed to release expired maintenance preparation lease");
-        }
+        lease.release().await;
         state
             .serving
             .cancel_restart_preparation(active_sessions)
@@ -267,21 +251,22 @@ pub async fn enter_maintenance(
             "maintenance preparation expired before pre-existing admissions settled; run preflight again",
         ));
     }
-    match state.membership.enter_maintenance(&node_id, &lease).await {
-        Ok(status) => Ok(Json(status)),
+    match state
+        .membership
+        .enter_maintenance(&node_id, lease.claim())
+        .await
+    {
+        Ok(status) => {
+            lease.disarm();
+            Ok(Json(status))
+        }
         Err(error) => {
-            if let Err(release_error) = state
-                .membership
-                .release_cluster_operation_lease(&lease)
-                .await
-            {
-                tracing::warn!(%release_error, "failed to release maintenance preparation lease; expiry remains authoritative");
-            }
             let active_sessions = local_owned_media_sessions(&state).await;
             state
                 .serving
                 .cancel_restart_preparation(active_sessions)
                 .await;
+            lease.release().await;
             Err(api_error(error))
         }
     }
@@ -602,7 +587,7 @@ mod tests {
             .expect("enter maintenance end")
             .0;
         let claim = enter
-            .find("acquire_maintenance_preparation")
+            .find("acquire_planned_outage_preflight")
             .expect("replicated planned-outage lease");
         let bound = enter
             .find("preparation_expiry_unix_ms")
@@ -614,11 +599,13 @@ mod tests {
             .find("wait_for_restart_admissions")
             .expect("in-flight admissions settle");
         let commit = enter
-            .rfind(".enter_maintenance(&node_id, &lease)")
+            .rfind(".enter_maintenance(&node_id, lease.claim())")
             .expect("durable maintenance commit");
         assert!(claim < bound && bound < begin && begin < wait && wait < commit);
+        assert!(enter.contains("PlannedOutageOperation::Maintenance"));
         assert!(enter.contains("if !drain.new_admissions_blocked"));
-        assert!(enter.contains("release_cluster_operation_lease(&lease)"));
+        assert!(enter.contains("lease.release().await"));
+        assert!(enter.contains("lease.disarm()"));
         assert!(enter.contains("cancel_restart_preparation(active_sessions)"));
         assert!(enter.contains("node_id != state.node_id"));
         assert!(enter.contains(".maintenance"));

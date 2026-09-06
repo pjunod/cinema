@@ -31,7 +31,7 @@ change.
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
 | M4 · transport status | `codex/cluster-transport-m4` | not opened | every current review finding is fixed; moved-base Rust 1.97.1 fast-lane qualification and three replacement adversarial reviews are pending | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · source-time replay aging |
-| M5 · recovery campaign | `codex/cluster-transport-m5` | not opened | early exact review findings are fixed on the pre-M4 base; post-M4 rebase, qualification, and three exact-candidate reviews remain | Actual TLS transport matrix · 20 learner and 20 voter cycles |
+| M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | early review findings are fixed and committed; the branch awaits the final M4 base before its replacement exact-candidate reviews | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
@@ -44,8 +44,14 @@ tree that passed combined focused requalification. Fresh exact review of
 `660e0794` then found a failed-refresh DOM freeze, stale cross-observer
 completion precedence, stale status wording, an unfenced planned-outage
 preflight, an in-flight authentication revocation race, and late-read producer
-evidence resurrection. Those corrections have passed combined focused
-requalification and must be committed and reviewed as a new exact candidate.
+evidence resurrection. The exact review of `b7914f69` then found that retained
+browser evidence still trusted cross-machine wall clocks, a failed manual
+refresh left node transport DOM stale, snapshot status initialization could
+lose to a ready reader EOF, local revocation generations did not block
+cache-only authorization throughout the mutation, peer processes retained
+stale recovery proofs, and an aborted planned-outage request could strand its
+exact lease. Those corrections are in the worktree; focused requalification,
+commit, and three new exact-candidate reviews remain.
 The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 `rustup run 1.97.1`; unpinned results do not count.
 
@@ -85,7 +91,8 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 exact-candidate replacement | fail · `7e220e0c` rejected | The pre-review focused cluster/WAL lane, executor/status/Raft-client modules, operations contracts, validation catalog, membership web suite, compile, denied-warning Clippy, formatting, and diff checks passed. Three adversarial tracks nevertheless found six correctness or coverage gaps: receipt IDs could diverge from real install order; cancelled admission tickets were unbounded; UI selection was order-dependent; receiver completion could hide stronger sender acknowledgement; mutation preflights used stale peer cache data; and the no-I/O test bypassed the production collector. The replacement must fix every item and repeat the complete focused lane and three reviews from zero. |
 | M4 fourth-review corrections | fail · `d1472a55` rejected after green pre-review lane | Public attempt ownership follows actual executor worker start; cancelled admission retention is bounded to two waiters and overflow is explicit; UI evidence selection uses a deterministic two-stage total order; read-only GET/support collectors are cache-only while mutation preflights use fresh bounded evidence; and the no-I/O proof executes both production handlers. Exact review still found retained browser evidence that did not age, acknowledged completion losing to predecessor phases, Store-backed authentication before cache-only handlers, an unclustered refresh warning loop, and outer Raft socket cancellation bypassing inbound-status cleanup. |
 | M4 fifth-review corrections | fail · `660e0794` rejected by three fresh tracks | Retained browser evidence aged in the model but failed refreshes did not repaint it in the DOM; old cross-observer completion could hide a demonstrably newer same-fingerprint attempt; the status page was stale; restart and maintenance proved safety before claiming their lifecycle fence; an authentication already reading Store could republish revoked admin proof; and a late first status read renewed producer evidence past its original expiry. This exact tree is not a release candidate. |
-| M4 sixth-review corrections | pass · combined replacement lane green; commit pending | Failed refreshes repaint projected transport state without replacing an open decision dialog; cross-observer completion authority is bounded to the five-second freshness cohort; planned outages claim the replicated lifecycle lease before fresh evidence and release it on rejection; Store-backed authentication publishes only across an unchanged revocation generation; producer stalls retain their real deadline-derived boundary instead of the observer's read time; and this page avoids a circular self-SHA. The complete cluster/WAL lane, 133-case membership UI suite, 14 Settings contracts, 197 operations contracts, 23-point validation catalog, exact Rust 1.97.1 all-target check, root and three vendored denied-warning Clippy lanes, formatting, and diff checks pass; three fresh exact-candidate reviews remain after commit. |
+| M4 sixth-review corrections | fail · `b7914f69` rejected after a green lane | Failed automatic refreshes repaint projected transport state without replacing an open decision dialog; cross-observer completion authority is bounded to the five-second freshness cohort; planned outages claim the replicated lifecycle lease before fresh evidence and release it on rejection; Store-backed authentication publishes only across an unchanged revocation generation; and producer stalls retain their real deadline-derived boundary. Three fresh exact-SHA tracks still found seven UI, snapshot-lifecycle, cluster-revocation, and cancellation findings. |
+| M4 seventh-review corrections | pass · exact candidate commit pending | Browser evidence now ages from a local monotonic receipt and failed manual refreshes preserving-repaint retained transport state. Incoming snapshot receipt/status ownership is established synchronously at dequeue before reader EOF can win. Local and signed peer begin/end fences block and invalidate cache-only admin proof across logout and user mutations; the peer wire contains only an operation UUID and phase. Planned-outage lease RAII now spans preflight through drain and commit, releasing the exact claim on errors and task aborts. The complete focused cluster/WAL lane, 197 operations contracts, web suite, 23-point/28-check/1,376-file validation catalog, exact all-target check and denied-warning Clippy, three vendored Clippy matrices, formatting, and diff checks pass. Three fresh exact-candidate reviews are next. |
 | M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
@@ -134,6 +141,15 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    Store mutation. This deliberately means a cold process must complete one
    ordinary authentication before the two public recovery routes are usable;
    the private cluster listener remains the startup diagnostic path.
+10. **Use a conservative global peer fence for proof revocation.** The signed
+    begin/end request carries only a random operation UUID and phase; token
+    digests and user IDs never leave their process. Every committed peer must
+    acknowledge within the common two-second bound before success. While a
+    fence is active, all cache-only recovery authorization on that peer fails
+    closed; an uncertain end remains active for at most the existing
+    non-sliding five-minute proof TTL. This trades a short cluster-wide
+    diagnostic refusal for avoiding credential-derived or user-identifying
+    egress.
 
 ## Next checkpoint — requalify, review, gate, and merge M4
 

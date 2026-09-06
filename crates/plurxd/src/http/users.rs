@@ -12,6 +12,7 @@ use serde::Deserialize;
 use super::dto::UserDto;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
+use super::internal_auth_revocation::ClusterCacheRevocation;
 use crate::state::AppState;
 
 /// GET /api/v1/users (admin)
@@ -77,28 +78,39 @@ pub async fn update(
         .await?
         .ok_or(ApiError::NotFound("user"))?;
 
-    if let Some(is_admin) = req.is_admin {
-        // Never demote the last admin — that would orphan the server.
-        if target.is_admin && !is_admin && state.store.count_admins().await? <= 1 {
-            return Err(ApiError::Conflict(
-                "cannot remove admin from the last admin account".into(),
-            ));
-        }
-        let _proof_revocation =
-            (!is_admin).then(|| state.cache_only_admin_proofs.begin_user_revocation(id));
-        state.store.set_admin(id, is_admin).await?;
-    }
-    if let Some(password) = req.password {
-        if password.len() < 8 {
+    let password_hash = match req.password.as_deref() {
+        Some(password) if password.len() < 8 => {
             return Err(ApiError::BadRequest(
                 "password must be at least 8 characters".into(),
             ));
         }
-        let hash = auth::hash_password(&password).map_err(|e| ApiError::Internal(e.to_string()))?;
-        let _proof_revocation = state.cache_only_admin_proofs.begin_user_revocation(id);
+        Some(password) => {
+            Some(auth::hash_password(password).map_err(|e| ApiError::Internal(e.to_string()))?)
+        }
+        None => None,
+    };
+    if req.is_admin == Some(false) && target.is_admin && state.store.count_admins().await? <= 1 {
+        return Err(ApiError::Conflict(
+            "cannot remove admin from the last admin account".into(),
+        ));
+    }
+    let needs_revocation = req.is_admin == Some(false) || password_hash.is_some();
+    let proof_revocation = if needs_revocation {
+        Some(ClusterCacheRevocation::begin_user(&state, id).await?)
+    } else {
+        None
+    };
+
+    if let Some(is_admin) = req.is_admin {
+        state.store.set_admin(id, is_admin).await?;
+    }
+    if let Some(hash) = password_hash {
         state.store.set_password(id, &hash).await?;
         // Old sessions die with the old password.
         state.store.delete_tokens_for_user(id).await?;
+    }
+    if let Some(proof_revocation) = proof_revocation {
+        proof_revocation.finish(&state).await?;
     }
 
     let user = state
@@ -130,7 +142,8 @@ pub async fn delete(
         return Err(ApiError::Conflict("cannot delete the last admin".into()));
     }
     // Tokens and watch state go with the user (ON DELETE CASCADE).
-    let _proof_revocation = state.cache_only_admin_proofs.begin_user_revocation(id);
+    let proof_revocation = ClusterCacheRevocation::begin_user(&state, id).await?;
     state.store.delete_user(id).await?;
+    proof_revocation.finish(&state).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

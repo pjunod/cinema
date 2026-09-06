@@ -42,6 +42,12 @@ struct CachedAdminProofState {
     /// authentication captures this before its first read and may publish only
     /// if no revocation crossed that read.
     generation: u64,
+    /// Cache-only recovery authorization fails closed while any local or peer
+    /// revocation brackets a Store mutation. This is deliberately global: the
+    /// cache is tiny and refusing unrelated recovery reads for the short
+    /// mutation window is safer than allowing a target-matching mistake.
+    local_active_revocations: usize,
+    remote_revocations: BTreeMap<String, RemoteCacheOnlyAdminRevocation>,
     proofs: BTreeMap<String, CachedAdminProof>,
 }
 
@@ -54,10 +60,18 @@ struct CachedAdminProof {
 #[derive(Clone, Copy)]
 pub(crate) struct CacheOnlyAdminAuthenticationTicket(u64);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum CacheOnlyAdminRevocationTarget {
     Digest(String),
     User(i64),
 }
+
+struct RemoteCacheOnlyAdminRevocation {
+    expires_at: tokio::time::Instant,
+}
+
+const MAX_REMOTE_CACHE_ONLY_ADMIN_REVOCATIONS: usize = 128;
+const REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL: Duration = CACHE_ONLY_ADMIN_PROOF_TTL;
 
 /// Brackets a Store mutation with two cache generations. The first removes
 /// existing proof before the mutation starts; the second prevents an ordinary
@@ -70,14 +84,44 @@ pub(crate) struct CacheOnlyAdminRevocation {
 
 impl Drop for CacheOnlyAdminRevocation {
     fn drop(&mut self) {
-        match &self.target {
+        if let Ok(mut state) = self.cache.inner.lock() {
+            state.generation = state.generation.wrapping_add(1);
+            state.local_active_revocations = state.local_active_revocations.saturating_sub(1);
+            state.invalidate_target(&self.target);
+        }
+    }
+}
+
+impl CachedAdminProofState {
+    fn invalidate_target(&mut self, target: &CacheOnlyAdminRevocationTarget) {
+        match target {
             CacheOnlyAdminRevocationTarget::Digest(digest) => {
-                self.cache.invalidate_digest(digest);
+                self.proofs.remove(digest);
             }
             CacheOnlyAdminRevocationTarget::User(user_id) => {
-                self.cache.invalidate_user(*user_id);
+                self.proofs.retain(|_, proof| proof.user_id != *user_id);
             }
         }
+    }
+
+    fn prune_remote_revocations(&mut self, now: tokio::time::Instant) {
+        let expired = self
+            .remote_revocations
+            .iter()
+            .filter(|(_, revocation)| revocation.expires_at <= now)
+            .map(|(operation_id, _)| operation_id.clone())
+            .collect::<Vec<_>>();
+        if !expired.is_empty() {
+            self.generation = self.generation.wrapping_add(1);
+            self.proofs.clear();
+        }
+        for operation_id in expired {
+            self.remote_revocations.remove(&operation_id);
+        }
+    }
+
+    fn revocation_active(&self) -> bool {
+        self.local_active_revocations != 0 || !self.remote_revocations.is_empty()
     }
 }
 
@@ -85,10 +129,9 @@ impl CacheOnlyAdminProofCache {
     /// Capture the cache generation before beginning Store authentication.
     /// A poisoned cache refuses publication and cache-only authorization.
     pub(crate) fn authentication_ticket(&self) -> Option<CacheOnlyAdminAuthenticationTicket> {
-        self.inner
-            .lock()
-            .ok()
-            .map(|state| CacheOnlyAdminAuthenticationTicket(state.generation))
+        let mut state = self.inner.lock().ok()?;
+        state.prune_remote_revocations(tokio::time::Instant::now());
+        (!state.revocation_active()).then_some(CacheOnlyAdminAuthenticationTicket(state.generation))
     }
 
     /// Publish the result of one Store-backed authentication. Non-admin proof
@@ -106,10 +149,11 @@ impl CacheOnlyAdminProofCache {
         let Ok(mut state) = self.inner.lock() else {
             return;
         };
-        if state.generation != ticket.0 {
+        let now = tokio::time::Instant::now();
+        state.prune_remote_revocations(now);
+        if state.revocation_active() || state.generation != ticket.0 {
             return;
         }
-        let now = tokio::time::Instant::now();
         state.proofs.retain(|_, proof| proof.expires_at > now);
         if !user.is_admin {
             state.proofs.remove(&token_digest);
@@ -137,40 +181,92 @@ impl CacheOnlyAdminProofCache {
     }
 
     pub(crate) fn begin_digest_revocation(&self, token_digest: &str) -> CacheOnlyAdminRevocation {
-        self.invalidate_digest(token_digest);
+        let target = CacheOnlyAdminRevocationTarget::Digest(token_digest.to_owned());
+        self.begin_local_revocation(&target);
         CacheOnlyAdminRevocation {
             cache: self.clone(),
-            target: CacheOnlyAdminRevocationTarget::Digest(token_digest.to_owned()),
+            target,
         }
     }
 
     pub(crate) fn begin_user_revocation(&self, user_id: i64) -> CacheOnlyAdminRevocation {
-        self.invalidate_user(user_id);
+        let target = CacheOnlyAdminRevocationTarget::User(user_id);
+        self.begin_local_revocation(&target);
         CacheOnlyAdminRevocation {
             cache: self.clone(),
-            target: CacheOnlyAdminRevocationTarget::User(user_id),
+            target,
         }
+    }
+
+    fn begin_local_revocation(&self, target: &CacheOnlyAdminRevocationTarget) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.prune_remote_revocations(tokio::time::Instant::now());
+            state.generation = state.generation.wrapping_add(1);
+            state.local_active_revocations = state.local_active_revocations.saturating_add(1);
+            state.invalidate_target(target);
+        }
+    }
+
+    /// Begin a conservative global peer fence. The wire operation deliberately
+    /// carries no token digest or user identifier; the cache is bounded and a
+    /// short global refusal is preferable to transmitting credential-derived
+    /// data between processes.
+    pub(crate) fn begin_remote_revocation(&self, operation_id: &str) -> Result<(), &'static str> {
+        let mut state = self.inner.lock().map_err(|_| "cache unavailable")?;
+        let now = tokio::time::Instant::now();
+        state.prune_remote_revocations(now);
+        if state.remote_revocations.contains_key(operation_id) {
+            return Ok(());
+        }
+        if state.remote_revocations.len() >= MAX_REMOTE_CACHE_ONLY_ADMIN_REVOCATIONS {
+            return Err("revocation capacity exhausted");
+        }
+        state.generation = state.generation.wrapping_add(1);
+        state.proofs.clear();
+        state.remote_revocations.insert(
+            operation_id.to_owned(),
+            RemoteCacheOnlyAdminRevocation {
+                expires_at: now + REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn end_remote_revocation(&self, operation_id: &str) -> Result<(), &'static str> {
+        let mut state = self.inner.lock().map_err(|_| "cache unavailable")?;
+        state.prune_remote_revocations(tokio::time::Instant::now());
+        state.remote_revocations.remove(operation_id);
+        state.generation = state.generation.wrapping_add(1);
+        state.proofs.clear();
+        Ok(())
     }
 
     pub(crate) fn invalidate_digest(&self, token_digest: &str) {
         if let Ok(mut state) = self.inner.lock() {
+            state.prune_remote_revocations(tokio::time::Instant::now());
             state.generation = state.generation.wrapping_add(1);
             state.proofs.remove(token_digest);
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn invalidate_user(&self, user_id: i64) {
         if let Ok(mut state) = self.inner.lock() {
+            state.prune_remote_revocations(tokio::time::Instant::now());
             state.generation = state.generation.wrapping_add(1);
             state.proofs.retain(|_, proof| proof.user_id != user_id);
         }
     }
 
-    fn authenticate(&self, token_digest: &str) -> bool {
+    pub(crate) fn authenticate(&self, token_digest: &str) -> bool {
         let Ok(mut state) = self.inner.lock() else {
             return false;
         };
         let now = tokio::time::Instant::now();
+        state.prune_remote_revocations(now);
+        if state.revocation_active() {
+            return false;
+        }
         state.proofs.retain(|_, proof| proof.expires_at > now);
         state.proofs.contains_key(token_digest)
     }
@@ -470,6 +566,94 @@ mod tests {
     }
 
     #[test]
+    fn active_revocation_blocks_ticket_publication_until_guard_drop() {
+        use std::sync::{Arc, Barrier};
+
+        let cache = CacheOnlyAdminProofCache::default();
+        let digest = auth::hash_token("racing-admin-token");
+        let admin = user(7, true);
+        record(&cache, digest.clone(), &admin);
+        let stale_ticket = cache
+            .authentication_ticket()
+            .expect("ticket before revocation");
+
+        let revocation = cache.begin_user_revocation(admin.id);
+        let revocation_active = Arc::new(Barrier::new(2));
+        let publication_attempted = Arc::new(Barrier::new(2));
+        let publisher = {
+            let cache = cache.clone();
+            let digest = digest.clone();
+            let admin = admin.clone();
+            let revocation_active = revocation_active.clone();
+            let publication_attempted = publication_attempted.clone();
+            std::thread::spawn(move || {
+                revocation_active.wait();
+                assert!(cache.authentication_ticket().is_none());
+                cache.record_authenticated(Some(stale_ticket), digest, &admin);
+                publication_attempted.wait();
+            })
+        };
+
+        revocation_active.wait();
+        publication_attempted.wait();
+        assert!(!cache.authenticate(&digest));
+        drop(revocation);
+        publisher.join().expect("publication thread");
+        assert!(!cache.authenticate(&digest));
+        assert!(cache.authentication_ticket().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_revocation_fence_expires_bounded_and_reinvalidates() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let digest = auth::hash_token("remote-admin-token");
+        let admin = user(8, true);
+        record(&cache, digest.clone(), &admin);
+        cache
+            .begin_remote_revocation("remote-operation")
+            .expect("remote begin");
+        assert!(!cache.authenticate(&digest));
+        assert!(cache.authentication_ticket().is_none());
+
+        tokio::time::advance(super::REMOTE_CACHE_ONLY_ADMIN_REVOCATION_TTL).await;
+        assert!(cache.authentication_ticket().is_some());
+        assert!(!cache.authenticate(&digest));
+    }
+
+    #[test]
+    fn remote_revocation_fences_have_a_hard_capacity() {
+        let cache = CacheOnlyAdminProofCache::default();
+        for id in 0..super::MAX_REMOTE_CACHE_ONLY_ADMIN_REVOCATIONS {
+            cache
+                .begin_remote_revocation(&format!("operation-{id}"))
+                .expect("bounded remote fence");
+        }
+        assert!(cache.begin_remote_revocation("one-too-many").is_err());
+        cache
+            .end_remote_revocation("operation-0")
+            .expect("end one fence");
+        cache
+            .begin_remote_revocation("replacement")
+            .expect("released capacity is reusable");
+    }
+
+    #[test]
+    fn poisoned_proof_cache_fails_closed_for_authentication_and_revocation() {
+        let cache = CacheOnlyAdminProofCache::default();
+        let poisoner = {
+            let cache = cache.clone();
+            std::thread::spawn(move || {
+                let _locked = cache.inner.lock().expect("proof cache lock");
+                panic!("poison proof cache");
+            })
+        };
+        assert!(poisoner.join().is_err());
+        assert!(cache.authentication_ticket().is_none());
+        assert!(!cache.authenticate(&auth::hash_token("admin-token")));
+        assert!(cache.begin_remote_revocation("remote-operation").is_err());
+    }
+
+    #[test]
     fn cache_only_admin_proofs_have_a_hard_capacity() {
         let cache = CacheOnlyAdminProofCache::default();
         for id in 0..=super::MAX_CACHE_ONLY_ADMIN_PROOFS as i64 {
@@ -563,9 +747,15 @@ mod tests {
             .0;
         assert!(
             logout
-                .find("begin_digest_revocation")
+                .find("ClusterCacheRevocation::begin_digest")
                 .expect("logout revocation guard")
                 < logout.find("delete_token").expect("logout Store mutation")
+        );
+        assert!(
+            logout.find("delete_token").expect("logout Store mutation")
+                < logout
+                    .find("proof_revocation.finish")
+                    .expect("logout peer revocation end")
         );
 
         let setup = include_str!("system.rs")
@@ -591,13 +781,18 @@ mod tests {
             .0;
         assert!(
             update
-                .find("begin_user_revocation")
+                .find("ClusterCacheRevocation::begin_user")
                 .expect("demotion revocation guard")
                 < update.find("set_admin").expect("admin Store mutation")
         );
         assert!(
-            update.matches("begin_user_revocation").count() >= 2,
-            "demotion and password reset need independent guards"
+            update
+                .find("delete_tokens_for_user")
+                .expect("token revocation")
+                < update
+                    .find("proof_revocation.finish")
+                    .expect("user peer revocation end"),
+            "demotion and password reset must stay inside one peer bracket"
         );
         let delete = users
             .split_once("pub async fn delete(")
@@ -605,9 +800,15 @@ mod tests {
             .1;
         assert!(
             delete
-                .find("begin_user_revocation")
+                .find("ClusterCacheRevocation::begin_user")
                 .expect("delete revocation guard")
                 < delete.find("delete_user").expect("delete Store mutation")
+        );
+        assert!(
+            delete.find("delete_user").expect("delete Store mutation")
+                < delete
+                    .find("proof_revocation.finish")
+                    .expect("delete peer revocation end")
         );
     }
 

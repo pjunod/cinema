@@ -153,11 +153,15 @@
     if(!ops||ops.unavailable) return null;
     return (ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId)||null;
   }
-  function clusterTransportObservation(ops,raftId){
+  function clusterTransportObservation(ops,raftId,clientElapsedMs=0){
     if(!ops||ops.unavailable||raftId===null||raftId===undefined) return null;
-    const capturedAt=Number(ops.observed_at_unix_ms);
-    const elapsed=Number.isFinite(capturedAt)
-      ?Math.max(0,Date.now()-capturedAt):0;
+    // The aggregate's timestamp belongs to the daemon's wall clock. An admin
+    // browser may be ahead or behind that clock, so it cannot safely measure
+    // retained age. The shell passes only elapsed monotonic time since this
+    // exact response was received; direct/model callers default to no added
+    // age rather than inventing a cross-machine clock relationship.
+    clientElapsedMs=Number(clientElapsedMs);
+    const elapsed=Number.isFinite(clientElapsedMs)?Math.max(0,clientElapsedMs):0;
     const ageByElapsed=value=>value===null||value===undefined
       ?value:Number(value)+elapsed;
     const projectAgeAndDeadline=observation=>{
@@ -294,8 +298,8 @@
       (priority[right.phase]||0)-(priority[left.phase]||0)||tieBreak(left,right));
     return representatives[0]||null;
   }
-  function clusterTransportExplanation(ops,raftId,boundedReadReady){
-    const observation=clusterTransportObservation(ops,raftId);
+  function clusterTransportExplanation(ops,raftId,boundedReadReady,clientElapsedMs=0){
+    const observation=clusterTransportObservation(ops,raftId,clientElapsedMs);
     if(!observation)
       return boundedReadReady
         ? {code:"idle",text:"transport idle; bounded-read proof ready",observation:null}

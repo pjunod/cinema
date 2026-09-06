@@ -52,6 +52,7 @@ const BORROWED = [
   "clenv",
   "fmtAgo",
   "fmtBytes",
+  "clusterOpsElapsed",
   "replicationText",
   "clusterNodeOperationsBadge",
   "clusterNodeOperationsHtml",
@@ -93,6 +94,7 @@ const BORROWED = [
 // the next assertion.
 function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [] } = {}) {
   const source = `
+    const CLUSTER_OPS_RECEIVED_AT = new WeakMap();
     let ME = ${JSON.stringify({ is_admin: isAdmin })};
     let CLUSTER_REFUSAL = ${JSON.stringify(refusal)};
     let CLUSTER_TOKEN = ${JSON.stringify(token)};
@@ -599,59 +601,96 @@ test("transport status shows outbound evidence and expires stale samples", () =>
 
 test("retained transport evidence ages, stalls, and expires while refreshes fail", () => {
   const ui = sandbox();
+  const inactiveObservation = transportObservation("installing", {
+    sample_age_ms: 40,
+    active_deadline_remaining_ms: null,
+  });
+  const inactive = transportOps([inactiveObservation]);
+
+  let current = ui.clusterTransportExplanation(inactive, 2, false, 299_960);
+  assert.equal(current.code, "installing");
+  assert.equal(current.observation.sample_age_ms, 300_000);
+  assert.equal(
+    ui.clusterTransportExplanation(inactive, 2, false, 299_961).code,
+    "unavailable",
+  );
+  assert.equal(inactiveObservation.sample_age_ms, 40, "client aging must not renew the retained payload");
+
+  const activeObservation = transportObservation("installing", {
+    sample_age_ms: 301_000,
+    attempt_age_ms: 302_000,
+    last_local_receive_age_ms: 50,
+    active_deadline_remaining_ms: 1_000,
+    operation_owns_work: true,
+  });
+  const active = transportOps([activeObservation]);
+
+  current = ui.clusterTransportExplanation(active, 2, false, 999);
+  assert.equal(current.code, "installing");
+  assert.equal(current.observation.sample_age_ms, 301_999);
+  assert.equal(current.observation.attempt_age_ms, 302_999);
+  assert.equal(current.observation.last_local_receive_age_ms, 1_049);
+  assert.equal(current.observation.active_deadline_remaining_ms, 1);
+
+  current = ui.clusterTransportExplanation(active, 2, false, 1_000);
+  assert.equal(current.code, "stalled");
+  assert.equal(current.observation.active_deadline_remaining_ms, 0);
+  assert.equal(current.observation.last_error_category, "snapshot_stalled");
+
+  assert.equal(
+    ui.clusterTransportExplanation(active, 2, false, 301_000).code,
+    "stalled",
+    "the projected stall remains visible through its complete diagnostic window",
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(active, 2, false, 301_001).code,
+    "unavailable",
+  );
+  assert.equal(activeObservation.phase, "installing", "projection must not rewrite cached evidence");
+});
+
+test("client-local receipt time ignores browser clocks ahead or behind the daemon", () => {
   const realNow = Date.now;
-  let now = 1_000_000;
-  Date.now = () => now;
   try {
-    const inactiveObservation = transportObservation("installing", {
-      sample_age_ms: 40,
-      active_deadline_remaining_ms: null,
-    });
-    const inactive = transportOps([inactiveObservation]);
-    inactive.observed_at_unix_ms = now;
+    for (const [label, browserWall, serverWall] of [
+      ["browser ahead", 9_000_000, 1_000_000],
+      ["browser behind", 1_000_000, 9_000_000],
+    ]) {
+      let monotonicNow = 100;
+      const clock = { now: () => monotonicNow };
+      const receipt = new Function(
+        "performance",
+        `const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
+         ${shippedSource("clusterOpsReceived")}
+         ${shippedSource("clusterOpsElapsed")}
+         return {received:clusterOpsReceived,elapsed:clusterOpsElapsed};`,
+      )(clock);
+      const operations = transportOps([
+        transportObservation("installing", {
+          active_deadline_remaining_ms: 1_000,
+          operation_owns_work: true,
+        }),
+      ]);
+      operations.observed_at_unix_ms = serverWall;
+      const serialized = JSON.stringify(operations);
+      Date.now = () => browserWall;
+      receipt.received(operations);
+      assert.equal(JSON.stringify(operations), serialized, `${label}: receipt metadata entered JSON`);
 
-    now += 299_960;
-    let current = ui.clusterTransportExplanation(inactive, 2, false);
-    assert.equal(current.code, "installing");
-    assert.equal(current.observation.sample_age_ms, 300_000);
-    now += 1;
-    assert.equal(ui.clusterTransportExplanation(inactive, 2, false).code, "unavailable");
-    assert.equal(inactiveObservation.sample_age_ms, 40, "client aging must not renew the retained payload");
-
-    now = 2_000_000;
-    const activeObservation = transportObservation("installing", {
-      sample_age_ms: 301_000,
-      attempt_age_ms: 302_000,
-      last_local_receive_age_ms: 50,
-      active_deadline_remaining_ms: 1_000,
-      operation_owns_work: true,
-    });
-    const active = transportOps([activeObservation]);
-    active.observed_at_unix_ms = now;
-
-    now += 999;
-    current = ui.clusterTransportExplanation(active, 2, false);
-    assert.equal(current.code, "installing");
-    assert.equal(current.observation.sample_age_ms, 301_999);
-    assert.equal(current.observation.attempt_age_ms, 302_999);
-    assert.equal(current.observation.last_local_receive_age_ms, 1_049);
-    assert.equal(current.observation.active_deadline_remaining_ms, 1);
-
-    now += 1;
-    current = ui.clusterTransportExplanation(active, 2, false);
-    assert.equal(current.code, "stalled");
-    assert.equal(current.observation.active_deadline_remaining_ms, 0);
-    assert.equal(current.observation.last_error_category, "snapshot_stalled");
-
-    now += 300_000;
-    assert.equal(
-      ui.clusterTransportExplanation(active, 2, false).code,
-      "stalled",
-      "the projected stall remains visible through its complete diagnostic window",
-    );
-    now += 1;
-    assert.equal(ui.clusterTransportExplanation(active, 2, false).code, "unavailable");
-    assert.equal(activeObservation.phase, "installing", "projection must not rewrite cached evidence");
+      monotonicNow += 1_000;
+      assert.equal(receipt.elapsed(operations), 1_000, label);
+      assert.equal(
+        PANEL.clusterTransportExplanation(operations, 2, false, receipt.elapsed(operations)).code,
+        "stalled",
+        label,
+      );
+      monotonicNow += 300_001;
+      assert.equal(
+        PANEL.clusterTransportExplanation(operations, 2, false, receipt.elapsed(operations)).code,
+        "unavailable",
+        `${label}: retained evidence did not expire from client elapsed time`,
+      );
+    }
   } finally {
     Date.now = realNow;
   }
@@ -3544,7 +3583,13 @@ function tickHarness({ cluster, ops, now }) {
        SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
      const cacheTrakt=(value)=>value;
      const Date={now:clock};
-     const renderSettings=()=>recordRender(SETTINGS_DATA.clusterOps);
+     const performance={now:clock};
+     const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
+     ${shippedSource("clusterOpsReceived")}
+     ${shippedSource("clusterOpsElapsed")}
+     clusterOpsReceived(SETTINGS_DATA.clusterOps);
+     const renderSettings=()=>recordRender(
+       SETTINGS_DATA.clusterOps,clusterOpsElapsed(SETTINGS_DATA.clusterOps));
      ${shippedSource("isSettingsRoute")}
      ${shippedSource("clusterOpsInterval")}
      ${shippedSource("clusterOpsStamp")}
@@ -3572,9 +3617,11 @@ function tickHarness({ cluster, ops, now }) {
     async () => {},
     async () => {},
     () => {},
-    (renderedOps) => {
+    (renderedOps, elapsed) => {
       painted.push("render");
-      paintedTransport.push(PANEL.clusterTransportExplanation(renderedOps, 2, false).code);
+      paintedTransport.push(
+        PANEL.clusterTransportExplanation(renderedOps, 2, false, elapsed).code,
+      );
       readingAge.innerHTML = "rendered";
     },
     PANEL,
@@ -3651,69 +3698,59 @@ test("a refused collection repaints retained transport unless a dialog owns the 
     node("node-c", 3, "voter"),
   ]);
   const ops = operationStatus(cluster);
-  const realNow = Date.now;
-  let wallNow = 2_000_000;
-  Date.now = () => wallNow;
-  try {
-    ops.observed_at_unix_ms = wallNow;
-    ops.nodes[0].transport = {
+  ops.nodes[0].transport = {
+    observing_node_id: 1,
+    observations: [transportObservation("installing", {
       observing_node_id: 1,
-      observations: [transportObservation("installing", {
-        observing_node_id: 1,
-        peer_node_id: 2,
-        direction: "outbound",
-        active_deadline_remaining_ms: 1_000,
-        operation_owns_work: true,
-      })],
-    };
-    const now = { value: 1_000_000 };
-    const { harness, requests, painted, paintedTransport, readingAge } = tickHarness({
-      cluster, ops, now,
-    });
-    readingAge.innerHTML = "frozen";
-    wallNow += 1_000;
-    now.value += 15_000;
-    const refused = harness.settingsTick(1, "cluster");
-    requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
-    await refused;
-    assert.notEqual(readingAge.innerHTML, "frozen");
-    assert.deepEqual(painted, ["render"], "the locally projected stall is repainted");
-    assert.deepEqual(paintedTransport, ["stalled"]);
-    assert.equal(harness.stamped(), now.value, "the retry is the next gate, not the next tick");
+      peer_node_id: 2,
+      direction: "outbound",
+      active_deadline_remaining_ms: 1_000,
+      operation_owns_work: true,
+    })],
+  };
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted, paintedTransport, readingAge } = tickHarness({
+    cluster, ops, now,
+  });
+  readingAge.innerHTML = "frozen";
+  now.value += 15_000;
+  const refused = harness.settingsTick(1, "cluster");
+  requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await refused;
+  assert.notEqual(readingAge.innerHTML, "frozen");
+  assert.deepEqual(painted, ["render"], "the locally projected stall is repainted");
+  assert.deepEqual(paintedTransport, ["stalled"]);
+  assert.equal(harness.stamped(), now.value, "the retry is the next gate, not the next tick");
 
-    // A modal is an operator decision in progress. Keep it intact even after
-    // the retained observation expires, while continuing to patch its age row.
-    harness.openDialog(true);
-    readingAge.innerHTML = "frozen under modal";
-    wallNow += 300_001;
-    now.value += 15_000;
-    const held = harness.settingsTick(1, "cluster");
-    requests[1].reject(Object.assign(new Error("gateway"), { status: 502 }));
-    await held;
-    assert.deepEqual(painted, ["render"], "the open modal prevented a repaint");
-    assert.notEqual(readingAge.innerHTML, "frozen under modal");
+  // A modal is an operator decision in progress. Keep it intact even after
+  // the retained observation expires, while continuing to patch its age row.
+  harness.openDialog(true);
+  readingAge.innerHTML = "frozen under modal";
+  now.value += 286_001;
+  const held = harness.settingsTick(1, "cluster");
+  requests[1].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await held;
+  assert.deepEqual(painted, ["render"], "the open modal prevented a repaint");
+  assert.notEqual(readingAge.innerHTML, "frozen under modal");
 
-    // Once the modal closes, another failed refresh must pay the deferred local
-    // projection and remove the expired transport evidence from the visible UI.
-    harness.openDialog(false);
-    now.value += 15_000;
-    const expired = harness.settingsTick(1, "cluster");
-    requests[2].reject(Object.assign(new Error("gateway"), { status: 502 }));
-    await expired;
-    assert.deepEqual(painted, ["render", "render"]);
-    assert.deepEqual(paintedTransport, ["stalled", "unavailable"]);
+  // Once the modal closes, another failed refresh must pay the deferred local
+  // projection and remove the expired transport evidence from the visible UI.
+  harness.openDialog(false);
+  now.value += 15_000;
+  const expired = harness.settingsTick(1, "cluster");
+  requests[2].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await expired;
+  assert.deepEqual(painted, ["render", "render"]);
+  assert.deepEqual(paintedTransport, ["stalled", "unavailable"]);
 
-    // A 401 is not an ordinary refusal: it belongs to the logout transition, and
-    // swallowing it here would leave the tab rendering after auth is gone.
-    now.value += 15_000;
-    const unauthorized = harness.settingsTick(1, "cluster");
-    requests[3].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
-    await unauthorized;
-    assert.deepEqual(painted, ["render", "render"], "a 401 paints nothing here");
-    assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
-  } finally {
-    Date.now = realNow;
-  }
+  // A 401 is not an ordinary refusal: it belongs to the logout transition, and
+  // swallowing it here would leave the tab rendering after auth is gone.
+  now.value += 15_000;
+  const unauthorized = harness.settingsTick(1, "cluster");
+  requests[3].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
+  await unauthorized;
+  assert.deepEqual(painted, ["render", "render"], "a 401 paints nothing here");
+  assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
 });
 
 test("the two-second roster poll holds its sample under a dialog too", async () => {
@@ -3773,7 +3810,8 @@ test("the restart poll holds its sample under a dialog, and still reads it", asy
   const state = { clusterOps: null };
   const poll = new Function(
     "api", "settingsCurrent", "SETTINGS_DATA", "SETTINGS_LOADED", "renderSettings",
-    "repaintClusterPreserving", "clusterOpsStamp", "clusterRepaintDeferred", "setTimeout",
+    "repaintClusterPreserving", "clusterOpsStamp", "clusterOpsReceived",
+    "clusterRepaintDeferred", "setTimeout",
     `${shippedSource("pollLocalRestart")} return pollLocalRestart;`,
   )(
     () => {
@@ -3786,6 +3824,7 @@ test("the restart poll holds its sample under a dialog, and still reads it", asy
     () => painted.push("render"),
     (paint) => paint(),
     () => {},
+    (value) => value,
     () => served === 1,
     (resolve) => resolve(),
   );
@@ -3809,6 +3848,72 @@ test("the manual refresh always paints what it stores", () => {
   assert.notEqual(paints, -1);
   assert.ok(paints > stored, "the store is not followed by a repaint");
   assert.doesNotMatch(refresh, /clusterRepaintDeferred/);
+});
+
+test("a failed manual refresh repaints retained transport through stall and expiry", async () => {
+  const run = async (elapsed, expected) => {
+    const operations = transportOps([
+      transportObservation("installing", {
+        active_deadline_remaining_ms: 1_000,
+        operation_owns_work: true,
+      }),
+    ]);
+    let monotonicNow = 100;
+    const mount = { innerHTML: "previous" };
+    const painted = [];
+    const refresh = new Function(
+      "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
+      "clusterOperationsCard", "clusterOperationsUnavailable", "esc", "record",
+      "PlurxClusterPanel", "performance", "initialOps",
+      `let PAGE_RENDER_GENERATION=1;
+       let SETTINGS_DATA={clusterOps:initialOps};
+       const SETTINGS_LOADED=new Set(["clusterOps"]);
+       const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
+       ${shippedSource("clusterOpsReceived")}
+       ${shippedSource("clusterOpsElapsed")}
+       clusterOpsReceived(initialOps);
+       const renderSettings=()=>record(PlurxClusterPanel.clusterTransportExplanation(
+         SETTINGS_DATA.clusterOps,2,false,clusterOpsElapsed(SETTINGS_DATA.clusterOps)).code);
+       ${shippedSource("refreshClusterOperations")}
+       return refreshClusterOperations;`,
+    )(
+      { getElementById: () => mount },
+      async () => { throw new Error("gateway"); },
+      () => true,
+      (paint) => paint(),
+      () => "collecting",
+      (message) => `UNAVAILABLE:${message}`,
+      (value) => value,
+      (code) => painted.push(code),
+      PANEL,
+      { now: () => monotonicNow },
+      operations,
+    );
+
+    monotonicNow += elapsed;
+    await refresh(null);
+    assert.deepEqual(painted, [expected]);
+    assert.equal(mount.innerHTML, "UNAVAILABLE:gateway");
+  };
+
+  await run(1_000, "stalled");
+  await run(301_001, "unavailable");
+});
+
+test("every cluster status success receives a client-local monotonic baseline", () => {
+  assert.match(
+    SHIPPED_UI,
+    /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{\s*clusterOpsStamp\(\); return clusterOpsReceived\(ops\);/,
+  );
+  assert.match(
+    shippedSource("settingsTick"),
+    /const ops=clusterOpsReceived\(await api\("\/cluster\/status"\)\);/,
+  );
+  assert.match(
+    shippedSource("pollLocalRestart"),
+    /const ops=clusterOpsReceived\(await api\("\/cluster\/status"\)\);/,
+  );
+  assert.doesNotMatch(shippedSource("clusterOpsReceived"), /observed_at_unix_ms|Object\.defineProperty/);
 });
 
 test("the panel's own controls and dialogs are the only ones it reaches for", () => {
@@ -3988,7 +4093,10 @@ test("the ledger's freshness cell is addressable, and the clock is stamped where
   // Stamped where the request happens. loadSettingsKey serves a cached
   // aggregate without a request, so stamping where the value is PAINTED would
   // let a tab switch every ten seconds starve the refresh indefinitely.
-  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{ clusterOpsStamp\(\); return ops; \}\)/);
+  assert.match(
+    SHIPPED_UI,
+    /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{\s*clusterOpsStamp\(\); return clusterOpsReceived\(ops\);\s*\}\)/,
+  );
   assert.doesNotMatch(shippedSource("patchSettingsSecondary"), /clusterOpsStamp\(\)/);
 });
 

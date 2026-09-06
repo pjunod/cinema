@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::dto::UserDto;
 use super::error::ApiError;
 use super::extract::{AuthUser, RawToken};
+use super::internal_auth_revocation::ClusterCacheRevocation;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -68,11 +69,13 @@ pub async fn login(
 /// POST /api/v1/auth/logout — invalidate the presented token.
 pub async fn logout(
     State(state): State<AppState>,
+    _user: AuthUser,
     RawToken(token): RawToken,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let hash = auth::hash_token(&token);
-    let _proof_revocation = state.cache_only_admin_proofs.begin_digest_revocation(&hash);
+    let proof_revocation = ClusterCacheRevocation::begin_digest(&state, &hash).await?;
     state.store.delete_token(&hash).await?;
+    proof_revocation.finish(&state).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

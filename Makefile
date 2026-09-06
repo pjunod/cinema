@@ -187,7 +187,7 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
-	  network::raft_server::tests::production_biased_socket_close_records_inbound_snapshot_retry_on_work_drop \
+	  network::raft_server::tests::production_prepares_snapshot_status_before_biased_socket_close_drops_unpolled_work \
 	  --lib -- --exact
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,cache,macros,sqlite \
@@ -662,6 +662,9 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::cluster_operations::tests::failed_fresh_preflight_releases_its_planned_outage_lease \
 	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::cluster_operations::tests::aborted_fresh_preflight_releases_the_exact_planned_outage_claim \
+	  -- --exact
 	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib \
 	  cluster::membership::tests::planned_outage_lease_excludes_a_concurrent_production_removal_attempt \
 	  -- --exact
@@ -670,6 +673,21 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_honor_digest_and_user_invalidation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::active_revocation_blocks_ticket_publication_until_guard_drop \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::remote_revocation_fence_expires_bounded_and_reinvalidates \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::remote_revocation_fences_have_a_hard_capacity \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::extract::tests::poisoned_proof_cache_fails_closed_for_authentication_and_revocation \
+	  -- --exact
+	$(CARGO) test --locked -p plurxd --bin plurxd \
+	  http::internal_auth_revocation::tests::digest_and_user_revocation_on_a_invalidate_primed_b_before_success \
 	  -- --exact
 	$(CARGO) test --locked -p plurxd --bin plurxd \
 	  http::extract::tests::cache_only_admin_proofs_have_a_hard_capacity \

@@ -1823,7 +1823,17 @@ generation before its read and publishes proof only if that generation is
 unchanged. Logout, demotion, password reset, and user deletion invalidate proof
 and advance the generation both before and after their Store mutation, including
 commit-unknown outcomes; an in-flight stale read therefore cannot republish a
-revoked credential. A cold process therefore needs one successful ordinary authentication
+revoked credential. These mutations also bracket the Store write with signed
+begin/end messages to every committed peer under one two-second fanout bound.
+The peer wire contains only a random operation UUID and phase, never a token
+digest or user ID. A peer clears its bounded proof cache and refuses all
+cache-only recovery authorization while any fence is active; at most 128
+remote fences are retained, and an end that is lost or whose commit outcome is
+unknown expires no later than the existing non-sliding five-minute proof TTL.
+An unreachable peer, missing HTTP claim, oversized roster, non-204 response,
+or invalid signature fails the caller closed with a typed `503`; success is
+reported only after all begin and end acknowledgements. A cold process
+therefore needs one successful ordinary authentication
 before these public recovery reads; the private authenticated cluster-listener
 transport route remains the pre-listener/startup path.
 
@@ -1835,13 +1845,15 @@ is bounded to 500 milliseconds, leaving a strict 500-millisecond completion
 margin even when a public probe consumes its full deadline. Cache availability
 begins when that refresh completes; embedded status and transport ages still
 advance from their node-owned source timestamps. If a browser retains the last
-aggregate across failed refreshes, it advances those ages and the active
-deadline from the aggregate's own observation time, crosses to `stalled` at
-zero, and expires after the same five-minute diagnostic window. A failed
-refresh pays a preserving repaint so those projected transport fields change
-on screen. If a Cluster decision dialog is open, the page keeps that dialog
-intact, patches only the independent reading-age cell, and pays the transport
-repaint after the dialog closes. Each peer refresh probes the
+aggregate across failed refreshes, it advances those server-projected durations
+from a browser-local monotonic receipt baseline; browser and daemon wall-clock
+skew therefore cannot renew or prematurely expire the evidence. The projection
+crosses to `stalled` at zero and expires after the same five-minute diagnostic
+window. Automatic and manual refresh failures pay a preserving repaint so
+those projected transport fields change on screen while the unavailable
+verdict remains visible. If a Cluster decision dialog is open, the page keeps
+that dialog intact, patches only the independent reading-age cell, and pays the
+transport repaint after the dialog closes. Each peer refresh probes the
 public and private listeners concurrently, so up to sixteen bounded HTTP
 requests may be in flight. Roster members beyond the eight-probe bound remain
 visible as `peer_limit` instead of disappearing. A healthy sender can therefore
@@ -1851,7 +1863,10 @@ those five-second peer projections: they first claim the replicated
 planned-outage lifecycle lease, then reread committed membership and the peer
 directory and perform current authenticated probes under one absolute
 two-second preflight deadline. Collection failure or an unsafe/candidate-mismatch
-verdict releases that exact claim, while its presence prevents a concurrent
+verdict releases that exact claim. A cancellation-safe owner retains it across
+preflight, admission drain, and the final restart-preparation or maintenance
+commit; every error or aborted request releases the exact claim, and only a
+successful commit disarms cleanup. While present it prevents a concurrent
 join, promotion, maintenance, or removal from invalidating the safety proof. A roster or directory read that does not finish
 inside its own 500-millisecond share fails closed before mutation.
 Inactive status older than five minutes expires instead of continuing to claim

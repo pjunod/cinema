@@ -16,8 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
-    ActivityPeer, ClusterNodeRecord, ClusterOperationLease, MembershipStatus, NodeRole,
-    MAX_OPERATIONS_PEERS,
+    ActivityPeer, ClusterNodeRecord, ClusterOperationLease, MembershipManager, MembershipStatus,
+    NodeRole, MAX_OPERATIONS_PEERS,
 };
 use plurx_core::cluster::migration::status::{
     DbSnapshotMetricsSnapshot, SnapshotTransportPhase, SnapshotTransportStatus, WalRuntimeState,
@@ -325,6 +325,61 @@ pub(crate) enum PlannedOutageOperation {
     Maintenance,
 }
 
+/// Cancellation-safe owner of the exact replicated planned-outage claim.
+/// Every early return and task abort retries exact release from `Drop`; only a
+/// successful restart preparation or maintenance commit disarms it.
+pub(crate) struct PlannedOutageLeaseGuard {
+    lease: Option<ClusterOperationLease>,
+    membership: MembershipManager,
+    release_runtime: tokio::runtime::Handle,
+}
+
+impl PlannedOutageLeaseGuard {
+    fn new(lease: ClusterOperationLease, membership: MembershipManager) -> Self {
+        Self {
+            lease: Some(lease),
+            membership,
+            release_runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    pub(crate) fn claim(&self) -> &ClusterOperationLease {
+        self.lease.as_ref().expect("armed planned-outage lease")
+    }
+
+    pub(crate) async fn release(mut self) {
+        let Some(lease) = self.lease.as_ref() else {
+            return;
+        };
+        match self.membership.release_cluster_operation_lease(lease).await {
+            Ok(()) => {
+                self.lease.take();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to release planned-outage lease; Drop will retry and expiry remains authoritative");
+            }
+        }
+    }
+
+    pub(crate) fn disarm(mut self) {
+        self.lease.take();
+    }
+}
+
+impl Drop for PlannedOutageLeaseGuard {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        let membership = self.membership.clone();
+        self.release_runtime.spawn(async move {
+            if let Err(error) = membership.release_cluster_operation_lease(&lease).await {
+                tracing::warn!(%error, "failed to release cancelled planned-outage lease; expiry remains authoritative");
+            }
+        });
+    }
+}
+
 /// Claim the replicated membership-lifecycle exclusion before collecting the
 /// safety evidence it protects. A failed collection releases the exact claim;
 /// a successful caller owns it until restart preparation or maintenance
@@ -334,34 +389,28 @@ pub(crate) async fn acquire_planned_outage_preflight(
     node_id: &str,
     duration: Duration,
     operation: PlannedOutageOperation,
-) -> Result<(ClusterOperationLease, ClusterOperationsAggregate), ApiError> {
-    let acquire_membership = state.membership.clone();
-    let release_membership = state.membership.clone();
-    acquire_then_collect_preflight(
-        move || async move {
-            match operation {
-                PlannedOutageOperation::Restart => acquire_membership
-                    .acquire_restart_preparation(node_id, duration)
-                    .await,
-                PlannedOutageOperation::Maintenance => acquire_membership
-                    .acquire_maintenance_preparation(node_id, duration)
-                    .await,
-            }
-            .map_err(api_error)
-        },
-        || collect_current_aggregate(state),
-        move |lease| async move {
-            if let Err(error) = release_membership
-                .release_cluster_operation_lease(&lease)
+) -> Result<(PlannedOutageLeaseGuard, ClusterOperationsAggregate), ApiError> {
+    let lease = match operation {
+        PlannedOutageOperation::Restart => {
+            state
+                .membership
+                .acquire_restart_preparation(node_id, duration)
                 .await
-            {
-                tracing::warn!(%error, "failed to release planned-outage lease after preflight failure; expiry remains authoritative");
-            }
-        },
-    )
-    .await
+        }
+        PlannedOutageOperation::Maintenance => {
+            state
+                .membership
+                .acquire_maintenance_preparation(node_id, duration)
+                .await
+        }
+    }
+    .map_err(api_error)?;
+    let lease = PlannedOutageLeaseGuard::new(lease, state.membership.clone());
+    let evidence = collect_current_aggregate(state).await?;
+    Ok((lease, evidence))
 }
 
+#[cfg(test)]
 async fn acquire_then_collect_preflight<
     Lease,
     Evidence,
@@ -369,27 +418,66 @@ async fn acquire_then_collect_preflight<
     AcquireFuture,
     Collect,
     CollectFuture,
-    Release,
-    ReleaseFuture,
+    CancelRelease,
 >(
     acquire: Acquire,
     collect: Collect,
-    release: Release,
+    cancel_release: CancelRelease,
 ) -> Result<(Lease, Evidence), ApiError>
 where
     Acquire: FnOnce() -> AcquireFuture,
     AcquireFuture: std::future::Future<Output = Result<Lease, ApiError>>,
     Collect: FnOnce() -> CollectFuture,
     CollectFuture: std::future::Future<Output = Result<Evidence, ApiError>>,
-    Release: FnOnce(Lease) -> ReleaseFuture,
-    ReleaseFuture: std::future::Future<Output = ()>,
+    CancelRelease: FnOnce(Lease),
 {
     let lease = acquire().await?;
+    let guard = CancellationReleaseGuard::new(lease, cancel_release);
     match collect().await {
-        Ok(evidence) => Ok((lease, evidence)),
-        Err(error) => {
-            release(lease).await;
-            Err(error)
+        Ok(evidence) => Ok((guard.disarm(), evidence)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Runs the exact lease cleanup from `Drop`, including when the owning future
+/// is aborted at an await point after acquisition. Only a successful evidence
+/// collection disarms the guard and transfers ownership to the caller.
+#[cfg(test)]
+struct CancellationReleaseGuard<Lease, CancelRelease>
+where
+    CancelRelease: FnOnce(Lease),
+{
+    lease: Option<Lease>,
+    cancel_release: Option<CancelRelease>,
+}
+
+#[cfg(test)]
+impl<Lease, CancelRelease> CancellationReleaseGuard<Lease, CancelRelease>
+where
+    CancelRelease: FnOnce(Lease),
+{
+    fn new(lease: Lease, cancel_release: CancelRelease) -> Self {
+        Self {
+            lease: Some(lease),
+            cancel_release: Some(cancel_release),
+        }
+    }
+
+    fn disarm(mut self) -> Lease {
+        self.cancel_release.take();
+        self.lease.take().expect("armed lease guard")
+    }
+}
+
+#[cfg(test)]
+impl<Lease, CancelRelease> Drop for CancellationReleaseGuard<Lease, CancelRelease>
+where
+    CancelRelease: FnOnce(Lease),
+{
+    fn drop(&mut self) {
+        if let (Some(lease), Some(cancel_release)) = (self.lease.take(), self.cancel_release.take())
+        {
+            cancel_release(lease);
         }
     }
 }
@@ -662,13 +750,7 @@ pub(crate) async fn prepare_restart(
     )
     .await?;
     if !preflight.verdict.safe_to_restart_one {
-        if let Err(error) = state
-            .membership
-            .release_cluster_operation_lease(&lease)
-            .await
-        {
-            tracing::warn!(%error, "failed to release rejected restart preparation lease; expiry remains authoritative");
-        }
+        lease.release().await;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "restart_preparation_unsafe",
@@ -676,33 +758,21 @@ pub(crate) async fn prepare_restart(
         ));
     }
     if preflight.verdict.candidate_node_id.as_deref() != Some(state.node_id.as_str()) {
-        if let Err(error) = state
-            .membership
-            .release_cluster_operation_lease(&lease)
-            .await
-        {
-            tracing::warn!(%error, "failed to release restart candidate-mismatch lease; expiry remains authoritative");
-        }
+        lease.release().await;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "restart_preparation_candidate_mismatch",
             "open the candidate node directly; this node is not the current safe restart candidate",
         ));
     }
-    let local_expiry = lease.preparation_expiry_unix_ms(duration);
+    let local_expiry = lease.claim().preparation_expiry_unix_ms(duration);
     if local_expiry.is_none()
         || !state
             .serving
             .begin_restart_preparation_until(local_expiry.unwrap_or_default())
             .await
     {
-        if let Err(error) = state
-            .membership
-            .release_cluster_operation_lease(&lease)
-            .await
-        {
-            tracing::warn!(%error, "failed to release exhausted restart preparation lease");
-        }
+        lease.release().await;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "restart_preparation_expired",
@@ -713,19 +783,14 @@ pub(crate) async fn prepare_restart(
     let active_sessions = local_owned_media_sessions(&state).await;
     let drain = state.serving.restart_drain_status(active_sessions).await;
     if !drain.new_admissions_blocked {
-        if let Err(error) = state
-            .membership
-            .release_cluster_operation_lease(&lease)
-            .await
-        {
-            tracing::warn!(%error, "failed to release expired restart preparation lease");
-        }
+        lease.release().await;
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "restart_preparation_expired",
             "restart preparation expired before pre-existing admissions settled; run preflight again",
         ));
     }
+    lease.disarm();
     Ok(Json(restart_preparation_response(
         &state.node_id,
         active_sessions,
@@ -2720,6 +2785,15 @@ mod tests {
             Some(&HeaderValue::from_static("application/zip"))
         );
 
+        // Logout is a mutating route and therefore revalidates the bearer
+        // against Store before it may fan out a cluster-wide proof fence.
+        // Restore the same token only after the two cache-only reads have
+        // proved that their request paths do not touch Store.
+        state
+            .store
+            .create_token(&token_digest, admin.id, Some("cluster-status-test"))
+            .await
+            .expect("restore token for authenticated logout");
         let logout = app
             .clone()
             .oneshot(
@@ -2902,7 +2976,8 @@ mod tests {
             .0;
         assert!(restart.contains("acquire_planned_outage_preflight("));
         assert!(restart.contains("PlannedOutageOperation::Restart"));
-        assert!(restart.contains("release_cluster_operation_lease(&lease)"));
+        assert!(restart.contains("lease.release().await"));
+        assert!(restart.contains("lease.disarm()"));
         let maintenance_source = include_str!("cluster.rs");
         let maintenance = maintenance_source
             .split_once("pub async fn enter_maintenance(")
@@ -2913,7 +2988,8 @@ mod tests {
             .0;
         assert!(maintenance.contains("acquire_planned_outage_preflight("));
         assert!(maintenance.contains("PlannedOutageOperation::Maintenance"));
-        assert!(maintenance.contains("release_cluster_operation_lease(&lease)"));
+        assert!(maintenance.contains("lease.release().await"));
+        assert!(maintenance.contains("lease.disarm()"));
     }
 
     #[tokio::test]
@@ -2939,7 +3015,7 @@ mod tests {
                     Ok::<_, ApiError>(())
                 }
             },
-            |lease| async move { drop(lease) },
+            drop,
         )
         .await
         .expect("lease-protected fresh preflight");
@@ -2971,7 +3047,7 @@ mod tests {
             },
             {
                 let released = released.clone();
-                move |lease| async move {
+                move |lease| {
                     drop(lease);
                     released.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -2982,6 +3058,36 @@ mod tests {
         assert!(result.is_err());
         assert!(released.load(std::sync::atomic::Ordering::Relaxed));
         assert!(lifecycle_fence.try_lock_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn aborted_fresh_preflight_releases_the_exact_planned_outage_claim() {
+        let collect_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let released = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let task = tokio::spawn(acquire_then_collect_preflight(
+            || async { Ok::<_, ApiError>("exact-claim-a".to_owned()) },
+            {
+                let collect_started = collect_started.clone();
+                move || async move {
+                    collect_started.notify_one();
+                    std::future::pending::<Result<(), ApiError>>().await
+                }
+            },
+            {
+                let released = released.clone();
+                move |claim| {
+                    *released.lock().expect("release observation") = Some(claim);
+                }
+            },
+        ));
+
+        collect_started.notified().await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(
+            released.lock().expect("release observation").as_deref(),
+            Some("exact-claim-a")
+        );
     }
 
     #[tokio::test(start_paused = true)]

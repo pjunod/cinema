@@ -12095,7 +12095,9 @@ const SETTINGS_ENDPOINTS={
   // Stamped here rather than where the value is painted: loadSettingsKey serves
   // a cached aggregate without a request, and stamping that would let a tab
   // switch every ten seconds starve the refresh indefinitely.
-  clusterOps:()=>api("/cluster/status").then(ops=>{ clusterOpsStamp(); return ops; }),
+  clusterOps:()=>api("/cluster/status").then(ops=>{
+    clusterOpsStamp(); return clusterOpsReceived(ops);
+  }),
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status","dvConversions"],secondary:[]},
@@ -13001,6 +13003,10 @@ let CLUSTER_LOADED=false;
 // fresh without a timer of its own. Every path that stores a new aggregate
 // stamps this; the tick reads it. See clusterOpsInterval().
 let CLUSTER_OPS_FETCHED_AT=0;
+// Receipt age is browser-local and monotonic. The daemon's aggregate timestamp
+// belongs to another wall clock, while adding a client timestamp to the JSON
+// object would leak UI-only metadata into projections and support exports.
+const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
 // The last removal refusal, held so its sentence stays readable. A toast is
 // 2.2 seconds and these answers are paragraphs.
 let CLUSTER_REFUSAL=null;
@@ -13036,6 +13042,15 @@ function clenv(){ return {esc,fmtAgo,fmtBytes}; }
 function clusterOpsInterval(){ return 15000; }
 function clusterOpsStamp(){ CLUSTER_OPS_FETCHED_AT=Date.now(); }
 function clusterOpsDue(){ return Date.now()-CLUSTER_OPS_FETCHED_AT>=clusterOpsInterval(); }
+function clusterOpsReceived(ops){
+  if(ops&&typeof ops==="object") CLUSTER_OPS_RECEIVED_AT.set(ops,performance.now());
+  return ops;
+}
+function clusterOpsElapsed(ops){
+  if(!ops||typeof ops!=="object") return 0;
+  const receivedAt=CLUSTER_OPS_RECEIVED_AT.get(ops);
+  return receivedAt===undefined?0:Math.max(0,performance.now()-receivedAt);
+}
 // A modal is a decision in progress. renderSettings() rewrites the tab, and the
 // force-election dialog lives in that markup, so repainting under it would close
 // it mid-sentence.
@@ -13129,7 +13144,8 @@ function clusterNodeOperationsHtml(n,ops){
   if(ops.unavailable) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
     <div class="clnodeunknown" style="color:var(--bad)">Direct status is unavailable. Keep every available voter running and retry status above.</div></section>`;
   const row=PlurxClusterPanel.clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
-  const transport=PlurxClusterPanel.clusterTransportExplanation(ops,n.raft_id,n.bounded_read_ready);
+  const transport=PlurxClusterPanel.clusterTransportExplanation(
+    ops,n.raft_id,n.bounded_read_ready,clusterOpsElapsed(ops));
   const transportObservation=transport.observation;
   const transportText=transportObservation
     ? `${esc(transport.text)} · observer ${esc(String(transportObservation.observing_node_id))} · ${esc(PlurxClusterPanel.clusterOperationAge(transportObservation.sample_age_ms))}`
@@ -13223,7 +13239,8 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
   const direct=PlurxClusterPanel.clusterDirectMaintenanceStatus(context.operations,n.node_id);
   const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(n.active_media_sessions||0);
   const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
-  const transportProgress=PlurxClusterPanel.clusterTransportExplanation(context.operations,n.raft_id,n.bounded_read_ready);
+  const transportProgress=PlurxClusterPanel.clusterTransportExplanation(
+    context.operations,n.raft_id,n.bounded_read_ready,clusterOpsElapsed(context.operations));
   const note=n.maintenance
     ? directReady
       ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
@@ -13418,6 +13435,10 @@ async function refreshClusterOperations(btn){
     }
   }catch(error){
     if(settingsCurrent(generation,"cluster")){
+      // The retained node evidence has a client-local clock of its own. Repaint
+      // it before mounting the request failure so a manual refresh cannot leave
+      // an expired install rendered as active until the next 15-second gate.
+      repaintClusterPreserving(renderSettings);
       const current=document.getElementById("cluster-operations");
       if(current) current.innerHTML=clusterOperationsUnavailable(esc(error&&error.message||"request failed"));
     }
@@ -13448,7 +13469,7 @@ async function pollLocalRestart(nodeId,generation){
     await new Promise(resolve=>setTimeout(resolve,2000));
     if(!settingsCurrent(generation,"cluster")) return;
     try{
-      const ops=await api("/cluster/status");
+      const ops=clusterOpsReceived(await api("/cluster/status"));
       if(!settingsCurrent(generation,"cluster")) return;
       // The restart poll owns freshness while it runs, so it stamps the same
       // clock the tick reads: the two never probe the fan-out at once. It
@@ -14060,7 +14081,7 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         clusterOpsStamp();
         try{
           const previous=SETTINGS_DATA.clusterOps;
-          const ops=await api("/cluster/status");
+          const ops=clusterOpsReceived(await api("/cluster/status"));
           if(!settingsCurrent(generation,tab)) return;
           const changed=PlurxClusterPanel.clusterOpsProjection(previous)
             !==PlurxClusterPanel.clusterOpsProjection(ops);
