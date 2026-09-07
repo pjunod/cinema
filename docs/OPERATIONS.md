@@ -1981,10 +1981,13 @@ evidence. The artifact also records
 the readiness acknowledgement, every in-recovery acknowledgement, their
 target-local digest, the recovered SQLite content digest, and baseline plus
 post-quiescence OS-thread, socket, and Hiqlite-owned async-task counts for
-persistent voters 1–3 and restarted node 4. Before taking the baseline, the
-target must apply and hash the seeded image exactly. Baseline and post-cycle
-counts are each accepted only after two identical idle samples separated by a
-three-second cleanup/backoff horizon; active snapshot work resets that proof.
+persistent voters 1–3 and restarted node 4. Before taking the fixed baseline,
+the target must apply and hash the seeded image exactly, then complete one
+unmeasured recovery warmup cycle so lazy transport and database resources are
+already present. Baseline and post-cycle counts are each accepted only after
+two identical idle samples separated by a three-second sample interval; active
+snapshot work resets that proof. Every post-cycle sample must return to the
+fixed warmed baseline within one absolute 60-second cleanup horizon.
 The summary records the worst recovery, transfer, and install duration for each
 role. Do not accept an artifact if its build SHA differs from the candidate,
 either role has fewer than 20 cycles, recovery exceeds 1,500 seconds, the

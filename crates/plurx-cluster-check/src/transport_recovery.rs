@@ -51,6 +51,7 @@ const RECOVERY_DEADLINE: Duration = Duration::from_secs(1_500);
 const RESOURCE_CLEANUP_HORIZON: Duration = Duration::from_secs(60);
 const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
 const RESOURCE_STABLE_SAMPLES: usize = 2;
+const RESOURCE_BASELINE_WARMUP_CYCLES: u32 = 1;
 const THREAD_MARGIN: u64 = 0;
 const SOCKET_MARGIN: u64 = 0;
 const OWNED_ASYNC_TASK_MARGIN: u64 = 0;
@@ -729,21 +730,22 @@ async fn exercise_role_campaign(
     if target_image != expected_image {
         bail!("target recovery image did not converge before resource baseline");
     }
-    let baseline_resources = wait_for_stable_idle_resources(
-        cluster,
-        &[1, 2, 3, TARGET_NODE],
-        None,
-        Instant::now() + RECOVERY_DEADLINE,
-    )
-    .await?;
+    let mut baseline_resources: Option<Vec<(u64, ProcessResourceCount)>> = None;
     let mut cycles = Vec::with_capacity(cycles_required as usize);
 
-    for cycle in 1..=cycles_required {
-        println!(
-            "cluster-check: {} recovery cycle {cycle}/{}",
-            role.label(),
-            cycles_required
-        );
+    for cycle in 0..cycles_required.saturating_add(RESOURCE_BASELINE_WARMUP_CYCLES) {
+        if cycle == 0 {
+            println!(
+                "cluster-check: {} resource-baseline warmup cycle",
+                role.label()
+            );
+        } else {
+            println!(
+                "cluster-check: {} recovery cycle {cycle}/{}",
+                role.label(),
+                cycles_required
+            );
+        }
         let prefix = format!("cluster.transport-recovery.{}.{cycle:02}.", role.label());
         let (mut writer, writer_config) =
             spawn_writer(executable, cluster_root, specs, &prefix).await?;
@@ -920,14 +922,26 @@ async fn exercise_role_campaign(
             recovery_started_at_unix_ms,
             recovery_finished_at_unix_ms,
         )?;
+        let resource_deadline = if baseline_resources.is_some() {
+            Instant::now() + RESOURCE_CLEANUP_HORIZON
+        } else {
+            Instant::now() + RECOVERY_DEADLINE
+        };
         let post_resources = wait_for_stable_idle_resources(
             cluster,
             &[1, 2, 3, TARGET_NODE],
-            Some(&baseline_resources),
-            Instant::now() + RESOURCE_CLEANUP_HORIZON,
+            baseline_resources.as_deref(),
+            resource_deadline,
         )
         .await?;
-        let node_resources = collect_node_resource_evidence(&baseline_resources, &post_resources)?;
+        if cycle == 0 {
+            baseline_resources = Some(post_resources);
+            continue;
+        }
+        let baseline_resources = baseline_resources
+            .as_deref()
+            .context("resource baseline warmup did not complete")?;
+        let node_resources = collect_node_resource_evidence(baseline_resources, &post_resources)?;
         cycles.push(RecoveryCycleEvidence {
             role,
             cycle,
@@ -1278,19 +1292,24 @@ async fn wait_for_stable_idle_resources(
     let mut previous = None;
     let mut stable_samples = 0_usize;
     loop {
-        let mut idle = true;
-        for &node_id in node_ids {
-            let status = request_status(cluster, node_id).await?;
-            if status
-                .transport
-                .observations
-                .iter()
-                .any(|observation| observation.operation_owns_work)
-            {
-                idle = false;
+        let remaining = remaining_before(deadline, "stable idle resource sampling")?;
+        let (idle, current) = tokio::time::timeout(remaining, async {
+            let mut idle = true;
+            for &node_id in node_ids {
+                let status = request_status(cluster, node_id).await?;
+                if status
+                    .transport
+                    .observations
+                    .iter()
+                    .any(|observation| observation.operation_owns_work)
+                {
+                    idle = false;
+                }
             }
-        }
-        let current = request_resources_for_nodes(cluster, node_ids).await?;
+            Ok::<_, anyhow::Error>((idle, request_resources_for_nodes(cluster, node_ids).await?))
+        })
+        .await
+        .context("stable idle resource sampling exceeded its absolute deadline")??;
         let within_limits = ceilings.is_none_or(|limits| resources_within_limits(limits, &current));
         if idle && within_limits && previous.as_ref() == Some(&current) {
             stable_samples = stable_samples.saturating_add(1);
@@ -2860,6 +2879,7 @@ mod tests {
 
     #[test]
     fn owned_async_task_growth_has_no_resource_slack() {
+        assert_eq!(RESOURCE_BASELINE_WARMUP_CYCLES, 1);
         let limits = vec![(
             1,
             ProcessResourceCount {
