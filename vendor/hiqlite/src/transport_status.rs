@@ -641,6 +641,14 @@ impl LocalSnapshotTransportStatus {
         deadline: Instant,
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
+            // A failed RPC only makes a retry eligible. Count it when
+            // OpenRaft actually issues the next chunk: the final failure in
+            // its bounded retry loop has no following call and must not
+            // manufacture an attempt that never happened.
+            if observation.phase == SnapshotTransportPhase::Retrying {
+                observation.attempt_count = observation.attempt_count.saturating_add(1);
+                observation.retry_count = observation.retry_count.saturating_add(1);
+            }
             let end_offset = offset.saturating_add(len as u64);
             let attempted_offset = observation
                 .attempted_offset
@@ -695,8 +703,6 @@ impl LocalSnapshotTransportStatus {
         deadline: Option<Instant>,
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
-            observation.attempt_count = observation.attempt_count.saturating_add(1);
-            observation.retry_count = observation.retry_count.saturating_add(1);
             observation.phase = SnapshotTransportPhase::Retrying;
             observation.deadline = deadline;
             observation.last_error_category = Some(category);
@@ -2112,6 +2118,7 @@ mod tests {
         );
         status.connecting_owned("sqlite", 2, connection_id, 2, 2);
         status.outbound_retry_owned(&failed, "snapshot_mismatch", Some(deadline));
+        status.outbound_chunk_owned(&failed, 0, 64, true, deadline);
         status.outbound_failed_owned(&failed, "snapshot_attempt_ended");
         tokio::time::advance(Duration::from_secs(9)).await;
 
@@ -2150,6 +2157,42 @@ mod tests {
         assert_eq!(reset.retry_count, 0);
         assert_eq!(reset.reconnect_count, 0);
         assert_eq!(reset.attempt_age_ms, Some(0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn outbound_retry_counts_only_when_openraft_issues_the_next_chunk() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let attempt = status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            7,
+            "snapshot",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+
+        status.outbound_chunk_owned(&attempt, 0, 64, false, deadline);
+        status.outbound_retry_owned(&attempt, "transport_unavailable", Some(deadline));
+        let eligible = &status.snapshot().observations[0];
+        assert_eq!(eligible.phase, SnapshotTransportPhase::Retrying);
+        assert_eq!(eligible.attempt_count, 1);
+        assert_eq!(eligible.retry_count, 0);
+
+        status.outbound_chunk_owned(&attempt, 0, 64, false, deadline);
+        let issued = &status.snapshot().observations[0];
+        assert_eq!(issued.attempt_count, 2);
+        assert_eq!(issued.retry_count, 1);
+
+        status.outbound_retry_owned(&attempt, "transport_unavailable", Some(deadline));
+        status.outbound_failed_owned(&attempt, "snapshot_attempt_ended");
+        let exhausted = &status.snapshot().observations[0];
+        assert_eq!(exhausted.phase, SnapshotTransportPhase::Failed);
+        assert_eq!(exhausted.attempt_count, 2);
+        assert_eq!(exhausted.retry_count, 1);
     }
 
     #[tokio::test(start_paused = true)]

@@ -662,25 +662,6 @@ async fn exercise_role_campaign(
             role.label(),
             TRANSPORT_RECOVERY_CYCLES_PER_ROLE
         );
-        cluster.kill(TARGET_NODE).await?;
-        delete_disposable_target(cluster_root, TARGET_NODE)?;
-        let leader = cluster.leader_among(&[1, 2, 3]).await?;
-        let source_status = trigger_and_wait_for_snapshot(cluster, leader, role, cycle).await?;
-        let snapshot_index = source_status
-            .snapshot_index
-            .context("source did not publish a snapshot index")?;
-        let purged_index = source_status
-            .purged_index
-            .context("source did not publish a purged index")?;
-        let source_snapshot = snapshot_file(cluster_root, leader)?;
-        if source_snapshot.bytes < minimum_sqlite_bytes {
-            bail!(
-                "{} cycle {cycle} snapshot was {} bytes, below {minimum_sqlite_bytes}",
-                role.label(),
-                source_snapshot.bytes
-            );
-        }
-
         let prefix = format!("cluster.transport-recovery.{}.{cycle:02}.", role.label());
         let (mut writer, writer_config) =
             spawn_writer(executable, cluster_root, specs, &prefix).await?;
@@ -704,6 +685,26 @@ async fn exercise_role_campaign(
             .checked_add(RECOVERY_DEADLINE)
             .context("recovery deadline overflow")?;
         let recovery = async {
+            cluster.kill(TARGET_NODE).await?;
+            delete_disposable_target(cluster_root, TARGET_NODE)?;
+            let leader = cluster.leader_among(&[1, 2, 3]).await?;
+            let source_status =
+                trigger_and_wait_for_snapshot(cluster, leader, role, cycle, recovery_deadline)
+                    .await?;
+            let snapshot_index = source_status
+                .snapshot_index
+                .context("source did not publish a snapshot index")?;
+            let purged_index = source_status
+                .purged_index
+                .context("source did not publish a purged index")?;
+            let source_snapshot = snapshot_file(cluster_root, leader)?;
+            if source_snapshot.bytes < minimum_sqlite_bytes {
+                bail!(
+                    "{} cycle {cycle} snapshot was {} bytes, below {minimum_sqlite_bytes}",
+                    role.label(),
+                    source_snapshot.bytes
+                );
+            }
             let recovery_status = async {
                 spawn_recovery_node(
                     executable,
@@ -748,9 +749,25 @@ async fn exercise_role_campaign(
             );
             let ((target_status, source_status), installed_snapshot) =
                 tokio::try_join!(recovery_status, installed_snapshot)?;
-            Ok::<_, anyhow::Error>((target_status, source_status, installed_snapshot))
+            Ok::<_, anyhow::Error>((
+                leader,
+                snapshot_index,
+                purged_index,
+                source_snapshot,
+                target_status,
+                source_status,
+                installed_snapshot,
+            ))
         };
-        let (target_status, source_status, installed_snapshot) = supervise_recovery_writer(
+        let (
+            leader,
+            snapshot_index,
+            purged_index,
+            source_snapshot,
+            target_status,
+            source_status,
+            installed_snapshot,
+        ) = supervise_recovery_writer(
             &mut writer,
             &writer_config,
             ready_acknowledged_at_unix_ms,
@@ -852,10 +869,12 @@ async fn trigger_and_wait_for_snapshot(
     leader: u64,
     role: RecoveryRole,
     cycle: u32,
+    deadline: Instant,
 ) -> Result<RecoveryRuntimeStatus> {
     let previous = request_status(cluster, leader).await?.snapshot_index;
     let mut observed = None;
     for ordinal in 0..TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST.saturating_mul(3) {
+        remaining_before(deadline, "snapshot trigger")?;
         cluster
             .request(
                 leader,
@@ -882,7 +901,6 @@ async fn trigger_and_wait_for_snapshot(
     let snapshot = status
         .snapshot_index
         .context("new snapshot index disappeared")?;
-    let deadline = Instant::now() + RECOVERY_DEADLINE;
     while status.purged_index.is_none_or(|purged| purged < snapshot) {
         if Instant::now() >= deadline {
             bail!("snapshot {snapshot} was not purged before recovery deadline");
@@ -2042,6 +2060,12 @@ pub fn validate_transport_recovery_artifact(
     Ok(())
 }
 
+pub fn validate_transport_recovery_bytes(bytes: &[u8]) -> Result<()> {
+    let artifact: ClusterTransportRecoveryArtifact =
+        serde_json::from_slice(bytes).context("decode transport-recovery evidence")?;
+    validate_transport_recovery_artifact(&artifact)
+}
+
 fn validate_role_campaign(
     campaign: &RecoveryRoleCampaign,
     role: RecoveryRole,
@@ -2370,6 +2394,19 @@ mod tests {
     #[test]
     fn complete_twenty_plus_twenty_artifact_is_accepted() {
         validate_transport_recovery_artifact(&artifact()).expect("valid recovery artifact");
+    }
+
+    #[test]
+    fn retained_bytes_receive_the_same_closed_schema_and_semantic_validation() {
+        let bytes = serde_json::to_vec(&artifact()).expect("serialize complete evidence");
+        validate_transport_recovery_bytes(&bytes).expect("validate complete retained bytes");
+
+        let partial = serde_json::to_vec(&serde_json::json!({
+            "build_sha": "d".repeat(40),
+            "cycles": []
+        }))
+        .expect("serialize partial evidence");
+        assert!(validate_transport_recovery_bytes(&partial).is_err());
     }
 
     #[test]

@@ -3327,6 +3327,8 @@ mod tests {
         );
         let observation = transport.snapshot().observations.remove(0);
         assert_eq!(observation.phase, crate::SnapshotTransportPhase::Retrying);
+        assert_eq!(observation.attempt_count, 1);
+        assert_eq!(observation.retry_count, 0);
         assert_eq!(observation.active_deadline_remaining_ms, Some(60_000));
         assert_eq!(
             observation.last_error_category.as_deref(),
