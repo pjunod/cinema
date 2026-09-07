@@ -555,11 +555,16 @@ control:
   exist. No setting, no API field, no UI, and a whole `plurx-pgs` crate behind
   it.
 - `PLURX_DV_CONVERT` (`main.rs`) — default **on**, kill switch for the
-  Profile 7 → 8.1 conversion. Reported in `system_info`, not settable.
+  Profile 7 → 8.1 conversion. It surfaces as `RenderCaps.dolby_vision_convert`
+  on `/decision`, not in `system_info`, and is settable nowhere.
 - `OFFLINE_ENABLED` — master kill switch for offline packages; reaches the
   settings API and renders nowhere.
-- `SW_POOL_THREADS`, `MAX_HW_SESSIONS`, `LIBRARY_DV_DISK_CONVERT` — settings
-  keys with no DTO field at all.
+- `SW_POOL_THREADS` — a settings key with no DTO field at all.
+  `MAX_HW_SESSIONS` has none either, though it is at least visible read-only as
+  `hw_slots_max`. **`LIBRARY_DV_DISK_CONVERT` is not one of these** — it has a
+  dedicated API in `http/dv_disk.rs` and a per-library select in the web UI
+  (`dvModeSelect`). It was listed here in a first draft and is recorded as a
+  correction so the next reader does not build a control that already ships.
 
 `PLURX_HWACCEL` is the pattern the rest should follow: it seeds a stored
 setting the admin UI then displays, rather than being an invisible decision

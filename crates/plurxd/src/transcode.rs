@@ -370,7 +370,6 @@ impl LiveRecoveryReason {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) const LABELS: [&'static str; 5] = [
         "requested_live",
         "vod_index_pending",
@@ -378,6 +377,10 @@ impl LiveRecoveryReason {
         "vod_subtitle_burn_unavailable",
         "vod_source_unsupported",
     ];
+
+    fn label(self) -> &'static str {
+        Self::LABELS[self.index()]
+    }
 
     fn from_refusal(code: &str) -> Option<Self> {
         match code {
@@ -13552,18 +13555,20 @@ impl TranscodeManager {
         // prerequisite refusal may use the retained live engine rather than
         // turning background preparation into a catalogue-wide outage.
         let info = if req.presentation == Presentation::Live {
+            let started = self
+                .start_live_recovery_session(
+                    req,
+                    user_name,
+                    supersession_user,
+                    replacement_deadline,
+                    takeover,
+                )
+                .await?;
             // Not a fallback decision: the request named the live presentation
-            // before it got here. Counted separately for exactly that reason —
-            // no setting was consulted on this path.
+            // before it got here, and no setting was consulted. Counted after
+            // the start succeeded, for the same reason as the arm below.
             record_live_recovery(LiveRecoveryReason::RequestedLive);
-            self.start_live_recovery_session(
-                req,
-                user_name,
-                supersession_user,
-                replacement_deadline,
-                takeover,
-            )
-            .await?
+            started
         } else {
             let vod = self
                 .try_vod_session(
@@ -13578,35 +13583,34 @@ impl TranscodeManager {
             match vod {
                 Ok(info) => info,
                 Err(error) => {
-                    let recovery_code = vod_refusal(&error)
-                        .map(|(code, _)| code.to_owned())
-                        .filter(|code| {
-                            matches!(
-                                code.as_str(),
-                                "vod_index_pending"
-                                    | "vod_transcode_unavailable"
-                                    | "vod_subtitle_burn_unavailable"
-                                    | "vod_source_unsupported"
-                            )
-                        });
-                    if let Some(code) = recovery_code {
+                    // One list, not two. `from_refusal` is what decides both
+                    // whether a code may fall back and which reason it is
+                    // counted under, so adding a fifth code cannot produce
+                    // sessions the engine serves and nothing attributes.
+                    let recovery = vod_refusal(&error)
+                        .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
+                    if let Some(reason) = recovery {
                         if self.live_hls_recovery_enabled().await? {
-                            if let Some(reason) = LiveRecoveryReason::from_refusal(&code) {
-                                record_live_recovery(reason);
-                            }
                             tracing::warn!(
                                 file_id = req.file_id,
-                                refusal = code,
+                                refusal = reason.label(),
                                 "VOD prerequisite unavailable; using temporary live-HLS recovery"
                             );
-                            self.start_live_recovery_session(
-                                req,
-                                user_name,
-                                supersession_user,
-                                replacement_deadline,
-                                takeover,
-                            )
-                            .await?
+                            let started = self
+                                .start_live_recovery_session(
+                                    req,
+                                    user_name,
+                                    supersession_user,
+                                    replacement_deadline,
+                                    takeover,
+                                )
+                                .await?;
+                            // Counted after the start succeeded. `?` above is
+                            // a refusal — capacity, spawn, deadline — and a
+                            // metric whose HELP says "sessions served" must
+                            // not include streams nobody ever received.
+                            record_live_recovery(reason);
+                            started
                         } else {
                             return Err(error);
                         }

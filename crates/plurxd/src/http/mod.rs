@@ -4286,6 +4286,10 @@ mod tests {
             "a node with no roster, no fleet receipt and no candidate worker read nothing that \
              could be met, yet reported: {green:?}"
         );
+        // Order-independent because no row reachable here has a `met` branch a
+        // sibling test could reach: the retained engine's two rows refuse
+        // `met` by construction, and everything else is a roster or artifact
+        // this process does not have.
 
         // A CI artifact is not reachable from a running daemon, and a roster
         // this node does not have cannot be judged. Each of these says so.
@@ -4313,11 +4317,17 @@ mod tests {
         // vacuously true here and must not render as satisfied — that is the
         // same green-tick-meaning-not-checked this route exists to remove,
         // and it shipped once already in `cache_revocation_capability`.
+        // The retained engine's counters are process-global and monotone, so
+        // a sibling test that serves one live session changes what these rows
+        // say. Assert the property that holds whatever ran first: neither row
+        // may ever answer `met`, because one is a claim about coverage no
+        // counter can prove and the other is about a bypass that is
+        // structural. That is also what the rows are for.
         for id in ["vod_coverage_replaces_it", "no_session_bypasses_the_switch"] {
-            assert_eq!(
-                seen.get(id).map(String::as_str),
-                Some("unobservable"),
-                "a row with no sessions behind it must not answer: {body}"
+            let status = seen.get(id).map(String::as_str);
+            assert!(
+                matches!(status, Some("unobservable" | "unmet")),
+                "{id} answered {status:?}; neither of these can be earned: {body}"
             );
         }
     }
@@ -8440,9 +8450,11 @@ mod tests {
     }
 
     /// ADAPTIVE-QUALITY Phase 1 still advertises the source-filtered ladder,
-    /// but M4 must not use the removed live engine to fulfill a rung. Until D6
-    /// unlocks transcode-rung VOD, both a stray rung and the source-height
-    /// promise fail with the same typed, honest refusal.
+    /// but M4 must not use the retained live engine to fulfill a rung. Until
+    /// D6 unlocks transcode-rung VOD, both a stray rung and the source-height
+    /// promise fail with the same typed, honest refusal — with the fallback
+    /// switched off, which this test does explicitly. The engine is retained,
+    /// not removed, and the shipped default answers these requests with it.
     #[tokio::test]
     async fn the_ladder_is_advertised_and_stray_heights_snap() {
         crate::transcode::require_ffmpeg();
@@ -10792,29 +10804,75 @@ mod tests {
         );
         assert_eq!(body["vod"], false, "{body}");
 
+        // Monotone, not exact. These are process-global counters shared with
+        // every other test in this binary, and three `transcode::tests`
+        // creates increment index 0 on their own; an exact delta here would
+        // be a flake whose message points at this route rather than at the
+        // fixture that moved underneath it.
         let after = crate::transcode::live_recovery_snapshot();
-        assert_eq!(
-            after[2],
-            before[2] + 1,
+        assert!(
+            after[2] > before[2],
             "a session the retained engine served must be attributable to the reason it was \
              chosen, or an operator watching this node encode has nothing to read"
         );
-        assert_eq!(
-            after[0], before[0],
-            "this one went through the fallback setting; the switch-bypassing counter is for \
-             requests that arrive already naming the live presentation"
-        );
 
         // And it is readable from outside the process, which is the half a
-        // log line never had.
+        // log line never had — including the exposition's own headers, since
+        // a body with samples and no TYPE line is not a scrape.
         let exposition = crate::transcode::live_recovery_prometheus();
         assert!(
-            exposition.contains(&format!(
-                "plurx_live_hls_recovery_sessions_total{{reason=\"vod_transcode_unavailable\"}} {}",
-                after[2]
-            )),
-            "the count an operator can scrape must be the count the route reads: {exposition}"
+            exposition.starts_with(
+                "# HELP plurx_live_hls_recovery_sessions_total Sessions served by the retained \
+                 live-HLS engine, by why it was chosen.\n# TYPE \
+                 plurx_live_hls_recovery_sessions_total counter\n"
+            ),
+            "{exposition}"
         );
+        for label in [
+            "requested_live",
+            "vod_index_pending",
+            "vod_transcode_unavailable",
+            "vod_subtitle_burn_unavailable",
+            "vod_source_unsupported",
+        ] {
+            assert!(
+                exposition.contains(&format!(
+                    "plurx_live_hls_recovery_sessions_total{{reason=\"{label}\"}} "
+                )),
+                "every reason keeps a sample so a zero is visible as a zero: {exposition}"
+            );
+        }
+
+        // The exposition has to reach `/metrics`, which is where an operator
+        // reads it. Nothing else asserted that it is wired in.
+        let scrape = app
+            .clone()
+            .oneshot(get("/metrics", Some(&admin)))
+            .await
+            .expect("metrics");
+        let scrape = String::from_utf8(
+            axum::body::to_bytes(scrape.into_body(), usize::MAX)
+                .await
+                .expect("metrics body")
+                .to_vec(),
+        )
+        .expect("utf8");
+        assert!(
+            scrape.contains(
+                "plurx_live_hls_recovery_sessions_total{reason=\"vod_transcode_unavailable\"}"
+            ),
+            "the family must appear in the scrape, not only in the function that builds it"
+        );
+
+        // Do not leave an encoder running: this binary is CPU-sensitive and a
+        // stray ffmpeg has tipped timing-bound tests elsewhere.
+        state
+            .transcode
+            .stop_session(
+                body["session_id"].as_str().expect("session id"),
+                "test cleanup",
+            )
+            .await;
     }
 
     /// All four routes at once, each under its own name, from the three places
@@ -10881,8 +10939,12 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{copy}");
 
-        // The old fourth method is not a fallback. A transcode request is an
-        // explicit typed refusal until transcode-rung VOD is unlocked.
+        // With the fallback pinned off above, a transcode request is an
+        // explicit typed refusal. Under the shipped default it is not — the
+        // retained engine answers it, which is what
+        // `the_shipped_default_answers_a_vod_refusal_with_the_retained_engine`
+        // covers. This assertion is about the refusal, not about what a fleet
+        // node does.
         let (st, tx) = call(
             &app,
             post(

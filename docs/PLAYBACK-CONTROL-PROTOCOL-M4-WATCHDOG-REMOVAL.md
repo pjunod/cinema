@@ -64,7 +64,8 @@ This cut changes no client wire and continues to return `action:none`. The
 compatible server must deploy before separate passive Apple and Android
 reporter PRs; active mobile action consumption follows later. The one broad
 unit run is consumed and all five failures pass by exact name. Compile-only
-`cargo check --locked -p plurxd --features live-hls-recovery --tests`, the
+`cargo check --locked -p plurxd --tests` (recorded at the time as
+`--features live-hls-recovery`, before that default feature was removed), the
 complete static gates, the ownership recount, and unrestricted cluster
 validation succeed. The first adversarial pass found a P2 `Unsupported`/EPIPE
 ordering race; the repair retains `ChildStdout` through typed actor
