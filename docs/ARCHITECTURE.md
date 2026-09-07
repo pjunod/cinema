@@ -356,11 +356,15 @@ doesn't triple-hit the providers.
 
 ## 5. API design — one service, two façades
 
-**Native API** (`/api/v1`) — JSON over HTTP, OpenAPI-specified from day one
-(clients across five platforms need generated types), WebSocket for push
-(now-playing, scan progress, cluster events). Auth: opaque bearer tokens from
-local login; optional OIDC (Google/Apple) code flow mapping to local accounts
-(REQ-USER-2). Argon2id at rest, SHA-256 token lookup.
+**Native API** (`/api/v1`) — JSON over HTTP, enumerated route by route in
+[API.md](API.md). Auth: opaque bearer tokens from local login, plus scoped
+`plx_` keys for machine callers; Argon2id at rest, SHA-256 token lookup.
+Clients poll — there is no push channel. Two things this design called for are
+not built: an OpenAPI description (the routes were meant to generate one and
+do not, so API.md and the `tests/contracts/native-api.json` fixture are the
+specification the five client platforms work from), and the optional OIDC
+(Google/Apple) code flow mapping to local accounts that REQ-USER-2 asks
+for.
 
 Cluster activity uses one separate, non-public application RPC:
 `/_internal/v1/activity-snapshot`. Membership retains explicitly advertised
@@ -377,11 +381,13 @@ fan-out.
 **Plex-compat façade** (Tier 1, REQ-PLEX-1) — a stateless translation layer over
 the *same* services, plus a GDM responder (UDP 239.0.0.250:32414, LAN-only).
 Implements the endpoint set the Kodi-family clients actually use: `/identity`,
-`/library/sections...`, `/library/metadata/...`, `/photo/:/transcode`, part
-serving, `/video/:/transcode/universal/decision|start.m3u8`, `/:/timeline`,
-`/:/scrobble`, `/:/progress`, `/hubs/search`, `/playlists`. XML `MediaContainer`
-by default, JSON on `Accept: application/json`; `X-Plex-Token` values are plurx
-tokens. plex.tv is never contacted (REQ-PLEX-3); plex.tv *emulation* for
+`/library`, `/library/sections`, `/library/sections/{id}/all`,
+`/library/metadata/...`, `/photo/:/transcode`, part serving, `/:/timeline`,
+`/:/scrobble`, `/:/unscrobble`, `/search` and `/hubs/search` — and nothing
+else, so the transcode-decision, `/:/progress` and `/playlists` endpoints an
+older draft of this section listed are absent. Responses are XML
+`MediaContainer`; content negotiation is not implemented. `X-Plex-Token`
+values are plurx tokens. plex.tv is never contacted (REQ-PLEX-3); plex.tv *emulation* for
 Infuse/official apps is deferred Tier 2 (see [CLIENTS.md](CLIENTS.md) §3).
 
 It's a façade over shared services rather than a fork so that a bug fixed in the

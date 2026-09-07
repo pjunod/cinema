@@ -11,8 +11,10 @@ Hybrid approach: one shared TypeScript core wherever a platform runs web tech; n
 | 3 | **Kotlin / Media3** | Android TV & Google TV (= Sony TVs, Nvidia Shield, Fire TV *Android* devices), Android phones/tablets | ExoPlayer/Media3 — true MKV direct play, HEVC/AV1/DV per device |
 | 4 | **BrightScript / SceneGraph** | Roku | Roku Video node — strict envelope, leans hardest on server remux/transcode |
 
-Shared across all: the server's OpenAPI-generated types, the device-profile
-definitions, a common design language, and the
+Shared across all: the native API as [API.md](API.md) specifies it and
+`tests/contracts/native-api.json` pins it (there is no OpenAPI document and
+no generated types — see API.md §23), the device-profile definitions, a
+common design language, and the
 [player input contract](clients/PLAYER-INPUT-CONTRACT.md). Each first-party player maps
 platform events through one adapter into the same state/input routing table;
 its playback-info panel follows the companion shared field list.

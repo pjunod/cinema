@@ -39,6 +39,9 @@ for running it day to day and reading every status and log line it shows you, wi
 [docs/CHEATSHEET.md](docs/CHEATSHEET.md) as the copy-paste quickstart beside it.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the diagrams and the founding
 decisions (why one binary clusters without external infra), and
+[docs/API.md](docs/API.md) is the API reference: every endpoint plurxd serves,
+which credential it takes, and what comes back — written from the routers
+because there is no OpenAPI document.
 [docs/VALIDATION.md](docs/VALIDATION.md) explains the functionality-point
 catalog — how a changed path selects behavior contracts, which checks run at
 commit, CI, and full depth, and how to add a regression without losing it.
