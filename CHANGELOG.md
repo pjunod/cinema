@@ -97,6 +97,29 @@ bump may break compatibility and a **patch** bump never does.
   `web-check` target as well as the validation runner's `web-membership`
   check, so a web change reaches it without knowing its name.
 
+### Added
+
+- **A janitor that bounds the one CI cache no job can reach.**
+  `deploy/runner-janitor/` installs a script, a systemd unit and an hourly
+  timer on a runner host with one command. Each pass reads every
+  `forgejo-runner*.service`'s own `config.yml` for its `cache.dir` and, when
+  that directory is over a 20 G budget or its filesystem is under the 20 %
+  reserve, stops the runner, deletes the directory whole, and starts the runner
+  again — whole, because `bolt.db` is the only thing that knows which blob
+  belongs to which key, and removing a blob without its row promises the next
+  job an entry it cannot download. Docker is pruned only if the disk is still
+  short, and only of stopped containers, images unused for two weeks and build
+  cache over a week old, because the named `plurx-<runner>` builders are kept
+  warm deliberately. It never resets a runner that is working (idle is "the
+  unit's cgroup holds nothing but the daemon", which needs no API token), never
+  leaves a runner stopped (the restart is on a `RETURN` trap), and refuses any
+  `cache.dir` that is not a runner root ending in `cache` and holding
+  `bolt.db`. Every pass writes what it decided to the journal and to
+  `/var/lib/plurx-ci-janitor/last-run.json`, with `over_budget` and `reset`
+  counted separately so a runner that is never idle enough to reset is visible
+  instead of silently skipped. All three invariants are mutation-proven in
+  `tests/operations/test_ci_janitor.py`.
+
 ### Changed
 
 - **`docs/` has a landing page, and 144 of its 161 root files now live in a

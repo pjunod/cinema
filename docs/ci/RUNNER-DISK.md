@@ -152,11 +152,66 @@ no data in that directory that is not reproducible.
 ## The janitor is the permanent half
 
 Everything above is enforced by jobs, and a job only enforces it on the runner
-it happened to land on. The cache server, the Docker images, and a runner that
-has stopped taking jobs need something that runs whether or not CI does — a
-timer on each runner host, in the fleet's own configuration, not here. It
-holds the same numbers this document names: 20 G cache-server budget, 20 %
-floor, graceful stop before any delete.
+it happened to land on. The cache server, the Docker image store, and a runner
+that has stopped taking jobs need something that runs whether or not CI does.
+That is [`deploy/runner-janitor/`](../../deploy/runner-janitor/): a script, a
+systemd unit, an hourly timer, and a one-command installer.
+
+```bash
+sudo deploy/runner-janitor/install   # copies, enables the timer, ends in --dry-run
+```
+
+Run it on every runner host, and inside every runner guest — an Incus guest is
+reachable from any cluster member as
+`incus exec --project github-runners <guest> -- …`. It is idempotent; running
+it again upgrades the script in place.
+
+**What a pass does.** For every `forgejo-runner*.service` on the host it reads
+that runner's own `config.yml` for its `cache.dir`, and if the directory is
+over the 20 G budget *or* its filesystem is under the 20 % reserve, it resets
+it: stop the runner, delete the directory whole, start the runner. In steady
+state it decides `within budget` and deletes nothing. Then, only if the Docker
+filesystem is still under its reserve, it prunes stopped containers, images
+unused for two weeks, and build cache older than a week — not all build cache,
+because the named `plurx-<runner>` builders are kept warm on purpose.
+
+**Why the whole directory.** `bolt.db` is the only thing that knows which blob
+belongs to which key, and it is not a format a shell script should edit.
+Removing index and blobs together is always consistent; removing one without
+the other promises the next job an entry it cannot download. The cost is a cold
+cache for the next few jobs, and nothing in that directory is not reproducible.
+
+**Three invariants, each with a test.** It never resets a runner that is
+working — idleness is "the unit's cgroup holds nothing but the daemon", a local
+answer that needs no API token. It never leaves a runner stopped: the restart
+is on a `RETURN` trap, so a failed stop or a failed delete still ends with the
+runner up. And it refuses any `cache.dir` that is not a runner root ending in
+`cache` and holding `bolt.db` — the delete is a whole directory, so the path
+check *is* the safety argument.
+
+**What it reports.** Every pass writes a line per runner to the journal and a
+record to `/var/lib/plurx-ci-janitor/last-run.json`:
+
+```json
+{"finished":"2026-09-07T22:00:04Z","host":"nynuc","instances":4,
+ "over_budget":1,"reset":1,"reclaimed_gb":16,"docker_pruned":false,
+ "budget_gb":20}
+```
+
+`over_budget` and `reset` are deliberately separate: a runner that is over
+budget every hour and never idle enough to reset is a real condition, and it
+should be visible rather than silently skipped forever.
+
+```bash
+systemctl list-timers plurx-ci-janitor.timer     # when it next runs
+journalctl -u plurx-ci-janitor -n 50             # what the last passes decided
+cat /var/lib/plurx-ci-janitor/last-run.json      # the last pass, in one line
+plurx-ci-janitor --dry-run                       # decide out loud, delete nothing
+```
+
+The installer also drops `TimeoutStopSec=30min` onto every runner unit. Without
+it systemd kills a running job ninety seconds into a graceful stop, and the
+janitor becomes the thing that breaks CI.
 
 ## What this deliberately does not do
 
@@ -178,4 +233,8 @@ floor, graceful stop before any delete.
 `tests/operations/test_ci_cache.py` — that the runner-local path is what a
 self-hosted runner takes, that no rollout input can move it, that the floor
 stays satisfiable on a 78 GiB volume, and that the audit reports and never
-deletes. `tests/operations/test_contracts.py` pins the same shape per lane.
+deletes. `tests/operations/test_ci_janitor.py` — that the janitor leaves a
+cache inside its budget completely alone, resets an over-budget one whole,
+never touches a working runner, never leaves a runner stopped, and refuses a
+`cache.dir` that is not one. `tests/operations/test_contracts.py` pins the same
+shape per lane.
