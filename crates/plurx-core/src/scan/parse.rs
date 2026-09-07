@@ -313,7 +313,7 @@ pub fn parse_movie(path: &Path) -> ParsedMovie {
 pub struct ParsedHomeMedia {
     pub title: String,
     /// `YYYY-MM-DD` lifted off the front of the filename. Priority 3 in the
-    /// recorded-date ladder (docs/HOMEVIDEO-PLAN.md §4.4).
+    /// recorded-date ladder (docs/features/HOMEVIDEO-PLAN.md §4.4).
     pub date: Option<String>,
 }
 

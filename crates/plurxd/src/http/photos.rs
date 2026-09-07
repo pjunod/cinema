@@ -1,7 +1,7 @@
 //! Serving stills from `home` libraries.
 //!
 //! Photos are static bytes: no decision engine, no transcode, no session.
-//! They must never touch the playback pipeline (docs/HOMEVIDEO-PLAN.md §8.3).
+//! They must never touch the playback pipeline (docs/features/HOMEVIDEO-PLAN.md §8.3).
 //!
 //! Browsers honor EXIF orientation on `<img>` natively
 //! (`image-orientation: from-image` is the default), so the original is served

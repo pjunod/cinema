@@ -52,7 +52,7 @@
 //! The **configuration record** the output needs is written separately, by
 //! [`crate::fmp4::set_dolby_vision_record`] out of the source file's stored
 //! facts. ffmpeg does not derive that record from the RPUs — it copies the one
-//! its input container had (measured, `docs/PLAYBACK-CAPS-V2-M0.md` §8) — so a
+//! its input container had (measured, `docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8) — so a
 //! converted stream comes out of the muxer carrying the *source's* Profile 7
 //! `dvcC`, describing a dual-layer stream that is no longer there. Replacing
 //! it is not optional and not a nicety: a decoder reading it expects an

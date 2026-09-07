@@ -1,7 +1,7 @@
 # Playback testing — turn playback failures into a reproducible matrix
 
 Companion to [PLAYBACK.md](PLAYBACK.md) (how a file becomes a stream) and
-[STUTTER-4K.md](STUTTER-4K.md) (the measured 4K investigation) — this is how
+[STUTTER-4K.md](streaming/STUTTER-4K.md) (the measured 4K investigation) — this is how
 you exercise those paths automatically and read the result.
 
 The playback lab generates a deterministic media corpus, boots a new isolated
@@ -215,7 +215,7 @@ and Media3 tolerate the planned EXTINF timing; such a request returns the typed
 The `stall-recovery` suite is fault injection, not a correctness matrix. It
 holds a link at one rate until the session has proven itself, drops it to a
 lower rate at a recorded moment, and then records what the session did about
-it. It is the harness [PERF2-PLAN.md §7](PERF2-PLAN.md) requires *before* the
+it. It is the harness [PERF2-PLAN.md §7](performance/PERF2-PLAN.md) requires *before* the
 N4 Auto controller exists, so that the controller's acceptance can be measured
 rather than asserted.
 
@@ -560,7 +560,7 @@ result schema when device adapters land; keep the browser-reported capability
 block as a device-reported capability block.
 
 Container Chromium without proprietary decoders remains useful as a negative
-control, not as 4K proof. [STUTTER-4K.md](STUTTER-4K.md#6-the-harnesses) records
+control, not as 4K proof. [STUTTER-4K.md](streaming/STUTTER-4K.md#6-the-harnesses) records
 the scar: that browser cannot validate H.264, HEVC, or AAC.
 
 ## Native Apple exits — prove teardown on the device that owns the chrome

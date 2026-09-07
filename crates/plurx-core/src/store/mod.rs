@@ -1703,7 +1703,7 @@ pub trait MediaStore: Send + Sync + 'static {
         edit: &ItemEdit,
     ) -> Result<Option<Item>, StoreError>;
     /// Record that an NFO sidecar has been consumed for this item. Seeding
-    /// happens at most once, ever (docs/HOMEVIDEO-PLAN.md §4.3) — after this
+    /// happens at most once, ever (docs/features/HOMEVIDEO-PLAN.md §4.3) — after this
     /// the sidecar is dead to plurx, so a user's edits can never be clobbered.
     async fn set_nfo_seeded(&self, item_id: i64) -> Result<(), StoreError>;
 

@@ -80,7 +80,7 @@ default store; SQL + replicated KV cache + distributed locks + listen/notify in
 `txn` API maps directly onto the existing rusqlite row mappers, it compiles
 clean in the workspace, and a live node ran a migration + raft insert + typed
 read-back; its own suite proves 3-node replication and self-heal. See
-[PHASE3-SPIKE.md](PHASE3-SPIKE.md). **Fallback (not needed):** hand-rolled
+[PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md). **Fallback (not needed):** hand-rolled
 [openraft 0.9.x](https://github.com/databendlabs/openraft) with a redb raft log
 and a rusqlite state machine. Nothing before Phase 4 depends on the choice
 because all cluster access goes through the one internal `Store` trait.
@@ -137,7 +137,7 @@ consensus and melt it.
 
 ### 2.3 The failover mechanic — any node can serve segment N
 
-The Phase 3 spike ([PHASE3-SPIKE.md](PHASE3-SPIKE.md)) measured the
+The Phase 3 spike ([PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md)) measured the
 deterministic-segment idea against constant-frame-rate, **sparse-keyframe**, and
 VFR sources. The load-bearing property — *any node can produce a valid segment
 N* — holds even in the sparse-keyframe worst case (accurate input-seek), and

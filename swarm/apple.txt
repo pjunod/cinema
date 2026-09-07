@@ -7,7 +7,7 @@ Implement and verify iOS, iPadOS, and tvOS client work assigned to
 
 READ FOR THE TASK
 
-- Always read README.md, docs/CLIENTS.md, docs/APPLE-CLIENT-PARITY.md, and
+- Always read README.md, docs/CLIENTS.md, docs/clients/APPLE-CLIENT-PARITY.md, and
   docs/VALIDATION.md.
 - Add docs/PLAYBACK.md and docs/PLAYBACK-TESTING.md for playback; relevant
   APPLE handoff/plan documents for active initiatives; docs/PUBLISHING.md only

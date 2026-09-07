@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STATUS_PAGES = (
     "STATUS.md",
     "docs/STATUS.html",
-    "docs/PLAYBACK-CONTROL-STATUS.md",
+    "docs/playback-control/PLAYBACK-CONTROL-STATUS.md",
 )
 
 # Phrases that assert a pull request has not landed. Kept narrow on purpose,

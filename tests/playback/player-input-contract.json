@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "title": "Player input contract — one routing table every client's reducer must reproduce",
-  "documented_in": "docs/PLAYER-INPUT-CONTRACT.md",
+  "documented_in": "docs/clients/PLAYER-INPUT-CONTRACT.md",
   "ruled": "2026-09-02",
   "surfaces": {
     "ten-foot": "Directional input moves focus: Siri Remote (tvOS), D-pad (Android TV / Google TV), keyboard arrows on a TV browser, and keyboard arrows on the web when the timeline has focus.",

@@ -1,7 +1,7 @@
 # Apple build history through build 78
 
 Per-build narrative that accumulated in `clients/apple/README.md` and
-`docs/APPLE-CLIENT-PARITY.md` before issue #509 moved it here. Every Apple
+`docs/clients/APPLE-CLIENT-PARITY.md` before issue #509 moved it here. Every Apple
 change used to prepend a sentence to both blockquotes at the same offset, so any
 two concurrent Apple branches conflicted on both files, and the conflict
 returned every time `main` moved.
@@ -63,7 +63,7 @@ the not-ready explanation to five seconds, and rejects stale availability from
 a detached PiP controller instead of sending a start command through a nil
 optional. Build 58 labels a recognized `pgs-v1` subtitle as an Overlay instead
 of the legacy Burn-in fallback, so the physical HDR/Dolby Vision run in
-[APPLE-PGS-OVERLAY-ACCEPTANCE.md](../../docs/APPLE-PGS-OVERLAY-ACCEPTANCE.md)
+[APPLE-PGS-OVERLAY-ACCEPTANCE.md](../../docs/clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md)
 can distinguish the path it exercised. Build 57 makes the tvOS progress bar an
 ordinary focus stop until Select engages scrubbing, so left/right can cross
 the transport row without seeking. Build 56 restores bidirectional tvOS focus
@@ -83,7 +83,7 @@ separate cold-start and resume reasons; passing physical-device evidence
 remains pending. Build 29 added app-managed offline viewing on iPhone and
 iPad; the action remains hidden on tvOS.
 
-## From `docs/APPLE-CLIENT-PARITY.md`
+## From `docs/clients/APPLE-CLIENT-PARITY.md`
 
 Build 78 keeps the ten-foot tvOS dashboard as Standard and adds the shared
 Mini and full Debug playback-info modes on iOS and tvOS. Build 77 carries the
@@ -128,7 +128,7 @@ controller and the in- app-only PGS overlay. The not-ready explanation clears
 after five seconds so it cannot pin the player banner or iOS system chrome.
 Build 58 distinguishes a recognized `pgs-v1` Overlay from the Burn-in fallback
 in the subtitle menu and ships the decidable physical-iPad run in
-[APPLE-PGS-OVERLAY-ACCEPTANCE.md](APPLE-PGS-OVERLAY-ACCEPTANCE.md). Build 57
+[APPLE-PGS-OVERLAY-ACCEPTANCE.md](../clients/APPLE-PGS-OVERLAY-ACCEPTANCE.md). Build 57
 requires Select to engage tvOS progress scrubbing, leaving left/right free to
 cross the transport row without a seek. Build 56 restores bidirectional tvOS
 focus between show/season header actions and their non-empty child shelves.

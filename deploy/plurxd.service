@@ -14,7 +14,7 @@ Environment=PLURX_BIND=0.0.0.0:32400
 # Point at a specific ffmpeg build if desired:
 # Environment=PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg
 # HLS master experiments for the copied-Dolby-Vision investigation
-# (docs/APPLE-NATIVE-SUBTITLES-PLAN.md §5.4). Enable ONE per deploy, watch a
+# (docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md §5.4). Enable ONE per deploy, watch a
 # real Apple TV, then decide — every master regression so far passed the unit
 # tests and failed on the device, so the device is the only oracle.
 # Environment=PLURX_HLS_CLOSED_CAPTIONS_NONE=1

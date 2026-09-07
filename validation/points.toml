@@ -25,7 +25,7 @@ audit_paths = [
   "vendor/**",
 ]
 audit_exclude = []
-allow_unmatched_globs = ["docs/METADATA*.md"]
+allow_unmatched_globs = ["docs/features/METADATA*.md"]
 
 [[checks]]
 id = "catalog-contract"
@@ -610,7 +610,7 @@ paths = [
   "crates/plurx-core/src/metadata/**",
   "crates/plurx-core/tests/audiobook_artwork.rs",
   "crates/plurxd/src/http/items.rs",
-  "docs/METADATA*.md",
+  "docs/features/METADATA*.md",
 ]
 checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["core.media", "server.api", "library.catalog"]
@@ -651,8 +651,11 @@ paths = [
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
   "crates/plurxd/src/web/playback-policy.js",
   "crates/plurxd/src/web/playback-control.js",
-  "docs/PLAYBACK*.md",
-  "docs/STUTTER-4K.md",
+  "docs/PLAYBACK.md",
+  "docs/PLAYBACK-TESTING.md",
+  "docs/playback-control/**",
+  "docs/streaming/PLAYBACK-CAPS-V2-*.md",
+  "docs/streaming/STUTTER-4K.md",
   "scripts/dv-evidence",
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
@@ -695,7 +698,7 @@ paths = [
   "scripts/live-tv-endless",
   "crates/plurxd/tests/live_tv_two_node.rs",
   "scripts/live-tv-hardware",
-  "docs/HDHOMERUN-LIVE-TV-*.md",
+  "docs/features/HDHOMERUN-LIVE-TV-*.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node", "live-tv-hardware"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
@@ -722,7 +725,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurxd/src/offline.rs",
   "crates/plurxd/src/http/offline.rs",
-  "docs/OFFLINE-VIEWING-PLAN.md",
+  "docs/clients/OFFLINE-VIEWING-PLAN.md",
 ]
 checks = [
   "offline-contract",
@@ -766,8 +769,8 @@ paths = [
   "brand/tokens.css",
   "crates/plurxd/src/http/web.rs",
   "crates/plurxd/src/web/**",
-  "docs/UI-*.md",
-  "docs/PLAYER-INPUT-CONTRACT*.md",
+  "docs/clients/UI-*.md",
+  "docs/clients/PLAYER-INPUT-CONTRACT*.md",
   "scripts/contrast-*",
   "scripts/player-contract-table",
   "scripts/player-input-fence",
@@ -792,7 +795,7 @@ paths = [
   "clients/apple/Sources/**",
   "clients/apple/Resources/**",
   "clients/apple/project.yml",
-  "docs/APPLE-CLIENT-PARITY.md",
+  "docs/clients/APPLE-CLIENT-PARITY.md",
   "docs/STATUS.html",
   "docs/apple-builds/**",
   "clients/android/app/src/main/**",
@@ -859,7 +862,7 @@ paths = [
   ".github/workflows/**",
   "Makefile",
   "docs/VALIDATION.md",
-  "docs/CI_EXECUTION_ACCELERATION_PLAN.md",
+  "docs/ci/CI_EXECUTION_ACCELERATION_PLAN.md",
   "scripts/pre-commit",
   "scripts/ci-flake-report",
   "scripts/history-audit",

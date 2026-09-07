@@ -13,7 +13,7 @@ Hybrid approach: one shared TypeScript core wherever a platform runs web tech; n
 
 Shared across all: the server's OpenAPI-generated types, the device-profile
 definitions, a common design language, and the
-[player input contract](PLAYER-INPUT-CONTRACT.md). Each first-party player maps
+[player input contract](clients/PLAYER-INPUT-CONTRACT.md). Each first-party player maps
 platform events through one adapter into the same state/input routing table;
 its playback-info panel follows the companion shared field list.
 

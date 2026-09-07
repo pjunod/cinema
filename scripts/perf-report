@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Collect what PERF-PLAN's open acceptance runs need, from a live server.
 
-Everything still open in docs/PERF-PLAN.md is a claim about *numbers on real
+Everything still open in docs/performance/PERF-PLAN.md is a claim about *numbers on real
 hardware*: which tone-map graph this box can actually run (§5 / M2), whether
 bounded rate control holds on a grain-heavy source (§4.6), and what a start
 and a seek really cost (§4.4, §6.3). CI cannot answer any of them — with no
@@ -294,7 +294,7 @@ def log_section(out, logs, cache_settings, srv=None, playback_events=None):
     #
     # A clean cut is one taken in front of a keyframe a player will not discard
     # a leading picture at, which is the whole reason plurx took the cutting
-    # away from ffmpeg (docs/SEGMENTER-PLAN.md, docs/STUTTER-4K.md §5.6). A
+    # away from ffmpeg (docs/streaming/SEGMENTER-PLAN.md, docs/streaming/STUTTER-4K.md §5.6). A
     # ceiling cut is one taken anyway because no clean point appeared before
     # the byte or duration limit — it still costs the frame, and printing the
     # number is the difference between a bounded residual and a hidden one.

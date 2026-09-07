@@ -1,7 +1,7 @@
 "use strict";
 
 // The player input contract is one JSON table every client's reducer must
-// reproduce (docs/PLAYER-INPUT-CONTRACT.md §2). This test keeps the table
+// reproduce (docs/clients/PLAYER-INPUT-CONTRACT.md §2). This test keeps the table
 // itself well-formed — every surface × state × input has exactly one outcome
 // and every outcome is a defined one — and keeps the doc's rendered copy of
 // it identical to the fixture, so nobody can change the contract in prose
@@ -170,7 +170,7 @@ test("every playback-info row has a unique id, a known section, a known format, 
   }
 });
 
-test("docs/PLAYER-INPUT-CONTRACT.md embeds every generated block verbatim", () => {
+test("docs/clients/PLAYER-INPUT-CONTRACT.md embeds every generated block verbatim", () => {
   const doc = fs.readFileSync(table.DOC, "utf8");
   for (const [begin, end, rendered, label] of [
     [table.BEGIN, table.END, table.renderBlock(contract), "routing"],

@@ -564,7 +564,7 @@ struct StallReopenTicket: Equatable {
 /// at or below the ladder floor is answered with the rung it is already on,
 /// every time, and the server counts nothing and raises no terminal error —
 /// bounding it there would need the per-playback retry state the contract
-/// forbids (docs/ADAPTIVE-QUALITY.md, "Native stall-reopen server boundary").
+/// forbids (docs/streaming/ADAPTIVE-QUALITY.md, "Native stall-reopen server boundary").
 /// Without a budget here a starved link reopens the floor rung forever.
 ///
 /// The floor is the predecessor's own rung, never 360: a sub-360 source and a

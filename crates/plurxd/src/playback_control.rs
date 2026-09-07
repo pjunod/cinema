@@ -620,7 +620,7 @@ pub(crate) struct ActionAcknowledgement {
     /// *proof* — a wall clock from an unsynchronised device establishes
     /// neither ownership nor freshness nor that what was displayed is what
     /// was offered — but it is a measurement, frozen against a corrected
-    /// hardware instrument (`docs/M6-CALLER-HANDOFF.md`), and dropping it
+    /// hardware instrument (`docs/playback-control/M6-CALLER-HANDOFF.md`), and dropping it
     /// would delete the only signal that instrument produces.
     ///
     /// So the change here is additive: `committed_media_origin_ms` is the
@@ -1549,7 +1549,7 @@ const _: () = assert!(
 /// admissions, zero predecessor and post-commit stalls, on a 40 Mbit/s link —
 /// 2.20× the predecessor's 18.183 Mbit/s, above the floor
 /// `headroom_refusal` enforces. See
-/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/M6-AXIS-CASE-HANDOFF.md).
+/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/playback-control/M6-AXIS-CASE-HANDOFF.md).
 ///
 /// **Why this list and not a rule.** Shadow mode measured that a pure
 /// resolution change does not occur on a real library at all — the top rung

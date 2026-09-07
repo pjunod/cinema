@@ -53,7 +53,7 @@ affected-surface validation. The complete commands and rationale live in
 
 If your session has the clone on one machine and `cargo` on another — the
 usual shape for a coding agent here — set up the compile loop in
-[docs/AGENT-COMPILE-LOOP.md](docs/AGENT-COMPILE-LOOP.md) **before** writing
+[docs/ci/AGENT-COMPILE-LOOP.md](docs/ci/AGENT-COMPILE-LOOP.md) **before** writing
 Rust, not after a gate rejects something. `git archive` carries source to a
 toolchain without carrying a credential, and it puts `cargo check`, `clippy
 -D warnings`, the unit suite and `rustfmt` inside ten minutes.

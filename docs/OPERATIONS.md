@@ -1271,7 +1271,7 @@ Give a learner the same trust you give a voter: admit only machines you
 administer, and treat a leaked join token as a full cluster compromise, exactly
 as for a voter join. Splitting membership mutation onto its own credential is a
 separate milestone, designed in
-[MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
+[MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](cluster/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
 
 Refusals specific to learner admission and lifecycle:
 
@@ -2257,7 +2257,7 @@ maximum connection drain. Retry `GET` and `HEAD` only; never automatically
 replay `POST`, `PUT`, `PATCH`, or `DELETE`, because a lost response does not
 prove the authority mutation was uncommitted. The exact contract and
 ready-to-adapt examples live in
-[`deploy/cluster-routing/`](../deploy/cluster-routing/).
+[`deploy/cluster-routing/`](../deploy/cluster-routing).
 
 Before rollout, run the product-neutral fixture and inspect its evidence:
 
@@ -2280,7 +2280,7 @@ deployed; do not infer a tighter absolute SLO from local stopwatch output.
 ### Cluster ingress, drain, and recovery
 
 Ready-to-adapt HAProxy, keepalived, and Kubernetes Service/Ingress examples
-live in [`deploy/cluster-routing/`](../deploy/cluster-routing/). All three use
+live in [`deploy/cluster-routing/`](../deploy/cluster-routing). All three use
 `/readyz`, not `/healthz`, for new traffic. Configure each voter's
 `cluster.artwork_url` as its node-specific public base even when
 `cluster.join_url` names the shared VIP or proxy; `GET /api/v1/cluster/ingress`
@@ -2863,7 +2863,7 @@ can be tried, watched, and kept or dropped without another build. Both are
 Apple authoring-rules items and both are candidates for the one open failure
 in the Apple native-subtitle work: a physical Apple TV rejecting a copied
 Dolby Vision master with CoreMedia `-12927`
-([docs/APPLE-NATIVE-SUBTITLES-PLAN.md](APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4).
+([docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4).
 
 | Var | What it adds | Why it might matter |
 |---|---|---|
@@ -3828,7 +3828,7 @@ plan's acceptance names. Nothing contests a session until its lease expires,
 and the media-session lease is twelve seconds with a three-second renewal
 (`LEASE_TTL_MS`, `LEASE_INTERVAL`); the contest tick and the takeover deadline
 sit on top of that. Recovery is bounded and correct at these values, just not
-fast — closing the gap is tracked in `docs/CLUSTER-MEDIA-POOL-PLAN.md` §8.8.
+fast — closing the gap is tracked in `docs/cluster/CLUSTER-MEDIA-POOL-PLAN.md` §8.8.
 
 #### Optional verified shared cache
 

@@ -1,6 +1,6 @@
 //! Local artwork for `home` libraries.
 //!
-//! Home libraries never call a provider (docs/HOMEVIDEO-PLAN.md §2) — there
+//! Home libraries never call a provider (docs/features/HOMEVIDEO-PLAN.md §2) — there
 //! is nothing to match "Christmas 2019.mp4" against, and a false match would
 //! be worse than nothing. Their "enrichment" is entirely local: art already
 //! sitting beside the file wins, otherwise ffmpeg grabs a frame.

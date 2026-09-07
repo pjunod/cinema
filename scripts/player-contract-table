@@ -2,7 +2,7 @@
 "use strict";
 
 // Render the two player contracts as the markdown blocks
-// docs/PLAYER-INPUT-CONTRACT.md embeds:
+// docs/clients/PLAYER-INPUT-CONTRACT.md embeds:
 //
 //   tests/playback/player-input-contract.json  → contract:routing:begin/end
 //   tests/playback/playback-info-fields.json   → contract:info:begin/end
@@ -20,7 +20,7 @@ const path = require("node:path");
 const ROOT = path.join(__dirname, "..");
 const FIXTURE = path.join(ROOT, "tests/playback/player-input-contract.json");
 const FIELDS = path.join(ROOT, "tests/playback/playback-info-fields.json");
-const DOC = path.join(ROOT, "docs/PLAYER-INPUT-CONTRACT.md");
+const DOC = path.join(ROOT, "docs/clients/PLAYER-INPUT-CONTRACT.md");
 const POLICY = path.join(ROOT, "crates/plurxd/src/web/playback-policy.js");
 const WEB = path.join(ROOT, "crates/plurxd/src/web/index.html");
 const BEGIN = "<!-- contract:routing:begin -->";

@@ -353,8 +353,8 @@ class CatalogCase(unittest.TestCase):
         scope = scope_for_paths(
             catalog,
             (
-                "docs/OFFLINE-VIEWING-PLAN.md",
-                "docs/OFFLINE-VIEWING-REVIEW.md",
+                "docs/clients/OFFLINE-VIEWING-PLAN.md",
+                "docs/clients/OFFLINE-VIEWING-REVIEW.md",
                 "docs/STATUS.html",
                 "validation/regressions.d/a828a217-playback-pipeline.toml",
             ),

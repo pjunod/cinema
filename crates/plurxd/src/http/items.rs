@@ -4,7 +4,7 @@
 //! would be silently clobbered by the next refresh, so this endpoint refuses
 //! them until the fix-match UI (REQ-META-5) exists. Home libraries have no
 //! agent, so the DB is the only truth there and editing is safe by
-//! construction (docs/HOMEVIDEO-PLAN.md §2, §8.2).
+//! construction (docs/features/HOMEVIDEO-PLAN.md §2, §8.2).
 
 use axum::extract::{Path, State};
 use axum::Json;

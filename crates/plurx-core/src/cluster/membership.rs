@@ -194,7 +194,7 @@ pub enum ClusterRole {
 ///   those directories exist to carry, in both directions: a learner cannot
 ///   answer a voter's probe, and a voter refuses a learner's.
 ///
-/// `docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 specifies the member-scoped
+/// `docs/cluster/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 specifies the member-scoped
 /// predicate for `authorize_internal_peer_request` — "a consistent read that
 /// the signer is a live member" — and gives the committed-voter predicate to
 /// `authorize_membership_mutation` alone, as "the one refusal in this design
@@ -10804,7 +10804,7 @@ mod tests {
     // directories exist to carry. The 401 then reached the operator as
     // "unreachable" on a node whose heartbeat was fresh.
     //
-    // `docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 already specified the
+    // `docs/cluster/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 already specified the
     // member-scoped predicate here and gave the voter predicate to membership
     // mutation alone; the code was stricter than its own design.
 
