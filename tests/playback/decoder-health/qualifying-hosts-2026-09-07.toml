@@ -1,0 +1,23 @@
+captured_at = "2026-09-07"
+scope = "workstations a diagnostic grammar was qualified on; not deployed nodes"
+qualification = "measured"
+# Why this file exists at all, separately from the fleet survey: a contract has
+# to name a host whose build was actually measured, and the fleet survey is
+# evidence about deployed nodes on the day it was taken. A workstation is not a
+# node. Putting one in the fleet file would make the fleet's own evidence say
+# something untrue about what is deployed, which is the one thing that file is
+# for.
+
+[capture]
+host_binary_sha256 = "shasum -a 256 \"$(command -v ffmpeg)\""
+host_buildconf_sha256 = "ffmpeg -buildconf 2>/dev/null | shasum -a 256"
+host_ffmpeg = "ffmpeg -version | head -1"
+canonicalization = "hash exact command bytes including line order and terminating newlines; no filtering"
+
+[[nodes]]
+name = "pauls-macbook-pro-2"
+role = "qualifying workstation"
+host_ffmpeg = "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers"
+host_binary_sha256 = "9f5ddd4f8b36eb07b0c5d60ab6ea1e618bedd70bc45feab82b4dc23be1596ad1"
+host_buildconf_sha256 = "04f79ec5a6cfd0e83ff45f4ca27d29015f569cfe4a5bebb3d9de072a70490ae5"
+note = "Homebrew build. Not a deployed node; a contract qualified here proves the grammar, never the fleet."

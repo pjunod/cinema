@@ -101,14 +101,16 @@ pub const MAX_DIAGNOSTIC_LINE_BYTES: usize = 16 * 1024;
 /// One, so a failing plan is replaced once and not repeatedly.
 pub const AUTOMATIC_PRODUCER_RECOVERY_LIMIT: u32 = 1;
 
-/// The message that opens every qualified primary record. Matched as a literal
-/// prefix rather than searched for anywhere in the line: `Error initializing
-/// filters: Invalid data found when processing input` carries the contract's
-/// detail text and the contract's contexts, and is not a decode failure.
-const PRIMARY_MESSAGE: &str = "Error submitting packet to decoder:";
-
-/// The subordinate FFmpeg emits after the failure it elaborates on.
-const SUBORDINATE_MESSAGE: &str = "No frame decoded?";
+// The message that opens a primary record used to be a constant here. It is a
+// contract field now, and the reason is not hypothetical: FFmpeg 9 does not
+// contain the string `Error submitting packet to decoder` at all — the binary's
+// only decode-error format is `Decoding error: %s`. A grammar carrying the
+// FFmpeg 8 wording matches nothing on FFmpeg 9, and a grammar that matches
+// nothing reports every stream as clean, which is the exact failure this whole
+// effort exists to prevent, reached by an ordinary upgrade.
+//
+// Everything else about a build was already a contract field. The wording is
+// no different in kind, and it was the one that was not.
 
 /// What one line of stderr turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +185,38 @@ pub struct DiagnosticContract {
     pub input_codec: String,
     pub decoder: String,
     pub require_context_addresses: bool,
+    /// The literal prefix that opens a primary record on this build.
+    ///
+    /// Matched as a prefix rather than searched for anywhere in the line:
+    /// `Error initializing filters: Invalid data found when processing input`
+    /// carries the contract's detail text and the contract's contexts, and is
+    /// not a decode failure.
+    pub primary_message: String,
+    /// The detail line this build emits after the failure it elaborates on,
+    /// when it emits one. Counting it would double every fault.
+    ///
+    /// `None` for a build that emits none, which is the honest state rather
+    /// than a default: FFmpeg 8 prints `No frame decoded?` and FFmpeg 9 does
+    /// not print it at all.
+    #[serde(default)]
+    pub subordinate_message: Option<String>,
+    /// Whether this build was shown to attribute *every* failed packet.
+    ///
+    /// The windowed rule counts records inside two seconds, which only means
+    /// what it says on a build that emits one per failure. FFmpeg 8 was
+    /// measured doing exactly that: five records, five failures. FFmpeg 9's
+    /// attributed record count for a corrupted h264 source was measured across
+    /// several inputs at zero, one and two — so it announces far fewer records
+    /// than there are failed packets, and five inside two seconds is not
+    /// something that build has been shown to produce.
+    ///
+    /// Deliberately a statement about what was measured, not a claim that the
+    /// build *cannot* emit five. It gates the automatic action, never the
+    /// latch: a burst that does occur still faults, still raises the barrier's
+    /// evidence and still refuses the artifact. What an unqualified build may
+    /// not do is kill a session on the strength of a rule nobody qualified for
+    /// it.
+    pub attributes_every_failure: bool,
     pub error_detail: String,
     pub fixture: String,
     pub fixture_sha256: String,
@@ -241,7 +275,7 @@ pub const RETAINED_DIAGNOSTIC_CONTRACTS: &str =
     include_str!("../../../tests/playback/decoder-health/diagnostic-contracts.toml");
 
 /// The only table version this build understands.
-pub const DIAGNOSTIC_CONTRACT_VERSION: u32 = 1;
+pub const DIAGNOSTIC_CONTRACT_VERSION: u32 = 2;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ContractLoadError {
@@ -250,6 +284,8 @@ pub enum ContractLoadError {
     DuplicateId(String),
     /// An identifier a published manifest could not carry.
     UnsafeId(String),
+    /// A matcher that would match everything, or nothing it should.
+    UnusableMatcher(String),
 }
 
 impl std::fmt::Display for ContractLoadError {
@@ -265,6 +301,12 @@ impl std::fmt::Display for ContractLoadError {
             Self::DuplicateId(id) => write!(
                 formatter,
                 "diagnostic contract {id} is defined more than once"
+            ),
+            Self::UnusableMatcher(id) => write!(
+                formatter,
+                "diagnostic contract {id} carries a message matcher that is empty or padded; \
+                 an empty prefix matches every line ever printed, and a padded one matches \
+                 none — which certifies every broken stream as clean"
             ),
             Self::UnsafeId(id) => write!(
                 formatter,
@@ -304,6 +346,26 @@ impl DiagnosticContract {
         for (index, contract) in parsed.contracts.iter().enumerate() {
             if !plurx_core::transcode::health::safe_diagnostic_contract_id(&contract.id) {
                 return Err(ContractLoadError::UnsafeId(contract.id.clone()));
+            }
+            // A build that prints no subordinate line says so by omitting the
+            // key. Spelling it as an empty string would be a prefix that
+            // matches every line, which would classify the whole stream as
+            // subordinate detail and count nothing at all.
+            // Empty is the obvious one and the *safe* one: an empty prefix
+            // over-matches, which is noisy. Padded is the dangerous one, and
+            // it is one stray character away in a hand-written file. A leading
+            // space makes `strip_prefix` fail against a message this reader
+            // has already trimmed, so the grammar matches nothing — and a
+            // grammar that matches nothing certifies every broken stream as
+            // clean, which is the failure this whole effort exists to prevent.
+            let usable = |message: &str| !message.is_empty() && message == message.trim();
+            if !usable(&contract.primary_message)
+                || contract
+                    .subordinate_message
+                    .as_deref()
+                    .is_some_and(|message| !usable(message))
+            {
+                return Err(ContractLoadError::UnusableMatcher(contract.id.clone()));
             }
             if parsed.contracts[..index]
                 .iter()
@@ -482,7 +544,7 @@ impl DiagnosticGrammar {
             RepeatMatch::None => {}
         }
 
-        if is_subordinate(trimmed) {
+        if is_subordinate(trimmed, self.contract.subordinate_message.as_deref()) {
             return DiagnosticRecord::SubordinateDetail;
         }
 
@@ -500,7 +562,10 @@ impl DiagnosticGrammar {
             }
         }
 
-        let Some(detail) = attributed.message.strip_prefix(PRIMARY_MESSAGE) else {
+        let Some(detail) = attributed
+            .message
+            .strip_prefix(self.contract.primary_message.as_str())
+        else {
             return DiagnosticRecord::Unrelated;
         };
         if !self.is_selected(&attributed) {
@@ -519,6 +584,12 @@ impl DiagnosticGrammar {
 
     /// The build-bound half: the codec and decoder the contract was qualified
     /// for, and the context addresses when it says those are load-bearing.
+    /// Whether this build attributes every failed packet, and therefore
+    /// whether the windowed fault rule can fire against it at all.
+    pub fn attributes_every_failure(&self) -> bool {
+        self.contract.attributes_every_failure
+    }
+
     fn matches_contract_identity(&self, attributed: &AttributedLine<'_>) -> bool {
         attributed.codec.trim() == self.contract.input_codec
             && attributed.decoder.trim() == self.contract.decoder
@@ -527,9 +598,15 @@ impl DiagnosticGrammar {
     }
 }
 
-/// `[<name> @ addr] [error] No frame decoded?`, with either context part
-/// optional in the ways FFmpeg actually varies them.
-fn is_subordinate(line: &str) -> bool {
+/// `[<name> @ addr] [error] <the build's subordinate wording>`, with either
+/// context part optional in the ways FFmpeg actually varies them.
+///
+/// A build that emits no subordinate line has none to recognize, and matching
+/// nothing is the right answer for it — not a default wording it never prints.
+fn is_subordinate(line: &str, subordinate: Option<&str>) -> bool {
+    let Some(subordinate) = subordinate else {
+        return false;
+    };
     let Some((_, rest)) = take_context(line) else {
         return false;
     };
@@ -537,7 +614,7 @@ fn is_subordinate(line: &str) -> bool {
         Some((context, remainder)) if is_severity(context.name) => remainder,
         _ => rest,
     };
-    rest.starts_with(SUBORDINATE_MESSAGE)
+    rest.starts_with(subordinate)
 }
 
 enum RepeatMatch {
@@ -610,6 +687,23 @@ pub struct HealthAccumulator {
     /// The lines are still read and still logged; none of them is evidence,
     /// so the attempt cannot certify its own output.
     grammar_available: bool,
+    /// Whether this build's attribution frequency has been qualified for the
+    /// windowed rule.
+    ///
+    /// The rule counts records inside two seconds, which only means what it
+    /// says on a build that emits one per failed packet. FFmpeg 8 does. FFmpeg
+    /// 9's attributed record count for a corrupted source was measured at zero,
+    /// one and two depending on the input — so five inside two seconds is not
+    /// something that build has been shown to produce, and a window of five
+    /// there is not the evidence the rule was designed around.
+    ///
+    /// It gates the *action*, not the latch. Refusing to latch would be the
+    /// worse trade: a genuinely burst-failing stream would then leave no fault,
+    /// no barrier, and a receipt saying `Unqualified` with no terminal fault
+    /// where it should say `Rejected` — losing the strongest thing the
+    /// observation had to say. Latching still refuses the artifact; what an
+    /// unqualified build may not do is kill a session over it.
+    windowed_action_qualified: bool,
     previous: RepeatProvenance,
 }
 
@@ -644,6 +738,12 @@ impl HealthAccumulator {
             invalid_utf8_lines: 0,
             observation_complete: true,
             grammar_available: false,
+            // True with no contract, because that is what this accumulator has
+            // always done and a latch without a grammar drives nothing:
+            // `automatic_action_allowed` already gates the action on the
+            // grammar. Only a contract that says its build cannot support the
+            // rule turns it off, and only for the qualified path.
+            windowed_action_qualified: true,
             previous: RepeatProvenance::Ambiguous,
         }
     }
@@ -653,11 +753,19 @@ impl HealthAccumulator {
     /// The only constructor that can produce a qualifying observation, so the
     /// grammar and the permission to certify are one decision rather than two
     /// that can drift.
-    pub fn with_qualified_grammar() -> Self {
+    pub fn with_qualified_grammar(windowed_action_qualified: bool) -> Self {
         Self {
             grammar_available: true,
+            windowed_action_qualified,
             ..Self::new()
         }
+    }
+
+    /// Whether this build's attribution frequency was qualified for the
+    /// windowed rule, and therefore whether a window of five here is the
+    /// evidence that rule was designed around.
+    pub fn windowed_action_qualified(&self) -> bool {
+        self.windowed_action_qualified
     }
 
     /// Feed one classified line. Returns the fault if this line is what
@@ -852,6 +960,7 @@ impl HealthAccumulator {
     pub fn automatic_action_allowed(&self) -> bool {
         self.fault.is_some()
             && self.triggering_window_contract_qualified
+            && self.windowed_action_qualified
             && !self.compressed_log()
             && self.observation_complete
     }
@@ -1414,10 +1523,11 @@ where
     // decides whether any line is classified: without a contract this attempt
     // has no grammar, so nothing it prints is evidence and its output cannot
     // become a durable artifact however clean it looks.
-    let mut accumulator = if grammar.is_some() {
-        HealthAccumulator::with_qualified_grammar()
-    } else {
-        HealthAccumulator::new()
+    let mut accumulator = match grammar.as_ref() {
+        Some(grammar) => {
+            HealthAccumulator::with_qualified_grammar(grammar.attributes_every_failure())
+        }
+        None => HealthAccumulator::new(),
     };
     let mut reader = BoundedDiagnosticReader::new();
     let mut stream = stream;
@@ -1493,6 +1603,8 @@ mod tests {
     use super::*;
 
     const CONTRACTS: &str = RETAINED_DIAGNOSTIC_CONTRACTS;
+    const QUALIFIED_FFMPEG_9: &str =
+        include_str!("../../../tests/playback/decoder-health/qualified-ffmpeg-9.stderr");
     const QUALIFIED_FFMPEG_8: &str =
         include_str!("../../../tests/playback/decoder-health/qualified-ffmpeg-8.stderr");
     const UNQUALIFIED_FFMPEG_5: &str =
@@ -1509,7 +1621,8 @@ mod tests {
     /// would make these tests slow and flaky and would prove nothing extra.
     fn replay(fixture: &str, grammar: &DiagnosticGrammar) -> HealthAccumulator {
         let base = Instant::now();
-        let mut accumulator = HealthAccumulator::with_qualified_grammar();
+        let mut accumulator =
+            HealthAccumulator::with_qualified_grammar(grammar.attributes_every_failure());
         for line in fixture.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -1535,6 +1648,9 @@ mod tests {
             input_codec: decoder.to_owned(),
             decoder: decoder.to_owned(),
             require_context_addresses: true,
+            primary_message: "Error submitting packet to decoder:".to_owned(),
+            subordinate_message: Some("No frame decoded?".to_owned()),
+            attributes_every_failure: true,
             error_detail: detail.to_owned(),
             fixture: "test".to_owned(),
             fixture_sha256: "d".repeat(64),
@@ -1962,7 +2078,7 @@ mod tests {
         assert!(!accumulator.qualifies_reuse());
 
         // A stream that ended *on* a newline was not cut.
-        let mut whole = HealthAccumulator::with_qualified_grammar();
+        let mut whole = HealthAccumulator::with_qualified_grammar(true);
         let mut reader = BoundedDiagnosticReader::new();
         assert_eq!(reader.push(b"[info] done\n", &mut whole).len(), 1);
         assert_eq!(reader.finish(&mut whole), None);
@@ -1999,7 +2115,7 @@ mod tests {
     /// An incomplete observation cannot qualify anything, whatever it saw.
     #[test]
     fn an_unfinished_reader_cannot_qualify_an_artifact() {
-        let mut accumulator = HealthAccumulator::with_qualified_grammar();
+        let mut accumulator = HealthAccumulator::with_qualified_grammar(true);
         assert!(
             accumulator.qualifies_reuse(),
             "a clean complete read of a qualified build qualifies"
@@ -2057,6 +2173,188 @@ mod tests {
         );
         assert!(accumulator.automatic_action_allowed());
         assert!(!accumulator.qualifies_reuse());
+    }
+
+    /// The retained FFmpeg 8 contract cannot cover any running build, and the
+    /// reason is a convention, not a hash.
+    ///
+    /// `MeasuredBuild::measure` takes `ffmpeg_version` from the first banner
+    /// line — `ffmpeg version 8.0.1-3ubuntu2 Copyright …` — and `covers_build`
+    /// compares it for equality. The retained FFmpeg 8 contract records the
+    /// bare `8.0.1-3ubuntu2` instead, so it can never match, which makes it
+    /// inert on the very host it was qualified against.
+    ///
+    /// It is pinned rather than fixed because fixing it means re-capturing
+    /// that host's banner line, and inventing one would be exactly the
+    /// confident-but-unmeasured value this evidence set exists to refuse. The
+    /// FFmpeg 9 contract uses the measured convention, so a future capture has
+    /// a correct example to follow.
+    #[test]
+    fn the_retained_ffmpeg_8_contract_records_a_version_no_build_reports() {
+        let contracts = DiagnosticContract::load(CONTRACTS).expect("retained contracts parse");
+        let ffmpeg8 = contracts
+            .iter()
+            .find(|contract| contract.input_codec == "rawvideo")
+            .expect("the retained rawvideo contract");
+        assert!(
+            !ffmpeg8.ffmpeg_version.starts_with("ffmpeg version "),
+            "owed: this contract predates the measured-banner convention and cannot cover a \
+             running build until its host is re-captured"
+        );
+        let ffmpeg9 = contracts
+            .iter()
+            .find(|contract| contract.input_codec == "h264")
+            .expect("the retained h264 contract");
+        assert!(
+            ffmpeg9.ffmpeg_version.starts_with("ffmpeg version "),
+            "a contract's version is the banner line `MeasuredBuild` reads, not a package version"
+        );
+    }
+
+    /// A matcher that is empty, or padded, is refused at load.
+    ///
+    /// Empty is the obvious one and the safe one: it over-matches. Padded is
+    /// the dangerous one and it is one stray character away in a hand-written
+    /// file — a leading space makes the prefix fail against a message this
+    /// reader has already trimmed, so the grammar matches nothing, and a
+    /// grammar that matches nothing certifies every broken stream as clean.
+    #[test]
+    fn an_empty_or_padded_matcher_is_refused_at_load() {
+        for (field, value) in [
+            ("primary_message", ""),
+            ("primary_message", " Error submitting packet to decoder:"),
+            ("primary_message", "Error submitting packet to decoder: "),
+            ("primary_message", "   "),
+            ("subordinate_message", ""),
+            ("subordinate_message", " No frame decoded?"),
+        ] {
+            let table = CONTRACTS.replacen(
+                &format!("{field} = \"Error submitting packet to decoder:\""),
+                &format!("{field} = \"{value}\""),
+                1,
+            );
+            let table = if table == CONTRACTS {
+                CONTRACTS.replacen(
+                    &format!("{field} = \"No frame decoded?\""),
+                    &format!("{field} = \"{value}\""),
+                    1,
+                )
+            } else {
+                table
+            };
+            assert_ne!(table, CONTRACTS, "the fixture must actually change {field}");
+            assert!(
+                matches!(
+                    DiagnosticContract::load(&table),
+                    Err(ContractLoadError::UnusableMatcher(_))
+                ),
+                "{field} = {value:?} must be refused"
+            );
+        }
+        // And the retained table itself passes the guard, so the test is about
+        // the guard rather than about the table being unloadable.
+        assert!(DiagnosticContract::load(CONTRACTS).is_ok());
+    }
+
+    /// The same grammar, on a build whose wording is different and whose
+    /// attribution is once per session rather than once per failure.
+    ///
+    /// This is the finding that made the primary message a contract field.
+    /// FFmpeg 9 does not contain the string `Error submitting packet to
+    /// decoder` anywhere in its binary — its only decode-error format is
+    /// `Decoding error: %s` — so the FFmpeg 8 wording matches nothing on it,
+    /// and a grammar that matches nothing reports every stream as clean. An
+    /// ordinary upgrade would have reached that silently.
+    ///
+    /// The two tiers separate cleanly here, and in the safe direction: one
+    /// structural record refuses the cache artifact, and the windowed action
+    /// cannot fire because this build never emits five of anything.
+    #[test]
+    fn the_ffmpeg_9_capture_counts_a_record_and_cannot_act_on_it() {
+        let contracts = DiagnosticContract::load(CONTRACTS).expect("retained contracts parse");
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.id == "ffmpeg-9.0.1-homebrew-h264-v1")
+            .expect("the retained ffmpeg 9 contract")
+            .clone();
+        assert_eq!(contract.primary_message, "Decoding error:");
+        assert_eq!(contract.subordinate_message, None);
+        assert!(!contract.attributes_every_failure);
+        assert_eq!(contract.fixture, "qualified-ffmpeg-9.stderr");
+
+        let accumulator = replay(QUALIFIED_FFMPEG_9, &DiagnosticGrammar::new(contract, 0, 0));
+        assert_eq!(accumulator.primary_error_records(), 1);
+        assert_eq!(
+            accumulator.contract_qualified_records(),
+            1,
+            "the record carried the build receipt"
+        );
+        assert!(accumulator.observation_complete());
+        assert!(
+            !accumulator.qualifies_reuse(),
+            "one structural record is already enough to refuse the artifact"
+        );
+        assert_eq!(
+            accumulator.fault(),
+            None,
+            "one record is not a window of five"
+        );
+        assert!(!accumulator.windowed_action_qualified());
+    }
+
+    /// A build whose attribution was not qualified still latches, and still
+    /// may not act on it.
+    ///
+    /// The first draft of this milestone blocked the *latch* for such a build,
+    /// and that was the wrong trade: a genuinely burst-failing stream would
+    /// then produce no fault, no barrier, and a receipt saying `Unqualified`
+    /// with no terminal fault where it should say `Rejected` — throwing away
+    /// the strongest thing the observation had to say in order to avoid
+    /// overclaiming about a *different* thing. Latching refuses the artifact;
+    /// what an unqualified build may not do is kill a session over it.
+    #[test]
+    fn an_unqualified_attribution_still_latches_and_still_may_not_act() {
+        let contracts = DiagnosticContract::load(CONTRACTS).expect("retained contracts parse");
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.id == "ffmpeg-9.0.1-homebrew-h264-v1")
+            .expect("the retained ffmpeg 9 contract")
+            .clone();
+        let grammar = DiagnosticGrammar::new(contract, 0, 0);
+        let base = Instant::now();
+        let mut accumulator = HealthAccumulator::with_qualified_grammar(false);
+        let line = "[vist#0:0/h264 @ 0x1] [dec:h264 @ 0x2] [error] \
+                    Decoding error: Invalid data found when processing input";
+        for step in 0..20 {
+            accumulator.observe(
+                base + Duration::from_millis(step * 10),
+                &grammar.classify(line),
+            );
+        }
+        assert_eq!(accumulator.primary_error_records(), 20);
+        assert_eq!(
+            accumulator.fault(),
+            Some(DecodeFaultKind::VideoDecodeFailure),
+            "a burst is still a fault, and refusing to see it would lose the receipt's \
+             strongest statement"
+        );
+        assert!(
+            !accumulator.automatic_action_allowed(),
+            "but a build whose attribution was never qualified may not kill a session"
+        );
+        assert!(!accumulator.qualifies_reuse());
+
+        // And the same twenty records on a build whose attribution *was*
+        // qualified do permit the action, so the refusal above is about the
+        // contract rather than about anything else in this fixture.
+        let mut qualified = HealthAccumulator::with_qualified_grammar(true);
+        for step in 0..20 {
+            qualified.observe(
+                base + Duration::from_millis(step * 10),
+                &grammar.classify(line),
+            );
+        }
+        assert!(qualified.automatic_action_allowed());
     }
 
     /// The capture this whole effort was created from. It latches, it refuses
@@ -2135,13 +2433,21 @@ mod tests {
     /// that had changed underneath.
     #[test]
     fn an_unsupported_or_ambiguous_contract_table_is_refused() {
-        let table = CONTRACTS.replacen("version = 1", "version = 2", 1);
+        let table = CONTRACTS.replacen("version = 2", "version = 3", 1);
         assert_eq!(
             DiagnosticContract::load(&table),
-            Err(ContractLoadError::UnsupportedVersion(2))
+            Err(ContractLoadError::UnsupportedVersion(3))
+        );
+        // And the version this build no longer reads. Version 1 tables carried
+        // the primary message as a constant in this file rather than as a
+        // field, so reading one with these rules would match every build's
+        // lines against one build's wording.
+        assert_eq!(
+            DiagnosticContract::load(&CONTRACTS.replacen("version = 2", "version = 1", 1)),
+            Err(ContractLoadError::UnsupportedVersion(1))
         );
         assert!(matches!(
-            DiagnosticContract::load("version = 1\n[[contracts]]\nid = 1\n"),
+            DiagnosticContract::load("version = 2\n[[contracts]]\nid = 1\n"),
             Err(ContractLoadError::Malformed(_))
         ));
         assert!(
@@ -2577,7 +2883,7 @@ mod tests {
         });
         flood.await.expect("flood");
         // The bound itself, not only the flag: 32 KiB written, 16 KiB kept.
-        let mut retained = HealthAccumulator::with_qualified_grammar();
+        let mut retained = HealthAccumulator::with_qualified_grammar(true);
         let mut bounded = BoundedDiagnosticReader::new();
         let mut wide = vec![b'x'; MAX_DIAGNOSTIC_LINE_BYTES * 2];
         wide.push(b'\n');

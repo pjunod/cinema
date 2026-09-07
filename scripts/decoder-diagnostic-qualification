@@ -31,20 +31,45 @@ FLEET_PATH = (
     Path(__file__).resolve().parents[1]
     / "tests/playback/decoder-health/fleet-ffmpeg-2026-09-05.toml"
 )
+# Workstations a grammar was qualified on. Kept apart from the fleet survey on
+# purpose: a contract must name a host whose build was measured, and the fleet
+# survey is evidence about what is deployed. A workstation is not deployed, and
+# writing one into that file would make it say something untrue about the
+# fleet — which is the only thing it is for.
+QUALIFYING_HOSTS_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "tests/playback/decoder-health/qualifying-hosts-2026-09-07.toml"
+)
 ACTION_STDERR_MODE = "repeat+level+error"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 ADDRESS = r"(?:0x[0-9a-fA-F]+|<address>)"
-PRIMARY_VIDEO_ERROR = re.compile(
-    rf"^\[vist#(?P<input>\d+):(?P<stream>\d+)/(?P<codec>[^\]@]+?)"
-    rf"(?: @ (?P<stream_address>{ADDRESS}))?\]\s+"
-    rf"\[dec:(?P<decoder>[^\]@]+?)"
-    rf"(?: @ (?P<decoder_address>{ADDRESS}))?\]\s+"
-    r"(?P<severity>\[error\]\s+)?Error submitting packet to decoder:"
-    r"(?P<detail>.*)$"
-)
-SUBORDINATE_NO_FRAME = re.compile(
-    rf"^\[[^\]@]+(?: @ {ADDRESS})?\]\s+(?:\[error\]\s+)?No frame decoded\?"
-)
+def primary_video_error(contract: dict) -> re.Pattern[str]:
+    """The primary-record matcher for one contract's build.
+
+    The wording is the build's, not this harness's. FFmpeg 9 does not contain
+    the string `Error submitting packet to decoder` anywhere in its binary; its
+    only decode-error format is `Decoding error: %s`. A harness carrying one
+    build's wording would replay another build's capture as a stream with no
+    records at all — which reads exactly like a clean stream.
+    """
+    return re.compile(
+        rf"^\[vist#(?P<input>\d+):(?P<stream>\d+)/(?P<codec>[^\]@]+?)"
+        rf"(?: @ (?P<stream_address>{ADDRESS}))?\]\s+"
+        rf"\[dec:(?P<decoder>[^\]@]+?)"
+        rf"(?: @ (?P<decoder_address>{ADDRESS}))?\]\s+"
+        rf"(?P<severity>\[error\]\s+)?{re.escape(contract['primary_message'])}"
+        r"(?P<detail>.*)$"
+    )
+
+
+def subordinate_detail(contract: dict) -> re.Pattern[str] | None:
+    """The subordinate matcher, when the build emits one at all."""
+    message = contract.get("subordinate_message")
+    if not message:
+        return None
+    return re.compile(
+        rf"^\[[^\]@]+(?: @ {ADDRESS})?\]\s+(?:\[error\]\s+)?{re.escape(message)}"
+    )
 LEGACY_REPEAT = re.compile(
     r"^\s*(?:\[(?:error|warning|fatal|info|verbose|debug|trace)\]\s+)?"
     r"Last message repeated (?P<count>[0-9]{1,20}) times$"
@@ -75,10 +100,13 @@ class DiagnosticContract:
     input_codec: str
     decoder: str
     require_context_addresses: bool
+    primary_message: str
+    attributes_every_failure: bool
     error_detail: str
     fixture: str
     fixture_sha256: str
     scope: str
+    subordinate_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +131,7 @@ class Qualification:
     triggering_window_started_at_ms: int | None
     fault_at_ms: int | None
     detection_latency_ms: int | None
+    windowed_action_qualified: bool
     automatic_action_qualified: bool
 
 
@@ -121,9 +150,11 @@ def action_contract(contract_id: str | None) -> DiagnosticContract | None:
             contract_document = tomllib.load(document)
         with FLEET_PATH.open("rb") as document:
             fleet = tomllib.load(document)
+        with QUALIFYING_HOSTS_PATH.open("rb") as document:
+            workstations = tomllib.load(document)
     except (OSError, KeyError, tomllib.TOMLDecodeError) as error:
         raise QualificationError(f"cannot load diagnostic evidence: {error}") from error
-    if contract_document.get("version") != 1:
+    if contract_document.get("version") != 2:
         raise QualificationError("unsupported diagnostic contract document version")
     contracts = contract_document.get("contracts")
     if not isinstance(contracts, list):
@@ -135,7 +166,10 @@ def action_contract(contract_id: str | None) -> DiagnosticContract | None:
         raise QualificationError(f"unknown diagnostic contract: {contract_id}")
     raw = matches[0]
     fields = set(DiagnosticContract.__dataclass_fields__)
-    if set(raw) != fields:
+    # `subordinate_message` is optional: a build that prints no detail line
+    # omits it rather than spelling it as an empty prefix, which would match
+    # every line ever printed.
+    if not set(raw) <= fields or not (fields - {"subordinate_message"}) <= set(raw):
         raise QualificationError(
             f"diagnostic contract {contract_id} must define exactly: "
             + ", ".join(sorted(fields))
@@ -157,6 +191,20 @@ def action_contract(contract_id: str | None) -> DiagnosticContract | None:
         contract.fixture,
         contract.scope,
     )
+    # The same guard the daemon applies at load. Empty over-matches, which is
+    # noisy; padded matches nothing, which certifies every broken stream as
+    # clean. A table the daemon refuses outright must not be a table this
+    # harness will qualify a contract from.
+    for label, matcher in (
+        ("primary message", contract.primary_message),
+        ("subordinate message", contract.subordinate_message),
+    ):
+        if matcher is None:
+            continue
+        if not isinstance(matcher, str) or not matcher or matcher != matcher.strip():
+            raise QualificationError(
+                f"diagnostic contract {contract_id} has an empty or padded {label}"
+            )
     if not all(isinstance(value, str) and value for value in text_fields):
         raise QualificationError(f"diagnostic contract {contract_id} has empty fields")
     if type(contract.require_context_addresses) is not bool:
@@ -176,12 +224,25 @@ def action_contract(contract_id: str | None) -> DiagnosticContract | None:
             raise QualificationError(
                 f"diagnostic contract {contract_id} has invalid {label} hash"
             )
-    nodes = [node for node in fleet.get("nodes", []) if node.get("name") == contract.host]
+    # Which file a host came from is part of what a contract means, so it is
+    # checked rather than described. A workstation grammar is not fleet
+    # evidence, and a contract whose scope does not say so would let a reader
+    # take one for the other.
+    measured = [(node, "fleet") for node in fleet.get("nodes", [])] + [
+        (node, "workstation") for node in workstations.get("nodes", [])
+    ]
+    nodes = [entry for entry in measured if entry[0].get("name") == contract.host]
     if len(nodes) != 1:
         raise QualificationError(
-            f"diagnostic contract {contract_id} host is absent from fleet evidence"
+            f"diagnostic contract {contract_id} host is absent from measured build evidence, "
+            "or is claimed by more than one measured-host file"
         )
-    node = nodes[0]
+    node, provenance = nodes[0]
+    if (provenance == "workstation") != ("workstation" in contract.scope):
+        raise QualificationError(
+            f"diagnostic contract {contract_id} host is a {provenance} build; its scope must "
+            "say so, and must not say so otherwise"
+        )
     if (
         node.get("host_ffmpeg") != contract.ffmpeg_version
         or node.get("host_binary_sha256") != contract.binary_sha256
@@ -240,6 +301,26 @@ def qualify(
     contract_id: str | None = None,
 ) -> Qualification:
     contract = action_contract(contract_id)
+    # Without a contract there is no build to read a wording from. The M0
+    # wording is the harness's own fallback for that case, and it is the one
+    # thing here that is not evidence about a build.
+    raw_contract = (
+        asdict(contract)
+        if contract is not None
+        else {
+            "primary_message": "Error submitting packet to decoder:",
+            "subordinate_message": "No frame decoded?",
+        }
+    )
+    primary_pattern = primary_video_error(raw_contract)
+    subordinate_pattern = subordinate_detail(raw_contract)
+    # Whether five records inside two seconds is the evidence the rule was
+    # designed around on *this* build. A build that has not been shown to
+    # attribute every failed packet still latches — the fault refuses the
+    # artifact and that is worth keeping — but it may not drive an action.
+    windowed_action_qualified = (
+        contract.attributes_every_failure if contract is not None else True
+    )
     window: deque[tuple[int, bool]] = deque(maxlen=VIDEO_DECODE_ERROR_LIMIT)
     primary = 0
     severity_qualified = 0
@@ -322,11 +403,11 @@ def qualify(
                 malformed_lines = saturating_count(malformed_lines)
                 prior_class = None
                 continue
-            if SUBORDINATE_NO_FRAME.match(message):
+            if subordinate_pattern is not None and subordinate_pattern.match(message):
                 subordinate = saturating_count(subordinate)
                 prior_class = "subordinate"
                 continue
-            match = PRIMARY_VIDEO_ERROR.match(message)
+            match = primary_pattern.match(message)
             if match is None:
                 prior_class = "other"
                 continue
@@ -394,9 +475,15 @@ def qualify(
         triggering_window_started_at_ms=triggering_window_start,
         fault_at_ms=fault_at,
         detection_latency_ms=latency,
+        windowed_action_qualified=windowed_action_qualified,
         automatic_action_qualified=(
             fault_at is not None
             and triggering_window_contract_qualified
+            # The build's own attribution frequency, from the contract. Without
+            # this the harness would certify an automatic action for a build on
+            # which the daemon refuses to take one — two policies, and the
+            # harness is the one that decides what gets retained.
+            and windowed_action_qualified
             and selected_repeat_summaries == 0
             and unrelated_repeat_summaries == 0
             and ambiguous_repeat_summaries == 0

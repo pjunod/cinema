@@ -26,6 +26,9 @@ CONTRACT_FIELDS = (
     "input_codec",
     "decoder",
     "require_context_addresses",
+    "primary_message",
+    "subordinate_message",
+    "attributes_every_failure",
     "error_detail",
     "fixture",
     "fixture_sha256",
@@ -116,12 +119,18 @@ def write_bound_contract(
     omit: set[str] | None = None,
 ) -> None:
     with (FIXTURES / "diagnostic-contracts.toml").open("rb") as document:
-        contract = tomllib.load(document)["contracts"][0]
+        contracts = tomllib.load(document)["contracts"]
+    # By id, not by position: the table has more than one entry now, and
+    # reordering it must not silently rebind every provenance test to a
+    # different build.
+    (contract,) = [
+        entry for entry in contracts if entry["id"] == RAWVIDEO_CONTRACT
+    ]
     contract["fixture"] = fixture.name
     contract["fixture_sha256"] = hashlib.sha256(fixture.read_bytes()).hexdigest()
     contract.update(overrides or {})
     omitted = omit or set()
-    lines = ["version = 1", "", "[[contracts]]"]
+    lines = ["version = 2", "", "[[contracts]]"]
     for field in CONTRACT_FIELDS:
         if field in omitted:
             continue
@@ -175,7 +184,9 @@ class DecoderDiagnosticQualificationTests(unittest.TestCase):
         contract = CHECKER["action_contract"](RAWVIDEO_CONTRACT)
         for name, primary in cases.items():
             with self.subTest(case=name):
-                match = CHECKER["PRIMARY_VIDEO_ERROR"].fullmatch(primary)
+                match = CHECKER["primary_video_error"](
+                    {"primary_message": "Error submitting packet to decoder:"}
+                ).fullmatch(primary)
                 self.assertIsNotNone(match)
                 self.assertFalse(CHECKER["matches_action_contract"](match, contract))
 
@@ -561,10 +572,16 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
         with path.open("rb") as document:
             contracts = tomllib.load(document)
 
-        self.assertEqual(contracts["version"], 1)
-        self.assertEqual(len(contracts["contracts"]), 1)
+        self.assertEqual(contracts["version"], 2)
+        self.assertEqual(len(contracts["contracts"]), 2)
         contract = contracts["contracts"][0]
-        self.assertEqual(set(contract), set(CONTRACT_FIELDS))
+        # `subordinate_message` is the one optional field: a build that prints
+        # no detail line omits it rather than spelling it as an empty prefix,
+        # which would match every line ever printed.
+        self.assertLessEqual(set(contract), set(CONTRACT_FIELDS))
+        self.assertLessEqual(
+            set(CONTRACT_FIELDS) - {"subordinate_message"}, set(contract)
+        )
         self.assertEqual(contract["id"], RAWVIDEO_CONTRACT)
         self.assertEqual(contract["host"], "nynuc")
         self.assertEqual(len(contract["binary_sha256"]), 64)
@@ -579,6 +596,98 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
             "Invalid data found when processing input",
         )
         self.assertIn("not deployed producer", contract["scope"])
+
+        # The wording that opens a primary record is the build's, not this
+        # repository's. FFmpeg 9 contains no `Error submitting packet to
+        # decoder` string at all, so a grammar carrying FFmpeg 8's wording
+        # matches nothing on it — and a grammar that matches nothing reports
+        # every stream as clean.
+        self.assertEqual(
+            contract["primary_message"], "Error submitting packet to decoder:"
+        )
+        self.assertEqual(contract["subordinate_message"], "No frame decoded?")
+        self.assertTrue(contract["attributes_every_failure"])
+
+        ffmpeg9 = contracts["contracts"][1]
+        self.assertEqual(ffmpeg9["primary_message"], "Decoding error:")
+        self.assertNotIn("subordinate_message", ffmpeg9)
+        # Measured: however corrupt the input, this build announces the failure
+        # once per decode session, so the five-in-two-seconds rule can never
+        # reach its limit and must not claim it can.
+        self.assertFalse(ffmpeg9["attributes_every_failure"])
+        self.assertEqual(ffmpeg9["input_codec"], "h264")
+        self.assertIn("not a deployed fleet build", ffmpeg9["scope"])
+        fixture9 = FIXTURES / ffmpeg9["fixture"]
+        self.assertEqual(
+            hashlib.sha256(fixture9.read_bytes()).hexdigest(),
+            ffmpeg9["fixture_sha256"],
+        )
+
+    def test_the_ffmpeg_9_capture_counts_but_cannot_act(self) -> None:
+        """The two tiers, on a real build that only supports one of them.
+
+        A structural record refuses a cache artifact. An automatic action needs
+        a window of five, and this build emits one record per decode session
+        however corrupt the input is — so the refusal fires and the action
+        cannot, which is the failure direction that is safe.
+        """
+        result = CHECKER["qualify"](
+            FIXTURES / "qualified-ffmpeg-9.stderr",
+            contract_id="ffmpeg-9.0.1-homebrew-h264-v1",
+        )
+        self.assertEqual(result.primary_video_error_records, 1)
+        self.assertEqual(result.contract_qualified_primary_records, 1)
+        self.assertTrue(result.observation_complete)
+        self.assertFalse(result.automatic_action_qualified)
+        self.assertFalse(result.windowed_action_qualified)
+        self.assertIsNone(result.fault_at_ms)
+
+    def test_an_unqualified_attribution_latches_but_cannot_act(self) -> None:
+        """The harness and the daemon apply one rule, not two.
+
+        The harness is what qualifies a contract before it is retained, so a
+        harness that certified an automatic action for a build on which the
+        daemon refuses to take one would be certifying something that cannot
+        happen. A fabricated five-record replay is the only way to reach this
+        on a build that does not emit five.
+        """
+        record = (
+            "[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] "
+            "Decoding error: Invalid data found when processing input"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "burst.stderr"
+            fixture.write_text(
+                "".join(f"{step * 10}\t{record}\n" for step in range(5)),
+                encoding="utf-8",
+            )
+            contracts = Path(directory) / "contracts.toml"
+            write_bound_contract(
+                contracts,
+                fixture,
+                overrides={
+                    "primary_message": "Decoding error:",
+                    "input_codec": "h264",
+                    "decoder": "h264",
+                    "attributes_every_failure": False,
+                },
+                omit={"subordinate_message"},
+            )
+            checker_globals = CHECKER["qualify"].__globals__
+            original = checker_globals["CONTRACTS_PATH"]
+            checker_globals["CONTRACTS_PATH"] = contracts
+            try:
+                result = CHECKER["qualify"](fixture, contract_id=RAWVIDEO_CONTRACT)
+            finally:
+                checker_globals["CONTRACTS_PATH"] = original
+        # The fault is still seen — refusing to see it would throw away the
+        # strongest thing the observation had to say.
+        self.assertEqual(result.primary_video_error_records, 5)
+        self.assertIsNotNone(result.fault_at_ms)
+        # And the action is still refused, because nobody qualified the rule
+        # against this build's attribution.
+        self.assertFalse(result.windowed_action_qualified)
+        self.assertFalse(result.automatic_action_qualified)
 
     def test_actual_media_baseline_is_bound_to_generator_and_output_evidence(self) -> None:
         path = ROOT / "tests/playback/decoder-media-baseline-2026-09-05.toml"

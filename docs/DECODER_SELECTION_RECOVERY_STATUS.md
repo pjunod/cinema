@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3d candidate; M0–M3c4, M4 and M5a merged into the effort ·
+**Status:** M3e candidate; M0–M3d, M4 and M5a merged into the effort ·
 **Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M3d task base:** effort head
-`86647b37cb9e91d3c043f3e3a0ef4fb5330ef34e`
+`effort/decoder-selection-recovery` · **M3e task base:** effort head
+`a8403e104f8be8a31dba09d184bfa7da983d73da`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,8 +20,8 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3d — the qualified decoder inventory |
-| Task branch | `codex/decoder-selection-m3d`, based on effort head `86647b37` |
+| Milestone | M3e — the wording belongs to the build |
+| Task branch | `codex/decoder-selection-m3e`, based on effort head `a8403e10` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
@@ -38,7 +38,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a–M3c4 merged; M3d candidate; M3c5 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d measures which decoder the running build actually selects, without which no attempt could ever be classified and the qualified namespace could hold nothing. Nothing selects it in production yet; the operator control and the paths that cannot yet publish a manifest are M3c5 |
+| M3 · owned observation and health receipts | M3a–M3d merged; M3e candidate; M3c5 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. Nothing selects it in production yet; the operator control and the paths that cannot yet publish a manifest are M3c5 |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -1510,6 +1510,144 @@ running against this build and cleaning up after itself. Daemon
 `transcode::tests::` 247/247 with two new. `make lint`, `make validation-lint`
 and `make history-check` clean.
 
+## M3e working tree — the wording belongs to the build
+
+Trying to prove the chain end to end on the qualifying workstation turned up
+something the effort had assumed rather than measured.
+
+`Error submitting packet to decoder` **does not exist anywhere in the FFmpeg 9
+binary.** Not reworded, not moved — absent. Its only decode-error format is
+`Decoding error: %s`. The grammar carried that wording as a Rust constant while
+every other build-varying fact — the contexts, the severity labels, the codec,
+the decoder, the detail text — was already a contract field. It was the one
+that was not.
+
+A grammar carrying one build's wording matches nothing on another, and a
+grammar that matches nothing reports every stream as clean. So an ordinary
+FFmpeg upgrade would have turned the whole effort off, silently, and left a
+node reporting healthy while producing exactly the broken artifacts this work
+exists to catch. That is not a hypothetical failure path; it is the one this
+project was created from, reached by a package update.
+
+So the message is a contract field now, in the Rust grammar and in the M0
+harness, and the contract table version is bumped: a version-1 table stated no
+wording, so reading one with these rules would match every build's lines
+against one build's message.
+
+### A second measured fact: how often a build says it
+
+`attributes_every_failure` is the other half, and it is a measurement stated as
+a measurement. Corrupted six-second h264 sources decoded on FFmpeg 9.0.1
+produced zero, one or two attributed records depending on the input — far fewer
+than the number of failed packets — and every one of those decodes **exited
+0**, which is the silent failure this effort is named after, reproduced on a
+current build.
+
+The windowed rule counts five records inside two seconds, which only means what
+it says on a build that emits one per failure. FFmpeg 8 was measured doing
+exactly that. FFmpeg 9 has not been shown to produce five of anything, so the
+rule has not been qualified for it.
+
+It gates the automatic **action**, never the latch, and the first draft of this
+milestone had that backwards. Blocking the latch would have been the worse
+trade: a genuinely burst-failing stream on such a build would then produce no
+fault, no barrier, and a receipt saying `Unqualified` with no terminal fault
+where it should say `Rejected` — throwing away the strongest thing the
+observation had, in order to avoid overclaiming about a different thing.
+Latching refuses the artifact. What an unqualified build may not do is kill a
+session on the strength of a rule nobody qualified for it.
+
+The two tiers separate exactly as designed, and in the safe direction:
+
+| | FFmpeg 8.0.1 (`rawvideo`) | FFmpeg 9.0.1 (`h264`) |
+|---|---|---|
+| structural records | 5 | 1 |
+| contract-qualified records | 5 | 1 |
+| refuses the cache artifact | yes | **yes** |
+| may drive an automatic action | yes | **no — not qualified** |
+
+The tier that protects the cache fires on both. The tier that drives an
+automatic action fires only where the rule was qualified against the build, and
+fails closed everywhere else. Both the Rust grammar and the M0 harness apply
+that gate — the harness is what qualifies a contract before it is retained, so
+a harness that certified an action the daemon refuses to take would be
+certifying something that cannot happen.
+
+### The evidence, and where it is kept
+
+`qualified-ffmpeg-9.stderr` is a real capture: a corrupted h264 source decoded
+on the qualifying workstation with the qualified log flags, hashed into the
+contract. Both the Rust grammar and the M0 harness replay it and agree on every
+number.
+
+Only the `@ 0x…` context-address form is redacted. The first draft rewrote
+every `0x…`, which also redacted an EBML byte value and a file offset — values
+the build printed, that are not identity, and whose removal made the retained
+evidence misstate what FFmpeg said. The same blanket rewrite would have altered
+a hex value inside a primary record's detail text, which `error_detail` is
+compared against exactly.
+
+Its host is a *workstation*, not a fleet node.
+`qualifying-hosts-2026-09-07.toml` is a separate measured-host file, because
+the fleet survey is evidence about what is deployed on the day it was taken,
+and writing a laptop into it would make the one file whose whole purpose is
+describing the fleet say something untrue about the fleet.
+
+That separation is enforced rather than described: the harness records which
+file a contract's host came from and refuses a contract whose scope does not
+agree — a workstation host must say so, and a fleet host must not.
+
+### What is still owed
+
+This qualifies a grammar on a workstation. It is not fleet evidence, not a
+producer qualification, and not an automatic-action qualification for any
+deployed build. The fleet's FFmpeg 8.0.1 and 5.1.9 builds still need their own
+captures, and 5.1.9 is expected to qualify nothing at all because it does not
+print the attributed context — which is the correct outcome for it.
+
+One more thing is owed and is now pinned by a test rather than left to be
+rediscovered: the retained FFmpeg 8 contract records `ffmpeg_version` as the
+package version `8.0.1-3ubuntu2`, while `MeasuredBuild` reads the full banner
+line and `covers_build` compares it for equality. That contract therefore
+cannot cover any running build — it is inert on the very host it was qualified
+against. Fixing it means re-capturing that host's banner, and inventing one
+would be exactly the confident-but-unmeasured value this evidence set exists to
+refuse. The FFmpeg 9 contract uses the measured convention, so the next capture
+has a correct example to follow.
+
+What this milestone does change about the fleet's future is that an upgrade to
+FFmpeg 9 no longer silently disarms the grammar: it produces a build no
+contract covers, which is an honest unqualified state, and the moment someone
+captures FFmpeg 9 on a real node the contract that describes it already has a
+place to say so.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran, and it re-ran the measurements rather than reading
+about them. It found one blocker and four major defects, including one in the
+milestone's own central judgement.
+
+| Finding | Disposition |
+|---|---|
+| The M0 harness parsed `attributes_every_failure` and never read it, so the harness and the daemon were two policies for the one rule this milestone adds — and the harness is what qualifies a contract *before* it is retained. It would have certified an automatic action for a build on which the daemon refuses to take one | The harness applies the same gate and reports it. A new test fabricates a five-record replay on an unqualified build and asserts it faults and still may not act |
+| The matcher guard caught the safe direction and not the catastrophic one. An empty prefix over-matches, which is noisy; a *padded* one — one stray leading space in a hand-written file — matches nothing, and a grammar that matches nothing certifies every broken stream as clean | Empty and padded are both refused, in the daemon and in the harness, with a test that walks six spellings |
+| Blocking the *latch* for an unqualified build was the wrong trade. A genuinely burst-failing stream would then produce no fault, no barrier, and a receipt saying `Unqualified` with no terminal fault where it should say `Rejected` | The gate moved to the action. The fault still latches and still refuses the artifact; what an unqualified build may not do is kill a session |
+| "FFmpeg 9 emits exactly one attributed record per session however corrupt the input" was a generalisation from one file. Re-measured across several inputs: zero, one and two — all exiting 0 | Restated as what was measured, in the contract, the code and this document |
+| The retained FFmpeg 8 contract records a `ffmpeg_version` no running build reports, so it can never cover one | Pinned by a test as owed evidence rather than fixed with an invented banner line |
+| The fixture's sanitizer rewrote every `0x…`, redacting an EBML byte and a file offset that the build actually printed | Only the `@ 0x…` address form is redacted, and the fixture was re-captured |
+| The workstation/fleet separation was asserted in one hardcoded hostname in one test | The harness records which measured-host file a contract's host came from and refuses a contract whose scope disagrees |
+
+Focused evidence on this head, pinned `rustc 1.97.1`: daemon `decoder_health`
+42/42, four new — the FFmpeg 9 capture counting a record it may not act on, an
+unqualified attribution still latching and still refusing to act (with the
+qualified-attribution twin acting on the same twenty records, so the refusal is
+about the contract), the empty-and-padded matcher guard across six spellings,
+and the owed FFmpeg 8 version convention.
+`tests.operations.test_decoder_diagnostic_qualification` 26/26, two new — the
+same capture replayed through the harness with the same numbers, and a
+fabricated five-record burst on an unqualified build that faults and still may
+not act. `make lint`, `make validation-lint` and `make history-check` clean.
+
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 
 Admission decided what a session would cost from the encoder's name. A
@@ -2055,8 +2193,12 @@ that binds FFmpeg version, binary/build hashes, codec, decoder, context
 addresses, severity, exact error detail, and retained fixture hash. The sole
 M0 harness parses those fields into a closed typed schema, cross-checks the
 host version and hashes against the fleet evidence, then hashes and classifies
-one open fixture descriptor. Its sole action contract is host
+one open fixture descriptor. Its sole *deployed-build* action contract is host
 FFmpeg 8.0.1 `rawvideo`; it is not deployed-producer or MPEG-4 qualification.
+M3d added a second contract, for `h264` on the qualifying workstation's FFmpeg
+9.0.1 — a grammar qualification and explicitly not fleet evidence, kept in its
+own measured-host file so the fleet survey cannot be made to say something
+untrue about what is deployed.
 `No frame decoded?` is supporting evidence. The #913 FFmpeg 7.1.4 MPEG-4
 capture, deployed FFmpeg 5.1 shape, fatal backend initialization grammars, and
 every additional build/backend grammar remain observation-only until retained

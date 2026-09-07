@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tomllib
@@ -35,6 +36,8 @@ M3C3_TASK_BASE = M3C2_MERGED_HEAD
 M3C3_MERGED_HEAD = "b602b9f2add7c14861265f7d384c1d9910b0c742"
 M3C4_MERGED_HEAD = "86647b37cb9e91d3c043f3e3a0ef4fb5330ef34e"
 M3D_TASK_BASE = M3C4_MERGED_HEAD
+M3D_MERGED_HEAD = "a8403e104f8be8a31dba09d184bfa7da983d73da"
+M3E_TASK_BASE = M3D_MERGED_HEAD
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
@@ -108,20 +111,32 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("| Maximum retained counter | `u64::MAX` |", self.status)
 
         contracts = self.contracts["contracts"]
-        self.assertEqual(len(contracts), 1)
-        contract = contracts[0]
-        self.assertEqual(contract["host"], "nynuc")
-        self.assertEqual(contract["input_codec"], "rawvideo")
-        self.assertEqual(contract["decoder"], "rawvideo")
+        # Every retained contract is a host grammar qualification, and none of
+        # them is a deployed-producer one. The count is not pinned — a build
+        # measured is a contract added — but the boundary is.
+        self.assertGreaterEqual(len(contracts), 1)
+        for contract in contracts:
+            with self.subTest(contract=contract["id"]):
+                self.assertIn("host diagnostic grammar only", contract["scope"])
+                # Every one of them disclaims being a producer or fleet
+                # qualification, however it words it.
+                self.assertRegex(contract["scope"], r"not (a )?deployed")
+        by_host = {contract["host"]: contract for contract in contracts}
+        nynuc = by_host["nynuc"]
+        self.assertEqual(nynuc["input_codec"], "rawvideo")
+        self.assertEqual(nynuc["decoder"], "rawvideo")
         self.assertEqual(
-            contract["scope"],
+            nynuc["scope"],
             "host diagnostic grammar only; not deployed producer or MPEG-4 qualification",
         )
         self.assertIn(
-            "Its sole action contract is host FFmpeg 8.0.1 `rawvideo`; it is not "
-            "deployed-producer or MPEG-4 qualification.",
+            "Its sole *deployed-build* action contract is host FFmpeg 8.0.1 `rawvideo`; "
+            "it is not deployed-producer or MPEG-4 qualification.",
             self.flat_status,
         )
+        # And the only other one is explicit that it is a workstation, so no
+        # reader can mistake it for fleet evidence.
+        self.assertNotIn("pauls-macbook-pro-2", {node["name"] for node in self.fleet["nodes"]})
 
     def test_status_preserves_unqualified_fleet_media_and_client_boundaries(self) -> None:
         self.assertEqual(self.fleet["qualification"], "advertised-only")
@@ -180,12 +195,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(f"M3d task base:** effort head `{M3D_TASK_BASE}`", self.flat_status)
+        self.assertIn(f"M3e task base:** effort head `{M3E_TASK_BASE}`", self.flat_status)
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C2_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C3_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C4_MERGED_HEAD[:8], self.status)
+        self.assertIn(M3D_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -309,7 +325,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M3d candidate; M0–M3c4, M4 and M5a merged into the effort", self.status
+            "M3e candidate; M0–M3d, M4 and M5a merged into the effort", self.status
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
@@ -723,6 +739,84 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "`rawvideo` is not a codec this node advertises for", self.flat_status
         )
 
+    def test_m3e_the_diagnostic_wording_is_a_property_of_the_build(self) -> None:
+        """A constant here would have turned the effort off on an upgrade.
+
+        `Error submitting packet to decoder` does not exist anywhere in the
+        FFmpeg 9 binary. A grammar carrying it matches nothing on that build,
+        and a grammar that matches nothing reports every stream as clean —
+        the failure this project was created from, reached by a package update.
+        """
+        health = DECODER_HEALTH.read_text(encoding="utf-8")
+        contracts = self.contracts
+
+        self.assertEqual(contracts["version"], 2)
+        by_id = {contract["id"]: contract for contract in contracts["contracts"]}
+        ffmpeg9 = by_id["ffmpeg-9.0.1-homebrew-h264-v1"]
+        self.assertEqual(ffmpeg9["primary_message"], "Decoding error:")
+        self.assertNotIn("subordinate_message", ffmpeg9)
+        self.assertFalse(ffmpeg9["attributes_every_failure"])
+
+        # The gate is on the action, never the latch. Blocking the latch would
+        # cost a burst-failing stream its fault, its barrier and the strongest
+        # statement its receipt had to make.
+        self.assertIn("windowed_action_qualified: bool,", health)
+        action = health.split("pub fn automatic_action_allowed(", 1)[1].split(
+            "\n    }", 1
+        )[0]
+        self.assertIn("self.windowed_action_qualified", action)
+        latch = health.split("if self.window.len() >= VIDEO_DECODE_ERROR_LIMIT", 1)[1][
+            :200
+        ]
+        self.assertNotIn("windowed_action_qualified", latch)
+        # And the harness applies the same gate, because it is what qualifies a
+        # contract before it is retained.
+        self.assertIn("and windowed_action_qualified", self.harness)
+
+        # An empty prefix would match every line ever printed, so it cannot be
+        # spelled at all.
+        self.assertIn("UnusableMatcher(String)", health)
+
+        # The capture is real, hashed, and its host is a workstation kept out
+        # of the fleet survey.
+        fixture = (
+            ROOT / "tests/playback/decoder-health" / ffmpeg9["fixture"]
+        ).read_bytes()
+        self.assertEqual(
+            hashlib.sha256(fixture).hexdigest(), ffmpeg9["fixture_sha256"]
+        )
+        self.assertIn(b"Decoding error: Invalid data found", fixture)
+        # Only the address form is redacted: the other hex values are what the
+        # build printed, and rewriting them would misstate the evidence. The
+        # header comment names the redacted form, so read the records only.
+        records = [
+            line
+            for line in fixture.decode().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        self.assertTrue(records)
+        for record in records:
+            with self.subTest(record=record[:60]):
+                self.assertNotIn("@ 0x", record)
+        self.assertTrue(any("first byte 0x" in record for record in records))
+        hosts = tomllib.loads(
+            (
+                ROOT / "tests/playback/decoder-health/qualifying-hosts-2026-09-07.toml"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            {node["name"] for node in hosts["nodes"]}, {"pauls-macbook-pro-2"}
+        )
+        self.assertIn("not deployed nodes", hosts["scope"])
+        # Enforced, not described: the harness refuses a contract whose scope
+        # disagrees with the file its host came from.
+        self.assertIn('(provenance == "workstation") != ("workstation" in contract.scope)', self.harness)
+
+        # And the document says what is still owed rather than claiming the
+        # fleet is covered.
+        self.assertIn("What is still owed", self.status)
+        self.assertIn("not fleet evidence", self.status)
+
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.
 
@@ -743,17 +837,20 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             with self.subTest(constant=name):
                 self.assertIn(f"pub const {name}: {value};", health)
 
-        # The message is the harness's literal, matched as a prefix. A
-        # `contains` here is what let a filter-graph failure carrying the
-        # contract's own detail text read as a decode failure.
-        self.assertIn(
-            'const PRIMARY_MESSAGE: &str = "Error submitting packet to decoder:";',
-            health,
-        )
-        self.assertIn(
-            "Error submitting packet to decoder:",
+        # The message is matched as a prefix, and it is the *build's* message
+        # rather than a constant. A `contains` here is what let a filter-graph
+        # failure carrying the contract's own detail text read as a decode
+        # failure; a constant is what would have let an FFmpeg upgrade read
+        # every broken stream as clean.
+        self.assertNotIn("const PRIMARY_MESSAGE:", health)
+        self.assertIn("self.contract.primary_message.as_str()", health)
+        self.assertIn("pub primary_message: String,", health)
+        # And the harness reads it from the contract too, so a capture from one
+        # build cannot be replayed under another build's wording.
+        self.assertIn("re.escape(contract['primary_message'])", self.harness)
+        self.assertNotIn(
+            'r"(?P<severity>\\[error\\]\\s+)?Error submitting packet to decoder:"',
             self.harness,
-            "the harness and the Rust grammar name the same message",
         )
         # Both halves of the stream selector, and every contract field that
         # changes what a line means.

@@ -1,0 +1,14 @@
+# Sanitized host FFmpeg 9.0.1 h264 grammar from pauls-macbook-pro-2.
+# Captured from a real decode of a corrupted h264 source: the process
+# exited 0 and printed one attributed record.
+# Only the `@ 0x…` context address form is redacted. The other hex values
+# here are an EBML byte and a file offset — what the build printed, not
+# identity — and rewriting them would misstate the evidence.
+0	[h264 @ <address>] [error] Invalid NAL unit size (62017 > 225).
+0	[h264 @ <address>] [error] missing picture in access unit with size 229
+0	[in#0/matroska,webm @ <address>] [error] Length 6 indicated by an EBML number's first byte 0x05 at pos 12492 (0x30cc) exceeds max length 4.
+0	[h264 @ <address>] [error] Invalid NAL unit size (62017 > 225).
+0	[h264 @ <address>] [error] Error splitting the input into NAL units.
+0	[h264 @ <address>] [error] Reference 4 >= 3
+0	[h264 @ <address>] [error] error while decoding MB 5 11, bytestream 617
+0	[vist#0:0/h264 @ <address>] [dec:h264 @ <address>] [error] Decoding error: Invalid data found when processing input

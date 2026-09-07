@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 [[contracts]]
 id = "ffmpeg-8.0.1-3ubuntu2-rawvideo-v1"
@@ -10,7 +10,38 @@ stderr_mode = "repeat+level+error"
 input_codec = "rawvideo"
 decoder = "rawvideo"
 require_context_addresses = true
+primary_message = "Error submitting packet to decoder:"
+subordinate_message = "No frame decoded?"
+attributes_every_failure = true
 error_detail = "Invalid data found when processing input"
 fixture = "qualified-ffmpeg-8.stderr"
 fixture_sha256 = "994f1318f5f9c7a895818e446bf669a9818407b7b51174fe5f75b99223640a34"
 scope = "host diagnostic grammar only; not deployed producer or MPEG-4 qualification"
+
+[[contracts]]
+id = "ffmpeg-9.0.1-homebrew-h264-v1"
+host = "pauls-macbook-pro-2"
+ffmpeg_version = "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers"
+binary_sha256 = "9f5ddd4f8b36eb07b0c5d60ab6ea1e618bedd70bc45feab82b4dc23be1596ad1"
+buildconf_sha256 = "04f79ec5a6cfd0e83ff45f4ca27d29015f569cfe4a5bebb3d9de072a70490ae5"
+stderr_mode = "repeat+level+error"
+input_codec = "h264"
+decoder = "h264"
+require_context_addresses = true
+# FFmpeg 9 does not contain the string `Error submitting packet to decoder`
+# anywhere in the binary; its only decode-error format is `Decoding error: %s`.
+primary_message = "Decoding error:"
+# And it prints no subordinate detail line at all, so the key is absent rather
+# than empty: an empty prefix would match every line ever printed.
+# Measured, not assumed, and stated as what was measured. Corrupted 6-second
+# h264 sources on this build produced zero, one or two attributed records
+# depending on the input, and every one of those decodes exited 0. That is far
+# fewer records than failed packets, so five inside two seconds is not
+# something this build has been shown to produce, and the windowed rule has not
+# been qualified for it. The rule gates the automatic *action*, never the
+# latch: a burst that does occur still faults and still refuses the artifact.
+attributes_every_failure = false
+error_detail = "Invalid data found when processing input"
+fixture = "qualified-ffmpeg-9.stderr"
+fixture_sha256 = "d0a95f8d4d120b7f161c8dadb8df4a6ecf9e79dc7d6922e1640734e59ff25714"
+scope = "host diagnostic grammar only, on the qualifying workstation; not a deployed fleet build and not a producer qualification"
