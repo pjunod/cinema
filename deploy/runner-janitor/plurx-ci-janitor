@@ -167,7 +167,12 @@ while IFS= read -r unit; do
   # config that names anything else is skipped rather than trusted -- this
   # deletes a directory whole, so the check is the whole safety argument.
   case "$dir" in */*runner*/cache) ;; *) continue ;; esac
-  [ ! -L "$dir" ] && [ -d "$dir" ] && [ -f "$dir/bolt.db" ] || continue
+  [ ! -L "$dir" ] && [ -d "$dir" ] || continue
+  # The index or the blob tree -- either proves what this directory is, and
+  # requiring both was wrong: `gha-nuc4-general-01` was carrying 13G of blobs
+  # with no `bolt.db` beside them, and the janitor walked straight past the
+  # fullest runner in the fleet reporting nothing at all.
+  [ -f "$dir/bolt.db" ] || [ -d "$dir/cache" ] || continue
 
   instances=$((instances + 1))
   used_kb=$(du -sk "$dir" | awk '{ print $1 }')

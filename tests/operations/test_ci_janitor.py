@@ -200,8 +200,27 @@ class JanitorContractCase(unittest.TestCase):
         self.assertTrue((self.cache / "bolt.db").is_file())
         self.assertFalse((self.state / "last-run.json").exists())
 
-    def test_a_directory_without_the_index_is_not_a_cache_server(self):
+    def test_the_blob_tree_alone_is_enough_to_recognize_a_cache_server(self):
+        """`gha-nuc4-general-01` had 13G of blobs and no `bolt.db` beside them.
+
+        Requiring both markers made the janitor walk past the fullest runner in
+        the fleet and report nothing, which is the failure mode this whole
+        thing exists to end.
+        """
         (self.cache / "bolt.db").unlink()
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
+        self.assertFalse(self.cache.exists())
+
+    def test_a_directory_that_is_neither_index_nor_blobs_is_not_a_cache(self):
+        (self.cache / "bolt.db").unlink()
+        (self.cache / "cache/0a/11").unlink()
+        (self.cache / "cache/0a").rmdir()
+        (self.cache / "cache").rmdir()
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
 
         result = self.run_janitor()
@@ -259,6 +278,21 @@ class JanitorContractCase(unittest.TestCase):
         # graceful stop, and the janitor becomes the thing that breaks CI.
         self.assertIn("TimeoutStopSec=30min", installer)
         self.assertIn("--dry-run", installer)
+
+        # A host with no checkout still installs in one command, because a
+        # fleet fix that takes four gets applied to two hosts.
+        bootstrap = (ROOT / "deploy/runner-janitor/bootstrap").read_text(
+            encoding="utf-8"
+        )
+        for name in (
+            "plurx-ci-janitor",
+            "plurx-ci-janitor.service",
+            "plurx-ci-janitor.timer",
+            "install",
+        ):
+            self.assertIn(name, bootstrap)
+        self.assertIn("raw/branch/$REF/deploy/runner-janitor", bootstrap)
+        self.assertIn('exec "$work/install"', bootstrap)
 
 
 if __name__ == "__main__":

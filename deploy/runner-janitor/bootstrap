@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Install the runner janitor on a host with no checkout of this repository.
+#
+#   sudo bash <(curl -fsSL http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap)
+#
+# One command, because a fleet fix that takes four is a fleet fix that gets
+# applied to two hosts. It fetches the janitor, its unit and its timer from the
+# forge into a temporary directory and runs the ordinary installer, which is
+# the same one a checkout would run.
+set -euo pipefail
+
+FORGE=${PLURX_FORGE:-http://192.168.4.7:3000}
+REF=${PLURX_REF:-main}
+base="$FORGE/noirr/plurx/raw/branch/$REF/deploy/runner-janitor"
+
+[ "$(id -u)" -eq 0 ] || { echo "bootstrap: run me as root" >&2; exit 1; }
+
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+for name in plurx-ci-janitor plurx-ci-janitor.service plurx-ci-janitor.timer install; do
+  curl -fsSL "$base/$name" -o "$work/$name"
+done
+chmod +x "$work/plurx-ci-janitor" "$work/install"
+exec "$work/install"
