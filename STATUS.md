@@ -54,7 +54,8 @@ that catches up.
 
 ## Settings put the operator on the login page, and the cause was a tombstone
 
-**Branch `fix/cluster-recovery-auth` — open against `main`.** Opening Settings
+**PR [#101](http://192.168.4.7:3000/noirr/plurx/pulls/101) — merged into
+`main` as `a1b1fa34`, 2026-09-07. Not deployed.** Opening Settings
 on the fleet returned the sign-in screen. The credential was valid the whole
 time.
 
@@ -88,6 +89,17 @@ session through a cluster-recovery refusal and paints it in the panel that
 reports the cluster; and the activation loop names the precondition blocking
 it and backs off to a minute instead of logging one unattributed sentence
 every three seconds forever.
+
+An adversarial review then found four gaps in that first tree, all closed
+before the merge: the fence was corrected in two of the three statements that
+carry it and `enter_maintenance`'s own admission still read the table wide;
+the new predicate failed open on a removal row whose target cannot be resolved
+at all; the blocker attribution named eight of the acquire's eleven standing
+conditions and reported this node's own exclusion as another node's; and the
+client guessed rather than asking, so `keepSessionOn401` now confirms the
+credential against `/me` before anything is decided — a node still running the
+older build refuses these reads with 401 while the session is fine, and a token
+that dies mid-tick must still end it.
 
 ## A deploy that refused itself over an unmaintainable pair
 
