@@ -12457,6 +12457,13 @@ static CONTROL_RECOVERY_WITHHELD: [[AtomicU64; 3]; 7] =
 /// Clients by platform and whether they declared they accept a hold. This is
 /// the fleet's rollout progress, readable without touching a device.
 static CONTROL_VOCABULARY: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+/// Clients by platform that declared `prepare_replacement`, whatever else they
+/// declared. Separate from `CONTROL_VOCABULARY` because that one answers "is
+/// this client fully managed" and needs all four actions, while the prepared
+/// handoff only ever asked about this one. Folding them let a report say no
+/// client had asked for a handoff while a client that omitted
+/// `retry_resource` was asking for exactly that.
+static CONTROL_PREPARE_CAPABLE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_LEASE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RETIREMENTS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_HOLDS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -12772,6 +12779,79 @@ pub(crate) fn record_action(
         && request.accepts(RETRY_RESOURCE_ACTION)
         && request.accepts(PREPARE_REPLACEMENT_ACTION);
     CONTROL_VOCABULARY[usize::from(complete)][platform].fetch_add(1, Ordering::Relaxed);
+    if request.accepts(PREPARE_REPLACEMENT_ACTION) {
+        CONTROL_PREPARE_CAPABLE[platform].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The rollout counters as data, for the Developer readiness route.
+///
+/// `prometheus()` already renders these, but a text scrape is the wrong shape
+/// for a caller that has to decide met/unmet — parsing our own exposition
+/// format back into numbers would be a second encoder to keep in step. Both
+/// readers now share the same load.
+///
+/// Process-local and reset by a restart, which the route says out loud rather
+/// than presenting a fresh process's zeroes as evidence of anything.
+pub(crate) struct ControlVocabularySnapshot {
+    /// Exchanges from clients declaring every action this server can send,
+    /// indexed web/apple/android.
+    pub complete: [u64; 3],
+    /// Exchanges from clients declaring only some of them.
+    pub partial: [u64; 3],
+}
+
+pub(crate) fn control_vocabulary_snapshot() -> ControlVocabularySnapshot {
+    let read = |row: &[AtomicU64; 3]| {
+        [
+            row[0].load(Ordering::Relaxed),
+            row[1].load(Ordering::Relaxed),
+            row[2].load(Ordering::Relaxed),
+        ]
+    };
+    ControlVocabularySnapshot {
+        complete: read(&CONTROL_VOCABULARY[1]),
+        partial: read(&CONTROL_VOCABULARY[0]),
+    }
+}
+
+pub(crate) struct PreparationStagedSnapshot {
+    pub staged: u64,
+    pub refused: u64,
+}
+
+pub(crate) fn preparation_staged_snapshot() -> PreparationStagedSnapshot {
+    PreparationStagedSnapshot {
+        staged: PREPARATIONS_STAGED[1].load(Ordering::Relaxed),
+        refused: PREPARATIONS_STAGED[0].load(Ordering::Relaxed),
+    }
+}
+
+/// Exchanges from clients declaring `prepare_replacement`, indexed
+/// web/apple/android.
+pub(crate) fn prepare_capable_snapshot() -> [u64; 3] {
+    [
+        CONTROL_PREPARE_CAPABLE[0].load(Ordering::Relaxed),
+        CONTROL_PREPARE_CAPABLE[1].load(Ordering::Relaxed),
+        CONTROL_PREPARE_CAPABLE[2].load(Ordering::Relaxed),
+    ]
+}
+
+/// Record one partial-vocabulary exchange, so a test that reads the
+/// prerequisite back through a route sees a deterministic `Unmet`.
+///
+/// These counters are process-global and every test in this binary shares
+/// them, so a test asserting on a *reading* of them is otherwise
+/// order-dependent: one `record_action` in a sibling test changes the answer,
+/// and the resulting failure reads like a bug in the assertion rather than in
+/// the fixture. This adds rather than resets, and the reading it forces is
+/// checked before any other branch — a concurrent increment from any sibling
+/// can only add to counters, never zero them, so the branch under test cannot
+/// be taken away. It is not a stub either: this is the counter production
+/// writes and the route reads.
+#[cfg(test)]
+pub(crate) fn record_partial_vocabulary_for_tests() {
+    CONTROL_VOCABULARY[0][0].fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn record_producer_hold(reason: crate::transcode::AheadHoldReason) {

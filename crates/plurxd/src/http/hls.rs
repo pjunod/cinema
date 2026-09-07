@@ -15064,6 +15064,61 @@ mod tests {
         );
     }
 
+    /// The Developer readiness row `server_preparation_is_real` reports
+    /// `unmet`, and this is the other end of that sentence.
+    ///
+    /// That row is a claim about this build — "a prepared successor publishes
+    /// `encoder: staged` with no candidate worker behind its playlist" — and a
+    /// claim about a build goes stale silently: §4 ships a real worker, and the
+    /// Developer tab keeps telling operators the capability is metadata only,
+    /// with every test still green. So the claim is pinned here, where the
+    /// staging happens. When a candidate worker exists this test fails, and
+    /// whoever makes it pass is holding the reason the readiness row has to
+    /// change with it.
+    #[tokio::test]
+    async fn a_prepared_successor_still_publishes_a_staged_encoder() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, session_id, route) = staging_fixture(dir.path()).await;
+
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &staged_candidate_request(),
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        let published = fixture
+            .state
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("staged route read")
+            .expect("the staged successor has a durable route");
+        let response: serde_json::Value =
+            serde_json::from_str(&published.response_json).expect("the published start response");
+
+        assert_eq!(
+            response["encoder"], "staged",
+            "the Developer readiness row `server_preparation_is_real` tells operators this build \
+             stages metadata only. If a candidate worker now names itself here, that row is \
+             lying, and it lives in crates/plurxd/src/http/developer.rs"
+        );
+    }
+
     /// M6 §3.4c's acceptance at the actual control seam. The stage happens
     /// outside the exchange that requested it; the next exchange reads the
     /// durable row, has the same owner-local slot authorize it, and returns a

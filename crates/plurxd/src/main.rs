@@ -1974,6 +1974,11 @@ fn build_state(
             shared_cache_dir: config.cluster.shared_cache_dir.clone(),
             shared_cache_id: config.cluster.shared_cache_id.clone(),
             catalogue,
+            snapshot_recovery_budgets: crate::state::SnapshotRecoveryBudgets {
+                chunk_secs: config.cluster.snapshot_chunk_timeout_secs,
+                transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
+                install_secs: config.cluster.install_snapshot_timeout_secs,
+            },
         },
         store,
         dirs,
