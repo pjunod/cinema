@@ -46,7 +46,7 @@ use std::path::PathBuf;
 /// so 2 s helps copy when the source GOP is short and never hurts it.
 ///
 /// It is also the unit of every boundary the cluster failover contract talks
-/// about (`docs/PHASE3-SPIKE.md`): a session restarted on another node resumes
+/// about (`docs/cluster/PHASE3-SPIKE.md`): a session restarted on another node resumes
 /// at `N * SEGMENT_SECONDS`. Nothing may hardcode the number — the spike
 /// measured 4, this is now 2, and the property holds for any fixed length. A
 /// second copy of the value is a failover bug waiting for the day it changes
@@ -57,7 +57,7 @@ pub const SEGMENT_SECONDS: u32 = 2;
 ///
 /// On a copy, `hls_time` is a floor under cuts that can only happen at source
 /// keyframes — and every cut costs a frame. The one-stream experiment
-/// (docs/STUTTER-4K.md §5.3ter) proved it: the same open-GOP bitstream plays
+/// (docs/streaming/STUTTER-4K.md §5.3ter) proved it: the same open-GOP bitstream plays
 /// 1781 frames with ZERO drops as one continuous stream, and drops exactly
 /// one leading picture per segment start when fragmented, in Chrome's MSE
 /// and Safari's native player alike. Only the segment-START keyframe gets
@@ -235,7 +235,7 @@ pub const COPY_PUBLISH_GATE_SECS: u32 = 12;
 /// there* (ISO 14496-15 — parameter sets live in the sample entry only, which
 /// ffmpeg's hvcC already carries). So every fragment used to open with a spec
 /// violation, at exactly the boundary cadence of the 4K stutter this exists
-/// to fix (docs/STUTTER-4K.md §5.0). And Dolby Vision's EL/RPU units (62/63):
+/// to fix (docs/streaming/STUTTER-4K.md §5.0). And Dolby Vision's EL/RPU units (62/63):
 /// tagging `hvc1` rather than `dvh1`/`dvhe` already forecloses any client
 /// engaging DV on this path, so those units are dead weight in every access
 /// unit — the browser's parser steps over them, and the base layer is
@@ -252,7 +252,7 @@ pub const COPY_PUBLISH_GATE_SECS: u32 = 12;
 /// copy left at every segment join.
 ///
 /// One more thing a Dolby Vision source has to shed, learned from Safari on
-/// an M3 Max (docs/STUTTER-4K.md): the *container signaling*. Stripping the
+/// an M3 Max (docs/streaming/STUTTER-4K.md): the *container signaling*. Stripping the
 /// RPU/EL NAL units leaves the stream's DOVI configuration side data intact,
 /// and the muxer writes it out as a `dvcC` box — a stream that DECLARES
 /// Dolby Vision Profile 7 (the dual-layer Blu-ray profile no browser and no
@@ -329,7 +329,7 @@ pub fn hevc_copy_bsf_for_copy(
 /// That is not a cosmetic mismatch. Chrome ignores the box; VideoToolbox
 /// honours it, and Safari answers a 4K10 HEVC stream so labelled with a
 /// *software* decode on hardware that has a dedicated block for it — the
-/// stutter `docs/STUTTER-4K.md` exists to fix, reintroduced by the filter
+/// stutter `docs/streaming/STUTTER-4K.md` exists to fix, reintroduced by the filter
 /// meant to prevent it. The half-strip is worse than either whole answer, so
 /// the init must have the record removed
 /// (`crate::fmp4::remove_dolby_vision_record`) before a client sees it.
@@ -1829,7 +1829,7 @@ pub fn copy_pipe_args_with_dolby_vision(
 /// source whose keyframes `crate::fmp4` cannot read, and for a stream it
 /// turned out not to be able to follow. It cuts wherever it finds a keyframe
 /// past the floor, which on an open-GOP source costs one frame per boundary
-/// (docs/STUTTER-4K.md §5.6). That is the behaviour the segmenter exists to
+/// (docs/streaming/STUTTER-4K.md §5.6). That is the behaviour the segmenter exists to
 /// improve on, and the behaviour anything unexpected degrades back to.
 pub fn hls_copy_args(
     source: &MediaFile,
@@ -1909,7 +1909,7 @@ pub fn hls_copy_args_with_sequence(
     // HEVC spec's instruction at random access is to DISCARD the leading
     // pictures — one dropped frame per segment boundary, which is exactly
     // the measured residual stutter (22 drops in 45s, 15/23 within 150ms of
-    // a boundary, docs/STUTTER-4K.md §5.5). The claim was a lie on this path;
+    // a boundary, docs/streaming/STUTTER-4K.md §5.5). The claim was a lie on this path;
     // whether any given player acts on it, a lie in a spec tag is not a
     // thing to keep shipping.
     args.extend(

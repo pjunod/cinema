@@ -94,7 +94,7 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > death. DRM, DVR, captions and guide scheduling are not supported.
 > General server administration remains in the web app; the viewing, discovery, and
 > playback surfaces are native here. The capability matrix is in
-> [Android client parity](../../docs/ANDROID-CLIENT-PARITY.md).
+> [Android client parity](../../docs/clients/ANDROID-CLIENT-PARITY.md).
 
 ## What works
 
@@ -102,7 +102,7 @@ recomputed on every decision, because unplugging HDMI changes the answer.
   stop on a dedicated H.264/AAC live player. No library watch-progress writes.
   Settings → Developer documents the required private IPv4 tuner, committed
   owner node, compatible fleet, FFmpeg, scratch space and session budget before
-  runtime enablement. [The Live TV plan](../../docs/HDHOMERUN-LIVE-TV-PLAN.md)
+  runtime enablement. [The Live TV plan](../../docs/features/HDHOMERUN-LIVE-TV-PLAN.md)
   records limits and acceptance; source tests are not physical playback proof.
 - **Connect & sign in** to any plurx server by address (`http://192.168.1.10:32400`); the
   session is remembered so the app reconnects silently on next launch.

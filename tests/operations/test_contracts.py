@@ -1283,7 +1283,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("group: plurx-browser-heavy", web_layout)
         self.assertNotIn("group: plurx-browser-heavy", vod_web)
         self.assertIn("--case suspend-resume", vod_web)
-        self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
+        self.assertIn("docs/streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
         self.assertIn(
             "if: needs.scope.outputs.release_build == 'true' || "
             "needs.scope.outputs.container == 'true'",

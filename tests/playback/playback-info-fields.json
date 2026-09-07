@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "title": "Playback-info panel field contract — one row list, every client shows the same rows with the same labels and units",
-  "documented_in": "docs/PLAYER-INPUT-CONTRACT.md",
+  "documented_in": "docs/clients/PLAYER-INPUT-CONTRACT.md",
   "ruled": "2026-09-02",
 
   "modes": {

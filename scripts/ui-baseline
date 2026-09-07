@@ -6,7 +6,7 @@ layout arc rearranges it. There is no component test to lean on and no design
 system to diff, so the only honest way to say "this refactor changed nothing"
 is to photograph the app before and after and prove the photographs are
 identical. That was G0's contract, and G3 found two holes in it (see
-docs/UI-LAYOUTS-G3-DECISION.md §3 and §5/R1):
+docs/clients/UI-LAYOUTS-G3-DECISION.md §3 and §5/R1):
 
   * it captured and exited — the comparison was a `sha256sum` a human ran by
     hand, so nothing ever failed;
@@ -172,7 +172,7 @@ SEED_PASSWORD = "baseline-password"
 # rewrite rows nothing renders. `after-quiescence` aborts an activation attempt
 # after its marker is fsynced and before any incoming target exists, which buys
 # the one SQLite recovery boot `seed()` and `freeze_database()` need. See
-# docs/CLUSTERING-PLAN.md §4 and `select_daemon_store`.
+# docs/cluster/CLUSTERING-PLAN.md §4 and `select_daemon_store`.
 ACTIVATION_FAILPOINT_ENV = "PLURX_CLUSTER_ACTIVATION_FAILPOINT"
 ACTIVATION_FAILPOINT = "after-quiescence"
 # `ActivationFailpoint::crash_if` exits with this. Requiring it is what keeps a

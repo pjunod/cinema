@@ -1437,7 +1437,7 @@ fn admit_restart(
 /// Shared by `resolve_plan` and by M6's candidate, because it is the one part
 /// of resolving a recipe that needs the store, the ladder ceiling and the
 /// network prior — see
-/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.3 on why
+/// [M6-CALLER-HANDOFF.md](../../../../docs/playback-control/M6-CALLER-HANDOFF.md) §3.3 on why
 /// the rest of `resolve_plan` is not what a candidate wants.
 pub(crate) async fn resolve_height(
     state: &AppState,
@@ -1466,7 +1466,7 @@ pub(crate) async fn resolve_height(
 /// honoured, what would we deliver?"* without creating anything, and that is
 /// the same question `create` answers on its way to admission. Answered once,
 /// here, rather than twice in two places that agree today —
-/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.2. **Do
+/// [M6-CALLER-HANDOFF.md](../../../../docs/playback-control/M6-CALLER-HANDOFF.md) §3.2. **Do
 /// not grow a second resolver.** The drift would be invisible, because both
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
@@ -9020,7 +9020,7 @@ fn advertises_dolby_vision(context: &crate::transcode::HlsContext) -> bool {
 /// in between, so this is where it is caught. Chrome ignores the box;
 /// VideoToolbox honours it, and Safari answers 4K10 HEVC so labelled with a
 /// software decode on hardware that has a dedicated block for it
-/// (`docs/STUTTER-4K.md` §6).
+/// (`docs/streaming/STUTTER-4K.md` §6).
 ///
 /// Gated on what the playlist says rather than on how the session was built,
 /// deliberately. The serve path has no copy options in hand, and the question

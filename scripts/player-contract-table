@@ -2,7 +2,7 @@
 "use strict";
 
 // Render the two player contracts as the markdown blocks
-// docs/PLAYER-INPUT-CONTRACT.md embeds:
+// docs/clients/PLAYER-INPUT-CONTRACT.md embeds:
 //
 //   tests/playback/player-input-contract.json  → contract:routing:begin/end
 //   tests/playback/playback-info-fields.json   → contract:info:begin/end
@@ -20,8 +20,16 @@ const path = require("node:path");
 const ROOT = path.join(__dirname, "..");
 const FIXTURE = path.join(ROOT, "tests/playback/player-input-contract.json");
 const FIELDS = path.join(ROOT, "tests/playback/playback-info-fields.json");
-const DOC = path.join(ROOT, "docs/PLAYER-INPUT-CONTRACT.md");
+const DOC = path.join(ROOT, "docs/clients/PLAYER-INPUT-CONTRACT.md");
 const POLICY = path.join(ROOT, "crates/plurxd/src/web/playback-policy.js");
+// The generated blocks cite the fixtures with a link relative to the doc, so
+// the citation stays correct when the doc moves: docs/clients/PLAYER-INPUT-CONTRACT.md
+// needed "../tests/…", docs/clients/ needs "../../tests/…". Deriving it means
+// a move never silently desynchronizes the doc from this generator.
+const fromDoc = (target) =>
+  path.relative(path.dirname(DOC), target).split(path.sep).join("/");
+const FIXTURE_LINK = fromDoc(FIXTURE);
+const FIELDS_LINK = fromDoc(FIELDS);
 const WEB = path.join(ROOT, "crates/plurxd/src/web/index.html");
 const BEGIN = "<!-- contract:routing:begin -->";
 const END = "<!-- contract:routing:end -->";
@@ -43,7 +51,7 @@ function renderBlock(contract) {
   out.push(BEGIN);
   out.push("");
   out.push(
-    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   for (const surface of Object.keys(contract.routing)) {
     out.push("");
@@ -66,7 +74,7 @@ function renderBlock(contract) {
 function renderOutcomesBlock(contract) {
   const out = [OUTCOMES_BEGIN, ""];
   out.push(
-    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   out.push("");
   out.push("| Outcome | What the client does |");
@@ -82,7 +90,7 @@ function renderOutcomesBlock(contract) {
 function renderRowsBlock(contract) {
   const out = [ROWS_BEGIN, ""];
   out.push(
-    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   out.push("");
   out.push("| Row | Items in order | Surfaces | Focusable | Notes |");
@@ -115,7 +123,7 @@ function renderRowsBlock(contract) {
 function renderTimingsBlock(contract) {
   const out = [TIMINGS_BEGIN, ""];
   out.push(
-    `_Generated from [\`tests/playback/player-input-contract.json\`](../tests/playback/player-input-contract.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/player-input-contract.json\`](${FIXTURE_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   out.push("");
   out.push("| Name | Value |");
@@ -144,7 +152,7 @@ function renderInfoBlock(fields) {
   out.push(INFO_BEGIN);
   out.push("");
   out.push(
-    `_Generated from [\`tests/playback/playback-info-fields.json\`](../tests/playback/playback-info-fields.json) by \`scripts/player-contract-table\`; do not edit by hand._`,
+    `_Generated from [\`tests/playback/playback-info-fields.json\`](${FIELDS_LINK}) by \`scripts/player-contract-table\`; do not edit by hand._`,
   );
   const modes = Object.keys(fields.modes);
   for (const section of fields.sections) {

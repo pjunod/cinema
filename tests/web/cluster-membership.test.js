@@ -6,7 +6,7 @@
 // What this file is actually protecting: the WORDS. The membership API already
 // has its own Rust gate for lifecycle, admin gating, and refusal codes. The
 // thing only this surface can get wrong is telling an operator that two voters
-// are redundancy — docs/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated
+// are redundancy — docs/cluster/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated
 // non-goal precisely because two voters need both machines for every write and
 // therefore survive no failure. A settings screen that renders that as a green
 // "highly available" is the single most damaging bug this panel can ship, and

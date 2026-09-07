@@ -387,7 +387,7 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
 /// Built from the source's stored facts rather than read from the output,
 /// because what the output carries is the *source's* record: ffmpeg derives it
 /// from its input container rather than from the RPUs (measured,
-/// `docs/PLAYBACK-CAPS-V2-M0.md` §8), and the rewrite that makes the RPUs say
+/// `docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8), and the rewrite that makes the RPUs say
 /// 8.1 runs on the far side of that muxer. Left alone, the sample entry would
 /// declare Profile 7 over samples that are no longer Profile 7.
 ///

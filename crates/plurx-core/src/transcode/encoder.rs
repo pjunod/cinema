@@ -1328,7 +1328,7 @@ mod tests {
                  `delivered_dynamic_range` reports \"sdr\" for it on that basis.\n\
                  Give the new rung an `OutputGrade` variant, teach\n\
                  `video_codec_for` about it, extend the truth model in\n\
-                 docs/MEDIA-BADGES-PLAN.md §2.1, and leave this alone. Do not\n\
+                 docs/streaming/MEDIA-BADGES-PLAN.md §2.1, and leave this alone. Do not\n\
                  delete it — a badge that lies is a bug nobody reports, because\n\
                  the picture still plays."
             );

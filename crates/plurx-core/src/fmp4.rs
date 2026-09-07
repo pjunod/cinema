@@ -8,7 +8,7 @@
 //! picture, and both Chrome's MSE and Safari's native player treat a segment's
 //! first keyframe as a random-access point: the HEVC spec's instruction at
 //! random access is to DISCARD the leading pictures, so exactly one frame dies
-//! per boundary (`docs/STUTTER-4K.md` §5.3ter — 11/12 boundary-attributed in
+//! per boundary (`docs/streaming/STUTTER-4K.md` §5.3ter — 11/12 boundary-attributed in
 //! Safari, 15/23 in Chrome, and zero drops in 1781 frames of the same
 //! bitstream played unsegmented). A copy cannot change GOP structure. It can
 //! change **where the cuts land**, and that is all this module does: ffmpeg
@@ -800,7 +800,7 @@ pub struct PromotionInputs {
     /// out of the *source file's* stored facts, because the record the muxer
     /// wrote describes the wrong stream. ffmpeg does not derive this record
     /// from the RPUs: it copies the one its input container had (measured,
-    /// `docs/PLAYBACK-CAPS-V2-M0.md` §8). A Profile 7 → 8.1 conversion runs on
+    /// `docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8). A Profile 7 → 8.1 conversion runs on
     /// the far side of that muxer, so the output carries the *source's*
     /// Profile 7 `dvcC` over samples whose RPUs now say 8.1 — a sample entry
     /// declaring an enhancement layer the conversion dropped, which is worse
@@ -1539,7 +1539,7 @@ pub fn dolby_vision_record(init: &Init) -> Result<Option<DolbyVisionRecord>, Fmp
 /// Write `record` into this init's video sample entry, replacing whatever
 /// configuration was there.
 ///
-/// One caller today, one contingency (M5a-0, `docs/PLAYBACK-CAPS-V2-M0.md` §8):
+/// One caller today, one contingency (M5a-0, `docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8):
 ///
 /// - **The conversion.** ffmpeg does not derive this record from the RPU — it
 ///   copies the one the input container had. The P7→P8.1 rewrite runs on the
@@ -1654,7 +1654,7 @@ pub fn set_dolby_vision_record(
 /// over a stream that has neither layer. Chrome ignores the box; VideoToolbox
 /// honours it, and Safari answers with a software decode of 4K10 HEVC on
 /// hardware that has a dedicated block for it — the 4K stutter
-/// `docs/STUTTER-4K.md` exists to fix, reintroduced by the very filter meant
+/// `docs/streaming/STUTTER-4K.md` exists to fix, reintroduced by the very filter meant
 /// to prevent it.
 ///
 /// The record is a sibling of `hvcC` inside the sample entry, not a child of
@@ -2697,7 +2697,7 @@ impl CutClass {
 
 /// Classify a fragment's opening keyframe.
 ///
-/// The rule, from `docs/SEGMENTER-PLAN.md` §4.2, is conservative in one
+/// The rule, from `docs/streaming/SEGMENTER-PLAN.md` §4.2, is conservative in one
 /// direction only: anything not positively identified as clean is dirty, so a
 /// misread costs a boundary that could have been cleaner and never costs a
 /// frame that should have survived.
@@ -4381,7 +4381,7 @@ mod tests {
     }
 
     /// The two Dolby Vision configuration records ffmpeg itself wrote, captured
-    /// from nuc4 on 2026-08-30 (`docs/PLAYBACK-CAPS-V2-M0.md` §8).
+    /// from nuc4 on 2026-08-30 (`docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8).
     ///
     /// These are the golden. The 24-byte payload is the whole contract between
     /// plurx and every Dolby Vision decoder downstream, and the only way to

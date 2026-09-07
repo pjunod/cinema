@@ -623,9 +623,9 @@ jobs:
           scripts/playback-lab run --suite vod --case suspend-resume --browser chrome \
             --chrome "$chrome" --json target/playback-lab/acceptance/vod.json
           # Steady, seek-storm, and stall-recovery are intentionally out of CI.
-          # See docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md,
-          # docs/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md, and
-          # docs/VOD-STALL-ACCEPTANCE-HANDOFF.md for restoration prompts.
+          # See docs/streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md,
+          # docs/streaming/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md, and
+          # docs/streaming/VOD-STALL-ACCEPTANCE-HANDOFF.md for restoration prompts.
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize

@@ -8950,7 +8950,7 @@ function hitchBlame(){
   return bits.join(" · ");
 }
 // ---- decode margin ---------------------------------------------------------
-// The stutter investigation's verdict (docs/STUTTER-4K.md §5.3): on the 4K
+// The stutter investigation's verdict (docs/streaming/STUTTER-4K.md §5.3): on the 4K
 // HEVC remux the client's TYPICAL decode was 41.6ms against a 41.7ms frame
 // budget — the decoder running at exactly realtime, so every spike surfaced
 // as a held frame — while the same machine decodes the 1080p transcode at
@@ -14060,7 +14060,7 @@ function systemPanel(sys,playbackEvents){
 // what it refuses, and this renders the refusal in words somebody can act on.
 //
 // The one thing this panel must never do is present two voters as redundancy.
-// docs/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated non-goal because two
+// docs/cluster/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated non-goal because two
 // voters need *both* machines for every write and therefore survive no failure
 // — strictly worse than one node, while looking like an upgrade. A settings
 // screen is the surface most likely to imply otherwise, so the wording below is

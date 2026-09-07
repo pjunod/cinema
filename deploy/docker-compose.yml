@@ -134,7 +134,7 @@ services:
       # duplicate service on the private `media` bridge.
       PLURX_MDNS_ADVERTISE: "false"
       # HLS master experiments for the copied-Dolby-Vision investigation
-      # (docs/APPLE-NATIVE-SUBTITLES-PLAN.md §5.4). Enable ONE per deploy and
+      # (docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md §5.4). Enable ONE per deploy and
       # watch a real Apple TV: every master regression in that arc passed the
       # unit tests and failed on the device.
       # PLURX_HLS_CLOSED_CAPTIONS_NONE: "1"

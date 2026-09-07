@@ -66,7 +66,7 @@ the same command that refused now reports `health=1335s, snapshot=1200s
 
 **Effort `effort/streaming-reliability`, started 2026-09-04 from `48615baf`.**
 The live progress ledger is
-[STREAMING-RELIABILITY-STATUS.md](docs/STREAMING-RELIABILITY-STATUS.md): review
+[STREAMING-RELIABILITY-STATUS.md](docs/streaming/STREAMING-RELIABILITY-STATUS.md): review
 scope, verified facts, task PRs, adversarial findings, test evidence, and the
 autonomous decisions made while Paul is away. The effort does not reach
 `main` until its final fixed tree has one full qualification receipt.
@@ -273,7 +273,7 @@ last written 2026-08-26 and reading it would answer a stale question.
 
 **Not verified on hardware.** The fleet serves this code now (below), but
 nothing here has been played from a browser against it.
-`docs/M5-VERIFICATION-PROMPT.md` is the hand-off, and it is gated on ops:
+`docs/streaming/M5-VERIFICATION-PROMPT.md` is the hand-off, and it is gated on ops:
 raft membership, then the analysis queue draining, then file 70's converting
 identity being built.
 
@@ -739,7 +739,7 @@ its own operations-status reply to the Cluster panel, and every media-session
 relay, control and abort a learner ingress originated — and every voter refused
 a learner's. Meanwhile `learner_route_eligible` publishes exactly that surface
 to learners, `operations_peers`/`media_peers` name them as fan-out targets in
-both directions, and `docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 already
+both directions, and `docs/cluster/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 already
 specified the member-scoped predicate here, giving the voter predicate to
 membership mutation alone. The implementation was stricter than its own design.
 `PeerAuthorityRole` now names the role each surface asks for; activity

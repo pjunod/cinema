@@ -1,6 +1,6 @@
 //! Kodi-style `.nfo` sidecar parsing for home libraries.
 //!
-//! The NFO is a **one-time seed, not a data backend** (docs/HOMEVIDEO-PLAN.md
+//! The NFO is a **one-time seed, not a data backend** (docs/features/HOMEVIDEO-PLAN.md
 //! §1): the scanner reads `<basename>.nfo` the first time it ingests a video,
 //! builds the item's metadata from it, and then never looks at the file
 //! again. plurx never writes one — ARCHITECTURE §8's "plurx never writes to

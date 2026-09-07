@@ -31,7 +31,7 @@ Repo scaffolding: cargo workspace (`plurxd`, `plurx-core`, `plurx-compat-plex`),
 
 ## Phase 3 — Cluster spike (decision gate) ✅ DONE
 
-Time-boxed spike, not a feature phase. Full findings in [PHASE3-SPIKE.md](PHASE3-SPIKE.md).
+Time-boxed spike, not a feature phase. Full findings in [PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md).
 
 - ✅ **Store backend decided: hiqlite 0.14.** API (`execute`/`query_map`/`txn`) maps onto the existing rusqlite row mappers; compiles clean in the workspace; a live node ran migration + raft insert + typed read-back; upstream's suite proves 3-node replication + self-heal. openraft fallback not needed.
 - ✅ **Deterministic-segment behavior measured** against CFR, sparse-keyframe, and VFR sources: any node produces a valid segment N (accurate seek even with keyframes only at 0/10 s); independently-produced segments sequence to the correct 12.000 s via the playlist; same segment is byte-identical across runs (`threads=1`).
@@ -43,7 +43,7 @@ Time-boxed spike, not a feature phase. Full findings in [PHASE3-SPIKE.md](PHASE3
 
 Its own shippable slice, between Phase 3 and Phase 4 — HA-neutral (no new
 replication classes; scan and local artwork ride the already-planned
-leader-scheduled singleton). Design record: [HOMEVIDEO-PLAN.md](HOMEVIDEO-PLAN.md),
+leader-scheduled singleton). Design record: [HOMEVIDEO-PLAN.md](features/HOMEVIDEO-PLAN.md),
 scope in [REQUIREMENTS.md](REQUIREMENTS.md) §5a.
 
 - ✅ **Migration v6:** `libraries`/`items` rebuilt to drop the kind CHECKs (SQLite can't alter one); `recorded_at`, `tags`, `nfo_seeded_at`; FTS recreated over tags. The migration runner now disables FKs around each migration and runs `foreign_key_check` after.
@@ -59,7 +59,7 @@ scope in [REQUIREMENTS.md](REQUIREMENTS.md) §5a.
 
 Another shippable slice, HA-neutral (targeted scans ride the same
 leader-scheduled scanner singleton as full scans). Design record:
-[INTEGRATION-PLAN.md](INTEGRATION-PLAN.md); the master plan lives in monarr's
+[INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md); the master plan lives in monarr's
 repo. Behaviour in [FEATURES.md](FEATURES.md) §11.
 
 - ✅ **Migration v8 — scoped API keys:** `plx_…`, SHA-256 at rest, shown once, scope list, admin CRUD. A second credential kind, so another application never needs a token that IS a user.
@@ -87,7 +87,7 @@ noticed sooner than the reconcile interval.
 
 ## Performance — start latency, 4K, pre-cache (IN PROGRESS)
 
-Design record: [PERF-PLAN.md](PERF-PLAN.md) — where the seconds go when you
+Design record: [PERF-PLAN.md](performance/PERF-PLAN.md) — where the seconds go when you
 press Play, and the milestones that get them back: instrument first (M0),
 single-node pacing/buffer/segment fixes (M1), GPU tone-mapping end to end
 (M2), the pre-transcode cache (M3), and cluster transcode — placement,
@@ -98,9 +98,9 @@ through M3; M4 *is* Phase 4's transcode chapter and waits for its plumbing.
   beacons, session status endpoint), chapters moved to scan time,
   burst-then-hold pacing replacing `-re`, the ahead-window suspend, and the
   progress-aware watchdog.
-- 📝 **Reviewed 2026-07-28**, two rounds: [PERF-PLAN-REVIEW.md](PERF-PLAN-REVIEW.md)
-  → [PERF-REVIEW-RESPONSE.md](PERF-REVIEW-RESPONSE.md) →
-  [PERF-REVIEW-ASSESSMENT.md](PERF-REVIEW-ASSESSMENT.md). The plan carries
+- 📝 **Reviewed 2026-07-28**, two rounds: [PERF-PLAN-REVIEW.md](performance/PERF-PLAN-REVIEW.md)
+  → [PERF-REVIEW-RESPONSE.md](performance/PERF-REVIEW-RESPONSE.md) →
+  [PERF-REVIEW-ASSESSMENT.md](performance/PERF-REVIEW-ASSESSMENT.md). The plan carries
   the corrected contracts and a decisions ledger (PERF-PLAN §8.6).
 - ✅ **M1 complete 2026-07-28:** the correction pass (PERF-PLAN §2.8), the
   fixture-matrix benchmark, 2-second segments, bounded rate control on every
@@ -122,7 +122,7 @@ through M3; M4 *is* Phase 4's transcode chapter and waits for its plumbing.
 
 ## Ebook reader — consumption inside Cinema (IN PROGRESS)
 
-The executable plan is [EBOOK-READER-PLAN.md](EBOOK-READER-PLAN.md). Cinema
+The executable plan is [EBOOK-READER-PLAN.md](clients/EBOOK-READER-PLAN.md). Cinema
 owns the read/resume/offline loop while Curator keeps acquisition and Runner
 keeps transfer.
 
@@ -162,7 +162,7 @@ keeps transfer.
 ## Phase 4 — HA for real (IN PROGRESS)
 
 The executable handoff is
-[CLUSTERING-PLAN.md](CLUSTERING-PLAN.md): it separates node identity from the
+[CLUSTERING-PLAN.md](cluster/CLUSTERING-PLAN.md): it separates node identity from the
 logical server first, then brings up the one-voter replicated store before
 membership, singleton jobs, session takeover, and failure drills.
 
@@ -210,8 +210,8 @@ Not a reversal of the "no live TV" non-goal so much as a narrowing of it: no
 DVR, no recording, no scheduling, no streaming-service aggregation, no
 discovery feed. One over-the-air tuner, played live on every first-party
 client, off until an administrator turns it on. The plan and its contract are
-[HDHOMERUN-LIVE-TV-PLAN.md](HDHOMERUN-LIVE-TV-PLAN.md); the running state is
-[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
+[HDHOMERUN-LIVE-TV-PLAN.md](features/HDHOMERUN-LIVE-TV-PLAN.md); the running state is
+[HDHOMERUN-LIVE-TV-STATUS.md](features/HDHOMERUN-LIVE-TV-STATUS.md).
 
 - ✅ **M1 device, settings, lineup** — one manually configured private IPv4
   device; generation-fenced replicated settings; sanitized lineup with DRM

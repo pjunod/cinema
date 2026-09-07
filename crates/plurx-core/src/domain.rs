@@ -23,7 +23,7 @@ pub enum LibraryKind {
     Books,
     /// Home video & photos: a folder tree of camera files. No metadata
     /// provider — the source of truth is the disk (folder layout, optional
-    /// Kodi-style `.nfo` sidecars, embedded dates). See docs/HOMEVIDEO-PLAN.md.
+    /// Kodi-style `.nfo` sidecars, embedded dates). See docs/features/HOMEVIDEO-PLAN.md.
     Home,
 }
 
@@ -172,7 +172,7 @@ pub struct Item {
     pub tags: Vec<String>,
     /// Unix seconds when an NFO sidecar was consumed for this item.
     /// `None` = never seeded (and eligible for seeding if a sidecar appears).
-    /// Once set, the sidecar is dead to plurx — see docs/HOMEVIDEO-PLAN.md §4.3.
+    /// Once set, the sidecar is dead to plurx — see docs/features/HOMEVIDEO-PLAN.md §4.3.
     pub nfo_seeded_at: Option<i64>,
     /// Unix seconds of the last artwork *download attempt*, and why it failed
     /// if it did (`None` = it didn't, or none has been made).
@@ -332,7 +332,7 @@ impl MetadataPatch {
 }
 
 /// A hand edit of one item's metadata (home libraries only — see
-/// docs/HOMEVIDEO-PLAN.md §2). Unlike [`MetadataPatch`], which agents use to
+/// docs/features/HOMEVIDEO-PLAN.md §2). Unlike [`MetadataPatch`], which agents use to
 /// add or replace, an edit must be able to *clear* a field: the outer
 /// `Option` is "present in the request", the inner one is the new value.
 #[derive(Debug, Clone, Default)]
@@ -513,7 +513,7 @@ pub struct ProbeResult {
     /// Container capture time (`format.tags.creation_time`), normalized to a
     /// local-naive ISO-8601 string. Phones and camcorders set it, which makes
     /// it the best home-video date short of an NFO — see
-    /// docs/HOMEVIDEO-PLAN.md §4.4.
+    /// docs/features/HOMEVIDEO-PLAN.md §4.4.
     pub creation_time: Option<String>,
 }
 

@@ -5,7 +5,7 @@ read-only · **Privacy:** aggregate playback fields only; no titles, usernames,
 network addresses, credentials, request bodies, or media paths retained.
 
 Companion to
-[STREAMING-RELIABILITY-REVIEW.md](../STREAMING-RELIABILITY-REVIEW.md). This is
+[STREAMING-RELIABILITY-REVIEW.md](../streaming/STREAMING-RELIABILITY-REVIEW.md). This is
 the reproducible evidence behind the review's history, fleet, and nightly
 claims. Source-code evidence remains in the review's finding index.
 
@@ -152,14 +152,14 @@ record both a green workflow and positive proof that playback cases started.
 
 The failing evidence is already retained in repository handoffs:
 
-- [VOD-STEADY-ACCEPTANCE-HANDOFF.md](../VOD-STEADY-ACCEPTANCE-HANDOFF.md)
+- [VOD-STEADY-ACCEPTANCE-HANDOFF.md](../streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md)
   records run 32943477931 / job 98105071882: four visible hitches, a cold-start
   `bufferStalledError`, 0.165× presentation with 21.3 seconds buffered, and
   serving-authority expiry. Its exact focused rerun command is retained there.
-- [VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md](../VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md)
+- [VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md](../streaming/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md)
   records run 32929741906 / job 98059637890: all 20 seeks used one session,
   but nine visible hitches, about 0.1 seconds of runway, and authority expiry.
-- [VOD-STALL-ACCEPTANCE-HANDOFF.md](../VOD-STALL-ACCEPTANCE-HANDOFF.md)
+- [VOD-STALL-ACCEPTANCE-HANDOFF.md](../streaming/VOD-STALL-ACCEPTANCE-HANDOFF.md)
   records run 32918531993 / job 98032989197: the shaped case timed out before
   first frame after Auto selected a VOD transcode rung that the server refused.
 

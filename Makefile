@@ -1268,7 +1268,7 @@ benchmark-run: ## Run the selected real Cinema/Plex A/B config (tokens come from
 # routes, two viewports — so a refactor can be *shown* to have changed nothing.
 #
 # Two tiers, and the difference is the whole design (see the script's header,
-# and docs/UI-LAYOUTS-G3-DECISION.md §5/R1). The STRUCTURAL tier —
+# and docs/clients/UI-LAYOUTS-G3-DECISION.md §5/R1). The STRUCTURAL tier —
 # tests/ui-structure.golden — is a reviewed answer key designed to be committed
 # and enforced by `ui-check`. Nothing in it is a pixel, a path or a clock, so
 # it is the same file on every machine. The PIXEL tier stays in

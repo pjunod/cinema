@@ -83,7 +83,7 @@ scope information fails open into all compile surfaces.
 **Compilation being blocking is a reason to compile locally, not a reason to
 let the gate do it.** A session whose checkout has no toolchain can still have
 one in about ten minutes — see
-[AGENT-COMPILE-LOOP.md](AGENT-COMPILE-LOOP.md) — and the local run reports
+[AGENT-COMPILE-LOOP.md](ci/AGENT-COMPILE-LOOP.md) — and the local run reports
 every error at once where the gate reports the first.
 
 **Corrective changes still need a focused local proof.** Run the smallest test
@@ -275,7 +275,7 @@ A red qualification does not turn every task back into a release candidate.
 Reopen the effort, fix the named failure with its focused command, and use the
 compile-only task lane again. When the tree settles, run one new complete
 qualification. Do not use a green job from an older candidate as proof for the
-new tree; [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) defines the
+new tree; [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md) defines the
 content-fingerprint work required before selective result reuse can be trusted.
 The transport-recovery campaign is stricter: its successful lane receipt and
 the aggregate qualification receipt accept only workflow run attempt `1`.
