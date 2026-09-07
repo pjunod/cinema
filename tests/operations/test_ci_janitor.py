@@ -334,10 +334,7 @@ class MacosJanitorContractCase(unittest.TestCase):
         self.log = fixture / "launchctl.log"
         tools = {
             "plutil": (
-                "#!/bin/sh\n"
-                'printf \'{"Label":"%s","ProgramArguments":'
-                '["/usr/local/bin/forgejo-runner-13.1.0","daemon","-c","%s"]}\\n\' '
-                '"$FIXTURE_LABEL" "$FIXTURE_CONFIG"\n'
+                "#!/bin/sh\nprintf '%s\\n' \"$FIXTURE_PLIST_JSON\"\n"
             ),
             "launchctl": (
                 "#!/bin/sh\n"
@@ -370,8 +367,10 @@ class MacosJanitorContractCase(unittest.TestCase):
                 "PATH": f"{self.bin}{os.pathsep}{self.environment['PATH']}",
                 "PLURX_JANITOR_STATE_DIR": str(self.state),
                 "PLURX_JANITOR_DAEMON_DIR": str(self.daemons),
-                "FIXTURE_LABEL": self.LABEL,
-                "FIXTURE_CONFIG": str(self.config),
+                # plutil escapes every forward slash, and the real plist
+                # on gha-mba-apple-01 does exactly that. A fixture that did not
+                # would pass a script that reads a path naming nothing.
+                "FIXTURE_PLIST_JSON": self.plist_json(),
                 "FIXTURE_LOG": str(self.log),
                 "FIXTURE_PID": "4242",
                 "FIXTURE_PGREP_STATUS": "1",
@@ -379,6 +378,14 @@ class MacosJanitorContractCase(unittest.TestCase):
                 "FIXTURE_AVAIL_KB": str(119 * 1024 * 1024),
                 "FIXTURE_USED_KB": str(4 * 1024 * 1024),
             }
+        )
+
+    def plist_json(self):
+        escaped = str(self.config).replace("/", "\\/")
+        program = "\\/usr\\/local\\/bin\\/forgejo-runner-13.1.0"
+        return (
+            f'{{"Label":"{self.LABEL}","ProgramArguments":'
+            f'["{program}","daemon","-c","{escaped}"]}}'
         )
 
     def run_janitor(self, *arguments):

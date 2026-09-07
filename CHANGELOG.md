@@ -123,7 +123,8 @@ bump may break compatibility and a **patch** bump never does.
   check is not a courtesy but the whole safety mechanism, because
   `launchctl bootout` does not drain a running job the way `systemctl stop`
   does, so it additionally requires the work root to have been quiet for two
-  minutes.
+  minutes. Verified on the machine: unload, reset, load, and the runner back
+  `idle` in Forgejo twenty seconds later.
 
 ### Changed
 

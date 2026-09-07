@@ -49,9 +49,10 @@ those is mutation-proven. Installed and running hourly on nynuc, rogg16, every r
 Incus runner guest, and the Lima VM that carries `gha-mbp-linux-arm-01` — which
 was holding 24G of its own and gave all of it back on the first pass.
 `deploy/runner-janitor/macos/` is the launchd equivalent for
-`gha-mba-apple-01`, the one runner with no systemd; it is written and its logic
-is mutation-proven against fakes, but **it has not yet run on that machine**,
-because the deploy key has no sudo there. The `pjunod/ansible`
+`gha-mba-apple-01`, the one runner with no systemd, and it is installed and
+verified there: it read the runner's label and config out of the launchd plist,
+unloaded the daemon, reset a 4 G cache and loaded it again, and the runner was
+back `idle` in Forgejo twenty seconds later. **The whole fleet is bounded.** The `pjunod/ansible`
 repository still describes the retired GitHub `actions-runner` fleet and knows
 nothing about `forgejo-runner`, so the janitor ships from this repository until
 that catches up.

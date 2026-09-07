@@ -67,13 +67,17 @@ available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
 # `plutil -convert json` rather than PlistBuddy, because it is on PATH and so a
 # contract test can substitute it. The runner's own plist is the authority on
 # both its label and which config it reads.
+# `plutil -convert json` escapes every forward slash -- the real plist on
+# `gha-mba-apple-01` yields `\/Users\/githubrunner\/forgejo-runner\/config.yml`
+# -- so a path read straight out of it names nothing.
 plist_field() {
-  plutil -convert json -o - "$1" 2>/dev/null | tr ',' '\n' | tr -d '[]{}" '
+  plutil -convert json -o - "$1" 2>/dev/null |
+    sed 's|\\/|/|g' | tr ',' '\n' | tr -d '[]{}" '
 }
 
 label_for_plist() {
   plutil -convert json -o - "$1" 2>/dev/null |
-    sed -n 's/.*"Label":"\([^"]*\)".*/\1/p'
+    sed 's|\\/|/|g' | sed -n 's/.*"Label":"\([^"]*\)".*/\1/p'
 }
 
 config_for_plist() {
@@ -174,10 +178,12 @@ for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
   reset_cache "$label" "$plist" "$dir" "$used_kb"
 done
 
+# The full hostname, not `hostname -s`: on a Mac that cuts at the first dot and
+# both of these report "pauls", which names neither of them.
 if [ "$dry_run" != true ]; then
   mkdir -p "$STATE_DIR"
   printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"reclaimed_gb":%d,"budget_gb":%d}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname -s)" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" \
     "$instances" "$over_budget" "$reset_count" \
     "$((reclaimed_kb / 1024 / 1024))" "$BUDGET_GB" > "$STATE_DIR/last-run.json"
 fi

@@ -176,6 +176,11 @@ numbers, same three invariants, launchd instead of systemd.
 sudo deploy/runner-janitor/macos/install
 ```
 
+Verified on `gha-mba-apple-01` on 2026-09-07: it read the runner's label and
+config out of the launchd plist, measured 4 G, unloaded the daemon, reset the
+directory and loaded it again, and the runner was back `idle` in Forgejo
+twenty seconds later.
+
 One difference there is not cosmetic. `systemctl stop` drains — the Linux
 installer raises `TimeoutStopSec` to thirty minutes so that it can — and
 `launchctl bootout` does not: SIGTERM, then SIGKILL about twenty seconds later,
