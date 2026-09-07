@@ -10,6 +10,30 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **CI runners stop filling up, because every cache path is bounded now.** A
+  Forgejo runner serves `actions/cache` from a directory of its own, and
+  `forgejo-runner` 13.1.0 evicts nothing from it — no size cap, no TTL, no
+  garbage collection, as its own `generate-config` shows. This repository had
+  a complete bounded alternative for both the Cargo cache and BuildKit state,
+  and both were gated on `persistent-eligible: true` together with
+  `CI_EXECUTION_MODE` being `shadow` or `accelerated`. That variable has never
+  been set here, so the condition was false on every job, every job took the
+  unbounded branch, and the fleet accumulated ~167 G of cache blobs nothing
+  would ever delete: 118 entries and 41 G on `gha-m6-general-01` alone, all
+  three days old, on a 78 G disk. Runners then failed jobs the way a full
+  runner does — `ld terminated with signal 7 [Bus error]`, which reads as a
+  miscompile. A bound a configuration variable can switch off is not a bound,
+  so the inputs are gone: a self-hosted runner takes the bounded runner-local
+  Cargo cache and the named BuildKit builder, always, and a hosted runner takes
+  the hosted service, which evicts on its own. The reserve those pruners keep
+  free is now a share of the filesystem rather than a flat 100 GiB, which on
+  the 78-97 GB runner guests was larger than the whole volume and could never
+  be satisfied — so the pruner deleted every cache it was allowed to and failed
+  the job regardless. What no job can bound is reported instead of guessed:
+  `scripts/ci-runner-cache-audit` prints the cache server's size and entry
+  count into every Cargo lane's summary and warns, by runner name, past 20 G.
+  [docs/ci/RUNNER-DISK.md](docs/ci/RUNNER-DISK.md) is the operator's copy.
+
 - **A Compose deploy no longer refuses over a number nobody was told to
   maintain.** The readiness grace and the snapshot deadline are one budget, and
   the preflight has always refused a grace too short to cover it. But the

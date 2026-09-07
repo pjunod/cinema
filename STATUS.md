@@ -4,6 +4,45 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The CI fleet filled up because the bound was behind a flag nobody set
+
+**Branch `fix/ci-runner-disk` — open against `main`.** Runners kept running
+out of disk. The failure never says so: a runner that fills mid-link reports
+`ld terminated with signal 7 [Bus error]`, which is what a miscompile looks
+like, and the real `No space left on device` is hundreds of lines further down.
+
+A Forgejo runner serves `actions/cache` out of its own `cache.dir`, and
+`forgejo-runner` 13.1.0 has **no eviction for it at all** — its own
+`generate-config` offers `enabled`, `dir`, `host`, `proxy_port` and the shared
+secrets, and nothing else. Everything written there is permanent. This
+repository already owned a bounded alternative for both consumers that write
+there — an LRU Cargo cache under a 30 G budget, a named BuildKit builder pruned
+to 50 G — and both were gated on `persistent-eligible: true` *and*
+`CI_EXECUTION_MODE` in {shadow, accelerated}. The variable has never been set
+on this repository. So the condition was false on every job ever run, every job
+took the unbounded branch, and nothing in the fleet was bounded by anything.
+
+Measured 2026-09-07 on `gha-m6-general-01`: 118 cache entries, 41 G, every one
+created in the previous three days — about 13 G/day on a 78 G disk, which fills
+a runner guest in a week. Fleet-wide the cache servers held ~167 G, and nynuc
+carried another 101 G of Docker images (4 of 131 in use) and 58 G of BuildKit
+cache. ~340 G was reclaimed by hand the same day: Docker build cache and
+dangling images on nynuc, m6 and nuc4, and the cache servers of the five idle
+runner guests reset index-and-blobs together while each was stopped.
+
+The branch removes both gates — where a cache lives follows the runner, not a
+rollout flag — and fixes a second defect the flag had been hiding: the pruners'
+reserve was a flat 100 GiB, which is larger than the 78-97 GB Incus guests, so
+`healthy` could never become true there and the pruner would have deleted every
+cache it was permitted to and failed the job anyway. It is 20 % of the
+filesystem now, with a floor that cannot exceed a quarter of it. What a job
+still cannot bound, it reports: `scripts/ci-runner-cache-audit` writes the
+cache server's size and entry count into every Cargo lane's summary and warns
+by runner name past 20 G, because deleting from that directory means stopping
+the runner and a job cannot stop the runner it is running on. That last part —
+a timer on each runner host — is the fleet's half, and is not in this
+repository.
+
 ## Settings put the operator on the login page, and the cause was a tombstone
 
 **Branch `fix/cluster-recovery-auth` — open against `main`.** Opening Settings
