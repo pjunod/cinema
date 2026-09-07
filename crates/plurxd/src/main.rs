@@ -1978,7 +1978,6 @@ fn build_state(
                 chunk_secs: config.cluster.snapshot_chunk_timeout_secs,
                 transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
                 install_secs: config.cluster.install_snapshot_timeout_secs,
-                trusted_network: config.cluster.trusted_network.clone(),
             },
         },
         store,

@@ -1641,7 +1641,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # process, no producer, nothing owned. The emit they feed does spawn, but it
 # goes through `telemetry::emit`, which already owns that task and is already
 # counted where it lives.
-expected_occurrences = 274
+# +1 for the Developer readiness route: `state.membership.status()` in
+# `http/developer.rs`, reading the committed roster so a prerequisite row can
+# say whether every node advertises a dialable cluster API host. The sentinel
+# catches `.status(` alongside `.spawn(` and `.output(`; this is a replicated
+# read on an existing manager. It starts no process, owns no producer and
+# creates no timer.
+expected_occurrences = 275
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -235,7 +235,14 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   });
 });
 
+// Every stub takes ...args and serialises all of them. The first version took
+// the arguments it expected — `togRow(id,label,note)` against a shipped
+// `togRow(id,label,note,checked,attrs)` — and silently dropped `checked` and
+// `attrs`, which is where a `disabled` flag would go. A reviewer disabled the
+// switch through `attrs` and the "gates nothing" test passed. A stub that
+// discards arguments cannot prove anything about them.
 function developerPanelUnder(readiness) {
+  const record = (kind) => (...args) => `${kind}(${JSON.stringify(args)})`;
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
     [
@@ -256,20 +263,31 @@ function developerPanelUnder(readiness) {
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
     (title, sub) => `CARDHEAD:${title}|${sub || ""}`,
-    (id, label, note) => `TOG:${id}|${label}|${note}`,
-    (fn) => `FOOT:${fn}`,
+    record("TOG"),
+    record("FOOT"),
     esc,
   );
   return panel({ playback_control_protocol_v1: true, hls_typeless_sliding: false }, readiness);
 }
 
+// Everything the panel emits except the readings themselves. Comparing this
+// across readings is stronger than comparing the controls: it also catches a
+// `<fieldset disabled>` wrapper, an added `title="prerequisites not met"`, a
+// whole card removed, or a Save button that disappears — none of which pass
+// through `togRow`.
+function developerPanelSkeleton(readiness) {
+  return developerPanelUnder(readiness)
+    .replace(/<span data-devstat=[\s\S]*?<\/span>/g, "«pill»")
+    .replace(/<small class="hint" data-devev="[^"]*">[\s\S]*?<\/small>/g, "«evidence»");
+}
+
 test("Developer is where the switches that cost something live", () => {
   const html = developerPanelUnder(undefined);
   for (const id of ["pcpv1", "phs"]) {
-    assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
+    assert.match(html, new RegExp(`TOG\\(\\["${id}"`), `Developer is missing the ${id} switch`);
   }
-  assert.match(html, /FOOT:saveDeveloper/);
-  assert.match(html, /FOOT:saveExperimental/);
+  assert.match(html, /FOOT\(\["saveDeveloper"/);
+  assert.match(html, /FOOT\(\["saveExperimental"/);
   assert.match(html, /Enable prepared quality handoff/);
   assert.match(html, /encoder: staged/);
   assert.match(html, /twenty consecutive commits/);
@@ -293,6 +311,37 @@ test("Developer is where the switches that cost something live", () => {
 // true and then left the operator with no way to find out. These pin the three
 // answers the daemon can give and, more importantly, that a bad one changes
 // nothing about the controls.
+// Every row the panel asks for, forced to one status. Written from the ids the
+// shipped panel actually requests so a new row cannot slip past these tests
+// with no coverage.
+const DEV_REQUIREMENT_IDS = {
+  cluster_transport_recovery: ["recovery_budgets", "cluster_api_advertised", "cache_revocation_capability", "recovery_receipt"],
+  playback_control_protocol_v1: ["clients_report"],
+  prepared_quality_handoff: ["server_preparation_is_real", "client_two_player_handoff", "fleet_receipt"],
+};
+function statuses(status) {
+  return {
+    items: Object.entries(DEV_REQUIREMENT_IDS).map(([id, requirements]) => ({
+      id,
+      requirements: requirements.map((rid) => ({ id: rid, title: rid, status, evidence: `read: ${rid}` })),
+    })),
+  };
+}
+
+test("the panel asks for exactly the rows the server reports", () => {
+  const html = developerPanelUnder(statuses("met"));
+  const asked = [...html.matchAll(/data-devstat="([^"]+)"/g)].map((m) => m[1]).sort();
+  const offered = Object.entries(DEV_REQUIREMENT_IDS)
+    .flatMap(([item, reqs]) => reqs.map((rid) => `${item}:${rid}`)).sort();
+  assert.deepEqual(asked, offered,
+    "a row the server does not report renders 'not reported' to an operator forever");
+  assert.doesNotMatch(html, /not reported/);
+  // And a row that really is missing says so rather than reading as pending.
+  const short = statuses("met");
+  short.items[1].requirements = [];
+  assert.match(developerPanelUnder(short), /not reported/);
+});
+
 test("Developer prerequisites report what the server can see, and gate nothing", () => {
   const readiness = {
     items: [
@@ -324,16 +373,22 @@ test("Developer prerequisites report what the server can see, and gate nothing",
   // The switch is still a switch. If a later change disables a control because
   // a reading is unmet, this fails — which is the whole point of the section
   // being advisory rather than a gate with extra steps.
-  // The switches are still switches. Every control this panel emits must be
-  // byte-identical whether the readings are all unmet or absent entirely — if
-  // a later change makes a control depend on a reading, this is what catches
-  // it, and the section stops being advisory the moment it does.
-  const controls = (markup) => markup.match(/TOG:[^\n]*|FOOT:\w+/g).join("\n");
-  assert.equal(controls(html), controls(developerPanelUnder(undefined)));
+  // The switches are still switches. Everything this panel emits apart from
+  // the readings themselves must be byte-identical whichever way the readings
+  // go — every row met, every row unmet, no reading at all. If a later change
+  // makes any control depend on a reading, this is what catches it, and the
+  // section stops being advisory the moment it does.
+  const allMet = statuses("met"), allUnmet = statuses("unmet");
+  assert.equal(developerPanelSkeleton(allUnmet), developerPanelSkeleton(undefined),
+    "an unmet reading changed something other than the reading");
+  assert.equal(developerPanelSkeleton(allMet), developerPanelSkeleton(allUnmet),
+    "the panel differs between a satisfied and a refused prerequisite");
+  assert.equal(developerPanelSkeleton({ unavailable: "boom" }), developerPanelSkeleton(undefined),
+    "a failed reading changed something other than the reading");
 
   // A prerequisite the reading does not cover keeps its explanation and says
-  // it is still waiting, rather than silently rendering as satisfied.
-  assert.match(html, /checking…/);
+  // the server did not report it, rather than silently rendering as satisfied.
+  assert.match(html, /not reported/);
   const missing = developerPanelUnder(undefined);
   assert.match(missing, /twenty consecutive commits/, "the explanation survives a missing reading");
   assert.doesNotMatch(missing, />met</);
@@ -344,7 +399,7 @@ test("A failed prerequisite reading says so instead of reading as satisfied", ()
   assert.match(html, />unavailable</);
   assert.match(html, /The prerequisite reading failed: membership unavailable/);
   assert.doesNotMatch(html, />met</);
-  assert.match(html, /TOG:pcpv1\|/, "a failed reading still leaves every switch usable");
+  assert.match(html, /TOG\(\["pcpv1"/, "a failed reading still leaves every switch usable");
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {

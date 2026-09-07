@@ -13737,7 +13737,10 @@ function devReadinessRow(readiness,itemId,reqId){
 }
 function devReadinessPill(found,readiness){
   if(readiness&&readiness.unavailable) return `<span class="pill warn">unavailable</span>`;
-  if(!found) return `<span class="pill">checking…</span>`;
+  // A reading arrived and did not carry this row: the server does not know
+  // about it. "checking…" forever would be its own green tick that means
+  // nothing was checked, which is the thing this section exists to stop.
+  if(!found) return readiness?`<span class="pill warn">not reported</span>`:`<span class="pill">checking…</span>`;
   const label=DEV_READINESS_LABEL[found.status]||"unknown";
   if(found.status==="met") return `<span class="pill" style="color:var(--good);border-color:var(--good)">${esc(label)}</span>`;
   if(found.status==="unmet") return `<span class="pill warn">${esc(label)}</span>`;
@@ -13745,7 +13748,8 @@ function devReadinessPill(found,readiness){
 }
 function devReadinessEvidence(found,readiness){
   if(readiness&&readiness.unavailable) return `The prerequisite reading failed: ${readiness.unavailable}`;
-  return found?found.evidence:"";
+  if(found) return found.evidence;
+  return readiness?"This server did not report on this prerequisite.":"";
 }
 // One prerequisite: the fixed explanation of what it means, then what this
 // server actually read. The explanation stays here because it is UI copy; the

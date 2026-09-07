@@ -480,15 +480,33 @@ including native/overlay subtitle awaits and delayed old attachment callbacks.
 **Landed — the readings, not the whole item.** `GET /api/v1/developer/readiness`
 (`http/developer.rs`) answers every prerequisite the Developer cards list with
 `met` / `unmet` / `unobservable` plus the sentence it read, and the tab renders
-them in place. Three points for whoever extends it: `unobservable` is the
-honest answer for a CI-artifact receipt and must not be quietly upgraded; the
-requirement *copy* stays in `index.html` and only the *reading* comes from the
-daemon, so the server never owns UI prose; and the advisory rule is pinned from
-both sides — `an_unmet_prerequisite_does_not_block_the_switch` in
-`http/mod.rs`, and a web assertion that every control the panel emits is
-byte-identical under an all-unmet reading and no reading at all. Adding a new
-card means adding its item to that route, or its rows render "checking…"
-forever.
+them in place. Four things to know before extending it:
+
+- **`Unobservable` is the common answer and must not be relaxed.** Most of
+  these questions are not answerable from a running daemon: a CI receipt, a
+  roster a single-node install does not have, a fleet of clients the counters
+  can only see once they report. Two adversarial reviews found five rows
+  claiming otherwise in the first draft — including a green tick built on
+  `cache_admin_revocation_ready()`'s deliberate fail-open for an unreplicated
+  node. If a row you are adding can only ever be `Met` by rounding, make it
+  `Unobservable` and put the numbers in the evidence.
+- **The requirement copy stays in `index.html`; only the reading comes from the
+  daemon.** The server never starts owning UI prose.
+- **The advisory rule is pinned from both sides, and the first version of both
+  pins was blind.** `an_unmet_prerequisite_does_not_block_the_switch` must
+  drive a prerequisite that is genuinely `unmet` — it originally drove an
+  `unobservable` one, which a gate keyed on `Unmet` would have walked past —
+  and the web assertion compares the whole panel with the reading spans
+  stripped, because the earlier per-control comparison used a stub that dropped
+  the argument a `disabled` flag travels in.
+- **A row the route does not report renders "not reported", not "checking…".**
+  `the panel asks for exactly the rows the server reports` keeps the two sides
+  in step.
+
+Rows that are claims about the build rather than the deployment need a pin at
+the code they describe, or they go stale silently: `server_preparation_is_real`
+has `a_prepared_successor_still_publishes_a_staged_encoder` in `http::hls`, and
+that test is what will tell whoever finishes §4 that this row now lies.
 
 Still open here: the hidden-gate removal below, and the qualification/promotion
 run.

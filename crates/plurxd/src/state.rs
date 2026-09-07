@@ -1028,20 +1028,23 @@ impl AppState {
     }
 }
 
-/// What this node has budgeted for one Raft snapshot recovery, plus the
-/// network boundary it was told to trust.
+/// What this node has budgeted for one Raft snapshot recovery.
 ///
 /// These live in `[cluster]` config and are consumed only when the Hiqlite
 /// node is built, so nothing in the admin surface could report them. The
 /// Developer readiness route needs to say what they actually are — an
 /// operator asked whether the budgets fit their deployment cannot answer that
 /// from a document listing the defaults.
+///
+/// `cluster.trusted_network` was carried here in a first draft and removed:
+/// nothing in the daemon reads it, so printing it beside a row about keeping
+/// the transport off the public Internet would have implied a boundary the
+/// process is not holding.
 #[derive(Clone, Debug, Default)]
 pub struct SnapshotRecoveryBudgets {
     pub chunk_secs: u64,
     pub transfer_secs: u64,
     pub install_secs: u64,
-    pub trusted_network: String,
 }
 
 pub struct AppConfig {

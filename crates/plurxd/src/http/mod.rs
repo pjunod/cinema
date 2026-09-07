@@ -4216,11 +4216,15 @@ mod tests {
     /// The Developer section's prerequisite rows, and the rule that they are
     /// reporting rather than deciding.
     ///
-    /// The assertions that matter are the honest ones: a fact this process
-    /// cannot reach must come back `unobservable` with an evidence sentence
-    /// saying where the answer does live, and no row may return an empty
-    /// evidence string — a status with nothing behind it is the "green tick
-    /// that means not checked" this route exists to replace.
+    /// The assertions that matter are the honest ones. Every row this test app
+    /// can reach is a fact about a single-node SQLite install with no roster
+    /// and no fleet receipt, so almost all of them must come back
+    /// `unobservable` with a sentence saying what was read and what was not. A
+    /// `met` here would be a fail-open default rendered as a green tick, which
+    /// is the failure mode the route exists to replace — and one of them
+    /// (`cache_revocation_capability`, whose accessor answers `Ok(true)` for
+    /// an unreplicated node because its real caller is asking a different
+    /// question) shipped exactly that way in the first draft.
     #[tokio::test]
     async fn developer_readiness_reports_what_it_reads_and_admits_what_it_cannot() {
         let app = test_app();
@@ -4267,79 +4271,109 @@ mod tests {
             }
         }
 
-        // A CI artifact is not reachable from a running daemon, and saying so
-        // is the point. If either of these ever reports `met`, something is
-        // asserting a fact it did not read.
-        assert_eq!(
-            seen.get("recovery_receipt").map(String::as_str),
-            Some("unobservable")
+        // Nothing on a single-node install may report `met`. Asserted as a set
+        // rather than row by row so a row added later cannot quietly arrive
+        // green: the first draft had two roster rows and this test pinned only
+        // one of them, which is how the fail-open `met` survived review.
+        let green = seen
+            .iter()
+            .filter(|(_, status)| status.as_str() == "met")
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            green.is_empty(),
+            "a node with no roster, no fleet receipt and no candidate worker read nothing that \
+             could be met, yet reported: {green:?}"
         );
-        assert_eq!(
-            seen.get("fleet_receipt").map(String::as_str),
-            Some("unobservable")
-        );
-        // This test app is single-node SQLite: there is no committed roster,
-        // so the roster rows must say that rather than pass or fail.
-        assert_eq!(
-            seen.get("cluster_api_advertised").map(String::as_str),
-            Some("unobservable"),
-            "a node with no replicated membership has no roster to judge"
-        );
-        // The staged-successor row is a statement about the build, so it holds
-        // whatever the deployment looks like. It flips when a candidate worker
-        // exists, not when an operator changes a setting.
-        assert_eq!(
-            seen.get("server_preparation_is_real").map(String::as_str),
-            Some("unmet")
-        );
+
+        // A CI artifact is not reachable from a running daemon, and a roster
+        // this node does not have cannot be judged. Each of these says so.
+        for id in [
+            "recovery_receipt",
+            "fleet_receipt",
+            "recovery_budgets",
+            "cluster_api_advertised",
+            "cache_revocation_capability",
+        ] {
+            assert_eq!(
+                seen.get(id).map(String::as_str),
+                Some("unobservable"),
+                "{id} claimed to have read something this process cannot reach: {body}"
+            );
+        }
+        // Statements about this build, true whatever the deployment looks
+        // like. They flip when a candidate worker and a shipped two-player
+        // client exist, not when an operator changes a setting.
+        for id in ["server_preparation_is_real", "client_two_player_handoff"] {
+            assert_eq!(seen.get(id).map(String::as_str), Some("unmet"));
+        }
     }
 
-    /// Advisory means advisory. This is the test that fails if anyone later
-    /// makes readiness a precondition.
+    /// Advisory means advisory. This is the test that fails if anyone makes a
+    /// reading a precondition.
+    ///
+    /// It drives the switch whose own prerequisite is `unmet` — deterministically,
+    /// by recording one partial-vocabulary exchange through the counter
+    /// production writes, because `unobservable` is the state a fresh process
+    /// is in and a gate spelled `if status == Unmet { refuse }` would sail
+    /// past a test that only ever saw `unobservable`. It then drives the
+    /// switch both ways: a gate that refuses only the enable would survive a
+    /// test that only enables.
     #[tokio::test]
     async fn an_unmet_prerequisite_does_not_block_the_switch() {
         let app = test_app();
         let admin = setup_admin(&app).await;
+        crate::playback_control::record_partial_vocabulary_for_tests();
+
+        let control_row = |body: &Value| -> (Value, Value) {
+            let item = body["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .find(|item| item["id"] == "playback_control_protocol_v1")
+                .expect("the control protocol item")
+                .clone();
+            (
+                item["enabled"].clone(),
+                item["requirements"][0]["status"].clone(),
+            )
+        };
 
         let (_, before) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
-        let control = before["items"]
-            .as_array()
-            .expect("items")
-            .iter()
-            .find(|item| item["id"] == "playback_control_protocol_v1")
-            .expect("the control protocol item");
-        assert_eq!(control["enabled"], false);
-        assert_ne!(
-            control["requirements"][0]["status"], "met",
-            "this test needs a prerequisite that is not satisfied to be worth anything"
+        let (enabled, status) = control_row(&before);
+        assert_eq!(enabled, false);
+        assert_eq!(
+            status, "unmet",
+            "this test is worthless unless the switch's own prerequisite is refused"
         );
 
-        let (status, _) = call(
-            &app,
-            put(
-                "/api/v1/settings",
-                Some(&admin),
-                serde_json::json!({"playback_control_protocol_v1": true}),
-            ),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "an unmet advisory prerequisite must not refuse the switch"
-        );
+        for want in [true, false, true] {
+            let (status, _) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    serde_json::json!({"playback_control_protocol_v1": want}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an unmet advisory prerequisite must not refuse the switch in either direction"
+            );
 
-        let (_, after) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
-        let control = after["items"]
-            .as_array()
-            .expect("items")
-            .iter()
-            .find(|item| item["id"] == "playback_control_protocol_v1")
-            .expect("the control protocol item");
-        assert_eq!(
-            control["enabled"], true,
-            "the row reports the switch's real position, not the position it thinks is safe"
-        );
+            let (_, after) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            let (enabled, requirement) = control_row(&after);
+            assert_eq!(
+                enabled, want,
+                "the row reports the switch's real position, not the position it thinks is safe"
+            );
+            assert_eq!(
+                requirement, "unmet",
+                "turning the switch on does not make its prerequisite true"
+            );
+        }
     }
 
     #[tokio::test]
