@@ -2431,8 +2431,10 @@ for (const startupDelay of [0, 1600, 7000]) {
             "--evidence target/validation/cluster-transport-recovery.json", recovery
         )
         self.assertIn(
-            "--evidence-validator target/debug/plurx-cluster-check", recovery
+            "EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check",
+            recovery,
         )
+        self.assertIn('--evidence-validator "$EVIDENCE_VALIDATOR"', recovery)
         self.assertIn("if-no-files-found: error", recovery)
         self.assertIn(
             "steps.transport_recovery.outcome != 'success'", recovery

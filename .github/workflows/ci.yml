@@ -445,12 +445,13 @@ jobs:
         if: always()
         env:
           LANE_RESULT: ${{ steps.transport_recovery.outcome }}
+          EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check
         run: >-
           python3 -m validation.ci_lane_receipt
           --output target/validation/cluster-transport-recovery-receipt.json
           --log target/validation/cluster-transport-recovery.log
           --evidence target/validation/cluster-transport-recovery.json
-          --evidence-validator target/debug/plurx-cluster-check
+          --evidence-validator "$EVIDENCE_VALIDATOR"
           --lane cluster-transport-recovery
           --result "$LANE_RESULT"
           --command "make cluster-transport-recovery-check"
