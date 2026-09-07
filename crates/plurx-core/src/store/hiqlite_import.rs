@@ -748,6 +748,7 @@ const TABLES: &[TablePlan] = &[
             "media_sequence",
             "discontinuity_sequence",
             "updated_at_ms",
+            "drain_deadline_ms",
         ],
         order_by: "incarnation_id",
         minimum_schema: 25,
@@ -2228,6 +2229,15 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 && schema_version < 35
             {
                 "0".to_owned()
+            } else if table.name == "media_sessions"
+                && *column == "drain_deadline_ms"
+                && schema_version < 50
+            {
+                // A source from before the column has no draining session to
+                // describe, and null is what "not draining" is spelled as
+                // everywhere else. Zero would be a deadline in 1970 that every
+                // reader would then have to except.
+                "NULL".to_owned()
             } else if table.name == "files"
                 && matches!(
                     *column,

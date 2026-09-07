@@ -203,7 +203,12 @@ pub(super) const MEDIA_SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS media
     media_origin_ms               INTEGER NOT NULL DEFAULT 0,
     media_sequence                INTEGER NOT NULL DEFAULT 0,
     discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,
-    updated_at_ms                 INTEGER NOT NULL
+    updated_at_ms                 INTEGER NOT NULL,
+    -- When a predecessor being drained on purpose stops being kept. Null means
+    -- not draining, which is what every session starts as. A fresh cluster
+    -- declares it here; an upgrade adds it by `ALTER`, and the migration has
+    -- to ask which of the two it is looking at before it tries.
+    drain_deadline_ms             INTEGER
 ) STRICT";
 
 /// Exact v10 shape used only by the v9 -> v10 migration. Later additive

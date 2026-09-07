@@ -301,6 +301,46 @@ pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER: &str =
 pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER: &str =
     pointer_desired_fence_update_trigger!();
 
+/// When a predecessor kept alive on purpose stops being kept.
+///
+/// Null means "not draining", which is every row that exists today and every
+/// row a session starts life as. A non-null value is a deadline in the same
+/// milliseconds every other clock column here uses: past it, the session is
+/// over regardless of what its lease says.
+///
+/// The column exists because three earlier attempts tried to *infer* "this
+/// session is draining" — from the playback pointer, and through the session
+/// lease — and each inference was already carrying a different meaning for
+/// somebody else. The pointer is deleted by an ordinary viewer action, so a
+/// drain keyed on it never ends; the lease is what the owner's renewal loop
+/// reads as liveness, so a drain keyed on it kills the worker in one tick.
+/// Neither is a fact about draining. This is, and it is durable, so it
+/// survives the restart of the node that set it and is visible to the node
+/// that inherits the work when that node does not come back.
+///
+/// Deliberately nullable rather than `NOT NULL DEFAULT 0`: a zero would be a
+/// deadline in 1970, and every reader would have to spell out that zero is not
+/// really a deadline. The null says it once, in the schema.
+macro_rules! media_session_drain_deadline_column {
+    () => {
+        // No trailing semicolon. The replicated backend submits this as one
+        // prepared statement and a trailing `;` makes it unpreparable — the
+        // failure the pointer-fence step above documents at length.
+        "ALTER TABLE media_sessions ADD COLUMN drain_deadline_ms INTEGER"
+    };
+}
+
+/// The drain deadline column, for the replicated migration's one statement.
+pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_COLUMN: &str =
+    media_session_drain_deadline_column!();
+
+/// The same column as a SQLite migration entry, which is run as a batch
+/// wrapped in `BEGIN` and `COMMIT` and therefore needs the separator the
+/// replicated backend must not have. One macro, two spellings, so the two
+/// backends cannot end up adding different columns.
+pub(crate) const MEDIA_SESSION_DRAIN_DEADLINE_SCHEMA: &str =
+    concat!(media_session_drain_deadline_column!(), ";");
+
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
     AFTER UPDATE OF publication_ready_at_ms ON media_sessions
