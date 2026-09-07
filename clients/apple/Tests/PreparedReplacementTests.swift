@@ -506,6 +506,45 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.readinessBoundElapsed())
     }
 
+    /// The whole cost of a server that stages a successor it never primes,
+    /// paid once instead of on every tap.
+    func testASuccessorThatNeverBecomesPlayableStopsTheAskingForThisPlayer() {
+        let host = RecordingHost()
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        XCTAssertTrue(coordinator.shouldAskForPreparation)
+        coordinator.offer(preparedAction(), filmPositionMs: 1_000)
+        coordinator.abandon(.failed)
+        XCTAssertFalse(
+            coordinator.shouldAskForPreparation,
+            "the viewer already paid to find out that nothing can be primed here"
+        )
+        // A new player is a new server, a new device state and a new source.
+        coordinator.playerIsEnding()
+        XCTAssertTrue(coordinator.shouldAskForPreparation)
+    }
+
+    /// A successor that *did* produce media and then failed says nothing about
+    /// the next one, so the asking continues.
+    func testAFailureAfterReadinessDoesNotStopTheAsking() async {
+        let host = RecordingHost()
+        host.firstFrameUnixMs = nil
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        coordinator.offer(preparedAction(), filmPositionMs: 1_000)
+        coordinator.successorIsMetadataReady()
+        coordinator.successorIsBuffered(throughMs: 40_000)
+        await coordinator.commit()
+        XCTAssertTrue(coordinator.shouldAskForPreparation)
+    }
+
+    /// An abort is the viewer moving on, never evidence about the server.
+    func testAnAbortDoesNotStopTheAsking() {
+        let host = RecordingHost()
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        coordinator.offer(preparedAction(), filmPositionMs: 1_000)
+        coordinator.abandonWithoutFallback(.aborted)
+        XCTAssertTrue(coordinator.shouldAskForPreparation)
+    }
+
     func testEndingThePlayerSettlesAndFreesWhateverIsLive() {
         let host = RecordingHost()
         let coordinator = PreparedReplacementCoordinator(host: host)

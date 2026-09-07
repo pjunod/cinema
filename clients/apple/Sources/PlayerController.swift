@@ -2938,6 +2938,10 @@ final class PlayerController: ObservableObject {
     private func offerPreparedQualityChange() async -> Bool {
         guard !isVOD,
               Caps.controlCapabilities().dualPlayerPreparation,
+              // A successor that never became playable once will not become
+              // playable on the next tap either, and the viewer already paid
+              // for finding that out. See `canOfferPreparation`.
+              preparedReplacement.shouldAskForPreparation,
               await playbackControl.isActivelyReporting
         else {
             retainControlSequence(await playbackControl.reportIntent())

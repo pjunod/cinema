@@ -331,6 +331,25 @@ final class PreparedReplacementCoordinator {
     /// The wall clock at which the live staging was opened, for the readiness
     /// bounds.
     private(set) var openedAtMs: Int?
+    /// False once a staging died before its successor ever became playable.
+    ///
+    /// A viewer pays for a preparation twice: once in the wait for the server
+    /// to offer one, and again in the wait for a successor that will never be
+    /// ready. Paying that on *every* quality change, on a server or a device
+    /// that cannot produce a successor at all, would make this capability a
+    /// regression rather than an improvement — and there are two live reasons
+    /// it might not: the server's own "reserve and prime" phase is not
+    /// implemented (`stage_prepared_successor` is documented **stage only**,
+    /// so a staged playlist answers `503 media_owner_transition` until the
+    /// pointer moves), and a device with one hardware decoder slot cannot hold
+    /// a second pipeline whatever M5.5 measured about logical ones.
+    ///
+    /// So the first failure before readiness is taken as evidence about this
+    /// playback, and the cost is paid once rather than per change. This is not
+    /// a switch and nothing configures it: it is learned, it is forgotten when
+    /// the player ends, and the day a successor becomes primeable this client
+    /// starts using it with no change at all.
+    private(set) var canOfferPreparation = true
 
     init(host: PreparedSuccessorHost?, now: @escaping () -> Int = {
         Int(Date().timeIntervalSince1970 * 1_000)
@@ -368,6 +387,9 @@ final class PreparedReplacementCoordinator {
         }
         return offer
     }
+
+    /// Whether a viewer-initiated change should wait for an offer at all.
+    var shouldAskForPreparation: Bool { canOfferPreparation && !ledger.hasActivePreparation }
 
     private func start(_ action: PreparedReplacementAction, filmPositionMs: Int) {
         ledger.open(action)
@@ -427,6 +449,11 @@ final class PreparedReplacementCoordinator {
         _ reason: PreparedReplacementAbandonment,
         fallingBackFor action: PreparedReplacementAction
     ) {
+        // A successor that never became playable is evidence about this
+        // playback, not about this attempt. One that failed after reaching
+        // metadata is not: something produced media, so the next change is
+        // worth trying.
+        if reason == .failed && ledger.phase == .building { canOfferPreparation = false }
         host?.discardPreparedSuccessor()
         ledger.noteAbandoned(reason)
         openedAtMs = nil
@@ -464,6 +491,9 @@ final class PreparedReplacementCoordinator {
     /// The player is going away. Anything still live is owed `aborted` before
     /// the reporter stops, and the pipeline is freed either way.
     func playerIsEnding() {
+        // A new player is a new server, a new device state and a new source.
+        // What this one learned about preparation does not travel.
+        canOfferPreparation = true
         host?.discardPreparedSuccessor()
         guard ledger.hasActivePreparation else { return }
         ledger.noteAbandoned(.aborted)
