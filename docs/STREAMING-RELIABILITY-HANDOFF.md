@@ -415,14 +415,25 @@ a settled contract instead of three guesses.
   successor, which is exactly the window §4's drain needs. No schema change is
   required.
 
-  What must be audited before relying on that: every place that reads
-  `state = 'active'` **without** consulting the pointer would see a draining
-  predecessor as a live session. The capacity counters already show both
-  spellings, which is the tell — `sessions.rs:970` excludes the pointer's
-  current incarnation explicitly, while `sessions.rs:446` does not. Any sweep
-  that reaps or takes over by `owner_node_id` + `state = 'active'` needs the
-  same exclusion before a predecessor is allowed to outlive its commit, or
-  recovery will treat a draining stream as one to rescue.
+  **And the bound the drain needs already exists: the predecessor's lease.**
+  The maintenance sweep at `sessions.rs:3372` ends any session with
+  `state = 'active' AND lease_expires_at_ms <= ?`, in batches, without
+  consulting the pointer. That is currently harmless because the commit ends
+  the predecessor first — but the moment it stops doing so, this sweep becomes
+  the thing that reaps a predecessor whose client never reported a switch. So
+  "bounded predecessor drain" does not need a new timer or a new sweep; it
+  needs the commit to stop ending the predecessor and to stop renewing its
+  lease, and the existing sweep provides the bound.
+
+  That is worth stating precisely because an earlier version of this note said
+  "any sweep that reaps by `owner_node_id` and `state = 'active'` needs a
+  pointer exclusion", which is broader than the code justifies. Checked
+  individually: every other `state = 'ended'` write in that file targets an
+  exact `incarnation_id` or a named staged preparation, so none of them can
+  reach an unrelated draining predecessor. The two counters at
+  `sessions.rs:446` and `:970` differ over the pointer, but both are admission
+  capacity, and a draining predecessor genuinely is consuming a node's
+  capacity — counting it is right, not a leak.
 
 - **The bounded-drain machinery already exists at
   `settle_activation_predecessor`**
