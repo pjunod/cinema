@@ -888,7 +888,13 @@ pattern = "terminal_reason"
 # 20 -> 21 after settlement review: the public post-retirement replay test
 # asserts the predecessor's durable `superseded` cause before exercising the
 # retained exact response. This is a test-only read of the existing writer.
-expected_occurrences = 21
+# 21 -> 20 when `preparation_ack_replay` stopped gating on that cause. Reading
+# `terminal_reason == 'superseded'` there was the same fact as "this commit
+# already happened" only while the commit retires the predecessor inside its
+# own transaction, which §4 has to stop it doing; the durable receipt is the
+# fence now, and a stricter one. A read is removed, no writer is. The count
+# goes back up if anything reintroduces a state gate on that cause.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
