@@ -303,6 +303,13 @@ test("Developer is where the switches that cost something live", () => {
   // transport is always compiled and automatic; this must not imply a gate.
   assert.match(html, /compiled in and activates automatically/);
   assert.doesNotMatch(html, /special build/);
+  // The retained live-HLS engine costs encode time and used to say so only in
+  // a log line. It belongs in the section for things that cost more than they
+  // look, with its switch named rather than duplicated.
+  assert.match(html, /Retained live-HLS engine/);
+  assert.match(html, /costs encode time on this node/);
+  assert.match(html, /#\/settings\/playback/);
+  assert.doesNotMatch(html, /TOG\(\["pvlr"/, "the switch stays in Playback; two copies drift");
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
 });
@@ -318,6 +325,7 @@ const DEV_REQUIREMENT_IDS = {
   cluster_transport_recovery: ["recovery_budgets", "cluster_api_advertised", "cache_revocation_capability", "recovery_receipt"],
   playback_control_protocol_v1: ["clients_report"],
   prepared_quality_handoff: ["server_preparation_is_real", "client_two_player_handoff", "fleet_receipt"],
+  live_hls_recovery: ["vod_coverage_replaces_it", "no_session_bypasses_the_switch"],
 };
 function statuses(status) {
   return {

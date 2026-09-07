@@ -96,16 +96,114 @@ pub(crate) async fn readiness(
     let settings = state.store.settings_snapshot().await?;
     let control_advertised = settings
         .get(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
-        .map(|value| value.trim())
+        .map(String::as_str)
         == Some("1");
+
+    // Not trimmed, deliberately: `live_hls_recovery_enabled` and the settings
+    // DTO both compare the raw value, and a row that trimmed would report the
+    // switch off while the engine kept falling back.
+    let live_recovery_on = settings
+        .get(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+        .map(String::as_str)
+        != Some("0");
 
     Ok(Json(DeveloperReadiness {
         items: vec![
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(),
+            live_hls_recovery(live_recovery_on),
         ],
     }))
+}
+
+/// The retained live-HLS engine: what it is, why it chose the work, and where
+/// the switch is.
+///
+/// It spends real encode time on real hardware and, until this row existed,
+/// said so only in a log line. It also used to be gated by a default Cargo
+/// feature no build ever turned off, which meant the question "does this node
+/// even have that engine" was answered by a compile flag rather than by
+/// anything an operator could see.
+fn live_hls_recovery(enabled: bool) -> DeveloperEnableItem {
+    let counts = crate::transcode::live_recovery_snapshot();
+    // The fallback's own total. Index 0 is the takeover path, which never
+    // consults the switch, so folding it in here would tell an operator that
+    // turning the switch off refuses sessions it cannot touch — and the row
+    // directly below says the opposite about the same sessions.
+    let fallback = counts[1..].iter().sum::<u64>();
+    let by_reason = crate::transcode::LIVE_RECOVERY_LABELS
+        .iter()
+        .zip(counts.iter())
+        .skip(1)
+        .filter(|(_, count)| **count > 0)
+        .map(|(label, count)| format!("{label} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let coverage = if fallback == 0 {
+        DeveloperRequirement {
+            id: "vod_coverage_replaces_it",
+            title: "Real VOD recipe coverage has replaced it",
+            status: RequirementStatus::Unobservable,
+            evidence: "No VOD prerequisite refusal has fallen back to the retained engine since \
+                       this process started, which is consistent with complete coverage and also \
+                       with nobody having asked. These counters are process-local and a restart \
+                       returns them to zero, so a quiet hour is not a coverage proof."
+                .to_owned(),
+        }
+    } else {
+        DeveloperRequirement {
+            id: "vod_coverage_replaces_it",
+            title: "Real VOD recipe coverage has replaced it",
+            status: RequirementStatus::Unmet,
+            evidence: format!(
+                "{fallback} session(s) since this process started reached the retained engine \
+                 because immutable VOD refused them ({by_reason}). Turning the fallback off \
+                 today would have refused those viewers instead. Settings \u{2192} Playback \
+                 \u{2192} Streaming holds the switch."
+            ),
+        }
+    };
+
+    // Never `Met`. The bypass is structural, not empirical: a request that
+    // arrives already naming the live presentation takes that branch with no
+    // setting consulted, so no number of switch-respecting sessions makes the
+    // title true. A sample that happens to contain no takeover is exactly the
+    // green tick meaning "not checked" this route exists to remove.
+    let unswitchable = counts[0];
+    let takeover = if unswitchable == 0 {
+        DeveloperRequirement {
+            id: "no_session_bypasses_the_switch",
+            title: "Nothing reaches the live engine past the switch",
+            status: RequirementStatus::Unobservable,
+            evidence: format!(
+                "No session since this process started arrived already naming the live \
+                 presentation. That is not a guarantee: the path consults no setting, so this \
+                 says only that nothing has taken it yet, and a restart returns the count to \
+                 zero. ({fallback} fallback session(s) in the same window.)"
+            ),
+        }
+    } else {
+        DeveloperRequirement {
+            id: "no_session_bypasses_the_switch",
+            title: "Nothing reaches the live engine past the switch",
+            status: RequirementStatus::Unmet,
+            evidence: format!(
+                "{unswitchable} session(s) since start arrived already naming the live \
+                 presentation and were served without consulting the fallback setting. That is \
+                 the peer takeover path, whose recipe validation requires it; turning the switch \
+                 off does not stop those."
+            ),
+        }
+    };
+
+    DeveloperEnableItem {
+        id: "live_hls_recovery",
+        title: "Fall back to the retained live-HLS engine",
+        enabled: Some(enabled),
+        requirements: vec![coverage, takeover],
+    }
 }
 
 async fn cluster_transport_recovery(state: &AppState) -> DeveloperEnableItem {
@@ -194,15 +292,22 @@ async fn cluster_api_requirement(state: &AppState) -> DeveloperRequirement {
         }
     };
 
-    let unreachable = status
-        .nodes
-        .iter()
-        .filter(|node| {
-            let host = node.advertised_host.trim();
-            host.is_empty() || host.eq_ignore_ascii_case("localhost")
-        })
-        .map(|node| node.node_id.clone())
-        .collect::<Vec<_>>();
+    // A loopback API address is only wrong when there is a peer that would
+    // have to dial it. A single-voter cluster on 127.0.0.1 is configured
+    // correctly and must not render red.
+    let unreachable = if status.nodes.len() < 2 {
+        Vec::new()
+    } else {
+        status
+            .nodes
+            .iter()
+            .filter(|node| {
+                let host = node.advertised_host.trim();
+                host.is_empty() || host.eq_ignore_ascii_case("localhost")
+            })
+            .map(|node| node.node_id.clone())
+            .collect::<Vec<_>>()
+    };
 
     if unreachable.is_empty() {
         DeveloperRequirement {

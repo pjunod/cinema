@@ -63,7 +63,9 @@ watchdogs taking globally conflicting recovery actions.
 
 ### 1.1 The fallback that actually ships
 
-The `live-hls-recovery` Cargo feature is on by default. Public clients still
+The `live-hls-recovery` Cargo feature has been removed; the retained engine is
+always compiled and `playback.vod_live_recovery` is the only switch. Public
+clients still
 request `presentation: "vod"`; `TranscodeManager::create_session_inner`
 tries VOD first and falls back to `start_live_recovery_session` for these
 typed prerequisite failures when `playback.vod_live_recovery` is not `0`:
@@ -1469,8 +1471,9 @@ owner and one client-visible transaction result in every case.
 - Default protocol advertisement on after mixed-fleet evidence.
 - Default the actor recovery engine on and remove the compatibility engine.
 - Remove `/status` polling and deprecated client recovery code.
-- Re-evaluate whether the `live-hls-recovery` feature remains necessary once
-  VOD eligibility covers the supported catalog.
+- Re-evaluate whether the retained live engine remains necessary once VOD
+  eligibility covers the supported catalog. Its Cargo feature is removed; the
+  remaining switch is `playback.vod_live_recovery`.
 
 **Acceptance:** repository search finds only the three approved progress
 deadlines and named lifecycle timers; playback-lab plus physical matrices are
