@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["c37169c2"]
+points = []
+checks = []
+reason = "Documentation only: it records where the predecessor drain's bound already lives and narrows an earlier note of mine that overstated which sweeps need a pointer exclusion. No runtime behaviour changes, so there is no functionality point to name and no evidence to carry."
+ignore = true
