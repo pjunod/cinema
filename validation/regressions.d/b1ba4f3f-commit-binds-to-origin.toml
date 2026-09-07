@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b1ba4f3f"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "A Committed acknowledgement carried an action_id and a wall-clock first-frame time, neither of which says the client built what the offer described. committed_media_origin_ms is now required and, more importantly, compared: bound_preparation_acknowledgement refuses a commit whose origin is not the offered one, because a required field nothing reads is ceremony rather than evidence. The gap is narrow and stated as such — a changed ask is already refused at commit by desired_digest, but that digest does not cover position, so a successor prepared for one point in the film and acknowledged after the viewer seeked elsewhere was indistinguishable from a correct commit. first_frame_unix_ms stays required: it is not proof but it is the measurement the M6 hardware instrument produces, and an earlier version of this change wrongly made it optional. a_commit_carries_the_origin_it_adopted_and_not_a_wall_clock pins the validation, a_commit_naming_an_origin_the_offer_did_not_is_refused pins the comparison that makes it evidence, and committed_acknowledgement_cannot_share_an_end_exchange was repaired so field validation no longer masks the rule it is named for."
