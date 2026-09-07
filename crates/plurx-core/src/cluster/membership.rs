@@ -2383,14 +2383,102 @@ fn maintenance_preserves_quorum(
         || reachable_voters.saturating_sub(usize::from(target_reachable)) >= voting_quorum
 }
 
-const ACQUIRE_CLUSTER_OPERATION_LEASE_SQL: &str = "INSERT INTO cluster_operation_leases \
+/// A membership removal that has not finished yet.
+///
+/// `cluster_node_removals` and `cluster_node_removal_attempts` are not only a
+/// removal's in-flight fence: `finalize_node_removal` deliberately leaves both
+/// rows behind as the durable tombstone, and a delete trigger protects them
+/// while the attempt row exists. A table-wide `NOT EXISTS` over either one
+/// therefore reads every removal the cluster has *ever* completed as one still
+/// in progress, and every guarded lease acquisition refuses for the remaining
+/// life of the cluster.
+///
+/// That is not hypothetical. A fleet that removed two nodes in August could
+/// never acquire the cache-admin exclusion again, so the one-time
+/// credential-revocation activation retried every three seconds and never
+/// completed; the Store-free admin proof cache therefore stayed fenced closed
+/// on every node, `/cluster/status` answered 401 to a valid administrator, and
+/// the web client — reading 401 as "your session is over" — put that
+/// administrator back on the login page on every visit to Settings.
+///
+/// In flight means what the `removals_pending` gauge already means: a removal
+/// row whose node is not yet tombstoned. `finalize_node_removal` stamps
+/// `removed_at` only after the membership change is committed, so a tombstoned
+/// node's removal is over by construction.
+fn removal_in_flight_predicate(table: &str, alias: &str) -> String {
+    // Written as "not known to be finished" rather than "joins a live node",
+    // because a fence must fail closed on a target it cannot resolve. Nothing
+    // requires a `cluster_nodes` row to exist for a removal row — the fence is
+    // inserted without a foreign key, and node rows are hard-deleted elsewhere
+    // (a rejoining node's row is) — so an inner join would read an orphaned
+    // fence as "clear", which is the one direction this predicate must never
+    // guess in. Only a target this cluster has positively tombstoned counts as
+    // finished.
+    format!(
+        "EXISTS (SELECT 1 FROM {table} AS {alias} \
+          WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS removal_target \
+            WHERE removal_target.node_id = {alias}.node_id \
+              AND removal_target.removed_at IS NOT NULL))"
+    )
+}
+
+fn no_removal_in_flight_predicates() -> String {
+    format!(
+        "NOT {} AND NOT {}",
+        removal_in_flight_predicate("cluster_node_removals", "removal"),
+        removal_in_flight_predicate("cluster_node_removal_attempts", "removal_attempt"),
+    )
+}
+
+/// Lifecycle work actually in progress. Counts a removal only while its node
+/// is untombstoned, for the reason in [`removal_in_flight_predicate`]: the
+/// removal rows outlive the removal.
+const LIFECYCLE_OPERATION_PENDING_SQL: &str =
+    "SELECT (SELECT COUNT(*) FROM cluster_node_removals AS removal \
+         WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS removal_target \
+           WHERE removal_target.node_id = removal.node_id \
+             AND removal_target.removed_at IS NOT NULL)) \
+       + (SELECT COUNT(*) FROM cluster_node_promotions) \
+       + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count";
+
+/// Admit one node into planned maintenance. `$1` is the target, `$2` now, `$3`
+/// the claim id of the maintenance lease the caller already holds.
+///
+/// A statement rather than an inline literal because it carries the same
+/// removal fence the two lease acquisitions do, and that fence had to be
+/// testable in all three places: acquiring the lease and then failing here
+/// reports as `MaintenanceConflict`, which reads as "someone else is doing
+/// something" rather than "this cluster removed a node in August".
+fn enter_maintenance_admission_sql() -> String {
+    format!(
+        "INSERT INTO cluster_node_maintenance \
+           (node_id, requested_at, acknowledged_at) \
+         SELECT $1, $2, NULL WHERE {} \
+           AND EXISTS (SELECT 1 FROM cluster_nodes node \
+             WHERE node.node_id = $1 AND node.removed_at IS NULL) \
+           AND EXISTS (SELECT 1 FROM cluster_operation_leases lease \
+             WHERE lease.singleton = 1 AND lease.node_id = $1 \
+               AND lease.operation = 'maintenance' \
+               AND lease.claim_id = $3 AND lease.expires_at > $2) \
+           AND {} \
+           AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
+           AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
+           AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+         ON CONFLICT(node_id) DO NOTHING RETURNING node_id",
+        capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY),
+        no_removal_in_flight_predicates()
+    )
+}
+
+fn acquire_cluster_operation_lease_sql() -> String {
+    format!(
+        "INSERT INTO cluster_operation_leases \
        (singleton, node_id, operation, claim_id, expires_at) \
      SELECT 1, $1, $2, $3, $4 \
      WHERE EXISTS (SELECT 1 FROM cluster_nodes node \
          WHERE node.node_id = $1 AND node.removed_at IS NULL) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts) \
+       AND {} \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
        AND NOT EXISTS (SELECT 1 FROM cluster_operation_lease_releases released_claim \
@@ -2401,7 +2489,10 @@ const ACQUIRE_CLUSTER_OPERATION_LEASE_SQL: &str = "INSERT INTO cluster_operation
      WHERE cluster_operation_leases.expires_at <= $5 \
         OR (cluster_operation_leases.node_id = $1 \
             AND cluster_operation_leases.operation = $2 \
-            AND cluster_operation_leases.claim_id = $3)";
+            AND cluster_operation_leases.claim_id = $3)",
+        no_removal_in_flight_predicates()
+    )
+}
 
 const RELEASE_CLUSTER_OPERATION_LEASE_SQL: &str = "DELETE FROM cluster_operation_leases \
      WHERE singleton = 1 AND node_id = $1 AND operation = $2 AND claim_id = $3";
@@ -2410,15 +2501,15 @@ const TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL: &str =
     "INSERT INTO cluster_operation_lease_releases (claim_id) VALUES ($1) \
      ON CONFLICT(claim_id) DO NOTHING";
 
-const ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
-    "INSERT INTO cluster_cache_admin_revocation_leases \
+fn acquire_cache_admin_revocation_lease_sql() -> String {
+    format!(
+        "INSERT INTO cluster_cache_admin_revocation_leases \
        (singleton, node_id, claim_id, expires_at, retain_release_receipt) \
      SELECT 1, $1, $2, $3, $4 \
      WHERE EXISTS (SELECT 1 FROM cluster_nodes node \
          WHERE node.node_id = $1 AND node.removed_at IS NULL) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts) \
+       AND {} \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
        AND NOT EXISTS (SELECT 1 FROM cluster_join_tokens WHERE state = 'redeeming') \
@@ -2434,7 +2525,10 @@ const ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
          cluster_cache_admin_revocation_leases.retain_release_receipt, \
          excluded.retain_release_receipt) \
      WHERE cluster_cache_admin_revocation_leases.node_id = $1 \
-       AND cluster_cache_admin_revocation_leases.claim_id = $2";
+       AND cluster_cache_admin_revocation_leases.claim_id = $2",
+        no_removal_in_flight_predicates()
+    )
+}
 
 const RELEASE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
     "DELETE FROM cluster_cache_admin_revocation_leases \
@@ -5113,7 +5207,7 @@ impl MembershipManager {
                         params!(lease.claim_id.as_str()),
                     ),
                     (
-                        ACQUIRE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
+                        acquire_cluster_operation_lease_sql(),
                         params!(
                             lease.node_id.as_str(),
                             lease.operation,
@@ -5178,7 +5272,7 @@ impl MembershipManager {
                         params!(lease.claim.as_str()),
                     ),
                     (
-                        ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL.to_owned(),
+                        acquire_cache_admin_revocation_lease_sql(),
                         params!(
                             lease.node_id.as_str(),
                             lease.claim.as_str(),
@@ -5462,23 +5556,7 @@ impl MembershipManager {
             .client
             .txn(vec![
                 (
-                    format!(
-                        "INSERT INTO cluster_node_maintenance \
-                           (node_id, requested_at, acknowledged_at) \
-                         SELECT $1, $2, NULL WHERE {} \
-                           AND EXISTS (SELECT 1 FROM cluster_nodes node \
-                             WHERE node.node_id = $1 AND node.removed_at IS NULL) \
-                           AND EXISTS (SELECT 1 FROM cluster_operation_leases lease \
-                             WHERE lease.singleton = 1 AND lease.node_id = $1 \
-                               AND lease.operation = 'maintenance' \
-                               AND lease.claim_id = $3 AND lease.expires_at > $2) \
-                           AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
-                           AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
-                           AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
-                           AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
-                         ON CONFLICT(node_id) DO NOTHING RETURNING node_id",
-                        capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY)
-                    ),
+                    enter_maintenance_admission_sql(),
                     params!(node_id, now, lease.claim_id.as_str()),
                 ),
                 (
@@ -5654,12 +5732,7 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<CountRow, _>(
-                "SELECT (SELECT COUNT(*) FROM cluster_node_removals) \
-                   + (SELECT COUNT(*) FROM cluster_node_promotions) \
-                   + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count",
-                params!(),
-            )
+            .query_consistent_map::<CountRow, _>(LIFECYCLE_OPERATION_PENDING_SQL, params!())
             .await?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
     }
@@ -5668,12 +5741,7 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_map::<CountRow, _>(
-                "SELECT (SELECT COUNT(*) FROM cluster_node_removals) \
-                   + (SELECT COUNT(*) FROM cluster_node_promotions) \
-                   + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count",
-                params!(),
-            )
+            .query_map::<CountRow, _>(LIFECYCLE_OPERATION_PENDING_SQL, params!())
             .await?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
     }
@@ -7046,6 +7114,73 @@ impl MembershipManager {
         Ok(rows.first().is_some_and(|row| row.count == 0))
     }
 
+    /// Which named precondition is refusing the cache-admin exclusion.
+    ///
+    /// The acquire is a conditional `INSERT ... SELECT ... WHERE`, so a
+    /// zero-row result carries no reason at all — and its caller turns that
+    /// into one opaque 503 every three seconds, forever, which is exactly how
+    /// a fleet spent two weeks refusing its own administrator without anything
+    /// in the product naming the cause. This answers the "why" in the
+    /// operator's vocabulary, from local applied SQL so it still works while
+    /// quorum is lost.
+    ///
+    /// It enumerates every standing condition in
+    /// [`acquire_cache_admin_revocation_lease_sql`]. The one deliberate
+    /// omission is the per-claim release receipt: a fresh claim id is minted
+    /// for each attempt, so that clause cannot refuse a new one. An empty
+    /// answer is therefore a finding of its own — the refusal is not local,
+    /// and the caller says so rather than saying nothing.
+    pub async fn cache_admin_exclusion_blockers(&self) -> Result<Vec<String>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        let sql = cache_admin_exclusion_blockers_sql();
+        let rows = inner
+            .client
+            .query_map::<CacheAdminBlockerRow, _>(
+                sql,
+                params!(inner.identity.node_id.as_str(), now),
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Vec::new());
+        };
+        Ok(row
+            .named()
+            .into_iter()
+            .filter(|(blocked, _)| *blocked)
+            .map(|(_, reason)| reason.to_owned())
+            .collect())
+    }
+}
+
+/// The standing conditions of [`acquire_cache_admin_revocation_lease_sql`], one
+/// boolean column each. `$1` is the local node id, `$2` is now in unix ms.
+fn cache_admin_exclusion_blockers_sql() -> String {
+    format!(
+        "SELECT \
+               NOT EXISTS (SELECT 1 FROM cluster_nodes node \
+                 WHERE node.node_id = $1 AND node.removed_at IS NULL) AS local_inactive, \
+               EXISTS (SELECT 1 FROM cluster_node_maintenance) AS maintenance, \
+               {removal} AS removal, \
+               {removal_attempt} AS removal_attempt, \
+               EXISTS (SELECT 1 FROM cluster_node_promotions) AS promotion, \
+               EXISTS (SELECT 1 FROM cluster_node_join_staging) AS join_staging, \
+               EXISTS (SELECT 1 FROM cluster_join_tokens WHERE state = 'redeeming') \
+                 AS join_redeeming, \
+               EXISTS (SELECT 1 FROM cluster_operation_leases) AS operation_lease, \
+               EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases \
+                 WHERE node_id = $1) AS held_locally, \
+               EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases \
+                 WHERE node_id <> $1) AS held_elsewhere, \
+               EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_release_watermark \
+                 WHERE singleton = 1 AND expires_through >= $2) AS release_watermark",
+        removal = removal_in_flight_predicate("cluster_node_removals", "removal"),
+        removal_attempt =
+            removal_in_flight_predicate("cluster_node_removal_attempts", "removal_attempt"),
+    )
+}
+
+impl MembershipManager {
     /// Cheap quorum-backed preflight for the automatic activation attempt.
     /// This is only an optimization that avoids taking the replicated
     /// exclusion throughout a partial rollout; the claim-bound activation
@@ -9926,6 +10061,88 @@ struct CountRow {
     count: i64,
 }
 
+/// The standing conditions of the cache-admin acquire, one column each. The
+/// column names are written once here and once in the query that produces
+/// them; `cache_admin_exclusion_blockers_name_every_standing_condition` runs
+/// that exact query so a rename cannot reach production as a panic inside the
+/// activation loop.
+struct CacheAdminBlockerRow {
+    local_inactive: bool,
+    maintenance: bool,
+    removal: bool,
+    removal_attempt: bool,
+    promotion: bool,
+    join_staging: bool,
+    join_redeeming: bool,
+    operation_lease: bool,
+    held_locally: bool,
+    held_elsewhere: bool,
+    release_watermark: bool,
+}
+
+impl CacheAdminBlockerRow {
+    #[cfg(test)]
+    const COLUMNS: [&'static str; 11] = [
+        "local_inactive",
+        "maintenance",
+        "removal",
+        "removal_attempt",
+        "promotion",
+        "join_staging",
+        "join_redeeming",
+        "operation_lease",
+        "held_locally",
+        "held_elsewhere",
+        "release_watermark",
+    ];
+
+    fn named(&self) -> [(bool, &'static str); 11] {
+        [
+            (
+                self.local_inactive,
+                "this node is not an active member of the committed roster",
+            ),
+            (self.maintenance, "a node is in maintenance"),
+            (self.removal, "a node removal is in flight"),
+            (self.removal_attempt, "a node removal attempt is in flight"),
+            (self.promotion, "a node promotion is in flight"),
+            (self.join_staging, "a node join is staged"),
+            (self.join_redeeming, "a join token is being redeemed"),
+            (self.operation_lease, "a planned-outage lease is held"),
+            (
+                self.held_locally,
+                "this node already holds the cache-admin exclusion",
+            ),
+            (
+                self.held_elsewhere,
+                "another node holds the cache-admin exclusion",
+            ),
+            (
+                self.release_watermark,
+                "the cache-admin release watermark is parked at or beyond now",
+            ),
+        ]
+    }
+}
+
+impl From<&mut Row<'_>> for CacheAdminBlockerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            local_inactive: row.get::<i64>("local_inactive") != 0,
+            maintenance: row.get::<i64>("maintenance") != 0,
+            removal: row.get::<i64>("removal") != 0,
+            removal_attempt: row.get::<i64>("removal_attempt") != 0,
+            promotion: row.get::<i64>("promotion") != 0,
+            join_staging: row.get::<i64>("join_staging") != 0,
+            join_redeeming: row.get::<i64>("join_redeeming") != 0,
+            operation_lease: row.get::<i64>("operation_lease") != 0,
+            held_locally: row.get::<i64>("held_locally") != 0,
+            held_elsewhere: row.get::<i64>("held_elsewhere") != 0,
+            release_watermark: row.get::<i64>("release_watermark") != 0,
+        }
+    }
+}
+
 struct ProtocolRangeRow {
     protocol_min: i64,
     protocol_max: i64,
@@ -11057,6 +11274,305 @@ mod tests {
         connection
     }
 
+    /// The refusal has to be able to explain itself, in the fleet's own state.
+    ///
+    /// `cache_admin_exclusion_blockers` is runtime-built SQL read back by
+    /// column name, and hiqlite's row accessor *panics* on a missing column —
+    /// inside the activation loop's task, which would kill it outright and
+    /// restore the original defect permanently and with no retry. So run the
+    /// exact query, against the same fixture the acquire is tested on, and
+    /// require every standing condition of the acquire to have a column that
+    /// answers, and to flip when that condition is made true.
+    #[test]
+    fn cache_admin_exclusion_blockers_name_every_standing_condition() {
+        let connection = guarded_cache_admin_lease_fixture();
+        let sql = cache_admin_exclusion_blockers_sql()
+            .replace("$1", "?1")
+            .replace("$2", "?2");
+        let read = |connection: &rusqlite::Connection| -> Vec<(String, i64)> {
+            let mut statement = connection.prepare(&sql).expect("blockers query");
+            let names = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let values = statement
+                .query_row(rusqlite::params!["node-a", 1_000_i64], |row| {
+                    (0..names.len())
+                        .map(|index| row.get::<_, i64>(index))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .expect("blockers row");
+            names.into_iter().zip(values).collect()
+        };
+
+        let baseline = read(&connection);
+        assert_eq!(
+            baseline
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            CacheAdminBlockerRow::COLUMNS.to_vec(),
+            "the query and the row reader must name the same columns, in the same order"
+        );
+        assert!(
+            baseline.iter().all(|(_, value)| *value == 0),
+            "a healthy fixture blocks nothing: {baseline:?}"
+        );
+
+        // Each condition, made true one at a time, must light exactly its own
+        // column. A predicate wired to the wrong column would otherwise report
+        // a plausible and wrong cause, which is worse than reporting none.
+        for (column, statement) in [
+            (
+                "local_inactive",
+                "UPDATE cluster_nodes SET removed_at = 5 WHERE node_id = 'node-a'",
+            ),
+            (
+                "maintenance",
+                "INSERT INTO cluster_node_maintenance VALUES ('node-b')",
+            ),
+            (
+                "removal",
+                "INSERT INTO cluster_node_removals VALUES ('node-b')",
+            ),
+            (
+                "removal_attempt",
+                "INSERT INTO cluster_node_removal_attempts VALUES ('node-b', 'attempt')",
+            ),
+            (
+                "promotion",
+                "INSERT INTO cluster_node_promotions VALUES ('node-b')",
+            ),
+            (
+                "join_staging",
+                "INSERT INTO cluster_node_join_staging VALUES ('node-b')",
+            ),
+            (
+                "join_redeeming",
+                "INSERT INTO cluster_join_tokens VALUES ('redeeming-token', 'redeeming')",
+            ),
+            (
+                "operation_lease",
+                "INSERT INTO cluster_operation_leases VALUES (1, 'node-b', 'maintenance', \
+                   'lease-claim', 9999)",
+            ),
+            (
+                "held_elsewhere",
+                "INSERT INTO cluster_cache_admin_revocation_lease_intents VALUES \
+                   ('other-claim'); \
+                 INSERT INTO cluster_cache_admin_revocation_leases \
+                   VALUES (1, 'node-b', 'other-claim', 9999, 0)",
+            ),
+            (
+                "release_watermark",
+                "INSERT INTO cluster_cache_admin_revocation_release_watermark VALUES (1, 5000)",
+            ),
+        ] {
+            let scratch = guarded_cache_admin_lease_fixture();
+            scratch.execute_batch(statement).expect(column);
+            let lit = read(&scratch)
+                .into_iter()
+                .filter(|(_, value)| *value != 0)
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lit,
+                vec![column.to_owned()],
+                "{column} did not light its own column alone"
+            );
+        }
+
+        // The local hold is the same table as the remote one, told apart by
+        // node id: reporting "another node holds it" for our own lease sends an
+        // operator to the wrong machine.
+        let scratch = guarded_cache_admin_lease_fixture();
+        scratch
+            .execute_batch(
+                "INSERT INTO cluster_cache_admin_revocation_lease_intents VALUES ('own-claim'); \
+                 INSERT INTO cluster_cache_admin_revocation_leases \
+                   VALUES (1, 'node-a', 'own-claim', 9999, 0)",
+            )
+            .expect("local hold");
+        let lit = read(&scratch)
+            .into_iter()
+            .filter(|(_, value)| *value != 0)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(lit, vec!["held_locally".to_owned()]);
+    }
+
+    /// The fleet defect, as two rows.
+    ///
+    /// A completed removal leaves its `cluster_node_removals` and
+    /// `cluster_node_removal_attempts` rows behind on purpose — they are the
+    /// durable tombstone, and a trigger protects them. Both guarded
+    /// acquisitions used to read those tables table-wide, so the first node a
+    /// cluster ever removed disabled the cache-admin exclusion and the planned
+    /// outage lease permanently. Measured on a four-node fleet: two removals
+    /// in August, the one-time credential-guard activation retrying every
+    /// three seconds ever since, the Store-free admin proof cache fenced
+    /// closed on every node as a result, `/cluster/status` answering 401 to a
+    /// valid administrator, and the operator returned to the login page on
+    /// every visit to Settings.
+    ///
+    /// A removal still in flight must keep blocking both. That is the half
+    /// that must not regress while fixing the other.
+    #[test]
+    fn a_completed_removal_stops_fencing_the_exclusions_it_finished_with() {
+        let mut connection = guarded_cache_admin_lease_fixture();
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-gone', 100, 900); \
+                 INSERT INTO cluster_node_removals VALUES ('node-gone'); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-gone', 'attempt-1');",
+            )
+            .expect("a removal that finished, tombstone and all");
+        assert_eq!(
+            acquire_guarded_cache_admin_lease(&mut connection, "claim-after-removal", false),
+            1,
+            "a tombstoned node's leftover fence is not a removal in progress"
+        );
+        let mut in_flight = guarded_cache_admin_lease_fixture();
+        in_flight
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-leaving', 100, NULL); \
+                 INSERT INTO cluster_node_removals VALUES ('node-leaving'); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-leaving', 'attempt-2');",
+            )
+            .expect("a removal still under way");
+        assert_eq!(
+            acquire_guarded_cache_admin_lease(&mut in_flight, "claim-during-removal", false),
+            0,
+            "a removal in flight still excludes the cache-admin claim"
+        );
+
+        // The planned-outage lease carries the identical predicate, which is
+        // why maintenance entry, restart preparation and force election were
+        // refused on that fleet too.
+        let mut leases = guarded_operation_lease_fixture();
+        leases
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-gone', 900); \
+                 INSERT INTO cluster_node_removals VALUES ('node-gone'); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-gone', 'attempt-1');",
+            )
+            .expect("a removal that finished");
+        assert_eq!(
+            acquire_guarded_operation_lease(&mut leases, "node-a", "maintenance", "claim-1"),
+            1,
+            "a finished removal must not fence planned outages for the life of the cluster"
+        );
+        let mut fenced = guarded_operation_lease_fixture();
+        fenced
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-leaving', NULL); \
+                 INSERT INTO cluster_node_removals VALUES ('node-leaving');",
+            )
+            .expect("a removal still under way");
+        assert_eq!(
+            acquire_guarded_operation_lease(&mut fenced, "node-a", "maintenance", "claim-2"),
+            0,
+            "a removal in flight still excludes a planned outage"
+        );
+
+        // And the admission that follows the lease. Taking the lease and then
+        // failing here is the worse failure of the two: the operator is told
+        // "maintenance and membership changes are mutually exclusive" while no
+        // membership change is happening or ever will again.
+        let admission = enter_maintenance_admission_sql()
+            .replace("$1", "?1")
+            .replace("$2", "?2")
+            .replace("$3", "?3");
+        // RETURNING makes this a query, not an execute: count the rows it
+        // gives back, which is what the daemon reads to decide it was admitted.
+        let admit = |connection: &rusqlite::Connection| -> usize {
+            let mut statement = connection
+                .prepare(&admission)
+                .expect("maintenance admission");
+            statement
+                .query_map(rusqlite::params!["node-a", 100_i64, "claim-1"], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("maintenance admission rows")
+                .count()
+        };
+        let ready = maintenance_admission_fixture();
+        assert_eq!(admit(&ready), 1, "a healthy cluster admits maintenance");
+        let after_removal = maintenance_admission_fixture();
+        after_removal
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-gone', 100, 900); \
+                 INSERT INTO cluster_node_removals VALUES ('node-gone'); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-gone', 'attempt-1');",
+            )
+            .expect("a removal that finished");
+        assert_eq!(
+            admit(&after_removal),
+            1,
+            "a finished removal must not refuse maintenance for the life of the cluster"
+        );
+        let during_removal = maintenance_admission_fixture();
+        during_removal
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-leaving', 100, NULL); \
+                 INSERT INTO cluster_node_removals VALUES ('node-leaving');",
+            )
+            .expect("a removal still under way");
+        assert_eq!(
+            admit(&during_removal),
+            0,
+            "a removal in flight still refuses maintenance"
+        );
+        // And a fence whose target this cluster cannot resolve at all stays a
+        // fence: an orphaned removal row is not evidence that it finished.
+        let orphaned = maintenance_admission_fixture();
+        orphaned
+            .execute_batch("INSERT INTO cluster_node_removals VALUES ('node-vanished');")
+            .expect("an orphaned removal fence");
+        assert_eq!(
+            admit(&orphaned),
+            0,
+            "an unresolvable removal target must fail closed, not open"
+        );
+    }
+
+    /// A cluster that can admit `node-a` into maintenance: it holds the
+    /// maintenance lease, proves the capability with a current heartbeat, and
+    /// nothing else is in flight.
+    fn maintenance_admission_fixture() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', 100, NULL); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT, capability TEXT, last_seen_at INTEGER, \
+                   PRIMARY KEY (node_id, capability)); \
+                 CREATE TABLE cluster_node_maintenance (\
+                   node_id TEXT PRIMARY KEY, requested_at INTEGER, acknowledged_at INTEGER); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_removal_attempts (node_id TEXT, attempt_id TEXT); \
+                 CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_operation_leases (\
+                   singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                   node_id TEXT NOT NULL, operation TEXT NOT NULL, \
+                   claim_id TEXT NOT NULL, expires_at INTEGER NOT NULL); \
+                 INSERT INTO cluster_operation_leases \
+                   VALUES (1, 'node-a', 'maintenance', 'claim-1', 9999);",
+            )
+            .expect("maintenance admission schema");
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ('node-a', ?1, 100)",
+                rusqlite::params![NODE_MAINTENANCE_CAPABILITY],
+            )
+            .expect("current maintenance capability");
+        connection
+    }
+
     fn acquire_guarded_cache_admin_lease(
         connection: &mut rusqlite::Connection,
         claim_id: &str,
@@ -11081,7 +11597,7 @@ mod tests {
             .expect("authorize cache-admin acquisition");
         let changed = transaction
             .execute(
-                ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL,
+                &acquire_cache_admin_revocation_lease_sql(),
                 rusqlite::params![
                     "node-a",
                     claim_id,
@@ -11195,7 +11711,7 @@ mod tests {
             .expect("authorize acquisition");
         let changed = transaction
             .execute(
-                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                &acquire_cluster_operation_lease_sql(),
                 rusqlite::params![node_id, operation, claim_id, 1_000_i64, 100_i64],
             )
             .expect("acquire guarded planned-outage claim");
@@ -12157,10 +12673,14 @@ mod tests {
         let handoff = source
             .find("self.handoff_leadership(target.raft_id, &status).await?")
             .expect("leader handoff");
+        // The fence moved into a named statement so its removal predicate is
+        // testable, so pin the call rather than the literal; the ordering this
+        // test exists for is unchanged.
         let commit = source
-            .find("INSERT INTO cluster_node_maintenance")
+            .find("enter_maintenance_admission_sql()")
             .expect("durable maintenance fence");
         assert!(handoff < commit);
+        assert!(enter_maintenance_admission_sql().contains("INSERT INTO cluster_node_maintenance"));
         assert!(source.contains("lease.operation != \"maintenance\""));
         assert!(source.contains("Param::StmtOutputNamed(0, \"node_id\".into())"));
         assert!(source.contains("DELETE FROM cluster_operation_leases"));
@@ -12203,7 +12723,7 @@ mod tests {
                 barrier.wait();
                 connection
                     .execute(
-                        ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                        &acquire_cluster_operation_lease_sql(),
                         rusqlite::params![
                             node_id,
                             operation,
@@ -12235,7 +12755,7 @@ mod tests {
         assert_eq!(
             connection
                 .execute(
-                    ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                    &acquire_cluster_operation_lease_sql(),
                     rusqlite::params!["node-b", "maintenance", "successor", 2_000_i64, 100_i64],
                 )
                 .expect("replace expired claimant"),
@@ -12252,7 +12772,7 @@ mod tests {
         let mut connection = guarded_operation_lease_fixture();
         assert!(connection
             .execute(
-                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                &acquire_cluster_operation_lease_sql(),
                 rusqlite::params![
                     "node-a",
                     "restart",
@@ -12466,7 +12986,7 @@ mod tests {
         assert_eq!(
             connection
                 .execute(
-                    ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                    &acquire_cluster_operation_lease_sql(),
                     rusqlite::params!["node-a", "restart", "preflight", 1_000_i64, 100_i64],
                 )
                 .expect("claim planned-outage lease before preflight"),

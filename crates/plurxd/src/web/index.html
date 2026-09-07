@@ -3240,7 +3240,7 @@ async function startNativeReader(token,itemId,fileId){
 window.startNativeReader=startNativeReader;
 
 // ---- api helpers ----------------------------------------------------------
-async function api(path, {method="GET", body=null, raw=false, signal=null}={}){
+async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false}={}){
   const authGeneration=AUTH_GENERATION;
   const headers={};
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
@@ -3250,7 +3250,27 @@ async function api(path, {method="GET", body=null, raw=false, signal=null}={}){
     const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
     throw error;
   }
-  if(res.status===401){
+  // `keepSessionOn401` belongs to the two cluster recovery reads, whose guard
+  // answers from a process-local proof cache. A closed cache there is a
+  // statement about the cluster, not about this credential, and ending the
+  // session over it is how a stuck protocol activation threw an administrator
+  // at the login screen on every visit to Settings.
+  //
+  // So don't guess: ask. `/me` is the credential's own route and has no
+  // cluster opinion. If it answers, the session is alive and the refusal
+  // belongs to the panel; if it refuses, that call ends the session on the
+  // ordinary path and this one just reports. Guessing either way is wrong in
+  // a real case — a node still running the old build refuses these reads with
+  // 401 while the credential is fine, and a token that genuinely died mid-tick
+  // must not leave the Cluster tab painting forever.
+  if(res.status===401&&keepSessionOn401&&authGeneration===AUTH_GENERATION){
+    // The probe is the whole mechanism: `/me` refused by an expired credential
+    // ends the session on the ordinary path above, inside this very call, and
+    // `/me` answered means the session is alive and the refusal is the
+    // cluster's. Either way this request then reports its own refusal to its
+    // caller, and the panel paints it.
+    try{ await api("/me"); }catch(probe){ void probe; }
+  }else if(res.status===401){
     // Parallel requests from an expired credential may finish after the user
     // has already signed in again. Only the credential generation that sent
     // this request may clear the current session.
@@ -12785,8 +12805,21 @@ const SETTINGS_ENDPOINTS={
   // Stamped here rather than where the value is painted: loadSettingsKey serves
   // a cached aggregate without a request, and stamping that would let a tab
   // switch every ten seconds starve the refresh indefinitely.
-  clusterOps:()=>api("/cluster/status").then(ops=>{
+  clusterOps:()=>api("/cluster/status",{keepSessionOn401:true}).then(ops=>{
     clusterOpsStamp(); return clusterOpsReceived(ops);
+  }).catch(error=>{
+    // A request from a credential generation that has already been replaced
+    // describes nothing about the current session; let it stay an error rather
+    // than painting it into the new one.
+    if(error&&error.staleAuth) throw error;
+    // A refused recovery read is a fact about the cluster, so it is reported
+    // by the panel that reports the cluster — named, dated and retryable —
+    // rather than as a page-level failure or, as it once was, as the end of
+    // the operator's session. `clusterOperationsCard` already knows this
+    // shape; it is the same one `/cluster/nodes` uses when it cannot answer.
+    clusterOpsStamp();
+    return {unavailable:true,code:(error&&error.code)||null,
+            message:(error&&error.message)||"request failed"};
   }),
 };
 const SETTINGS_MANIFEST={
@@ -14514,7 +14547,7 @@ async function pollLocalRestart(nodeId,generation){
     await new Promise(resolve=>setTimeout(resolve,2000));
     if(!settingsCurrent(generation,"cluster")) return;
     try{
-      const ops=clusterOpsReceived(await api("/cluster/status"));
+      const ops=clusterOpsReceived(await api("/cluster/status",{keepSessionOn401:true}));
       if(!settingsCurrent(generation,"cluster")) return;
       // The restart poll owns freshness while it runs, so it stamps the same
       // clock the tick reads: the two never probe the fan-out at once. It
@@ -14536,7 +14569,7 @@ async function pollLocalRestart(nodeId,generation){
 async function downloadClusterSupportBundle(btn){
   if(btn) btn.disabled=true;
   try{
-    const response=await api("/cluster/support-bundle",{raw:true});
+    const response=await api("/cluster/support-bundle",{raw:true,keepSessionOn401:true});
     const blob=await response.blob();
     const url=URL.createObjectURL(blob), link=document.createElement("a");
     link.href=url; link.download="plurx-cluster-support.zip"; link.style.display="none";
@@ -15126,7 +15159,7 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         clusterOpsStamp();
         try{
           const previous=SETTINGS_DATA.clusterOps;
-          const ops=clusterOpsReceived(await api("/cluster/status"));
+          const ops=clusterOpsReceived(await api("/cluster/status",{keepSessionOn401:true}));
           if(!settingsCurrent(generation,tab)) return;
           const changed=PlurxClusterPanel.clusterOpsProjection(previous)
             !==PlurxClusterPanel.clusterOpsProjection(ops);
@@ -15141,7 +15174,11 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
             else patchClusterReadingAge();
           }
         }catch(error){
-          if(error&&error.status===401) throw error;
+          // No refusal here ends the session any more, including a 401: the
+          // guard on this read answers from a process-local proof cache, so
+          // its refusal describes the cluster and not the credential. Every
+          // failure takes the same path — keep the retained evidence, keep
+          // its age honest, and let the next tick try again.
           if(!settingsCurrent(generation,tab)) return;
           // Retained transport evidence advances locally even when the refresh
           // fails: active work crosses its deadline into Stalled and eventually

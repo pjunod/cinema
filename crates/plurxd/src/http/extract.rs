@@ -25,7 +25,32 @@ pub struct AdminUser(pub User);
 ///
 /// A successful ordinary authentication publishes only the SHA-256 token
 /// digest, the user id needed for explicit revocation, and a fixed expiry.
-/// Cache-only reads never renew that expiry and never fall back to Store.
+/// Cache-only reads never renew that expiry.
+///
+/// **The Store is never asked first.** A cached proof answers with no Store
+/// contact at all, which is the property these two reads exist for: an
+/// operator diagnosing a wedged cluster must still be able to load the page
+/// that describes it, for as long as a proof lives.
+///
+/// What the cache must not do is answer *for* the Store when it has nothing to
+/// say. A miss — no proof yet, or the whole cache fenced closed by the
+/// revocation protocol — is this node's condition, not a verdict on the
+/// caller's credential, so the guard falls back to a bounded Store read for
+/// the same authority every other admin route already grants, and returns
+/// [`ApiError::Forbidden`] for a real non-admin, `401` only for a credential
+/// the Store does not know, and a named `503` when it cannot find out.
+/// Answering `401` from the cache alone is what logged an administrator out of
+/// a working session every time they opened Settings while the protocol
+/// activation was stuck.
+///
+/// Two limits worth stating plainly rather than discovering during an
+/// incident. The fallback is a linearizable read, so it cannot answer while
+/// quorum is lost: past the five-minute proof TTL these reads degrade to the
+/// named `503` in that incident rather than to data. And `user_for_token` also
+/// touches the token's `last_seen_at`, so the bound can cancel a replicated
+/// write mid-flight — that write is an idempotent activity stamp whose own
+/// caller already tolerates losing it, and the ordinary [`AuthUser`] path
+/// makes the same write with no bound at all.
 pub struct CacheOnlyAdminUser;
 
 const CACHE_ONLY_ADMIN_PROOF_TTL: Duration = Duration::from_secs(5 * 60);
@@ -375,6 +400,68 @@ impl CacheOnlyAdminProofCache {
         state.proofs.retain(|_, proof| proof.expires_at > now);
         state.proofs.contains_key(token_digest)
     }
+
+    /// Why the Store-free answer was unavailable, for the refusal that has to
+    /// explain itself. Read after [`Self::authenticate`] has already said no.
+    ///
+    /// Not read-only: like `authenticate`, it prunes expired revocations, and
+    /// that prune clears the cache and bumps the generation when a remote
+    /// revocation or the ambiguity fence has just lapsed. Same behaviour as
+    /// the call that preceded it, so it introduces no hazard of its own — but
+    /// it is a state transition, not an observation.
+    pub(crate) fn closure_reason(&self) -> CacheOnlyAdminClosure {
+        let Ok(mut state) = self.inner.lock() else {
+            return CacheOnlyAdminClosure::Poisoned;
+        };
+        state.prune_revocations(tokio::time::Instant::now());
+        if !state.cluster_revocation_capability_ready {
+            return CacheOnlyAdminClosure::ProtocolNotActivated;
+        }
+        if state.local_active_revocations != 0 || !state.remote_revocations.is_empty() {
+            return CacheOnlyAdminClosure::RevocationInFlight;
+        }
+        if state.local_ambiguity_expires_at.is_some() {
+            return CacheOnlyAdminClosure::MutationAmbiguityFence;
+        }
+        CacheOnlyAdminClosure::NoProofForCaller
+    }
+}
+
+/// The named reasons a Store-free admin proof was not available.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CacheOnlyAdminClosure {
+    /// Every committed member has not yet proven it runs the revocation
+    /// protocol, so no proof may be published or honoured on this node. This
+    /// is a cluster condition and it persists until activation completes.
+    ProtocolNotActivated,
+    /// A credential mutation is bracketing the cache right now.
+    RevocationInFlight,
+    /// A commit-ambiguous mutation left the bounded fail-closed fence up.
+    MutationAmbiguityFence,
+    /// The cache is open and simply holds no proof for this caller yet.
+    NoProofForCaller,
+    /// The cache mutex was poisoned by a panic in another request.
+    Poisoned,
+}
+
+impl CacheOnlyAdminClosure {
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            Self::ProtocolNotActivated => {
+                "its Store-free admin proof is closed because the cluster has not finished \
+                 activating the credential-revocation protocol on every committed member"
+            }
+            Self::RevocationInFlight => {
+                "its Store-free admin proof is closed while a credential change propagates"
+            }
+            Self::MutationAmbiguityFence => {
+                "its Store-free admin proof is fenced after a credential change whose outcome \
+                 was not definite"
+            }
+            Self::NoProofForCaller => "it holds no Store-free admin proof for this session yet",
+            Self::Poisoned => "its Store-free admin proof cache was poisoned by an earlier panic",
+        }
+    }
 }
 
 /// Guard for machine callers: a scoped API key, and nothing else.
@@ -592,12 +679,81 @@ impl FromRequestParts<AppState> for CacheOnlyAdminUser {
     ) -> Result<Self, Self::Rejection> {
         let token = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
         let digest = auth::hash_token(&token);
-        state
-            .cache_only_admin_proofs
-            .authenticate(&digest)
-            .then_some(Self)
-            .ok_or(ApiError::Unauthorized)
+        // The Store-free answer first, and on its own. While a cached proof
+        // exists this guard reaches no Store at all, which is the property
+        // the recovery reads were built for: a wedged Store must not be able
+        // to lock an operator out of the page that diagnoses it.
+        if state.cache_only_admin_proofs.authenticate(&digest) {
+            return Ok(Self);
+        }
+        let closure = state.cache_only_admin_proofs.closure_reason();
+        // No proof here means this process cannot vouch for the caller by
+        // itself — it does not mean the caller's credential is bad. Ask the
+        // Store, under a bound, for exactly the authority every other admin
+        // route already grants from it. A Store that answers is strictly
+        // safer than a cached proof: a revoked token has no row to find.
+        let ticket = state.cache_only_admin_proofs.authentication_ticket();
+        let lookup = tokio::time::timeout(
+            CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT,
+            state.store.user_for_token(&digest),
+        )
+        .await;
+        match lookup {
+            Ok(Ok(Some(user))) => {
+                state
+                    .cache_only_admin_proofs
+                    .record_authenticated(ticket, digest, &user);
+                if user.is_admin {
+                    Ok(Self)
+                } else {
+                    Err(ApiError::Forbidden)
+                }
+            }
+            Ok(Ok(None)) => {
+                state.cache_only_admin_proofs.invalidate_digest(&digest);
+                Err(ApiError::Unauthorized)
+            }
+            // The Store could not answer inside the bound. That is this
+            // node's condition, not the caller's credential, and it has to
+            // say so: a 401 here logs an administrator out of a working
+            // session over a cluster fault they were trying to look at.
+            //
+            // The precise condition goes to the log, not the body. This point
+            // is reachable with any bearer string, and "a credential change is
+            // propagating" or "the cache was poisoned by an earlier panic" is
+            // cluster-internal state that an unauthenticated caller has not
+            // earned. The operator reads it beside the rest of the incident.
+            Ok(Err(_)) | Err(_) => {
+                tracing::warn!(
+                    closure = closure.describe(),
+                    "refused a cluster recovery read: the Store did not answer within the bound"
+                );
+                Err(cache_only_admin_unavailable())
+            }
+        }
     }
+}
+
+/// How long the cache-miss path may wait on the Store before answering that
+/// it cannot authorize. Deliberately shorter than any page's own patience:
+/// the point of the bound is that a wedged Store degrades this guard to a
+/// named refusal instead of hanging the request that reports the wedge.
+const CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A cluster recovery read this node could not authorize. The code is stable
+/// so a client can tell it apart from a verdict on the credential; the sentence
+/// says which of the two it is and nothing else, because the caller has not
+/// authenticated. The specific condition is logged.
+fn cache_only_admin_unavailable() -> ApiError {
+    ApiError::typed(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "cluster_recovery_authorization_unavailable",
+        format!(
+            "this node could not authorize a cluster recovery read within {} seconds; this is \
+             the node's condition, not a verdict on your credential",
+            CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT.as_secs()
+        ),
+    )
 }
 
 #[cfg(test)]

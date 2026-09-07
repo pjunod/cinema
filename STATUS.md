@@ -1,8 +1,45 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-05 · Kept current by the working agent in the same
+**Updated:** 2026-09-07 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Settings put the operator on the login page, and the cause was a tombstone
+
+**Branch `fix/cluster-recovery-auth` — open against `main`.** Opening Settings
+on the fleet returned the sign-in screen. The credential was valid the whole
+time.
+
+`cluster_node_removals` and `cluster_node_removal_attempts` outlive the removal
+they describe: `finalize_node_removal` deliberately leaves both rows behind as
+the durable tombstone, and a trigger protects them. Both guarded acquisitions —
+the cache-admin exclusion and the planned-outage lease — read those tables
+table-wide, so **the first node a cluster ever removes disables both for the
+life of the cluster.** This fleet removed two nodes in August. Since then the
+one-time credential-guard activation has retried every three seconds and never
+completed (478 refusals in the 24 hours sampled, on each of four nodes, naming
+nothing); `cache_admin_revocation_ready` therefore answered false, which fences
+the Store-free admin proof cache closed on every node; `/cluster/status`, whose
+guard consulted only that cache, answered **401** to an administrator; and the
+web client, reading any 401 as "your session is over", called `logout()`.
+Settings remembers its last section, so an operator whose last section was
+Cluster met the login page on every attempt. `tcpdump` on nynuc confirms the
+shape: not one Begin fanout ever leaves the node — every attempt dies at the
+lease. `plurx_cluster_removals_pending` correctly reported `0` throughout,
+because the gauge already counts only untombstoned removals; the acquire SQL
+and the gauge disagreed, and the acquire was wrong.
+
+Four corrections, each with a regression that fails without it: the removal
+predicate now means what the gauge means (a removal row whose node is not yet
+tombstoned) in both acquisitions and in `lifecycle_operation_pending`; the
+cache-only admin guard answers the cached proof first and falls back to a
+bounded Store read, so a valid administrator gets `200`, a viewer gets `403`,
+an unknown token gets `401`, and a node that cannot find out gets a named
+`503` — never a 401 that ends a working session; the web client keeps the
+session through a cluster-recovery refusal and paints it in the panel that
+reports the cluster; and the activation loop names the precondition blocking
+it and backs off to a minute instead of logging one unattributed sentence
+every three seconds forever.
 
 ## A deploy that refused itself over an unmaintainable pair
 
