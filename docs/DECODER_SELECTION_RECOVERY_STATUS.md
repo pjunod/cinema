@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3c1 candidate; M0–M3b2, M4 and M5a merged into the effort ·
+**Status:** M3c2 candidate; M0–M3c1, M4 and M5a merged into the effort ·
 **Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M3c1 task base:** effort head
-`03ff36d655b8ffc754bea225e220f4345aaa15b4`
+`effort/decoder-selection-recovery` · **M3c2 task base:** effort head
+`bf75c62cf642ecac7671456aa88e48ed57fd46fd`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,8 +20,8 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3c1 — the artifact carries what was observed about it |
-| Task branch | `codex/decoder-selection-m3c`, based on effort head `03ff36d6` |
+| Milestone | M3c2 — a part carries its own observation across a resume |
+| Task branch | `codex/decoder-selection-m3c2`, based on effort head `bf75c62c` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
@@ -38,7 +38,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a, M3b1 and M3b2 merged; M3c1 candidate; M3c2 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 makes the generation manifest carry and authenticate the joined producer receipt. No reader consults one yet; that is M3c2 |
+| M3 · owned observation and health receipts | M3a, M3b1, M3b2 and M3c1 merged; M3c2 candidate; M3c3 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85)) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 makes a part carry its own receipt across a resume, without which no long film could ever be certified. No reader consults a receipt yet; that is M3c3 |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -940,6 +940,181 @@ adopted assembly carrying none. `decoder_health` 38/38 and
 `playback_control::tests::` 225/225 unchanged. `make lint` and
 `make validation-lint` clean;
 `python3 -m unittest tests.validation.test_decoder_recovery_status` 11/11 with
+one new contract; the rolling-producer ownership ledger is unchanged, because
+this milestone adds no task, timer or process shape.
+
+## M3c2 working tree — a part carries its own observation across a resume
+
+M3c1 left a defect that only becomes visible when you try to *use* a receipt.
+A generation is encoded across many preempted passes, and `GenerationObservation`
+had to call every inherited part `unobserved` because nothing survived the gap
+between passes. Weakest wins, so any film long enough to need a second pass was
+permanently `Unqualified` — meaning the qualified artifact namespace M3c3 is
+supposed to introduce could never hold a long title at all, and a reader gating
+on the receipt would re-encode such a film from scratch on every pretranscode
+pass forever.
+
+That is not the conservative answer. It is the useless one, and it is worth
+naming the difference: refusing to certify what you did not observe is correct;
+refusing to *read back* what you did observe, and then calling the resulting
+ignorance safety, is not.
+
+### The record, and what makes it evidence
+
+Each produced part now carries `.part-health.json` beside its segments: a
+`RetainedPartReceipt` holding the settled `ProducerHealthReceipt`, the shape it
+was settled over, and a digest of the two.
+
+`part_shape_digest` is what makes it evidence rather than an assertion. It
+covers the plan digest and, for every listed segment, its name, its byte count
+and its `EXTINF` — values `read_validated_part` already measures on the way
+past, so measuring the shape costs nothing beyond what validating the part
+already cost, and reading a record adds one bounded 4 KiB open-and-read per
+resumed part.
+
+It deliberately does not cover segment *content*, and that is a cost decision
+rather than a claim that content could not matter. A seal-time content digest
+is the only thing that would catch an in-place, same-size mutation of a
+resumed part's bytes between one pass and the next; the shape by construction
+cannot, and the generation manifest cannot either, because it hashes the
+objects at publication of *this* generation — after the resume. Hashing every
+resumed segment on every pass is a full read of the film, which is the exact
+cost resuming exists to avoid, and the staging tree is node-local. So an
+in-place same-size mutation between passes is out of scope, stated plainly
+rather than argued away.
+
+What the shape does catch is the case that actually occurs: a record left
+behind by a part that was truncated, re-encoded to a different length, or
+renumbered. A deterministic re-encode under the same plan and the same build
+would produce the same sizes, so the shape is not a proof of identity — the
+record is refused whenever the bytes visibly moved, not certified whenever they
+did not.
+
+The shape is digested under *this pass's* plan, not the one the record names, so
+a record can only be opened by the plan it was sealed for. A receipt from
+another plan is evidence about other bytes even when the sizes happen to line
+up.
+
+`record_digest` covers the rest, so a torn or edited record is refused rather
+than read — including the obvious edit, rewriting `part_shape` to whatever is
+actually on disk, which changes the body and therefore the digest.
+
+### Everything that is not exactly that reads as unobserved
+
+No record, an unreadable one, a version this build does not know, one over its
+4 KiB bound, one whose digest does not check out, one sealed over a different
+shape, one sealed for another plan. Every one of those yields
+`ProducerHealthReceipt::unobserved`, which is what the code did before this
+record existed.
+
+The digests are unkeyed SHA-256 over public inputs and `seal` is public, so the
+records are corruption-evident, not tamper-evident: they prove nothing against
+anyone who can write into the staging tree. That is the right bound for where
+they live — a node-local staging directory no peer and no shared cache writes
+into — and it is the generation manifest, which is what other nodes actually
+read, that authenticates its own copy of the conclusion.
+
+Writing is best effort for the same reason. The bytes are already on disk and
+already listed in a playlist; a staging directory that will not take a 4 KiB
+record is not a reason to throw away an encoded part. The record is written
+after the segments, so a crash between the two leaves a part with no record —
+unobserved, which is safe.
+
+### The attempt that leaves no part
+
+A part record can only describe a part that exists, and the attempt this whole
+effort is named after leaves none: FFmpeg drops every frame, exits zero, writes
+no segment, and the retry reuses the same directory. `GenerationObservation`
+records that receipt within a pass — M3c1's review is what put it there — but
+until this milestone it was forgotten at a pass boundary, so whether a film
+certified depended on where preemption happened to fall. A failed attempt
+followed by a clean retry inside one pass refused the generation; the same two
+attempts either side of a preemption did not.
+
+`.generation-health.json` at the staging root carries it. It is a monotone
+weakening accumulator: each pass joins its own non-producing attempts into
+whatever it read and writes the result back, so the value can only become more
+restrictive. It is written the moment such an attempt is recorded rather than
+at the end of the pass, because a pass about to be preempted is precisely the
+one whose observation would otherwise be lost.
+
+Its absence and its unreadability say different things, and the asymmetry with
+a part record is deliberate. A part's bytes exist whether or not a record
+describes them, so a missing part record is `unobserved`. The ledger describes
+no bytes at all, so its absence is "no pass has claimed an unproductive
+attempt" — nothing to carry. A ledger that is *present* and will not open is a
+statement that something was recorded and cannot be read, and that is
+`unobserved`.
+
+### Parts read by different grammars
+
+Now that a part survives a pass, an FFmpeg upgrade between two passes of one
+film gives two parts two different diagnostic contracts under one plan digest,
+which does not name the build. `join` already erased the contract name in that
+case; it now weakens the qualification too. `Qualified` beside
+`diagnostic_contract: None` is indistinguishable, to a reader, from a receipt
+no grammar ever covered — and M3c3 should not have to guess which it is
+looking at.
+
+### Where it does not go
+
+The record is staging-local evidence about how a part was made, not one of the
+objects the manifest inventories, so it never reaches the assembled generation.
+`a_record_is_never_placed_into_the_assembled_generation` pins that: `assemble`
+places only what the part playlists list, and a dotted name could not be a
+segment name in any case.
+
+### Still not here
+
+Nothing yet acts on a receipt. `artifact_namespace()` still returns
+`decoder-plan-v1-unqualified` for every plan, and no cache reader consults one.
+That is M3c3, and it now has something it can actually enforce: with this
+milestone a long film resumed across passes can reach `Qualified`, which before
+it could not.
+
+M3c3's shape is also now settled, and the reason is worth recording here rather
+than discovering during it. The namespace must not split on per-node contract
+coverage: `contract_for` matches `binary_sha256` and `buildconf_sha256`, so two
+nodes running two distribution builds of the same FFmpeg version would compute
+different cache keys for the same source and the same encode, fragmenting the
+replicated store and `cache_consumer_pins` mid-rollout. Plan §"Use a new recipe
+namespace/version" says the split happens when *qualification is turned on* —
+an operator decision, applied fleet-wide, with the cache rotation deliberately
+accepted — and that "observation-only rollout uses explicit unqualified/legacy
+output identity until qualification is enabled". So the namespace follows the
+effective qualification mode, and the four readers are gated only at retain
+boundaries, never at a serve boundary: unqualified bytes may still be served to
+the viewer waiting for them.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate. It found no blocker and one
+major defect, together with five findings about tests and documented claims;
+all are repaired in this head.
+
+| Finding | Disposition |
+|---|---|
+| `retain_part_health` was gated on `if produced`, so persistence was keyed on exactly the thing `GenerationObservation` exists to refuse to key on. Within a pass a non-producing failed attempt refused the generation; across a pass boundary it was forgotten, and whether a film certified depended on where preemption fell | The staging-root ledger described above, written the moment such an attempt is recorded. `an_attempt_that_left_no_part_is_carried_across_a_pass_boundary` runs the two-pass sequence and asserts both passes reach `Rejected` |
+| `join` erased the contract name when parts disagreed without weakening, and a build upgrade between passes is now an ordinary way to reach that. The result was `Qualified` beside `diagnostic_contract: None` — what a reader also sees when no grammar ever covered the bytes | Disagreement now weakens to `Unqualified` as well as clearing the name |
+| `RetainedPartReceipt::body_digest` fed the version *constant* rather than the record's own field, so `record_version` was outside its own digest — safe only while exactly one version is accepted | The version is digested from the record |
+| `a_record_is_never_placed_into_the_assembled_generation` could not fail: no production line can put a dotted name into an assembly | It asserts the assembled directory's whole listing instead of probing one name |
+| `an_inherited_part_refuses_the_generation_it_was_carried_into` asserted, after the refactor, on receipts it had constructed itself | Removed; `a_part_with_no_record_resumes_unobserved` covers the real path |
+| Two python contract assertions could not fail, and `M3C_TASK_BASE` was left unreferenced by a test whose name is `…_cannot_be_confused_with_history` | The `unobserved` assertion is scoped to the `resume_parts` slice, the unfalsifiable one is replaced, and M3c1's merged head is pinned |
+| Doc claims: "would buy nothing" about content hashing, "no extra `stat`", "cannot manufacture one", and "a re-encoded part cannot keep every segment's byte count and duration" — none of them true as written | All four restated above as what they actually are: a cost decision, a bounded extra read, corruption-evidence rather than tamper-evidence, and a refusal that triggers when bytes visibly move rather than a proof of identity |
+| The record-over-bound branch had no test and the "torn record" test edits rather than tears | `a_record_too_large_for_its_bound_is_not_written` covers the branch, and the test is named for what it does |
+
+Focused evidence on this head, pinned `rustc 1.97.1`: core
+`cargo test -p plurx-core --lib -- transcode::` 162/162, five new
+`transcode::health::` record contracts. Daemon `transcode::tests::` 239/239,
+with the milestone's own contracts: a resumed film with clean records
+certifying, a part with no record resuming unobserved, a record no longer bound
+to the bytes beside it, a record sealed for another plan, an edited record, a
+record over its bound, the record never reaching the assembled generation, an
+unproductive attempt carried across a pass boundary, and a ledger that is
+present but will not open. `decoder_health` 38/38 and
+`playback_control::tests::` 225/225 unchanged. `make lint`,
+`make validation-lint` and `make history-check` clean;
+`python3 -m unittest tests.validation.test_decoder_recovery_status` green with
 one new contract; the rolling-producer ownership ledger is unchanged, because
 this milestone adds no task, timer or process shape.
 

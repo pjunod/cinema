@@ -29,7 +29,8 @@ M2_TASK_BASE = "f7f98b013ffe9dcc5414e25e0b2e505df3e7beb7"
 M3A_TASK_BASE = "773ad4888194ad3b2986b60bd8d1bd4d67595b4a"
 M5A_TASK_BASE = "f0f7aec8254ce7c09221bf4462f2f34905f172ef"
 M3B_TASK_BASE = "de05be0494d846bc3b77e462505f1d3ecdb21b46"
-M3C_TASK_BASE = "03ff36d655b8ffc754bea225e220f4345aaa15b4"
+M3C1_MERGED_HEAD = "bf75c62cf642ecac7671456aa88e48ed57fd46fd"
+M3C2_TASK_BASE = M3C1_MERGED_HEAD
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -174,7 +175,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(f"M3c1 task base:** effort head `{M3C_TASK_BASE}`", self.flat_status)
+        self.assertIn(f"M3c2 task base:** effort head `{M3C2_TASK_BASE}`", self.flat_status)
+        # M3c1's merged head is this milestone's base, and the document has to
+        # say which head that is rather than only which pull request it was.
+        self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -298,7 +302,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M3c1 candidate; M0–M3b2, M4 and M5a merged into the effort", self.status
+            "M3c2 candidate; M0–M3c1, M4 and M5a merged into the effort", self.status
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
@@ -441,7 +445,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # nothing and exits zero writes no segment, and its receipt is the one
         # that says the film is truncated.
         self.assertIn("struct GenerationObservation {", daemon)
-        self.assertEqual(daemon.count("generation_health.record(receipt);"), 1)
+        self.assertEqual(daemon.count("generation_health.record(receipt, produced);"), 1)
         self.assertNotIn("part_receipts", daemon)
 
         # One bound for the contract identifier, enforced where the identifier
@@ -457,7 +461,60 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertRegex(contract["id"], r"\A[A-Za-z0-9._-]+\Z")
 
         # The status document does not claim a reader consults one yet.
-        self.assertIn("No reader consults one yet; that is M3c2", self.status)
+        self.assertIn("No reader consults a receipt yet; that is M3c3", self.status)
+
+    def test_m3c2_a_resumed_part_recovers_only_a_record_still_bound_to_it(self) -> None:
+        """Reading a record back may recover a conclusion, never invent one.
+
+        Every way of failing to read one has to land on `unobserved`, because
+        the alternative — treating an unreadable record as clean — is the same
+        false certificate the effort exists to prevent, reached by a new route.
+        """
+        health = CORE_HEALTH.read_text(encoding="utf-8")
+        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+
+        # The record binds a receipt to the bytes it was settled over.
+        self.assertIn("pub struct RetainedPartReceipt {", health)
+        self.assertIn("pub fn part_shape_digest(", health)
+        self.assertIn("pub const RETAINED_PART_RECEIPT_VERSION: u32 = 1;", health)
+        # And opening it checks the version, the binding and its own digest.
+        opened = health.split("impl RetainedPartReceipt {", 1)[1]
+        opened = opened.split("pub fn opened(", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("self.record_version == RETAINED_PART_RECEIPT_VERSION", opened)
+        self.assertIn("self.part_shape == part_shape", opened)
+        self.assertIn("actual == self.record_digest", opened)
+
+        # The shape covers the plan and every listed segment's name, size and
+        # duration — not its content, which the manifest already hashes.
+        shape = health.split("pub fn part_shape_digest(", 1)[1].split("\n}", 1)[0]
+        for field in ('"plan"', '"segments"', '"segment"', '"bytes"', '"duration_ms"'):
+            self.assertIn(field, shape)
+
+        # Anything that is not a record still bound to these bytes reads as
+        # unobserved, and the digest is taken under this pass's plan.
+        resumed = daemon.split("async fn resumed_part_health(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("part_shape_digest(plan_digest, shape)", resumed)
+        self.assertIn("record.opened(&shape_digest).cloned()", resumed)
+        # The fallback is in `resume_parts`, and it is the one line that decides
+        # what an unreadable record means.
+        resume = daemon.split("async fn resume_parts(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("resumed_part_health(&dir, plan_digest, &shape)", resume)
+        self.assertIn("ProducerHealthReceipt::unobserved(", resume)
+        self.assertNotIn("Qualification::Qualified", resume)
+
+        # An attempt that left no part is carried at the staging root, because
+        # there is no part for its receipt to be sealed beside.
+        self.assertIn('GENERATION_HEALTH_FILE: &str = ".generation-health.json"', daemon)
+        self.assertIn("pub struct RetainedGenerationHealth {", health)
+        record = daemon.split("fn record(&mut self,", 1)[1].split("\n    }", 1)[0]
+        self.assertIn("if !produced {", record)
+        self.assertIn("self.attempts.push(receipt);", record)
+
+        # The records are staging-local: the manifest inventories objects the
+        # part playlists list, and a dotted name is not one of them.
+        self.assertIn('PART_HEALTH_FILE: &str = ".part-health.json"', daemon)
+        names = daemon.split('std::iter::once("index.m3u8".to_owned())', 1)[1].split(";", 1)[0]
+        self.assertNotIn("HEALTH_FILE", names)
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.

@@ -178,6 +178,189 @@ pub struct ProducerHealthReceipt {
     pub qualification: Qualification,
 }
 
+/// The version of the retained part record. A reader that does not recognize
+/// it treats the part as unobserved rather than guessing at what it means.
+pub const RETAINED_PART_RECEIPT_VERSION: u32 = 1;
+
+/// One part's receipt, written beside the part and bound to its bytes.
+///
+/// A generation is encoded across many preempted passes, and a pass that
+/// cannot read back what an earlier pass observed has to call every inherited
+/// part unobserved — which makes every film long enough to need two passes
+/// permanently uncertifiable. That is not a conservative default, it is a
+/// broken one: it means the qualified artifact namespace could never hold a
+/// long title at all.
+///
+/// So the observation is written down where the bytes are. What makes it
+/// evidence rather than an assertion is `part_shape`: the receipt is bound to
+/// the exact segment list, sizes and durations it was settled over, so it
+/// cannot be carried onto a part that was re-encoded, truncated, or replaced.
+/// `record_digest` covers the rest, so a torn or rotted record is refused
+/// instead of read. It is an unkeyed digest over public inputs, so it is
+/// corruption-evident, not tamper-evident: it says nothing to anyone who can
+/// write into the part directory. That is the right bound for where these
+/// live — a node-local staging tree — and the generation manifest, which is
+/// the artifact peers actually read, authenticates its own copy separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedPartReceipt {
+    pub record_version: u32,
+    /// Digest of the part's shape, as [`part_shape_digest`] computes it.
+    pub part_shape: String,
+    pub receipt: ProducerHealthReceipt,
+    pub record_digest: String,
+}
+
+/// The join of every observed attempt on one generation that contributed no
+/// bytes, carried across passes at the staging root.
+///
+/// A part's record can only describe a part that exists. The attempt this
+/// whole effort is named after produces no part: FFmpeg drops every frame and
+/// exits zero, `read_part` returns nothing, and the directory is reused by the
+/// retry. Within one pass that receipt is still recorded, so the generation is
+/// refused; across a pass boundary it would be forgotten, and whether a film
+/// certified would depend on where preemption happened to fall. This is where
+/// it is kept instead.
+///
+/// It is a monotone weakening accumulator: each pass joins its own
+/// non-producing attempts into whatever it read and writes the result back, so
+/// the value can only ever become more restrictive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedGenerationHealth {
+    pub record_version: u32,
+    pub receipt: ProducerHealthReceipt,
+    pub record_digest: String,
+}
+
+#[derive(Serialize)]
+struct RetainedGenerationBody<'a> {
+    record_version: u32,
+    receipt: &'a ProducerHealthReceipt,
+}
+
+impl RetainedGenerationHealth {
+    pub fn seal(receipt: ProducerHealthReceipt) -> Result<Self, String> {
+        let record_digest = Self::body_digest(RETAINED_PART_RECEIPT_VERSION, &receipt)?;
+        Ok(Self {
+            record_version: RETAINED_PART_RECEIPT_VERSION,
+            receipt,
+            record_digest,
+        })
+    }
+
+    fn body_digest(record_version: u32, receipt: &ProducerHealthReceipt) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+
+        let encoded = serde_json::to_vec(&RetainedGenerationBody {
+            record_version,
+            receipt,
+        })
+        .map_err(|error| format!("serializing a retained generation record: {error}"))?;
+        Ok(hex::encode(Sha256::digest(encoded)))
+    }
+
+    /// The carried receipt, if this record is one this build wrote for this
+    /// plan and its digest still checks out.
+    ///
+    /// Unlike a part record, there is no shape to bind to — the attempts this
+    /// describes left no bytes. The plan digest carried inside the receipt is
+    /// the binding, and the staging tree it lives in is per-recipe.
+    pub fn opened(&self, plan_digest: &str) -> Option<&ProducerHealthReceipt> {
+        (self.record_version == RETAINED_PART_RECEIPT_VERSION
+            && self.receipt.plan_digest == plan_digest
+            && Self::body_digest(self.record_version, &self.receipt)
+                .is_ok_and(|actual| actual == self.record_digest))
+        .then_some(&self.receipt)
+    }
+}
+
+#[derive(Serialize)]
+struct RetainedPartBody<'a> {
+    record_version: u32,
+    part_shape: &'a str,
+    receipt: &'a ProducerHealthReceipt,
+}
+
+/// What a part's bytes look like, at the granularity that decides whether a
+/// receipt still describes them.
+///
+/// Names, sizes and durations rather than content. The segment *content* is
+/// hashed by the generation manifest at publication and verified on every
+/// serve, so hashing it again here would buy nothing and cost a full read of
+/// the film on every resume — the exact cost resuming exists to avoid. What
+/// this has to catch is a receipt outliving the part it was settled over, and
+/// a re-encoded part cannot keep every segment's byte count and duration.
+pub fn part_shape_digest(plan_digest: &str, segments: &[(String, u64, i64)]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    let mut feed = |name: &str, value: &[u8]| {
+        digest.update((name.len() as u32).to_le_bytes());
+        digest.update(name.as_bytes());
+        digest.update((value.len() as u32).to_le_bytes());
+        digest.update(value);
+    };
+    feed(
+        "shape_version",
+        RETAINED_PART_RECEIPT_VERSION.to_string().as_bytes(),
+    );
+    feed("plan", plan_digest.as_bytes());
+    feed("segments", segments.len().to_string().as_bytes());
+    for (name, bytes, duration_ms) in segments {
+        feed("segment", name.as_bytes());
+        feed("bytes", bytes.to_string().as_bytes());
+        feed("duration_ms", duration_ms.to_string().as_bytes());
+    }
+    hex::encode(digest.finalize())
+}
+
+impl RetainedPartReceipt {
+    /// Bind a settled receipt to the shape of the part it describes.
+    pub fn seal(part_shape: String, receipt: ProducerHealthReceipt) -> Result<Self, String> {
+        let record_digest =
+            Self::body_digest(RETAINED_PART_RECEIPT_VERSION, &part_shape, &receipt)?;
+        Ok(Self {
+            record_version: RETAINED_PART_RECEIPT_VERSION,
+            part_shape,
+            receipt,
+            record_digest,
+        })
+    }
+
+    /// The version is digested from the record rather than from the constant,
+    /// so the field is covered by its own digest. It is redundant while
+    /// `opened` accepts exactly one version, and it is the difference between
+    /// safe and silently unauthenticated the day a reader accepts two.
+    fn body_digest(
+        record_version: u32,
+        part_shape: &str,
+        receipt: &ProducerHealthReceipt,
+    ) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+
+        let encoded = serde_json::to_vec(&RetainedPartBody {
+            record_version,
+            part_shape,
+            receipt,
+        })
+        .map_err(|error| format!("serializing a retained part receipt: {error}"))?;
+        Ok(hex::encode(Sha256::digest(encoded)))
+    }
+
+    /// The receipt this record carries, if it still describes `part_shape`.
+    ///
+    /// `None` for a record from another version, a record whose own digest
+    /// does not check out, or a record bound to a different part. Every one of
+    /// those means the caller must treat the part as unobserved, which is what
+    /// it would have done before this record existed.
+    pub fn opened(&self, part_shape: &str) -> Option<&ProducerHealthReceipt> {
+        (self.record_version == RETAINED_PART_RECEIPT_VERSION
+            && self.part_shape == part_shape
+            && Self::body_digest(self.record_version, &self.part_shape, &self.receipt)
+                .is_ok_and(|actual| actual == self.record_digest))
+        .then_some(&self.receipt)
+    }
+}
+
 impl ProducerHealthReceipt {
     /// A receipt for work this daemon did not observe at all.
     ///
@@ -249,7 +432,17 @@ impl ProducerHealthReceipt {
                 diagnostic_contract = None;
             }
             if part.diagnostic_contract != diagnostic_contract {
+                // Parts read by different grammars have not been read by one
+                // grammar, and the generation cannot say which read it. It is
+                // reachable in ordinary operation now that a part survives a
+                // pass: an FFmpeg upgrade between two passes of the same film
+                // gives two parts two contracts under one plan digest, which
+                // does not name the build. Erasing the name without weakening
+                // would leave `Qualified` beside `diagnostic_contract: None` —
+                // indistinguishable, to a reader, from a receipt nobody's
+                // grammar ever covered.
                 diagnostic_contract = None;
+                qualification = qualification.weaker_of(Qualification::Unqualified);
             }
             observation_complete = observation_complete && part.observation_complete;
             video_decode_error_records =
@@ -378,11 +571,17 @@ mod tests {
     }
 
     #[test]
-    fn parts_read_by_different_grammars_name_no_contract() {
+    fn parts_read_by_different_grammars_name_no_contract_and_do_not_qualify() {
+        // An FFmpeg upgrade between two passes of one film reaches this.
         let mut other = clean(PLAN);
         other.diagnostic_contract = Some("ffmpeg-other-v1".to_owned());
         let joined = ProducerHealthReceipt::join(PLAN, &[clean(PLAN), other]).expect("joined");
         assert_eq!(joined.diagnostic_contract, None);
+        assert_eq!(joined.qualification, Qualification::Unqualified);
+        assert!(
+            !joined.permits_reuse(),
+            "`Qualified` with no contract named is indistinguishable from never having had one"
+        );
     }
 
     #[test]
@@ -467,5 +666,93 @@ mod tests {
         assert!(!safe_diagnostic_contract_id(
             "ffmpeg-7:6.1.1-3ubuntu5-h264-v1"
         ));
+    }
+
+    fn shape() -> Vec<(String, u64, i64)> {
+        vec![
+            ("seg00000.ts".to_owned(), 1_048_576, 2_000),
+            ("seg00001.ts".to_owned(), 1_040_000, 1_960),
+        ]
+    }
+
+    #[test]
+    fn the_part_shape_moves_when_any_of_the_bytes_it_describes_do() {
+        let base = part_shape_digest(PLAN, &shape());
+        assert_eq!(base, part_shape_digest(PLAN, &shape()));
+        assert_ne!(base, part_shape_digest(OTHER_PLAN, &shape()));
+
+        let mut renamed = shape();
+        renamed[1].0 = "seg00002.ts".to_owned();
+        assert_ne!(base, part_shape_digest(PLAN, &renamed));
+
+        let mut resized = shape();
+        resized[0].1 += 1;
+        assert_ne!(base, part_shape_digest(PLAN, &resized));
+
+        let mut retimed = shape();
+        retimed[0].2 += 1;
+        assert_ne!(base, part_shape_digest(PLAN, &retimed));
+
+        let mut truncated = shape();
+        truncated.pop();
+        assert_ne!(base, part_shape_digest(PLAN, &truncated));
+
+        // Length-prefixed, so no two different shapes can concatenate to the
+        // same byte stream.
+        let mut smeared = shape();
+        smeared[0].0 = "seg00000.ts1048576".to_owned();
+        smeared[0].1 = 0;
+        assert_ne!(base, part_shape_digest(PLAN, &smeared));
+    }
+
+    #[test]
+    fn a_sealed_record_opens_only_for_the_shape_it_was_sealed_over() {
+        let digest = part_shape_digest(PLAN, &shape());
+        let record = RetainedPartReceipt::seal(digest.clone(), clean(PLAN)).expect("seal");
+        assert_eq!(record.opened(&digest), Some(&clean(PLAN)));
+
+        let mut resized = shape();
+        resized[0].1 += 1;
+        assert_eq!(record.opened(&part_shape_digest(PLAN, &resized)), None);
+        assert_eq!(
+            record.opened(&part_shape_digest(OTHER_PLAN, &shape())),
+            None
+        );
+    }
+
+    #[test]
+    fn a_record_from_another_version_is_not_read() {
+        let digest = part_shape_digest(PLAN, &shape());
+        let mut record = RetainedPartReceipt::seal(digest.clone(), clean(PLAN)).expect("seal");
+        record.record_version = RETAINED_PART_RECEIPT_VERSION + 1;
+        assert_eq!(record.opened(&digest), None);
+    }
+
+    #[test]
+    fn a_promoted_receipt_no_longer_matches_its_own_record_digest() {
+        // The record lives in a staging directory beside the bytes. Its digest
+        // is what makes a torn or edited record refuse to open rather than
+        // hand back a conclusion nobody reached.
+        let digest = part_shape_digest(PLAN, &shape());
+        let mut unqualified = clean(PLAN);
+        unqualified.qualification = Qualification::Unqualified;
+        let mut record = RetainedPartReceipt::seal(digest.clone(), unqualified).expect("seal");
+        assert!(record.opened(&digest).is_some());
+        record.receipt.qualification = Qualification::Qualified;
+        assert_eq!(record.opened(&digest), None);
+    }
+
+    #[test]
+    fn a_record_whose_shape_field_was_edited_to_match_still_fails_its_digest() {
+        // Rewriting `part_shape` to the shape actually on disk is the obvious
+        // way to make a stale record open. It changes the body, so it changes
+        // the digest.
+        let mut resized = shape();
+        resized[0].1 += 1;
+        let sealed_over = part_shape_digest(PLAN, &shape());
+        let actual = part_shape_digest(PLAN, &resized);
+        let mut record = RetainedPartReceipt::seal(sealed_over, clean(PLAN)).expect("seal");
+        record.part_shape = actual.clone();
+        assert_eq!(record.opened(&actual), None);
     }
 }

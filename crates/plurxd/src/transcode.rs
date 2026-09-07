@@ -9597,10 +9597,22 @@ pub(crate) async fn quarantine_remove_cache_tree(
     }
 }
 
+/// Everything an earlier pass left behind for this generation, with what it
+/// observed while leaving it.
+struct ResumedParts {
+    parts: Vec<crate::produce::Part>,
+    /// One receipt per element of `parts`, in the same order. A part with no
+    /// readable record of its own is `unobserved`, so a resumed generation is
+    /// certified only from records that still bind to the bytes on disk.
+    receipts: Vec<crate::decoder_health::ProducerHealthReceipt>,
+}
+
 async fn resume_parts(
     temp: &plurx_core::fs_secure::SecureDirectory,
-) -> Result<Vec<crate::produce::Part>, String> {
+    plan_digest: &str,
+) -> Result<ResumedParts, String> {
     let mut parts = Vec::new();
+    let mut receipts: Vec<crate::decoder_health::ProducerHealthReceipt> = Vec::new();
     let mut playlist_bytes = 0_u64;
     let mut segments = 0_usize;
     let mut duration_ms = 0_i64;
@@ -9611,30 +9623,48 @@ async fn resume_parts(
         let name = crate::produce::part_dir(parts.len());
         let Ok(dir) = temp.open_child_directory(&name).await else {
             discard_dependent_parts(temp, parts.len(), false).await?;
-            return Ok(parts);
+            return Ok(ResumedParts { parts, receipts });
         };
         let remaining_playlist_bytes = MAX_RETAINED_PLAYLIST_BYTES.saturating_sub(playlist_bytes);
-        let Some((part, part_playlist_bytes)) =
-            read_validated_part(&dir, remaining_playlist_bytes).await
-        else {
+        let Some(validated) = read_validated_part(&dir, remaining_playlist_bytes).await else {
             // A directory with no listed segments contributes nothing and
             // would shift every later part's numbering if it were counted.
             discard_dependent_parts(temp, parts.len(), true).await?;
-            return Ok(parts);
+            return Ok(ResumedParts { parts, receipts });
         };
+        let ValidatedPart {
+            part,
+            playlist_bytes: part_playlist_bytes,
+            shape,
+        } = validated;
         playlist_bytes = playlist_bytes.saturating_add(part_playlist_bytes);
         segments = segments.saturating_add(part.segments.len());
         let Some(total_duration) = duration_ms.checked_add(part.duration_ms()) else {
             discard_dependent_parts(temp, parts.len(), true).await?;
-            return Ok(parts);
+            return Ok(ResumedParts { parts, receipts });
         };
         duration_ms = total_duration;
         if segments >= plurx_core::transcode::manifest::MAX_OBJECTS
             || duration_ms > MAX_RETAINED_TOTAL_DURATION_MS
         {
             discard_dependent_parts(temp, parts.len(), true).await?;
-            return Ok(parts);
+            return Ok(ResumedParts { parts, receipts });
         }
+        // Read after the part validates, and against the shape validation just
+        // measured: a record is only evidence about the bytes that are
+        // actually there.
+        receipts.push(
+            resumed_part_health(&dir, plan_digest, &shape)
+                .await
+                .unwrap_or_else(|| {
+                    crate::decoder_health::ProducerHealthReceipt::unobserved(
+                        plan_digest.to_owned(),
+                        // The disposition of the read. The receipt is
+                        // unqualified regardless of it.
+                        crate::decoder_health::ExitDisposition::CleanEnd,
+                    )
+                }),
+        );
         parts.push(part);
     }
 }
@@ -9645,20 +9675,50 @@ async fn resume_parts(
 /// the segment that was being written when the process was killed and the
 /// playlist does not — an unlisted `.ts` file is a truncated one, and treating
 /// it as content puts a corrupt two seconds into the middle of a film.
-async fn read_part(part_dir: &plurx_core::fs_secure::SecureDirectory) -> crate::produce::Part {
+async fn read_part(part_dir: &plurx_core::fs_secure::SecureDirectory) -> ValidatedPart {
     read_validated_part(part_dir, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
         .await
-        .map(|(part, _)| part)
-        .unwrap_or_else(|| crate::produce::Part {
-            segments: Vec::new(),
-            durations_ms: Vec::new(),
+        .unwrap_or_else(|| ValidatedPart {
+            part: crate::produce::Part {
+                segments: Vec::new(),
+                durations_ms: Vec::new(),
+            },
+            playlist_bytes: 0,
+            shape: Vec::new(),
         })
+}
+
+/// The name of the record a part carries about its own health.
+///
+/// Dotted so it cannot collide with a segment name, and never placed into the
+/// assembled generation: this is staging-local evidence about how the part was
+/// made, not one of the objects the manifest inventories.
+pub(crate) const PART_HEALTH_FILE: &str = ".part-health.json";
+/// The staging-root ledger of observed attempts that left no part behind.
+///
+/// A part record can only describe a part that exists, and the attempt this
+/// effort is named after leaves none — FFmpeg drops every frame, exits zero,
+/// writes no segment, and the retry reuses the same directory. This is where
+/// that receipt is kept so it survives a preemption.
+pub(crate) const GENERATION_HEALTH_FILE: &str = ".generation-health.json";
+/// A record holding one receipt with two short digests and a bounded contract
+/// id. Generous by a wide margin, and bounded so a corrupt staging directory
+/// cannot turn a resume into an unbounded read.
+const MAX_PART_HEALTH_BYTES: u64 = 4 * 1024;
+
+/// One validated part, with what is needed to tie a receipt to it.
+struct ValidatedPart {
+    part: crate::produce::Part,
+    playlist_bytes: u64,
+    /// `(name, bytes, duration_ms)` for every listed segment, in playlist
+    /// order — the shape a retained receipt is bound to.
+    shape: Vec<(String, u64, i64)>,
 }
 
 async fn read_validated_part(
     part_dir: &plurx_core::fs_secure::SecureDirectory,
     remaining_playlist_bytes: u64,
-) -> Option<(crate::produce::Part, u64)> {
+) -> Option<ValidatedPart> {
     let bytes = part_dir
         .read_bounded_child(
             "index.m3u8",
@@ -9678,6 +9738,7 @@ async fn read_validated_part(
         return None;
     }
     let mut names = std::collections::HashSet::with_capacity(part.segments.len());
+    let mut shape = Vec::with_capacity(part.segments.len());
     for (index, (name, duration_ms)) in part.segments.iter().zip(&part.durations_ms).enumerate() {
         if name != &format!("seg{index:05}.ts")
             || !names.insert(name.as_str())
@@ -9693,8 +9754,149 @@ async fn read_validated_part(
         {
             return None;
         }
+        shape.push((name.clone(), metadata.identity.size, *duration_ms));
     }
-    Some((part, encoded_len))
+    Some(ValidatedPart {
+        part,
+        playlist_bytes: encoded_len,
+        shape,
+    })
+}
+
+/// Write what this attempt observed beside the part it produced.
+///
+/// Best effort by design. The bytes are already on disk and already listed in
+/// a playlist; a staging directory that will not take a 4 KiB record is not a
+/// reason to throw away an encoded part. The cost of failing is that a later
+/// pass reads no record and calls the part unobserved, which is exactly what
+/// it did before this record existed.
+async fn retain_part_health(
+    part_dir: &plurx_core::fs_secure::SecureDirectory,
+    shape: &[(String, u64, i64)],
+    receipt: &crate::decoder_health::ProducerHealthReceipt,
+) {
+    let part_shape = plurx_core::transcode::health::part_shape_digest(&receipt.plan_digest, shape);
+    let sealed =
+        plurx_core::transcode::health::RetainedPartReceipt::seal(part_shape, receipt.clone())
+            .and_then(|record| {
+                serde_json::to_vec(&record)
+                    .map_err(|error| format!("serializing a retained part receipt: {error}"))
+            });
+    let encoded = match sealed {
+        Ok(encoded) if encoded.len() as u64 <= MAX_PART_HEALTH_BYTES => encoded,
+        Ok(encoded) => {
+            tracing::warn!(
+                bytes = encoded.len(),
+                "a part health record exceeded its bound and was not retained"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "a part health record could not be sealed");
+            return;
+        }
+    };
+    if let Err(error) = part_dir
+        .atomic_write_child(PART_HEALTH_FILE, &encoded)
+        .await
+    {
+        tracing::warn!(%error, "a part health record could not be written");
+    }
+}
+
+/// Carry forward what earlier passes observed in attempts that produced
+/// nothing.
+///
+/// `None` when the ledger is absent, which is the honest reading of "no pass
+/// has claimed an unproductive attempt". A ledger that is *present* and will
+/// not open is a different statement — something was recorded and cannot be
+/// read — so that yields `unobserved`, which refuses reuse. The asymmetry with
+/// a missing part record is deliberate: a part's bytes exist whether or not a
+/// record describes them, and an absent ledger describes no bytes at all.
+async fn carried_generation_health(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+    plan_digest: &str,
+) -> Option<crate::decoder_health::ProducerHealthReceipt> {
+    let bytes = temp
+        .read_bounded_child(GENERATION_HEALTH_FILE, MAX_PART_HEALTH_BYTES)
+        .await
+        .ok()?;
+    let unreadable = || {
+        Some(crate::decoder_health::ProducerHealthReceipt::unobserved(
+            plan_digest.to_owned(),
+            crate::decoder_health::ExitDisposition::CleanEnd,
+        ))
+    };
+    let Ok(record) =
+        serde_json::from_slice::<plurx_core::transcode::health::RetainedGenerationHealth>(&bytes)
+    else {
+        return unreadable();
+    };
+    match record.opened(plan_digest) {
+        Some(receipt) => Some(receipt.clone()),
+        None => unreadable(),
+    }
+}
+
+/// Write the ledger back after joining this pass's own unproductive attempts.
+///
+/// Best effort, like the part records: the alternative to a ledger that will
+/// not write is throwing away an encode. What it costs is that the next pass
+/// reads no ledger, which is what happened before it existed.
+async fn retain_generation_health(
+    temp: &plurx_core::fs_secure::SecureDirectory,
+    receipt: &crate::decoder_health::ProducerHealthReceipt,
+) {
+    let sealed = plurx_core::transcode::health::RetainedGenerationHealth::seal(receipt.clone())
+        .and_then(|record| {
+            serde_json::to_vec(&record)
+                .map_err(|error| format!("serializing a retained generation record: {error}"))
+        });
+    let encoded = match sealed {
+        Ok(encoded) if encoded.len() as u64 <= MAX_PART_HEALTH_BYTES => encoded,
+        Ok(encoded) => {
+            tracing::warn!(
+                bytes = encoded.len(),
+                "a generation health ledger exceeded its bound and was not retained"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "a generation health ledger could not be sealed");
+            return;
+        }
+    };
+    if let Err(error) = temp
+        .atomic_write_child(GENERATION_HEALTH_FILE, &encoded)
+        .await
+    {
+        tracing::warn!(%error, "a generation health ledger could not be written");
+    }
+}
+
+/// Read back what an earlier pass observed about this part.
+///
+/// `unobserved` for anything that is not a record binding a receipt to exactly
+/// these bytes: no record, an unreadable one, a version this build does not
+/// know, a torn one, or one sealed over a different shape. Every one of those
+/// is the honest answer, and all of them refuse reuse.
+/// The shape is digested under *this pass's* plan, not the one the record
+/// names, so a record can only be opened by the plan it was written for. A
+/// receipt from another plan is evidence about other bytes even when the
+/// segment sizes happen to line up.
+async fn resumed_part_health(
+    part_dir: &plurx_core::fs_secure::SecureDirectory,
+    plan_digest: &str,
+    shape: &[(String, u64, i64)],
+) -> Option<crate::decoder_health::ProducerHealthReceipt> {
+    let bytes = part_dir
+        .read_bounded_child(PART_HEALTH_FILE, MAX_PART_HEALTH_BYTES)
+        .await
+        .ok()?;
+    let record: plurx_core::transcode::health::RetainedPartReceipt =
+        serde_json::from_slice(&bytes).ok()?;
+    let shape_digest = plurx_core::transcode::health::part_shape_digest(plan_digest, shape);
+    record.opened(&shape_digest).cloned()
 }
 
 fn is_pretranscode_part_segment(name: &str) -> bool {
@@ -9788,40 +9990,63 @@ async fn assembled_publication(
 /// the receipt worth keeping, and the producer's progress observer carries no
 /// control handle, so nothing else in the process would ever see it.
 ///
-/// A part carried over from an earlier pass is recorded too, as `unobserved`:
-/// nobody here watched it being made, and one of those is enough to refuse the
-/// whole generation. That is deliberate — a resumed film certified from the
-/// tail this pass happened to encode is exactly the false certificate this
-/// effort exists to prevent.
+/// A part carried over from an earlier pass is recorded too, with whatever
+/// that pass sealed beside it — or `unobserved` when no record still binds to
+/// those bytes. Certifying a resumed film from the tail this pass happened to
+/// encode is exactly the false certificate this effort exists to prevent;
+/// refusing to read back a record that *is* there would make every film long
+/// enough to need two passes permanently uncertifiable, which is not the
+/// conservative answer, only the useless one.
 struct GenerationObservation {
     plan_digest: String,
     attempts: Vec<crate::decoder_health::ProducerHealthReceipt>,
+    /// The join of this pass's attempts that produced nothing, carried
+    /// separately because no part exists for them to be sealed beside.
+    unproductive: Option<crate::decoder_health::ProducerHealthReceipt>,
 }
 
 impl GenerationObservation {
-    /// Start from the parts an earlier pass left on disk.
-    fn inheriting(parts: &[crate::produce::Part], plan_digest: &str) -> Self {
+    /// Start from what an earlier pass left on disk: one receipt per resumed
+    /// part, plus whatever the staging ledger carried about attempts that
+    /// produced nothing.
+    fn inheriting(
+        inherited: Vec<crate::decoder_health::ProducerHealthReceipt>,
+        carried: Option<crate::decoder_health::ProducerHealthReceipt>,
+        plan_digest: &str,
+    ) -> Self {
+        let mut attempts = inherited;
+        attempts.extend(carried);
         Self {
             plan_digest: plan_digest.to_owned(),
-            attempts: parts
-                .iter()
-                .map(|_| {
-                    crate::decoder_health::ProducerHealthReceipt::unobserved(
-                        plan_digest.to_owned(),
-                        // Whatever ended those parts, this pass found their
-                        // bytes already on disk. `CleanEnd` describes the read;
-                        // the receipt is unqualified regardless of it.
-                        crate::decoder_health::ExitDisposition::CleanEnd,
-                    )
-                })
-                .collect(),
+            attempts,
+            unproductive: None,
         }
     }
 
     /// Record one producer attempt. Bounded by `PRODUCER_MAX_PARTS`, which is
     /// what bounds the spawn loop this is called from.
-    fn record(&mut self, receipt: crate::decoder_health::ProducerHealthReceipt) {
+    ///
+    /// `produced` decides only whether the attempt's own bytes carry the
+    /// receipt or the staging ledger does — never whether it is recorded.
+    fn record(&mut self, receipt: crate::decoder_health::ProducerHealthReceipt, produced: bool) {
+        if !produced {
+            self.unproductive = Some(match self.unproductive.take() {
+                Some(carried) => crate::decoder_health::ProducerHealthReceipt::join(
+                    &self.plan_digest,
+                    &[carried, receipt.clone()],
+                )
+                .unwrap_or_else(|| receipt.clone()),
+                None => receipt.clone(),
+            });
+        }
         self.attempts.push(receipt);
+    }
+
+    /// The join of every attempt this pass made that left no part behind, or
+    /// `None` when every attempt produced. This is what the staging ledger
+    /// has to carry so a preemption cannot forget it.
+    fn unproductive(&self) -> Option<&crate::decoder_health::ProducerHealthReceipt> {
+        self.unproductive.as_ref()
     }
 
     /// The one receipt the generation may present, or `None` when this pass
@@ -13857,8 +14082,16 @@ impl TranscodeManager {
         let max = self.max_hw_sessions().await;
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
-        let mut parts = resume_parts(temp).await?;
-        let mut generation_health = GenerationObservation::inheriting(&parts, &plan.plan_digest());
+        let plan_digest = plan.plan_digest();
+        let ResumedParts {
+            mut parts,
+            receipts: inherited_receipts,
+        } = resume_parts(temp, &plan_digest).await?;
+        let mut generation_health = GenerationObservation::inheriting(
+            inherited_receipts,
+            carried_generation_health(temp, &plan_digest).await,
+            &plan_digest,
+        );
         let mut retained_segments = parts.iter().map(|part| part.segments.len()).sum::<usize>();
         let mut retained_duration_ms = parts
             .iter()
@@ -14055,12 +14288,27 @@ impl TranscodeManager {
                 )
                 .await;
             report_producer_health(&format!("{hash} part {}", parts.len()), &receipt);
-            // Recorded before anything looks at what the attempt wrote. An
-            // attempt that decoded nothing and exited zero produces no
-            // segments, and that receipt is the one that matters most.
-            generation_health.record(receipt);
-            let part = read_part(&part_dir).await;
+            let ValidatedPart { part, shape, .. } = read_part(&part_dir).await;
             let produced = !part.is_empty();
+            if produced {
+                // Sealed beside the bytes it describes, so whichever pass
+                // resumes this film does not have to call the part unobserved.
+                retain_part_health(&part_dir, &shape, &receipt).await;
+            }
+            // Recorded whether or not it produced. An attempt that decoded
+            // nothing and exited zero writes no segment, and that receipt is
+            // the one that matters most.
+            generation_health.record(receipt, produced);
+            if !produced {
+                // Its directory is about to be removed or reused by the retry,
+                // so there is nothing for it to be sealed beside. The ledger is
+                // written now rather than at the end of the pass, because a
+                // pass that is about to be preempted is exactly the one whose
+                // observation would otherwise be lost.
+                if let Some(unproductive) = generation_health.unproductive() {
+                    retain_generation_health(temp, unproductive).await;
+                }
+            }
             if produced {
                 if parts.len().saturating_add(1) > MAX_RETAINED_PART_DIRECTORIES {
                     let _ = remove_staged_child(temp, &part_name).await;
@@ -26883,11 +27131,16 @@ pub(crate) mod tests {
         )
         .await
         .expect("killed tail playlist");
-        let (part, _) = read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+        let validated = read_validated_part(&capability, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
             .await
             .expect("one unmatched killed tail is droppable");
-        assert_eq!(part.segments, ["seg00000.ts"]);
-        assert_eq!(part.durations_ms, [2_000]);
+        assert_eq!(validated.part.segments, ["seg00000.ts"]);
+        assert_eq!(validated.part.durations_ms, [2_000]);
+        // The shape measures only what the playlist lists: the truncated tail
+        // the kill left behind is not part of what a receipt would be bound to.
+        assert_eq!(validated.shape.len(), 1);
+        assert_eq!(validated.shape[0].0, "seg00000.ts");
+        assert_eq!(validated.shape[0].2, 2_000);
     }
 
     /// A live EVENT playlist needs both more than one segment and enough media
@@ -35620,7 +35873,7 @@ pub(crate) mod tests {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let dir = entry.path().join(crate::produce::part_dir(index));
                     if let Ok(dir) = plurx_core::fs_secure::SecureDirectory::open(&dir).await {
-                        if !read_part(&dir).await.is_empty() {
+                        if !read_part(&dir).await.part.is_empty() {
                             return;
                         }
                     }
@@ -37523,45 +37776,19 @@ pub(crate) mod tests {
         }
     }
 
-    fn one_part_fixture(count: usize) -> crate::produce::Part {
-        crate::produce::Part {
-            segments: (0..count)
-                .map(|index| format!("seg{index:05}.ts"))
-                .collect(),
-            durations_ms: vec![1_000; count],
-        }
-    }
-
-    #[test]
-    fn an_inherited_part_refuses_the_generation_it_was_carried_into() {
-        let parts = vec![one_part_fixture(1); 3];
-        let digest = health_plan_digest();
-        let mut observation = GenerationObservation::inheriting(&parts, &digest);
-        assert!(observation.attempts.iter().all(|receipt| {
-            receipt.plan_digest == digest
-                && !receipt.observation_complete
-                && receipt.qualification == crate::decoder_health::Qualification::Unqualified
-        }));
-        // The consequence that matters: however clean this pass's own work is,
-        // a generation carrying inherited parts cannot be certified.
-        observation.record(health_receipt(
-            crate::decoder_health::Qualification::Qualified,
-        ));
-        let settled = observation.settle().expect("settled receipt");
-        assert!(!settled.permits_reuse());
-    }
-
     #[test]
     fn a_pass_that_attempted_nothing_settles_to_no_receipt() {
-        let observation = GenerationObservation::inheriting(&[], &health_plan_digest());
+        let observation =
+            GenerationObservation::inheriting(Vec::new(), None, &health_plan_digest());
         assert_eq!(observation.settle(), None);
         // And a pass whose only attempt was clean certifies its own work, so
         // the test above is about inheritance rather than about nothing ever
         // qualifying.
-        let mut clean = GenerationObservation::inheriting(&[], &health_plan_digest());
-        clean.record(health_receipt(
-            crate::decoder_health::Qualification::Qualified,
-        ));
+        let mut clean = GenerationObservation::inheriting(Vec::new(), None, &health_plan_digest());
+        clean.record(
+            health_receipt(crate::decoder_health::Qualification::Qualified),
+            true,
+        );
         assert!(clean.settle().expect("settled receipt").permits_reuse());
     }
 
@@ -37574,20 +37801,22 @@ pub(crate) mod tests {
         // producer's progress observer carries no control handle, so nothing
         // else in the process ever sees that fault.
         let digest = health_plan_digest();
-        let mut observation = GenerationObservation::inheriting(&[], &digest);
-        observation.record(health_receipt(
-            crate::decoder_health::Qualification::Qualified,
-        ));
+        let mut observation = GenerationObservation::inheriting(Vec::new(), None, &digest);
+        observation.record(
+            health_receipt(crate::decoder_health::Qualification::Qualified),
+            true,
+        );
         let mut failed = health_receipt(crate::decoder_health::Qualification::Rejected);
         failed.terminal_fault = Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure);
         failed.video_decode_error_records = 5;
         failed.contract_qualified_error_records = 5;
         // No part accompanies this one: the attempt left nothing on disk. It
         // is recorded regardless.
-        observation.record(failed);
-        observation.record(health_receipt(
-            crate::decoder_health::Qualification::Qualified,
-        ));
+        observation.record(failed, true);
+        observation.record(
+            health_receipt(crate::decoder_health::Qualification::Qualified),
+            true,
+        );
         let settled = observation.settle().expect("settled receipt");
         assert_eq!(
             settled.qualification,
@@ -37650,5 +37879,317 @@ pub(crate) mod tests {
             adopted.health, None,
             "an assembly this pass did not place carries no receipt from it"
         );
+    }
+
+    /// The shape `read_validated_part` would measure for a part directory.
+    async fn measured_shape(
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        index: usize,
+    ) -> Vec<(String, u64, i64)> {
+        let dir = temp
+            .open_child_directory(&crate::produce::part_dir(index))
+            .await
+            .expect("part directory");
+        read_validated_part(&dir, MAX_PRETRANSCODE_PART_PLAYLIST_BYTES)
+            .await
+            .expect("validated part")
+            .shape
+    }
+
+    async fn seal_part_health(
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        index: usize,
+        receipt: &crate::decoder_health::ProducerHealthReceipt,
+    ) {
+        let shape = measured_shape(temp, index).await;
+        let dir = temp
+            .open_child_directory(&crate::produce::part_dir(index))
+            .await
+            .expect("part directory");
+        retain_part_health(&dir, &shape, receipt).await;
+    }
+
+    async fn resumed_health(
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        plan_digest: &str,
+    ) -> Vec<crate::decoder_health::ProducerHealthReceipt> {
+        resume_parts(temp, plan_digest)
+            .await
+            .expect("resume parts")
+            .receipts
+    }
+
+    #[tokio::test]
+    async fn a_sealed_part_record_lets_a_resumed_film_still_be_certified() {
+        // Without this, every film long enough to need a second pass is
+        // permanently uncertifiable, and the qualified artifact namespace could
+        // never hold a long title at all.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 2).await;
+        write_health_part(&temp, 1, 1).await;
+        let clean = health_receipt(crate::decoder_health::Qualification::Qualified);
+        seal_part_health(&temp, 0, &clean).await;
+        seal_part_health(&temp, 1, &clean).await;
+
+        let digest = health_plan_digest();
+        let inherited = resumed_health(&temp, &digest).await;
+        assert_eq!(inherited.len(), 2);
+        let mut observation = GenerationObservation::inheriting(inherited, None, &digest);
+        observation.record(clean, true);
+        let settled = observation.settle().expect("settled receipt");
+        assert!(
+            settled.permits_reuse(),
+            "a resumed film whose every part carries a clean record is certifiable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_part_with_no_record_resumes_unobserved() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        let inherited = resumed_health(&temp, &health_plan_digest()).await;
+        assert_eq!(inherited.len(), 1);
+        assert!(!inherited[0].permits_reuse());
+        assert!(!inherited[0].observation_complete);
+    }
+
+    #[tokio::test]
+    async fn a_record_no_longer_bound_to_the_bytes_beside_it_is_refused() {
+        // Why the record is sealed over a shape at all. Re-encoding a part and
+        // leaving the old record behind would carry a clean certificate onto
+        // bytes nobody watched being made.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        seal_part_health(
+            &temp,
+            0,
+            &health_receipt(crate::decoder_health::Qualification::Qualified),
+        )
+        .await;
+        assert!(resumed_health(&temp, &health_plan_digest()).await[0].permits_reuse());
+
+        // Same name, same playlist, different bytes.
+        let part = temp
+            .open_child_directory(&crate::produce::part_dir(0))
+            .await
+            .expect("part directory");
+        part.atomic_write_child("seg00000.ts", b"a differently sized segment")
+            .await
+            .expect("rewrite segment");
+        let inherited = resumed_health(&temp, &health_plan_digest()).await;
+        assert!(
+            !inherited[0].permits_reuse(),
+            "a record sealed over other bytes must not certify these"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_sealed_for_another_plan_is_refused() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        seal_part_health(
+            &temp,
+            0,
+            &health_receipt(crate::decoder_health::Qualification::Qualified),
+        )
+        .await;
+        let other_plan = "7".repeat(64);
+        let inherited = resumed_health(&temp, &other_plan).await;
+        assert!(
+            !inherited[0].permits_reuse(),
+            "a record can only be opened by the plan it was sealed for"
+        );
+        assert_eq!(inherited[0].plan_digest, other_plan);
+    }
+
+    #[tokio::test]
+    async fn an_edited_record_is_refused_rather_than_read() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        seal_part_health(
+            &temp,
+            0,
+            &health_receipt(crate::decoder_health::Qualification::Unqualified),
+        )
+        .await;
+        let part = temp
+            .open_child_directory(&crate::produce::part_dir(0))
+            .await
+            .expect("part directory");
+        let encoded = part
+            .read_bounded_child(PART_HEALTH_FILE, MAX_PART_HEALTH_BYTES)
+            .await
+            .expect("read record");
+        let text = String::from_utf8(encoded).expect("utf8 record");
+        let promoted = text.replace("\"unqualified\"", "\"qualified\"");
+        assert_ne!(
+            promoted, text,
+            "the qualification must appear in the record"
+        );
+        part.atomic_write_child(PART_HEALTH_FILE, promoted.as_bytes())
+            .await
+            .expect("write promoted record");
+        let inherited = resumed_health(&temp, &health_plan_digest()).await;
+        assert!(
+            !inherited[0].permits_reuse(),
+            "a record whose own digest does not check out is not read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_is_never_placed_into_the_assembled_generation() {
+        // It is staging-local evidence about how a part was made, not one of
+        // the objects the manifest inventories.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let parts = vec![write_health_part(&temp, 0, 2).await];
+        seal_part_health(
+            &temp,
+            0,
+            &health_receipt(crate::decoder_health::Qualification::Qualified),
+        )
+        .await;
+        publish_from(&temp, &parts, None)
+            .await
+            .expect("publish")
+            .expect("assembled generation");
+        let mut placed = Vec::new();
+        let mut entries = tokio::fs::read_dir(directory.path().join(ASSEMBLED_DIR))
+            .await
+            .expect("read assembled directory");
+        while let Some(entry) = entries.next_entry().await.expect("assembled entry") {
+            placed.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        placed.sort();
+        // The whole listing, not one probe for one name: a generation holds
+        // its playlist and its segments and nothing else, whatever the record
+        // is called.
+        assert_eq!(placed, ["index.m3u8", "seg00000.ts", "seg00001.ts"]);
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_left_no_part_is_carried_across_a_pass_boundary() {
+        // Whether a film certifies must not depend on where preemption fell.
+        // Within one pass a failed non-producing attempt is recorded and
+        // refuses the generation; the ledger is what makes the same sequence
+        // refuse it when a pass boundary lands in the middle.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let digest = health_plan_digest();
+
+        // Pass one: an attempt that decoded nothing and wrote no segment,
+        // then a clean retry that produced the part.
+        let mut first = GenerationObservation::inheriting(Vec::new(), None, &digest);
+        let mut failed = health_receipt(crate::decoder_health::Qualification::Rejected);
+        failed.terminal_fault = Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure);
+        first.record(failed, false);
+        retain_generation_health(&temp, first.unproductive().expect("unproductive")).await;
+        write_health_part(&temp, 0, 1).await;
+        let clean = health_receipt(crate::decoder_health::Qualification::Qualified);
+        first.record(clean.clone(), true);
+        seal_part_health(&temp, 0, &clean).await;
+        // …and then the pass is preempted, publishing nothing.
+
+        // Pass two resumes, and must reach the same conclusion.
+        let second = GenerationObservation::inheriting(
+            resumed_health(&temp, &digest).await,
+            carried_generation_health(&temp, &digest).await,
+            &digest,
+        );
+        let settled = second.settle().expect("settled receipt");
+        assert_eq!(
+            settled.qualification,
+            crate::decoder_health::Qualification::Rejected
+        );
+        assert_eq!(
+            settled.terminal_fault,
+            Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure)
+        );
+        assert!(!settled.permits_reuse());
+    }
+
+    #[tokio::test]
+    async fn a_ledger_that_is_there_and_will_not_open_is_unobserved() {
+        // Absent means no pass claimed an unproductive attempt. Present and
+        // unreadable means one did and it cannot be read, which is a different
+        // statement and refuses reuse.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let digest = health_plan_digest();
+        assert_eq!(carried_generation_health(&temp, &digest).await, None);
+
+        temp.atomic_write_child(GENERATION_HEALTH_FILE, b"{\"not\":\"a ledger\"}")
+            .await
+            .expect("write a ledger nobody can read");
+        let carried = carried_generation_health(&temp, &digest)
+            .await
+            .expect("an unreadable ledger is still a statement");
+        assert!(!carried.permits_reuse());
+        assert!(!carried.observation_complete);
+    }
+
+    #[tokio::test]
+    async fn a_ledger_sealed_for_another_plan_does_not_certify_this_one() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        retain_generation_health(
+            &temp,
+            &health_receipt(crate::decoder_health::Qualification::Qualified),
+        )
+        .await;
+        let carried = carried_generation_health(&temp, &"7".repeat(64))
+            .await
+            .expect("a ledger for another plan is still a statement");
+        assert!(!carried.permits_reuse());
+    }
+
+    #[tokio::test]
+    async fn a_record_too_large_for_its_bound_is_not_written() {
+        // `retain_part_health` is best effort, and this is the branch that
+        // makes "best effort" mean something rather than being unreachable
+        // prose. A plan digest is a digest everywhere it is produced, but the
+        // type does not say so.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        write_health_part(&temp, 0, 1).await;
+        let shape = measured_shape(&temp, 0).await;
+        let part = temp
+            .open_child_directory(&crate::produce::part_dir(0))
+            .await
+            .expect("part directory");
+        let mut oversized = health_receipt(crate::decoder_health::Qualification::Qualified);
+        oversized.plan_digest = "f".repeat(MAX_PART_HEALTH_BYTES as usize * 2);
+        retain_part_health(&part, &shape, &oversized).await;
+        assert!(part
+            .child_metadata(PART_HEALTH_FILE)
+            .await
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound));
+        // And the part reads back as unobserved rather than as anything else.
+        assert!(!resumed_health(&temp, &health_plan_digest()).await[0].permits_reuse());
     }
 }
