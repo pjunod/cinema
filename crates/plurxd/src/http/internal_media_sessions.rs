@@ -1196,6 +1196,8 @@ mod tests {
             action_id: uuid::Uuid::new_v4().to_string(),
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // The successor was staged at origin 0; a commit echoes it.
+            committed_media_origin_ms: Some(0),
             first_frame_unix_ms: Some(4),
         });
         let response_time = crate::media_sessions::unix_ms();

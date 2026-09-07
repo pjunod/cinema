@@ -15899,6 +15899,14 @@ mod tests {
             action_id,
             state,
             buffered_through_ms: None,
+            // Only a commit carries an origin, and it must be the offered one.
+            committed_media_origin_ms: (state
+                == crate::playback_control::AcknowledgementState::Committed)
+                .then(|| {
+                    prepare_body["action"]["media_origin_ms"]
+                        .as_i64()
+                        .expect("offer origin")
+                }),
             first_frame_unix_ms: (state
                 == crate::playback_control::AcknowledgementState::Committed)
                 .then(unix_ms),
@@ -16077,6 +16085,8 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer: a commit naming a different origin is refused.
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
         delay_next_preparation_settlement(&route.incarnation_id, Duration::from_millis(300));
@@ -16165,6 +16175,8 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer: a commit naming a different origin is refused.
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
 
@@ -16516,6 +16528,14 @@ mod tests {
                         AcknowledgementState::Failed
                     },
                     buffered_through_ms: None,
+                    // The origin the offer named. A commit that does not
+                    // echo it is refused, so the fixture has to answer the
+                    // Prepare it was actually given.
+                    committed_media_origin_ms: committed.then(|| {
+                        body["action"]["media_origin_ms"]
+                            .as_i64()
+                            .expect("offer origin")
+                    }),
                     first_frame_unix_ms: committed.then(unix_ms),
                 });
                 let slots = Arc::new(tokio::sync::Semaphore::new(1));
@@ -16649,6 +16669,11 @@ mod tests {
                     AcknowledgementState::Failed
                 },
                 buffered_through_ms: None,
+                committed_media_origin_ms: committed.then(|| {
+                    body["action"]["media_origin_ms"]
+                        .as_i64()
+                        .expect("offer origin")
+                }),
                 first_frame_unix_ms: committed.then(unix_ms),
             });
             let key = preparation_settlement_key(
@@ -16790,6 +16815,8 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer: a commit naming a different origin is refused.
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
         let committed_request = request.clone();
@@ -16941,6 +16968,8 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer: a commit naming a different origin is refused.
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
         delay_next_preparation_settlement(&route.incarnation_id, Duration::from_millis(700));
@@ -17116,6 +17145,7 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Failed,
             buffered_through_ms: None,
+            committed_media_origin_ms: None,
             first_frame_unix_ms: None,
         });
         let (status, body) = control_body(

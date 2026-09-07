@@ -212,6 +212,40 @@ class ControlRequestWireCase(unittest.TestCase):
             kotlin_fields(self.android, "ControlRequest"),
         )
 
+    def test_the_acknowledgement_is_server_only_until_a_client_models_it(self) -> None:
+        """A struct no port declares is a parity hole nothing else would catch.
+
+        `ActionAcknowledgement` is the one request field with no client model:
+        M2 clients consume no action, so they have nothing to acknowledge, and
+        `test_the_request_itself` discards it for that reason. That discard is
+        correct today and silently wrong the moment a client gains the type —
+        the server could add, rename or retype a field and no test in this file
+        would notice, because the struct is outside every comparison.
+
+        So this asserts the premise rather than the parity. When it fails, the
+        fix is not to relax it: promote the pair to a real `assertSameWire`
+        beside the others, which is the check the discard has been standing in
+        for.
+        """
+        declared = {
+            "Apple": re.search(r"struct\s+ActionAcknowledgement\b", self.apple),
+            "Android": re.search(
+                r"(data\s+)?class\s+ActionAcknowledgement\b", self.android
+            ),
+        }
+        modelled = sorted(port for port, hit in declared.items() if hit)
+        self.assertEqual(
+            modelled,
+            [],
+            "ActionAcknowledgement is now modelled by "
+            + ", ".join(modelled)
+            + " while this file still discards it from the request comparison. "
+            "Add an assertSameWire for it rather than widening the discard: "
+            "the server requires committed_media_origin_ms and "
+            "first_frame_unix_ms on a commit, and a port that spells either "
+            "differently is refused at validation with no other test to say so.",
+        )
+
     def test_the_selection(self) -> None:
         self.assertSameWire(
             "ClientSelection",
