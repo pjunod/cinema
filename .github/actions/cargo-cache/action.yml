@@ -18,9 +18,11 @@ inputs:
   disk-gb:
     description: >-
       Free space required before this job starts, in whole gigabytes. A full
-      debug workspace tree is 21G; lanes that also carry Playwright browsers or
-      build ffmpeg should ask for more.
-    default: "30"
+      debug workspace tree is 21G and the persistent Cargo cache lives outside
+      the workspace, so 21G is what a job grows by; the default is that plus
+      link headroom. Lanes that also carry Playwright browsers or build ffmpeg
+      should ask for more.
+    default: "25"
   budget-gb:
     description: Maximum Cargo bytes retained across every toolchain on this runner.
     required: false
@@ -69,11 +71,21 @@ runs:
         # skips look identically clean.
         #
         # The number is measured rather than chosen: a full debug workspace
-        # tree is 21G on the pinned toolchain. 20G was the first guess and
-        # could never have been enough. `disk-gb` lets a heavier lane ask for
-        # what it needs instead of every lane inheriting the worst case.
+        # tree is 21G on the pinned toolchain, and the persistent Cargo cache
+        # lives outside the workspace, so 21G is what a job actually grows by.
+        # 25G is that plus link headroom.
+        #
+        # It was 30G for a few hours and that was too high. `gha-m6-general-02`
+        # has 30G free with nothing left to prune — its cache is live and its
+        # images are already gone — so a 30G bar refused a job on a healthy
+        # runner over one gigabyte. That is the worse failure: the bus error
+        # this guards against is recoverable by re-running, while a false
+        # refusal blocks the work outright and no rerun helps.
+        #
+        # A lane that genuinely needs more says so; `vod-web` asks for 45G
+        # because it carries Playwright browsers and an ffmpeg build on top.
         "$GITHUB_WORKSPACE/scripts/ci-require-disk" \
-          "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" "${DISK_GB:-30}"
+          "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" "${DISK_GB:-25}"
         [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
           echo "::error::Cargo cache lane must be filesystem-safe"
           exit 1
