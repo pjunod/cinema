@@ -345,6 +345,47 @@ A may remain displayed only under bounded drain and must never regain server
 authority. Lost commit responses require exact durable replay. A postcommit
 display failure starts a new fenced recovery, not an implicit rollback.
 
+**Where the server side actually attaches — read out of the code, 2026-09-07.**
+The next slice is `Switched` and the bounded drain, and the seams for both
+already exist. Recording them so the work starts from the code rather than
+re-deriving it, and so the three adapter sessions can run in parallel against
+a settled contract instead of three guesses.
+
+- **The offer is already bound.** `PreparedActionBinding` holds the
+  `PreparedSuccessorAction` beside the `Prepare` it sent, and
+  `bound_preparation_acknowledgement` already compares `action_id` and — since
+  `b1ba4f3f` — `committed_media_origin_ms` against
+  `binding.successor.media_origin_ms`. Every further field in §4's binding
+  tuple attaches at that one comparison. It is the right place: it is the only
+  point that holds the offer and the answer at once.
+- **`AcknowledgementState` has no `Switched`.** Today it runs
+  `MetadataReady → BufferReady → Committed → Failed | Aborted`, so the durable
+  commit is also the last thing the client says. That conflates *committed*
+  with *the viewer is seeing it*, which is exactly the distinction §4 exists to
+  draw: `Committed` is the server's transaction, `Switched` is the client's
+  display. A client that commits and then fails to present must be
+  distinguishable from one that succeeded, and today it is not.
+- **The drain seam is `settle_activation_predecessor`**
+  (`http/hls.rs:3083`), already bounded by
+  `PREDECESSOR_PROJECTION_FAST_WINDOW` (5 s) with
+  `PREDECESSOR_PROJECTION_RETRY_DELAY` behind it, and already able to report
+  `PredecessorAcknowledged`. What it is missing is not the bound but the
+  trigger: it runs from *activation*, so a prepared transaction that reused it
+  would retire the predecessor at commit, before the viewer has seen a frame
+  of the successor. Gate it on `Switched` and the existing bound becomes the
+  drain §4 asks for, rather than a second mechanism competing with it.
+- **`activate_media_session` must stay out of this path.** It reaps the
+  predecessor and advances the pointer unconditionally;
+  `a_prepared_transition_stages_a_successor_and_leaves_the_pointer_alone`
+  exists to pin that `prepare_media_session` is the entry point instead. Any
+  drain work has to keep that test true.
+
+The order that follows from this: add `Switched` and gate the existing drain
+on it, *then* fan out the three adapters. Doing the adapters first means three
+clients inventing three meanings for "ready" and "switched" against a server
+that has not yet fixed either, and the disagreement only surfaces at
+integration.
+
 Adapter seams from the read-only audit:
 
 | Client | Current behavior | Required implementation |
