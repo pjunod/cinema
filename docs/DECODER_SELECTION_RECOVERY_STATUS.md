@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M5a census repair candidate; M0–M3e, M4, M5a and M3c5 merged into
-the effort · **Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M5a census repair task base:** effort
-head `5e0f7f1f51d4476fabee81d278c47ccad6baf1a2`
+**Status:** M3f candidate; M0–M3e, M4, M5a, M3c5 and the M5a census repair
+merged into the effort · **Updated:** 2026-09-07 · **Integration branch:**
+`effort/decoder-selection-recovery` · **M3f task base:** effort head
+`b2dcf458500e210032197b3a3c73abbbe89092b8`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,14 +20,13 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M5a census repair — five gates M5a tripped and nobody read |
-| Task branch | `codex/decoder-selection-m5a-census`, based on effort head `5e0f7f1f` |
+| Milestone | M3f — the control, and what a node is allowed to do with it |
+| Task branch | `codex/decoder-selection-m3f`, based on effort head `b2dcf458` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run against this candidate; it raised one claimed blocker that was not a defect and eight documentation and comment findings that were, and all are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | This head on pinned 1.97.1: `plurx-core`'s lib target under `cargo test --workspace` is 992 passed, **0 failed**. That number is the point: a bare `cargo test -p plurx-core --lib` reports 749, because workspace feature unification turns on the cluster and hiqlite populations that carry three of the five inherited failures. A focused run cannot see them |
-| Full validation | On this exact head, pinned 1.97.1: `cargo test --workspace` all green — `plurxd` 1871 passed 0 failed 3 ignored, `plurx-core` lib 992/0, `plurx-core` `store_contract` 96/96, `plurx-cluster-check` 79/79. `make lint`, `make validation-lint` and `make history-check` clean; `cargo fmt --all --check` and `git diff --check` clean; `tests.operations.test_decoder_diagnostic_qualification` + `tests.validation.test_decoder_recovery_status` 43/43 |
+| Full validation | On this exact head, pinned 1.97.1: `cargo test --workspace` all green — `plurxd` 1876 passed 0 failed 3 ignored, `plurx-core` lib 992/0, `store_contract` 143/0/2, `plurx-cluster-check` 79/79. `node tests/web/settings-sections.test.js` 15/15 including four new verified-decode contracts. `tests.operations.test_decoder_diagnostic_qualification` + `tests.validation.test_decoder_recovery_status` 45/45. `make lint`, `make validation-lint`, `make history-check`, `cargo fmt --all --check` and `git diff --check` clean |
 | Repairs | The five inherited failures described in *M5a census repair* below are green on this head: the two sqlite transaction censuses, the migration count, the hiqlite additive-chain assertion, and the downgrade-fixture guard |
 | Exact receipt | The head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
 | Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
@@ -40,7 +39,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a–M3e and M3c5 merged; M3f not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. Nothing selects it in production yet; the operator control and its `Settings > Developer` enable section are M3f |
+| M3 · owned observation and health receipts | M3a–M3e and M3c5 merged; M3f is this candidate | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f adds the operator request, the node effective-mode intersection that decides whether it may be honoured, and the `Settings > Developer` enable section that states the cost and shows what this node measured |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | M5a merged and its census repair is this candidate; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change. M5a left five inherited test failures invisible to the effort gate; the repair candidate closes them |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -1912,6 +1911,175 @@ under them is untouched by this effort. They are timing-sensitive under load,
 not broken, and chasing them is not this repair's job — but a suite that fails
 a different test each time it is run under load is a gate nobody can read, so
 it is recorded as owed below.
+
+## M3f working tree — the control, and what a node is allowed to do with it
+
+Every milestone since M3c3 built behaviour behind an identity nothing selects.
+This is the control that selects it, and the reason it comes last rather than
+first is the same reason it is not a switch.
+
+`playback.decoder_health_qualified_artifacts` is a **request**. The identity it
+names is a different content-addressed key space: turning it on renames every
+transcode the node caches. A node that honoured a request it could not serve
+would rotate its whole cache to keys whose every generation is then refused —
+re-encoding each title once per request, forever, while every counter read
+healthy. That is worse than the failure this effort exists to fix, because it
+is silent and it is caused by the fix.
+
+So the node intersects the request with three things it measured about itself,
+and a node that fails any of them stays where it is and says which:
+
+| Check | Why it is decisive |
+|---|---|
+| This node measured its own FFmpeg | Without a `MeasuredBuild` no contract can be matched to the binary that is about to run, so nothing it prints is evidence |
+| The startup probe named the decoders this build selects | A diagnostic contract is qualified against a *named* decoder. A plan that names none can never be matched to one, so no attempt could ever be classified |
+| A retained contract covers this build | Covered as this node will run it: the same binary, the same decoder the probe measured, and the qualified log flags. This is the fleet's state today and the only one that takes real work to leave — it needs a capture from this build |
+
+Coverage is counted rather than merely looked up, which separates a fourth
+refusal from the third. `contract_for` refuses *ambiguity* by returning no
+contract at all, so two contracts covering one build read downstream exactly
+like none — and the fix for one is the opposite of the fix for the other. An
+operator with two, told to capture one, would make it worse. `ambiguous_contract`
+says which it is and what to do.
+
+A fifth refusal exists for the case where the node could not read the request
+at all. It keeps the identity every deployed node already has and says so,
+rather than failing the boot: a store read that is briefly unavailable during a
+restart must not keep a media server down over an off-by-default preview
+control, and staying unqualified is the status quo rather than a guess.
+
+`artifact_qualification_readiness` is a free function taking only measured
+facts, so the whole rule is tested without a manager, a store, a cache or an
+FFmpeg. The refusals are named values with a machine-readable name and a
+sentence an operator can act on, because a control whose only feedback is
+"still off" tells the person who turned it on nothing — and this one is off on
+every node.
+
+### Two facts, two fields
+
+The settings API reports the request and the node's answer separately:
+`decoder_health_qualified_artifacts` is what an operator asked for, and the
+read-only `decoder_health_qualification` is the namespace the node actually
+plans into, whether it is enforcing, whether it *could*, what it measured, what
+is covered, and the refusal.
+
+Collapsing those into one field is the mistake worth naming. A surface that
+echoed the request back as the state would let someone believe every transcode
+on the node is verified when nothing about it changed — which is precisely the
+false certificate the whole effort exists to prevent, arriving through the
+control that was supposed to prevent it.
+
+The request is stored either way. A node that is refused today and later gains
+a covering contract picks the request up on its next start, and does not need
+an operator to remember to come back.
+
+### When it is read, and why writing it does not apply it
+
+The identity is read from synchronous planning, so it is published **once, at
+start** — after the decoder probe and the contract install, before anything can
+plan. The settings write stores the request and deliberately does not apply it.
+
+The first draft of this milestone republished on every write, and that was
+wrong for a reason worth stating plainly: this value is part of every cache key
+the node computes. Moving it on a live node moves the key space *under work
+that is already running*. A session that resolved its plan a second earlier
+publishes into a directory the next lookup will not name. A resumable
+production cannot find its own earlier parts, and under the qualified identity
+those parts carry no receipt — so the film it restarts from zero can never be
+kept. A pretranscode row claimed under one recipe hash completes under another.
+A control that did that quietly to a busy node would be a worse failure than
+the one this effort exists to fix, and it would be caused by the fix.
+
+So the request is stored when written and read when the node next starts, which
+is also how a fleet rolls one out. That is also what keeps a cluster coherent:
+nodes converge as they restart, and until then a node that has not restarted is
+simply computing the keys it has always computed. Its own surface says a
+restart is owed.
+
+The surface reports **three** facts, and collapsing any pair breaks it. The
+stored request is what an operator asked for. The published answer is what this
+node decided at start, and it is read from the manager's own published value
+rather than recomputed — a recomputation would say `enforcing` on a node that
+is planning unqualified, which is the false certificate this control exists to
+prevent, arriving through the control. `pending_restart` is the gap between
+them, so a saved change is neither hidden nor claimed as in force.
+
+`test_publish_artifact_qualification` stays, and stays test-only. Every test of
+the enforcement behind this control runs on a host no contract covers, where
+the real publisher would — correctly — refuse them all.
+
+### The enable section
+
+`Settings > Developer` gains a **Verified decode artifacts** card. It states
+what the feature is for in the words the failure actually takes — FFmpeg can
+drop every frame of a file and still exit successfully, and without this that
+result is cached and served forever — then the cost, before the switch: it
+renames every transcode the node caches, nothing is deleted, and each title is
+made again on next demand.
+
+The cost line is conditional, because on a node that cannot honour the request
+there is no cost at all — and an unconditional warning sitting above three
+crosses that contradict it teaches an operator to stop reading the warnings.
+The eligible node is told what it will pay, including that turning it off later
+pays the rename a second time.
+
+Then the three checks, each with a tick or a cross and what it means, filled in
+from what this node measured rather than from a document telling an operator to
+go and find out. A refused request shows its explanation. Everything FFmpeg
+supplied — the version banner, the decoder names — is escaped, because it is
+somebody else's string in this page's markup. The card renders on a node that
+has never answered, because a Settings section that throws on a missing field
+is one that cannot be opened at all.
+
+Saving replaces this one card rather than re-rendering the panel. The Live TV
+card beside it stages a whole configuration before its own Save, and a
+panel-wide rebuild would discard it with no warning.
+
+It has its own Save writing its own single field. The verified-decode request
+renames a node's whole cache, so it must never ride along with a save an
+operator made for something else.
+
+### One test-harness repair, found by this milestone
+
+`tests/web/settings-sections.test.js` composes shipped functions with
+`new Function` and appends `return <name>;`. `shippedSource` returns everything
+from a declaration to the next one, which includes any trailing line comment —
+so appending on the same line put the `return` inside a comment and the
+composed source silently returned nothing. It cost one confusing failure here;
+the newline is now in all three composition sites.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran. It found two blockers, five majors and five minors.
+Both blockers were real, and one of them was the milestone's own central
+mistake.
+
+| Finding | Disposition |
+|---|---|
+| The settings surface recomputed readiness instead of reporting what the node published, so on an eligible node whose republish had failed it would report `enforcing: true` while planning unqualified — the exact false certificate this control exists to prevent | The manager stores the whole published answer, and the surface reports it. A test asserts the two are the same object and not two computations |
+| Nothing propagated the identity across a cluster, and a node that had not been told would keep planning the old key space until restart — with the executing node producing generations the requesting node then refuses, re-encoding a title on every demand | The write no longer applies on any node. The request is stored and read at start, so nodes converge as they restart, which is how a fleet rolls one out — and a node that has not restarted computes exactly the keys it always has |
+| Republishing on write rotated the key space under in-flight work: a session publishing where the next lookup will not look, a resumable production restarting from parts that carry no receipt, a claim completed under a different hash | Same repair. The runtime republish is gone, `pending_restart` says a restart is owed, and the card says why |
+| No test exercised the production publisher. Every test moved the identity through the `#[cfg(test)]` bypass, so a publisher that never wrote the lock would have passed | The diagnostic policy is handed to the manager rather than reached for as a global, and a test publishes a real request on a covered node, asserts planning reads it, asserts the recipe hash moves, and asserts it moves back |
+| `contract_for` refuses ambiguity by returning no contract, so two covering contracts reported as "capture one" — the instruction that makes it worse | `covering_contracts` counts, and `ambiguous_contract` says which problem it is |
+| The HTTP test pinned the exact refusal, which is a function of a process-global policy shared with every other test in the binary — an order-dependent gate | It asserts the shape the surface promises, and the exact-value test is the one with an injected policy |
+| Saving called `render()`, rebuilding the whole Developer panel and discarding anything staged in the four cards beside it | The card replaces itself by id |
+| `eligible()` was coverage alone, so it could have answered yes on a node that never identified the build the coverage is about | Conjoined with the measured build, and the previously missing assertion is in the test |
+| A transient store read at boot propagated out of daemon start, so a preview control could keep a media server down | It logs, keeps the unqualified identity, and reports `setting_unreadable` |
+| FFmpeg's version banner and decoder names were interpolated into the admin page unescaped | Escaped, with a test that walks a hostile banner |
+| The test harness fix added a new unseparated joint between two composed sources — the same class of bug, in the line that fixed it | The sources are joined with newlines |
+| The cost line was unconditional, above three crosses saying the cost would not be paid | Conditional on eligibility, and it now also states that turning it off pays the rename again |
+
+### What is still owed
+
+This effort's own qualifying workstation is the only host with a covering
+contract, and it is a workstation. Until a capture exists from the fleet's
+FFmpeg 8.0.1, every fleet node that turns this on will be told
+`no_contract_covers_this_build` — correctly, and with the capture named as the
+thing to do about it.
+
+Cluster convergence is by restart, and nothing yet reports the fleet's
+identities in one place. An operator rolling this out sees each node's own
+answer on that node's settings page and has to hold the fleet view themselves.
 
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 

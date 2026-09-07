@@ -1271,6 +1271,32 @@ impl DiagnosticPolicy {
     /// and without `repeat` the log is compressed. So the *intended* flags are
     /// an input here, and the caller uses the answer to decide which flags to
     /// emit — a build with no contract keeps the flags it has always had.
+    /// How many retained contracts cover this build for one codec, decoder
+    /// and log mode.
+    ///
+    /// [`Self::contract_for`] collapses "none" and "more than one" into the
+    /// same `None`, which is right for its caller — both mean no grammar —
+    /// and wrong for anything reporting *why*. Two covering contracts is a
+    /// fixable mistake with a different fix from having none, and an operator
+    /// told to capture a contract they already have twice will make it worse.
+    pub fn covering_contracts(&self, input_codec: &str, decoder: &str, stderr_mode: &str) -> usize {
+        let Some(build) = self.build.as_ref() else {
+            return 0;
+        };
+        let observed = ObservedBuild {
+            ffmpeg_version: &build.ffmpeg_version,
+            binary_sha256: &build.binary_sha256,
+            buildconf_sha256: &build.buildconf_sha256,
+            stderr_mode,
+            input_codec,
+            decoder,
+        };
+        self.contracts
+            .iter()
+            .filter(|contract| contract.covers_build(&observed))
+            .count()
+    }
+
     pub fn contract_for(
         &self,
         input_codec: &str,

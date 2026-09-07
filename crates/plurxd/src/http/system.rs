@@ -1563,6 +1563,16 @@ pub struct SettingsDto {
     /// Additive, behavior-neutral playback-control v1 advertisement. Off by
     /// default until clients ship passive reporters.
     pub playback_control_protocol_v1: bool,
+    /// Whether an operator has asked this node for the health-qualified
+    /// artifact identity. What the node actually does with the request is
+    /// `decoder_health_qualification`, below — the two are separate fields
+    /// because they are separate facts, and a surface that showed only the
+    /// request would tell an operator their node is enforcing something it is
+    /// not.
+    pub decoder_health_qualified_artifacts: bool,
+    /// What this node measured about itself, and the identity it therefore
+    /// plans into. Read-only.
+    pub decoder_health_qualification: DecoderHealthQualification,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -1657,6 +1667,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     // for this node's cache ownership when a cache location is configured.
     let settings = state.store.settings_snapshot().await?;
     let setting = |key: &str| settings.get(key).cloned();
+    let decoder_health_requested =
+        setting(keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS).as_deref() == Some("1");
     let live_tv = crate::live_tv::LiveTvConfig::from_snapshot(&settings, &state.node_id);
     let server_name = setting(keys::SERVER_NAME).unwrap_or_else(|| state.server_name.clone());
     let tmdb_api_key = setting(keys::TMDB_API_KEY).unwrap_or_default();
@@ -1836,6 +1848,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
         playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
             == Some("1"),
+        decoder_health_qualified_artifacts: decoder_health_requested,
+        decoder_health_qualification: DecoderHealthQualification::of(
+            &state.transcode.published_artifact_qualification(),
+            decoder_health_requested,
+        ),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -1872,6 +1889,65 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
 }
 
 /// GET /api/v1/settings (admin)
+/// What this node measured about its own decode, and the artifact identity it
+/// therefore plans into.
+///
+/// Read-only, and reported next to the request rather than instead of it. The
+/// request is what an operator asked for; this is what the node can honour.
+/// A surface that showed only the first would let someone believe every
+/// transcode on the node is now verified when nothing about it changed.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DecoderHealthQualification {
+    /// The content-addressed namespace this node plans into right now.
+    pub namespace: String,
+    /// Whether it is enforcing producer health receipts.
+    pub enforcing: bool,
+    /// Whether this node *could* enforce them if asked — that is, whether a
+    /// retained diagnostic contract covers its own FFmpeg build for at least
+    /// one decoder it measured.
+    pub eligible: bool,
+    /// The FFmpeg version this node measured for itself, if any.
+    pub measured_build: Option<String>,
+    /// `codec/decoder` pairs the startup probe measured.
+    pub measured_decoders: Vec<String>,
+    /// The subset a retained contract covers on this build.
+    pub covered_decoders: Vec<String>,
+    /// Machine-readable reason the request is not in force, if it is not.
+    pub refusal: Option<String>,
+    /// One sentence an operator can act on.
+    pub explanation: Option<String>,
+    /// The stored request differs from the one this node published, so a
+    /// restart is owed before the request means anything.
+    ///
+    /// The pair is the point. Reporting only the published answer would hide a
+    /// saved change; reporting only the request would claim a change that has
+    /// not happened. Both are true facts about different things.
+    pub pending_restart: bool,
+}
+
+impl DecoderHealthQualification {
+    /// `published` is what this node decided at start; `requested` is what the
+    /// store says now. Everything else here describes the published answer,
+    /// because that is what planning uses — a surface reporting a fresh
+    /// recomputation would say "enforcing" on a node that is not.
+    fn of(readiness: &crate::transcode::ArtifactQualificationReadiness, requested: bool) -> Self {
+        let pair = |(codec, decoder): &(String, String)| format!("{codec}/{decoder}");
+        Self {
+            namespace: readiness.effective.namespace().to_owned(),
+            enforcing: readiness.effective.enforces_receipt(),
+            eligible: readiness.eligible(),
+            measured_build: readiness.measured_build.clone(),
+            measured_decoders: readiness.measured_decoders.iter().map(pair).collect(),
+            covered_decoders: readiness.covered_decoders.iter().map(pair).collect(),
+            refusal: readiness.refusal.map(|refusal| refusal.name().to_owned()),
+            explanation: readiness
+                .refusal
+                .map(|refusal| refusal.explanation().to_owned()),
+            pending_restart: requested != readiness.requested,
+        }
+    }
+}
+
 pub async fn get_settings(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -1911,6 +1987,7 @@ pub struct UpdateSettings {
     pub vod_presentation: Option<bool>,
     pub vod_live_recovery: Option<bool>,
     pub playback_control_protocol_v1: Option<bool>,
+    pub decoder_health_qualified_artifacts: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -2035,6 +2112,7 @@ impl UpdateSettings {
             || self.vod_presentation.is_some()
             || self.vod_live_recovery.is_some()
             || self.playback_control_protocol_v1.is_some()
+            || self.decoder_health_qualified_artifacts.is_some()
             || self.vod_working_set_bytes.is_some()
             || self.vod_block_budget_secs.is_some()
             || self.vod_materialize_budget_secs.is_some()
@@ -2750,6 +2828,21 @@ pub async fn update_settings(
                 if on { "1" } else { "0" },
             )
             .await?;
+    }
+    if let Some(on) = req.decoder_health_qualified_artifacts {
+        state
+            .store
+            .put_setting(
+                keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS,
+                if on { "1" } else { "0" },
+            )
+            .await?;
+        // Stored, and deliberately not applied here. This value is part of
+        // every cache key the node computes, so applying it to a live node
+        // would move the key space under work already running. The response
+        // reports the stored request and the published answer separately, so
+        // the operator sees that a restart is owed rather than being told the
+        // change is in force.
     }
     if let Some(on) = req.vod_index_cluster_cache {
         state

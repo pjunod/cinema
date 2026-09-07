@@ -1175,6 +1175,20 @@ pub mod keys {
     /// HLS sessions. Explicit opt-in until every client has a passive reporter
     /// and mixed-fleet behavior has been measured.
     pub const PLAYBACK_CONTROL_PROTOCOL_V1: &str = "playback.control_protocol_v1";
+    /// Ask this node to plan into the health-qualified artifact identity, so a
+    /// transcode may only be reused when its producer's own receipt says the
+    /// decode was clean.
+    ///
+    /// A request, not a switch. It names a *different content-addressed key
+    /// space*, so a node that turned it on without being able to honour it
+    /// would rotate its whole transcode cache and then refuse every generation
+    /// it produced. The node intersects this with what it has actually
+    /// measured — a diagnostic contract covering its own FFmpeg build, and a
+    /// decoder inventory that names implementations that contract was
+    /// qualified against — and stays unqualified with a stated reason when it
+    /// cannot honour the request. Absent or `0` is off.
+    pub const DECODER_HEALTH_QUALIFIED_ARTIFACTS: &str =
+        "playback.decoder_health_qualified_artifacts";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite

@@ -200,12 +200,16 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
   const run = (fn, ids) => new Function(
-    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS",
-    `${shippedSource(fn)} return ${fn};`,
+    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard",
+    // The newline matters: a shipped function may be followed by a line
+    // comment, and `shippedSource` returns everything up to the next
+    // declaration. Without it the injected `return` lands inside that comment
+    // and the composed source silently returns nothing.
+    `${shippedSource(fn)}\nreturn ${fn};`,
   )(
     async (path, opts) => { writes[fn] = { path, body: opts.body }; return {}; },
     { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
-    (v) => v, () => {}, () => {}, {}, {},
+    (v) => v, () => {}, () => {}, {}, {}, () => "",
   );
   const defaults = ["pal", "psl", "psm", "perr"];
   // The two switches that are off on purpose moved to Developer, so Streaming
@@ -213,11 +217,17 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // something back on that an operator deliberately turned off.
   const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "serr"];
   const developer = ["pcpv1", "dverr"];
+  // `vdcard` is read too: this handler replaces its own card rather than
+  // re-rendering the panel, because the four cards beside it stage unsaved
+  // edits. The handler's own catch would swallow a missing-id assertion, so
+  // the id has to be listed here for the guard to mean anything.
+  const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
   const experimental = ["phs", "dxerr"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
     run("saveDeveloper", developer)({ disabled: false }),
+    run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
     run("saveExperimental", experimental)({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
@@ -227,6 +237,11 @@ test("Playback saves per card, and each card writes only its own fields", () => 
       "vod_materialize_budget_secs", "vod_presentation", "vod_working_set_bytes",
     ]);
     assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
+    // Its own card, its own field. The verified-decode request renames every
+    // cached transcode on the node, so it must never ride along with a save
+    // an operator made for something else.
+    assert.deepEqual(Object.keys(writes.saveVerifiedDecode.body).sort(), ["decoder_health_qualified_artifacts"]);
+    assert.equal(writes.saveVerifiedDecode.path, "/settings");
     assert.deepEqual(Object.keys(writes.saveExperimental.body).sort(), ["hls_typeless_sliding"]);
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
@@ -237,7 +252,10 @@ test("Playback saves per card, and each card writes only its own fields", () => 
 test("Developer is where the switches that cost something live", () => {
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("liveTvSettingsCard")}${shippedSource("developerPanel")} return developerPanel;`,
+    // Joined with newlines, not concatenated: `shippedSource` returns
+    // everything up to the next declaration, which may end inside a trailing
+    // line comment — and that would swallow whatever is glued after it.
+    `${["liveTvSettingsCard", "verifiedDecodeCard", "developerPanel"].map(shippedSource).join("\n")}\nreturn developerPanel;`,
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
@@ -247,7 +265,7 @@ test("Developer is where the switches that cost something live", () => {
     esc,
   );
   const html = panel({ playback_control_protocol_v1: true, hls_typeless_sliding: false });
-  for (const id of ["pcpv1", "phs"]) {
+  for (const id of ["pcpv1", "phs", "dhqa"]) {
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
   assert.match(html, /FOOT:saveDeveloper/);
@@ -262,6 +280,93 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /runtime settings; no special build/);
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
+});
+
+test("Verified decode states its cost, its prerequisites, and what this node measured", () => {
+  const card = new Function(
+    "setCard", "cardHead", "togRow", "setCardFoot", "esc",
+    `${shippedSource("verifiedDecodeCard")}\nreturn verifiedDecodeCard;`,
+  )(
+    (body) => `CARD[${body}]`,
+    (title, sub, tools) => `CARDHEAD:${title}|${sub || ""}|${tools || ""}`,
+    (id, label, note) => `TOG:${id}|${label}|${note}`,
+    (fn) => `FOOT:${fn}`,
+    esc,
+  );
+
+  // A node with nothing measured: every check fails, and each one says what
+  // it means rather than only that it failed.
+  const bare = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: false,
+    measured_build: null, measured_decoders: [], covered_decoders: [],
+    refusal: "not_requested", explanation: "Not requested on this node.",
+  } });
+  assert.match(bare, /TOG:dhqa\|/);
+  assert.match(bare, /FOOT:saveVerifiedDecode/);
+  // On a node that cannot honour the request there is no cost, and saying
+  // there is teaches an operator to stop reading the warnings.
+  assert.match(bare, /cannot honour the request today/);
+  assert.doesNotMatch(bare, /This node can honour the request/);
+  // Why the feature exists at all, in the words the failure actually takes.
+  assert.match(bare, /drop every frame of a file and still exit successfully/);
+  assert.equal((bare.match(/✗/g) || []).length, 3, "three unmet checks, each shown");
+  assert.match(bare, /Not requested on this node\./);
+
+  // Requested, and refused with the reason the fleet will actually hit.
+  const refused = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: false,
+    measured_build: "ffmpeg version 5.1.9", measured_decoders: ["h264/h264", "hevc/hevc"],
+    covered_decoders: [], refusal: "no_contract_covers_this_build",
+    explanation: "No retained diagnostic contract covers this node's FFmpeg build under the qualified log flags. Capture one from this build before enabling.",
+  } });
+  assert.match(refused, /Requested · not in force/, "the state is not the request");
+  assert.match(refused, /No retained diagnostic contract covers/);
+  assert.match(refused, /<code>h264\/h264<\/code>/, "what it did measure is still shown");
+  assert.equal((refused.match(/✓/g) || []).length, 2);
+  assert.equal((refused.match(/✗/g) || []).length, 1);
+
+  // In force.
+  const on = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
+    namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, eligible: true,
+    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/h264"],
+    covered_decoders: ["h264/h264"], refusal: null, explanation: null,
+  } });
+  assert.match(on, /Enforcing/);
+  assert.equal((on.match(/✗/g) || []).length, 0);
+  assert.doesNotMatch(on, /Not in force/);
+  // An eligible node is the one that actually pays, so it is the one told.
+  assert.match(on, /This node can honour the request/);
+  assert.match(on, /renames every transcode it caches/);
+  assert.match(on, /pays the same rename a second time/);
+
+  // Saved and not yet applied is a third state, and it is neither of the
+  // other two: reporting the request as the state would claim a change that
+  // has not happened, and reporting only the published answer would hide one
+  // an operator just made.
+  const pending = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: true,
+    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/h264"],
+    covered_decoders: ["h264/h264"], refusal: "not_requested",
+    explanation: "Not requested on this node.", pending_restart: true,
+  } });
+  assert.match(pending, /Saved · restart to apply/);
+  assert.match(pending, /applies the request when it next starts/);
+  assert.match(pending, /move that key space under work already in flight/);
+
+  // FFmpeg's version banner and decoder names are somebody else's strings.
+  const hostile = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: false,
+    measured_build: "<img src=x onerror=alert(1)>", measured_decoders: ["<script>/x"],
+    covered_decoders: [], refusal: "not_requested", explanation: "<b>x</b>",
+  } });
+  assert.doesNotMatch(hostile, /<img src=x/);
+  assert.doesNotMatch(hostile, /<script>/);
+  assert.match(hostile, /&lt;img src=x/);
+
+  // A node that has never answered still renders. The settings payload is the
+  // only source for this card, and a page that throws on a missing field is a
+  // Settings section that cannot be opened at all.
+  assert.doesNotThrow(() => card({}));
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {

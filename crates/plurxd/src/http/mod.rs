@@ -3424,6 +3424,112 @@ mod tests {
         }
     }
 
+    /// The verified-decode request is stored, and the node's answer to it is
+    /// reported separately.
+    ///
+    /// Three facts, three fields. The request is what an operator asked for;
+    /// the published answer is what this node decided at start and what
+    /// planning actually reads; `pending_restart` is the gap between them.
+    /// Collapsing any pair would let a surface claim a change that has not
+    /// happened, or hide one that has been saved.
+    ///
+    /// The specific refusal this host reports is deliberately not asserted:
+    /// `diagnostic_policy()` is a process global shared by every test in this
+    /// binary, so pinning its exact value here would make this gate depend on
+    /// test order. What is asserted is the shape — which is what the surface
+    /// promises.
+    #[tokio::test]
+    async fn the_verified_decode_request_is_stored_and_the_node_answers_it_separately() {
+        use plurx_core::store::keys;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["decoder_health_qualified_artifacts"], json!(false));
+        assert_eq!(
+            state
+                .store
+                .get_setting(keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS)
+                .await
+                .expect("setting"),
+            None,
+            "an upgrade must not rotate a node's transcode cache keys implicitly"
+        );
+        assert_eq!(
+            initial["decoder_health_qualification"]["namespace"],
+            json!(plurx_core::transcode::UNQUALIFIED_ARTIFACT_NAMESPACE)
+        );
+        assert_eq!(
+            initial["decoder_health_qualification"]["enforcing"],
+            json!(false)
+        );
+        assert_eq!(
+            initial["decoder_health_qualification"]["refusal"],
+            json!("not_requested")
+        );
+        assert_eq!(
+            initial["decoder_health_qualification"]["pending_restart"],
+            json!(false)
+        );
+
+        for enabled in [true, false] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "decoder_health_qualified_artifacts": enabled }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["decoder_health_qualified_artifacts"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+            // Requested or not, this host has no covering contract, so the
+            // node stays where it is — and says which of the two reasons it
+            // is, so the request and the state can never be confused.
+            assert_eq!(
+                body["decoder_health_qualification"]["namespace"],
+                json!(plurx_core::transcode::UNQUALIFIED_ARTIFACT_NAMESPACE),
+                "a request the node cannot honour must not move its key space"
+            );
+            // The published answer does not move: this node published at
+            // start, and a live rotation of its cache key space is exactly
+            // what the milestone refuses to do.
+            assert_eq!(
+                body["decoder_health_qualification"]["pending_restart"],
+                json!(enabled),
+                "a saved request that is not yet in force says so"
+            );
+            assert_eq!(
+                body["decoder_health_qualification"]["refusal"],
+                json!("not_requested"),
+                "the published answer describes what this node published, and \
+                 nothing has republished it"
+            );
+            assert!(
+                body["decoder_health_qualification"]["explanation"]
+                    .as_str()
+                    .is_some_and(|explanation| explanation.ends_with('.')),
+                "a refusal an operator cannot act on is the same as none"
+            );
+            // And the running manager agrees with what the surface reported.
+            assert_eq!(
+                state.transcode.artifact_qualification(),
+                plurx_core::transcode::ArtifactQualification::Unqualified
+            );
+        }
+    }
+
     #[tokio::test]
     async fn live_tv_settings_are_runtime_only_generation_cas_and_enable_fenced() {
         let (app, state) = test_app_with_state();

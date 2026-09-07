@@ -825,6 +825,13 @@ impl AppState {
                 system.tone_map.selected(),
             )
             .with_decoders(system.decoders.clone())
+            // Cloned from the policy this process installed, which happens in
+            // `probe_system` before this state is built. Handing it over makes
+            // the dependency visible in one place instead of being a global
+            // this manager reaches for at an unstated moment.
+            .with_diagnostic_policy(std::sync::Arc::new(
+                crate::decoder_health::diagnostic_policy().clone(),
+            ))
             .with_measured_decoders(system.measured_decoders.clone())
             .with_decode_probe(system.decode_probe_identity.clone())
             .with_dv_strippable(system.dovi_rpu)

@@ -13019,7 +13019,54 @@ function developerPanel(settings){
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback, and none of it is a different binary: these are runtime settings; no special build is needed.")}${liveTvSettingsCard(settings)}${preview}${prepared}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback, and none of it is a different binary: these are runtime settings; no special build is needed.")}${liveTvSettingsCard(settings)}${preview}${verifiedDecodeCard(settings)}${prepared}${experimental}`;
+}
+// Verified decode artifacts.
+//
+// The only control in this panel that changes what a cached transcode is
+// *named*, so it is the only one where turning it on has a cost before it has
+// an effect: every existing transcode on the node becomes unreachable and is
+// made again. It is also the only one whose prerequisites the node can check
+// for itself, so it shows what it measured rather than asking the operator to
+// go and find out.
+function verifiedDecodeCard(s){
+  const q=s.decoder_health_qualification||{};
+  const pill=q.pending_restart
+    ? `<span class="pill warn">Saved · restart to apply</span>`
+    : (q.enforcing
+        ? `<span class="pill">Enforcing</span>`
+        : (s.decoder_health_qualified_artifacts
+            ? `<span class="pill warn">Requested · not in force</span>`
+            : `<span class="pill">Off</span>`));
+  // Everything below comes from FFmpeg — a version banner and decoder names —
+  // so it is somebody else's string in this page's markup.
+  const list=v=>(v&&v.length)?v.map(x=>`<code>${esc(x)}</code>`).join(" "):"<i>none</i>";
+  const ok=b=>b?"✓":"✗";
+  const checks=`
+      <h2 class="section">What this node measured</h2>
+      <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Nothing this build prints can be matched to a contract, so nothing it prints is evidence."}</small></span></div>
+      <div class="tog"><span>${ok((q.measured_decoders||[]).length>0)} The startup probe named the decoders this build selects<small>${list(q.measured_decoders)}<br>A diagnostic contract is qualified against a <i>named</i> decoder, so a plan that names none can never be matched to one.</small></span></div>
+      <div class="tog"><span>${ok((q.covered_decoders||[]).length>0)} A retained diagnostic contract covers this build<small>${list(q.covered_decoders)}<br>Covered means covered as this node runs it: the same binary, the same decoder, and the qualified log flags. A contract qualified under different flags describes a different log.</small></span></div>`;
+  const refusal=q.explanation
+    ? `<div class="hint"><b>Not in force:</b> ${esc(q.explanation)}</div>`
+    : "";
+  // Conditional, because on a node that cannot honour the request there is no
+  // cost at all — and an unconditional warning above three crosses that
+  // contradict it teaches an operator to stop reading the warnings.
+  const cost=q.eligible
+    ? `<div class="hint"><b>This node can honour the request, so enabling it renames every transcode it caches.</b> The identity a cached transcode is keyed by includes whether its producer's health was verified, so the existing cache becomes unreachable and each title is transcoded again on next demand. Turning it off later pays the same rename a second time. Nothing is deleted; the old generations age out of the cache the way any other unused generation does. Apply it when the node is not busy.</div>`
+    : `<div class="hint"><b>This node cannot honour the request today</b>, so turning it on costs nothing and changes nothing until the checks below pass. On a node that <i>can</i> honour it, enabling renames every transcode it caches and each title is made again on next demand.</div>`;
+  const applies=q.pending_restart
+    ? `<div class="hint"><b>Saved, and not yet in force.</b> This node applies the request when it next starts. It is part of every cache key the node computes, so changing it while sessions are running would move that key space under work already in flight.</div>`
+    : `<div class="hint">The request takes effect when this node next starts, and is stored either way — so a node that later gains a covering contract picks it up without anyone coming back to it. A node that cannot honour it keeps serving normally under its present identity.</div>`;
+  return setCard(`${cardHead("Verified decode artifacts","A transcode may only be reused when the producer that made it left a receipt saying its decode was clean. FFmpeg can drop every frame of a file and still exit successfully; without this, that result is cached and served forever.",pill)}
+      ${cost}
+      ${checks}
+      ${refusal}
+      ${togRow("dhqa",`Require a producer health receipt <span class="pill">preview</span>`,"Asks this node for the verified identity. It is applied on the next start, and only if the three checks above pass.",s.decoder_health_qualified_artifacts)}
+      ${applies}
+      <div class="err" id="dhqerr"></div>
+      ${setCardFoot("saveVerifiedDecode")}`,{id:"vdcard"});
 }
 function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
@@ -14527,6 +14574,24 @@ async function saveDeveloper(btn){
     cacheSettings(await api("/settings",{method:"PUT",body:{
       playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveVerifiedDecode(btn){
+  const err=document.getElementById("dhqerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    // Re-render from the response rather than the request: the server decides
+    // whether the request is in force, and the operator needs to see that
+    // answer and not their own click reflected back at them.
+    const saved=await api("/settings",{method:"PUT",body:{
+      decoder_health_qualified_artifacts:document.getElementById("dhqa").checked}});
+    cacheSettings(saved);
+    toast("Verified decode setting saved"); if(btn) setCardSaved(btn);
+    // Replace this card only. A full panel re-render would rebuild the four
+    // cards beside it and silently discard anything typed into them — the Live
+    // TV card next door stages a whole configuration before its own Save.
+    const card=document.getElementById("vdcard");
+    if(card) card.outerHTML=verifiedDecodeCard(saved);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 async function saveExperimental(btn){

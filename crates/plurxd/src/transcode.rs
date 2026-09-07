@@ -10036,6 +10036,197 @@ async fn forget_unfenced_claim_with(
     }
 }
 
+/// Why a node is not planning into the health-qualified identity.
+///
+/// Ordered by what an operator should do about it, and stated rather than
+/// implied: a control whose only feedback is "still off" tells the person who
+/// turned it on nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualificationRefusal {
+    /// Nobody asked. The ordinary state of every deployed node.
+    NotRequested,
+    /// This node never measured its own FFmpeg, so no contract can be matched
+    /// to it and nothing it prints is evidence.
+    BuildUnmeasured,
+    /// The boot probe named no decoder implementation. A plan that names no
+    /// decoder can never be matched to a contract, which is qualified against
+    /// a named one.
+    NoDecoderMeasured,
+    /// The build is measured and decoders are named, but no retained
+    /// diagnostic contract covers this binary under the qualified log flags.
+    /// This is the fleet's ordinary state today and the one that takes real
+    /// work to leave: it needs a capture from this build.
+    NoContractCoversThisBuild,
+    /// More than one retained contract covers this build for the same codec,
+    /// decoder and log mode. `contract_for` refuses ambiguity, so this reads
+    /// as "no grammar" to everything downstream — but the fix is the opposite
+    /// of the one for having none, and an operator told to capture a contract
+    /// they already have twice would make it worse.
+    AmbiguousContract,
+    /// The request could not be read from the store at all, so this node does
+    /// not know what was asked of it. It keeps the identity it has, which is
+    /// the one every deployed node already has.
+    SettingUnreadable,
+}
+
+impl QualificationRefusal {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::BuildUnmeasured => "build_unmeasured",
+            Self::NoDecoderMeasured => "no_decoder_measured",
+            Self::NoContractCoversThisBuild => "no_contract_covers_this_build",
+            Self::AmbiguousContract => "ambiguous_contract",
+            Self::SettingUnreadable => "setting_unreadable",
+        }
+    }
+
+    /// One sentence an operator can act on, for the settings surface.
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::NotRequested => "Not requested on this node.",
+            Self::BuildUnmeasured => {
+                "This node has not measured its own FFmpeg build, so no diagnostic \
+                 contract can be matched to it."
+            }
+            Self::NoDecoderMeasured => {
+                "The startup probe named no decoder implementation, and a diagnostic \
+                 contract is qualified against a named decoder."
+            }
+            Self::NoContractCoversThisBuild => {
+                "No retained diagnostic contract covers this node's FFmpeg build under \
+                 the qualified log flags. Capture one from this build before enabling."
+            }
+            Self::AmbiguousContract => {
+                "More than one retained diagnostic contract covers this build for the \
+                 same decoder. Remove the duplicate; capturing another makes it worse."
+            }
+            Self::SettingUnreadable => {
+                "This node could not read the setting, so it kept the identity it had. \
+                 It will read it again on its next start."
+            }
+        }
+    }
+}
+
+/// What this node measured, and what it may therefore honour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactQualificationReadiness {
+    /// Whether an operator asked for the qualified identity on this node.
+    pub requested: bool,
+    /// The FFmpeg version this node measured for itself, if it measured one.
+    pub measured_build: Option<String>,
+    /// Every `(codec, decoder implementation)` the boot probe measured.
+    pub measured_decoders: Vec<(String, String)>,
+    /// The subset of those a retained diagnostic contract covers on this
+    /// build, under the qualified log flags.
+    pub covered_decoders: Vec<(String, String)>,
+    /// The identity this node will actually plan into.
+    pub effective: plurx_core::transcode::ArtifactQualification,
+    /// Why, when that is not the one requested.
+    pub refusal: Option<QualificationRefusal>,
+}
+
+impl ArtifactQualificationReadiness {
+    /// Whether the node could honour a request, whether or not one was made.
+    ///
+    /// Conjoined with the build rather than derived from coverage alone, so
+    /// this cannot answer "yes" on a node that never identified the binary the
+    /// coverage is about. Coverage is computed from the measured build, so the
+    /// two agree today; stating it here keeps the invariant local instead of
+    /// borrowing it from another module.
+    pub fn eligible(&self) -> bool {
+        self.measured_build.is_some() && !self.covered_decoders.is_empty()
+    }
+
+    /// What a node with no answer at all reports: the identity every deployed
+    /// node has, and a stated reason rather than a silent default.
+    fn unreadable() -> Self {
+        Self {
+            requested: false,
+            measured_build: None,
+            measured_decoders: Vec::new(),
+            covered_decoders: Vec::new(),
+            effective: plurx_core::transcode::ArtifactQualification::Unqualified,
+            refusal: Some(QualificationRefusal::SettingUnreadable),
+        }
+    }
+}
+
+/// The intersection an operator request is subject to.
+///
+/// The request names a different content-addressed key space, so honouring one
+/// this node cannot serve is not a degraded mode — it rotates the whole
+/// transcode cache to keys whose every generation is then refused, and the
+/// node re-encodes each title once per request forever while reporting healthy.
+/// So the request is intersected with three things this node measured about
+/// itself, and a node that fails any of them stays where it is and says which.
+///
+/// A free function, and deliberately not a method: it takes only measured
+/// facts, so the whole rule can be tested without a manager, a store, a cache
+/// or an FFmpeg.
+pub fn artifact_qualification_readiness(
+    requested: bool,
+    policy: &crate::decoder_health::DiagnosticPolicy,
+    measured: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+) -> ArtifactQualificationReadiness {
+    use plurx_core::transcode::ArtifactQualification;
+
+    let measured_build = policy
+        .measured_build()
+        .map(|build| build.ffmpeg_version.clone());
+    let mut measured_decoders = measured
+        .measured_codecs()
+        .map(|(codec, decoder)| (codec.to_owned(), decoder.to_owned()))
+        .collect::<Vec<_>>();
+    measured_decoders.sort();
+    // Covered means covered *as this node will run it*: the same codec, the
+    // same decoder implementation the probe measured, and the qualified log
+    // flags. A contract qualified under different flags describes a different
+    // log and cannot certify this one.
+    let covering = |codec: &str, decoder: &str| {
+        policy.covering_contracts(codec, decoder, crate::decoder_health::QUALIFIED_STDERR_MODE)
+    };
+    let covered_decoders = measured_decoders
+        .iter()
+        .filter(|(codec, decoder)| covering(codec, decoder) == 1)
+        .cloned()
+        .collect::<Vec<_>>();
+    // Ambiguity is refused upstream by returning no contract at all, so
+    // without this it would present as "capture one" to an operator who has
+    // captured two.
+    let ambiguous = measured_decoders
+        .iter()
+        .any(|(codec, decoder)| covering(codec, decoder) > 1);
+
+    let refusal = if !requested {
+        Some(QualificationRefusal::NotRequested)
+    } else if measured_build.is_none() {
+        Some(QualificationRefusal::BuildUnmeasured)
+    } else if measured_decoders.is_empty() {
+        Some(QualificationRefusal::NoDecoderMeasured)
+    } else if !covered_decoders.is_empty() {
+        None
+    } else if ambiguous {
+        Some(QualificationRefusal::AmbiguousContract)
+    } else {
+        Some(QualificationRefusal::NoContractCoversThisBuild)
+    };
+
+    ArtifactQualificationReadiness {
+        requested,
+        measured_build,
+        measured_decoders,
+        covered_decoders,
+        effective: if refusal.is_none() {
+            ArtifactQualification::HealthQualified
+        } else {
+            ArtifactQualification::Unqualified
+        },
+        refusal,
+    }
+}
+
 /// The final directory's own name, which is what identifies one production.
 ///
 /// `relative` is `<shard>/<identity>`, and the shard prefix is a directory
@@ -10406,6 +10597,13 @@ pub struct TranscodeManager {
     caps: EncoderCaps,
     /// Portable decoder names inventoried from this exact ffmpeg at boot.
     decoders: Vec<String>,
+    /// The diagnostic contracts this process resolved for its own FFmpeg.
+    ///
+    /// Handed to the manager rather than reached for, so the readiness this
+    /// node publishes is computed from a value someone had to supply — and so
+    /// a test can supply one. The default is the empty policy, which is the
+    /// honest answer for a manager nobody told anything.
+    diagnostic_policy: std::sync::Arc<crate::decoder_health::DiagnosticPolicy>,
     /// Which decoder this build was measured to select, per codec.
     ///
     /// Empty until the boot probe runs, and empty forever on a build whose
@@ -10439,7 +10637,13 @@ pub struct TranscodeManager {
     /// between a claim and its settlement would settle one identity's bytes
     /// under another's key. A change to it is a policy generation change, which
     /// is the mechanism this producer already has for exactly that.
-    artifact_qualification: std::sync::RwLock<plurx_core::transcode::ArtifactQualification>,
+    /// The whole published answer, not only its conclusion.
+    ///
+    /// The settings surface reports what this node *published*, and reporting
+    /// a fresh recomputation instead would let it say "enforcing" on a node
+    /// that is planning unqualified — the exact false certificate this control
+    /// exists to prevent, arriving through the control.
+    artifact_qualification: std::sync::RwLock<ArtifactQualificationReadiness>,
     /// Serializes probe → durable settings → publication. Without this, two
     /// concurrent admin PUTs can leave the store describing one request and
     /// the in-memory effective snapshot describing the other.
@@ -10774,12 +10978,20 @@ impl TranscodeManager {
             runtime_cache,
             subtitle_cache,
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
-            artifact_qualification: std::sync::RwLock::new(
-                plurx_core::transcode::ArtifactQualification::Unqualified,
-            ),
+            artifact_qualification: std::sync::RwLock::new(ArtifactQualificationReadiness {
+                requested: false,
+                measured_build: None,
+                measured_decoders: Vec::new(),
+                covered_decoders: Vec::new(),
+                effective: plurx_core::transcode::ArtifactQualification::Unqualified,
+                refusal: Some(QualificationRefusal::NotRequested),
+            }),
             rate_control_update: Mutex::new(()),
             caps,
             decoders: Vec::new(),
+            diagnostic_policy: std::sync::Arc::new(
+                crate::decoder_health::DiagnosticPolicy::default(),
+            ),
             measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(
             ),
             #[cfg(test)]
@@ -10907,6 +11119,16 @@ impl TranscodeManager {
     }
 
     /// Install the boot measurement of which decoder this build selects.
+    /// The contracts this node resolved for its own FFmpeg.
+    #[must_use]
+    pub fn with_diagnostic_policy(
+        mut self,
+        policy: std::sync::Arc<crate::decoder_health::DiagnosticPolicy>,
+    ) -> Self {
+        self.diagnostic_policy = policy;
+        self
+    }
+
     pub fn with_measured_decoders(
         mut self,
         measured: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
@@ -15935,29 +16157,124 @@ impl TranscodeManager {
 
     /// The artifact identity this node plans into right now.
     pub fn artifact_qualification(&self) -> plurx_core::transcode::ArtifactQualification {
-        *self
-            .artifact_qualification
+        self.artifact_qualification
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .effective
     }
 
-    /// Publish the effective artifact identity.
+    /// The answer this node published, exactly as it published it.
+    pub fn published_artifact_qualification(&self) -> ArtifactQualificationReadiness {
+        self.artifact_qualification
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What this node measured, and what it may therefore honour.
     ///
-    /// Test-only, and that is the sequencing rather than an omission. The
-    /// operator setting, the node effective-mode intersection and the
-    /// `Settings > Developer` control land together with the paths that cannot
-    /// yet publish a manifest, so a control that rotates a fleet's key space
-    /// never exists before everything behind it works. What is here is the
-    /// enforcement that control will select, complete and exercised.
+    /// Reads no setting: it answers "could this node do it", which the
+    /// settings surface needs in order to explain a refusal *before* an
+    /// operator asks for one and gets it.
+    pub fn artifact_qualification_readiness(
+        &self,
+        requested: bool,
+    ) -> ArtifactQualificationReadiness {
+        artifact_qualification_readiness(
+            requested,
+            &self.diagnostic_policy,
+            &self.measured_decoders,
+        )
+    }
+
+    /// Read the operator request, intersect it with what this node measured,
+    /// and publish the identity this node will actually plan into.
+    ///
+    /// **Called once, at start.** Not on every write, and that is the whole
+    /// design rather than an omission. This value is part of every cache key
+    /// the node computes, so moving it on a live node moves the key space
+    /// under work that is already running: a session that resolved its plan a
+    /// second ago publishes into a directory the next lookup will not name, a
+    /// resumable production cannot find its own earlier parts and — under the
+    /// qualified identity — those parts carry no receipt, so the film it
+    /// restarts can never be kept. A control that quietly did that to a busy
+    /// node would be a worse failure than the one this effort exists to fix,
+    /// because it would be caused by the fix.
+    ///
+    /// So the request is stored when it is written and read when the node next
+    /// starts, which is also how a fleet rolls one out. The settings surface
+    /// reports the stored request and the published answer as separate facts,
+    /// so an operator can see that a restart is owed.
+    ///
+    /// A store that cannot be read is not an excuse to guess, and it is also
+    /// not a reason to refuse to start a media server. The node keeps the
+    /// identity every deployed node already has and says it could not read the
+    /// setting, which is true and is visible on the settings surface.
+    pub async fn publish_artifact_qualification(&self) -> ArtifactQualificationReadiness {
+        let stored = self
+            .store
+            .get_setting(plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS)
+            .await;
+        let readiness = match stored {
+            Ok(value) => self.artifact_qualification_readiness(value.as_deref() == Some("1")),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not read the verified-decode request; keeping the unqualified identity"
+                );
+                ArtifactQualificationReadiness::unreadable()
+            }
+        };
+        let requested = readiness.requested;
+        let previous = self.artifact_qualification();
+        *self
+            .artifact_qualification
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = readiness.clone();
+        if previous != readiness.effective {
+            // A change here rotates every recipe hash this node computes, so
+            // it is logged at the level an operator reading a startup log will
+            // see, with the reason rather than only the outcome.
+            tracing::warn!(
+                namespace = readiness.effective.namespace(),
+                previous = previous.namespace(),
+                requested,
+                covered = readiness.covered_decoders.len(),
+                refusal = readiness.refusal.map(QualificationRefusal::name),
+                "the effective artifact identity changed; this node's transcode cache keys move with it"
+            );
+        } else {
+            tracing::info!(
+                namespace = readiness.effective.namespace(),
+                requested,
+                covered = readiness.covered_decoders.len(),
+                refusal = readiness.refusal.map(QualificationRefusal::name),
+                "published the effective artifact identity"
+            );
+        }
+        readiness
+    }
+
+    /// Publish an identity directly, without the intersection.
+    ///
+    /// Test-only, and it must stay that way. Every test of the enforcement
+    /// behind this control runs on a host no diagnostic contract covers, so
+    /// the real publisher would — correctly — refuse them all. This says
+    /// "pretend the prerequisites are met"; the real publisher is what decides
+    /// whether they are.
     #[cfg(test)]
     pub(crate) fn test_publish_artifact_qualification(
         &self,
         qualification: plurx_core::transcode::ArtifactQualification,
     ) {
-        *self
-            .artifact_qualification
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = qualification;
+        {
+            let mut published = self
+                .artifact_qualification
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            published.effective = qualification;
+            published.refusal = None;
+        }
         tracing::info!(
             namespace = qualification.namespace(),
             "published the effective artifact identity"
@@ -39080,6 +39397,336 @@ pub(crate) mod tests {
                     "an unqualified row records no digest, so nothing that keys on one changes"
                 );
             }
+        }
+    }
+
+    /// A request is not a switch: the node intersects it with what it
+    /// measured about itself.
+    ///
+    /// Honouring a request this node cannot serve is not a degraded mode. The
+    /// identity names a content-addressed key space, so the node would rotate
+    /// its whole transcode cache to keys whose every generation is then
+    /// refused — re-encoding each title once per request, forever, while every
+    /// counter reads healthy. Each of the three prerequisites is checked here
+    /// on its own, because a refusal an operator cannot act on is the same as
+    /// no refusal at all.
+    #[test]
+    fn a_request_for_the_qualified_identity_is_intersected_with_what_the_node_measured() {
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let contract =
+            |input_codec: &str, decoder: &str| crate::decoder_health::DiagnosticContract {
+                id: format!("fixture-{input_codec}-{decoder}"),
+                host: "workstation".to_owned(),
+                ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+                binary_sha256: "b".repeat(64),
+                buildconf_sha256: "c".repeat(64),
+                stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+                input_codec: input_codec.to_owned(),
+                decoder: decoder.to_owned(),
+                require_context_addresses: true,
+                primary_message: "Decoding error:".to_owned(),
+                subordinate_message: None,
+                attributes_every_failure: false,
+                error_detail: "corrupt input packet".to_owned(),
+                fixture: "f".to_owned(),
+                fixture_sha256: "d".repeat(64),
+                scope: "workstation".to_owned(),
+                backend_fault_detail: None,
+            };
+        let build = || crate::decoder_health::MeasuredBuild {
+            ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+        };
+        let covered = crate::decoder_health::DiagnosticPolicy::new(
+            Some(build()),
+            vec![contract("h264", "h264")],
+        );
+        let measured = MeasuredDecoders::from_measured(&[("h264", "h264"), ("hevc", "hevc")]);
+
+        // Nobody asked. Every deployed node, and the reason it is a separate
+        // refusal rather than an absent one: the surface says so out loud.
+        let idle = artifact_qualification_readiness(false, &covered, &measured);
+        assert_eq!(idle.effective, ArtifactQualification::Unqualified);
+        assert_eq!(idle.refusal, Some(QualificationRefusal::NotRequested));
+        assert!(
+            idle.eligible(),
+            "a node that could honour a request reports so before one is made, \
+             so an operator can see the answer before paying for it"
+        );
+
+        // Asked, and every prerequisite met. Only the covered pair is listed:
+        // hevc was measured and is not covered, and saying otherwise would
+        // claim a grammar that does not exist.
+        let asked = artifact_qualification_readiness(true, &covered, &measured);
+        assert_eq!(asked.effective, ArtifactQualification::HealthQualified);
+        assert_eq!(asked.refusal, None);
+        assert_eq!(
+            asked.covered_decoders,
+            vec![("h264".to_owned(), "h264".to_owned())]
+        );
+        assert_eq!(asked.measured_decoders.len(), 2);
+
+        // No build measured: nothing this node prints can be matched to a
+        // contract, so nothing it prints is evidence.
+        let unmeasured =
+            crate::decoder_health::DiagnosticPolicy::new(None, vec![contract("h264", "h264")]);
+        let readiness = artifact_qualification_readiness(true, &unmeasured, &measured);
+        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::BuildUnmeasured)
+        );
+        assert!(
+            !readiness.eligible() && readiness.covered_decoders.is_empty(),
+            "coverage is about a build, so a node that identified none has none"
+        );
+
+        // No decoder named. A contract is qualified against a *named* decoder,
+        // so a plan that names none can never be matched to one.
+        let readiness =
+            artifact_qualification_readiness(true, &covered, &MeasuredDecoders::default());
+        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::NoDecoderMeasured)
+        );
+
+        // Build measured, decoders named, and no contract covers it. This is
+        // the fleet's state today and the only refusal that takes real work to
+        // leave: it needs a capture from this build.
+        let uncovered = crate::decoder_health::DiagnosticPolicy::new(Some(build()), Vec::new());
+        let readiness = artifact_qualification_readiness(true, &uncovered, &measured);
+        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::NoContractCoversThisBuild)
+        );
+        assert!(!readiness.eligible());
+        assert_eq!(
+            readiness.measured_decoders.len(),
+            2,
+            "what it did measure is still reported; a refusal that hides the \
+             evidence leaves an operator with nothing to fix"
+        );
+
+        // A contract for a decoder this build does not select covers nothing.
+        // The measurement is what the plan will name, so a contract qualified
+        // against `libdav1d` says nothing about a node whose probe named
+        // `av1` — and the family name is exactly the substitution M3d exists
+        // to refuse.
+        let wrong_decoder = crate::decoder_health::DiagnosticPolicy::new(
+            Some(build()),
+            vec![contract("av1", "libdav1d")],
+        );
+        let readiness = artifact_qualification_readiness(
+            true,
+            &wrong_decoder,
+            &MeasuredDecoders::from_measured(&[("av1", "av1")]),
+        );
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::NoContractCoversThisBuild)
+        );
+    }
+
+    /// The publisher writes what the intersection decided, and the identity it
+    /// writes moves every cache key the node computes.
+    ///
+    /// The free-function test above proves the rule. This proves the two
+    /// things only the manager can: that the published value is what planning
+    /// actually reads, and that it is part of the recipe hash. Without the
+    /// second, every claim in this milestone about renaming a node's cache is
+    /// an assertion about code nobody ran.
+    #[tokio::test]
+    async fn the_published_identity_is_the_request_this_node_can_honour_and_moves_its_cache_keys() {
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let (mgr, _work, _cache) = cached_manager(&store);
+        // A contract covering exactly what this manager measured, on the build
+        // it was told it is running. Nothing else can produce a qualified
+        // node, which is why the policy is handed to the manager rather than
+        // reached for.
+        let contract = crate::decoder_health::DiagnosticContract {
+            id: "fixture-hevc".to_owned(),
+            host: "workstation".to_owned(),
+            ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "hevc".to_owned(),
+            decoder: "hevc".to_owned(),
+            require_context_addresses: true,
+            primary_message: "Decoding error:".to_owned(),
+            subordinate_message: None,
+            attributes_every_failure: false,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "workstation".to_owned(),
+            backend_fault_detail: None,
+        };
+        let mgr = mgr
+            .with_measured_decoders(MeasuredDecoders::from_measured(&[("hevc", "hevc")]))
+            .with_diagnostic_policy(Arc::new(crate::decoder_health::DiagnosticPolicy::new(
+                Some(crate::decoder_health::MeasuredBuild {
+                    ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+                    binary_sha256: "b".repeat(64),
+                    buildconf_sha256: "c".repeat(64),
+                }),
+                vec![contract],
+            )));
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+
+        // Nothing asked, so nothing moves — and the published answer says so
+        // rather than being an absence.
+        let published = mgr.publish_artifact_qualification().await;
+        assert_eq!(published.effective, ArtifactQualification::Unqualified);
+        assert_eq!(published.refusal, Some(QualificationRefusal::NotRequested));
+        assert!(published.eligible(), "this node could honour a request");
+        assert_eq!(
+            mgr.artifact_qualification(),
+            ArtifactQualification::Unqualified,
+            "planning reads the published value"
+        );
+        let unqualified_hash = recipe_hash_for(&mgr, &file, 1080).await;
+
+        // Asked, and honoured.
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("request");
+        let published = mgr.publish_artifact_qualification().await;
+        assert_eq!(published.effective, ArtifactQualification::HealthQualified);
+        assert_eq!(published.refusal, None);
+        assert!(published.requested);
+        assert_eq!(
+            mgr.artifact_qualification(),
+            ArtifactQualification::HealthQualified
+        );
+        assert_eq!(
+            mgr.published_artifact_qualification(),
+            published,
+            "the surface reports what was published, not a recomputation"
+        );
+        let qualified_hash = recipe_hash_for(&mgr, &file, 1080).await;
+        assert_ne!(
+            unqualified_hash, qualified_hash,
+            "the identity is part of the cache key: turning this on renames \
+             every transcode the node caches, which is the cost the settings \
+             card states and the reason this is not applied to a live node"
+        );
+
+        // And back. The rename is paid a second time, which is worth knowing
+        // before turning it off as casually as it was turned on.
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "0")
+            .await
+            .expect("withdraw");
+        let published = mgr.publish_artifact_qualification().await;
+        assert_eq!(published.effective, ArtifactQualification::Unqualified);
+        assert_eq!(published.refusal, Some(QualificationRefusal::NotRequested));
+        assert_eq!(
+            recipe_hash_for(&mgr, &file, 1080).await,
+            unqualified_hash,
+            "withdrawing the request returns the node to its own earlier keys"
+        );
+    }
+
+    /// Two contracts covering one build is a different problem from none, and
+    /// the fix for one makes the other worse.
+    ///
+    /// `contract_for` refuses ambiguity by returning no contract at all, so
+    /// without this it reads downstream as "capture one" to an operator who
+    /// has captured two.
+    #[test]
+    fn ambiguous_coverage_is_not_reported_as_missing_coverage() {
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+
+        let contract = |id: &str| crate::decoder_health::DiagnosticContract {
+            id: id.to_owned(),
+            host: "workstation".to_owned(),
+            ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "h264".to_owned(),
+            decoder: "h264".to_owned(),
+            require_context_addresses: true,
+            primary_message: "Decoding error:".to_owned(),
+            subordinate_message: None,
+            attributes_every_failure: false,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "workstation".to_owned(),
+            backend_fault_detail: None,
+        };
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
+                binary_sha256: "b".repeat(64),
+                buildconf_sha256: "c".repeat(64),
+            }),
+            vec![contract("first"), contract("second")],
+        );
+        let readiness = artifact_qualification_readiness(
+            true,
+            &policy,
+            &MeasuredDecoders::from_measured(&[("h264", "h264")]),
+        );
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::AmbiguousContract)
+        );
+        assert!(readiness.covered_decoders.is_empty());
+        assert!(!readiness.eligible());
+        assert!(
+            readiness
+                .refusal
+                .expect("refusal")
+                .explanation()
+                .contains("Remove the duplicate"),
+            "the instruction must not be the one that makes it worse"
+        );
+    }
+
+    /// Every refusal has a distinct name and a sentence someone can act on.
+    ///
+    /// A control whose only feedback is "still off" tells the person who
+    /// turned it on nothing, and this one is off by default on every node.
+    #[test]
+    fn every_qualification_refusal_says_what_to_do_about_it() {
+        let all = [
+            QualificationRefusal::NotRequested,
+            QualificationRefusal::BuildUnmeasured,
+            QualificationRefusal::NoDecoderMeasured,
+            QualificationRefusal::NoContractCoversThisBuild,
+        ];
+        let names = all.map(QualificationRefusal::name);
+        let mut unique = names.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), all.len(), "each refusal is distinguishable");
+        for refusal in all {
+            let explanation = refusal.explanation();
+            assert!(explanation.ends_with('.'), "{}", refusal.name());
+            assert!(
+                explanation.len() > 24,
+                "{} explains nothing",
+                refusal.name()
+            );
+            assert!(
+                !refusal.name().contains(' ') && refusal.name() == refusal.name().to_lowercase(),
+                "a machine-readable name"
+            );
         }
     }
 

@@ -42,6 +42,8 @@ M3E_MERGED_HEAD = "c54fb05276c31a5a39e91157f35f1bdb6b049a01"
 M3C5_TASK_BASE = M3E_MERGED_HEAD
 M3C5_MERGED_HEAD = "5e0f7f1f51d4476fabee81d278c47ccad6baf1a2"
 M5A_CENSUS_TASK_BASE = M3C5_MERGED_HEAD
+M5A_CENSUS_MERGED_HEAD = "b2dcf458500e210032197b3a3c73abbbe89092b8"
+M3F_TASK_BASE = M5A_CENSUS_MERGED_HEAD
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -54,6 +56,10 @@ REPLICATED = ROOT / "crates/plurx-core/src/store/replicated.rs"
 HIQLITE = ROOT / "crates/plurx-core/src/store/hiqlite.rs"
 DV_CONVERSION = ROOT / "crates/plurx-core/src/store/sqlite/dv_conversion.rs"
 SQLITE_STORE = ROOT / "crates/plurx-core/src/store/sqlite/mod.rs"
+HTTP_SYSTEM = ROOT / "crates/plurxd/src/http/system.rs"
+WEB_INDEX = ROOT / "crates/plurxd/src/web/index.html"
+WEB_SETTINGS_TEST = ROOT / "tests/web/settings-sections.test.js"
+DAEMON_MAIN = ROOT / "crates/plurxd/src/main.rs"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -211,8 +217,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"M5a census repair task base:** effort head `{M5A_CENSUS_TASK_BASE}`",
-            self.flat_status,
+            f"M3f task base:** effort head `{M3F_TASK_BASE}`", self.flat_status
         )
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
@@ -222,6 +227,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(M3D_MERGED_HEAD[:8], self.status)
         self.assertIn(M3E_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C5_MERGED_HEAD[:8], self.status)
+        self.assertIn(M5A_CENSUS_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -345,8 +351,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M5a census repair candidate; M0–M3e, M4, M5a and M3c5 merged into "
-            "the effort",
+            "M3f candidate; M0–M3e, M4, M5a, M3c5 and the M5a census repair "
+            "merged into the effort",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -505,8 +511,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertLessEqual(len(contract["id"].encode("utf-8")), 128)
                 self.assertRegex(contract["id"], r"\A[A-Za-z0-9._-]+\Z")
 
-        # The status document does not claim a reader consults one yet.
-        self.assertIn("Nothing selects it in production yet", self.status)
+        # Until M3f nothing selected the qualified identity at all, and this
+        # asserted the document said so. M3f adds the selector, so the claim
+        # worth pinning is the one that replaced it: the identity is never
+        # chosen by a request alone, only by a request the node's own
+        # measurements allow.
+        self.assertIn("the node effective-mode intersection", self.status)
+        self.assertNotIn("Nothing selects it in production yet", self.status)
         # And the document does not name two different milestones for it.
         self.assertNotIn("That is M3c3, and it now has something", self.status)
 
@@ -1114,6 +1125,143 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertIn("five gates M5a tripped and nobody read", self.status)
         self.assertNotIn("four gates M5a tripped", self.status)
+
+    def test_m3f_the_control_is_a_request_the_node_may_refuse(self) -> None:
+        """A switch here would rename every transcode on a node that cannot use it.
+
+        The identity this control selects is a content-addressed key space. A
+        node that honoured a request it could not serve would rotate its whole
+        cache to keys whose every generation is then refused — re-encoding each
+        title once per request forever, with every counter reading healthy.
+        That is worse than the failure the effort exists to fix, because it is
+        silent and it is caused by the fix. So the request is intersected with
+        what the node measured, and the surface reports both facts.
+        """
+        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        system = HTTP_SYSTEM.read_text(encoding="utf-8")
+        store = CORE_STORE.read_text(encoding="utf-8")
+        web = WEB_INDEX.read_text(encoding="utf-8")
+        main = DAEMON_MAIN.read_text(encoding="utf-8")
+
+        self.assertIn(
+            '"playback.decoder_health_qualified_artifacts"', store
+        )
+        # The rule takes measured facts and nothing else, so it is testable
+        # without a manager, a store, a cache or an FFmpeg.
+        self.assertIn(
+            "pub fn artifact_qualification_readiness(\n    requested: bool,", daemon
+        )
+        # Each prerequisite is its own refusal. A single "not eligible" would
+        # be a refusal an operator cannot act on, which is the same as none.
+        for refusal in (
+            "NotRequested",
+            "BuildUnmeasured",
+            "NoDecoderMeasured",
+            "NoContractCoversThisBuild",
+            # Two covering contracts read downstream exactly like none, and the
+            # fix for one is the opposite of the fix for the other.
+            "AmbiguousContract",
+            # A store that cannot be read keeps the identity every deployed
+            # node has, rather than failing the boot of a media server over an
+            # off-by-default preview control.
+            "SettingUnreadable",
+        ):
+            with self.subTest(refusal=refusal):
+                self.assertIn(f"QualificationRefusal::{refusal}", daemon)
+        self.assertIn("pub fn explanation(self) -> &'static str", daemon)
+
+        # Coverage is checked as the node will run it: the decoder the probe
+        # measured, under the qualified log flags. A contract qualified under
+        # different flags describes a different log.
+        self.assertIn(
+            "crate::decoder_health::QUALIFIED_STDERR_MODE", daemon
+        )
+
+        # Published once, at start, and nowhere else. The value is part of
+        # every cache key the node computes, so applying it to a live node
+        # would move that key space under work already running — a session
+        # publishing where the next lookup will not look, a resumable
+        # production restarting from parts that carry no receipt.
+        self.assertIn("state.transcode.publish_artifact_qualification().await;", main)
+        self.assertNotIn("publish_artifact_qualification", system)
+        self.assertEqual(daemon.count("pub async fn publish_artifact_qualification"), 1)
+        # And a store that cannot be read does not take the daemon down.
+        self.assertNotIn(
+            "state.transcode.publish_artifact_qualification().await?;", main
+        )
+
+        # The surface reports what the node published, never a recomputation:
+        # a recomputation would say "enforcing" on a node planning unqualified.
+        self.assertIn("pub fn published_artifact_qualification(", daemon)
+        self.assertIn("state.transcode.published_artifact_qualification()", system)
+
+        # The policy is handed to the manager rather than reached for, which is
+        # what makes the publisher testable at all.
+        self.assertIn("pub fn with_diagnostic_policy(", daemon)
+        self.assertIn(
+            "fn the_published_identity_is_the_request_this_node_can_honour_and_moves_its_cache_keys",
+            daemon,
+        )
+        # And the direct setter stays test-only: every test of the enforcement
+        # behind this control runs on a host no contract covers.
+        self.assertIn(
+            "#[cfg(test)]\n    pub(crate) fn test_publish_artifact_qualification(", daemon
+        )
+
+        # Two facts, two fields. A surface that echoed the request back as the
+        # state would let an operator believe every transcode on the node is
+        # verified when nothing about it changed.
+        self.assertIn("pub decoder_health_qualified_artifacts: bool,", system)
+        self.assertIn(
+            "pub decoder_health_qualification: DecoderHealthQualification,", system
+        )
+        self.assertIn("pub struct DecoderHealthQualification", system)
+        for field in (
+            "namespace",
+            "enforcing",
+            "eligible",
+            "refusal",
+            "explanation",
+            # The third fact. Without it the surface either hides a saved
+            # change or claims one that has not happened.
+            "pending_restart",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(f"pub {field}:", system)
+
+        # The enable section states the cost before the switch, shows what this
+        # node measured, and saves its own single field.
+        self.assertIn("function verifiedDecodeCard(", web)
+        self.assertIn("verifiedDecodeCard(settings)", web)
+        # Conditional, because on a node that cannot honour the request there
+        # is no cost — and an unconditional warning above three crosses that
+        # contradict it teaches an operator to stop reading warnings.
+        self.assertIn("cannot honour the request today", web)
+        self.assertIn("renames every transcode it caches", web)
+        self.assertIn("pays the same rename a second time", web)
+        # FFmpeg's banner and decoder names are somebody else's strings.
+        self.assertIn("esc(q.measured_build)", web)
+        # Saving replaces this card, never the panel: the Live TV card beside
+        # it stages a whole configuration before its own Save.
+        self.assertIn('document.getElementById("vdcard")', web)
+        self.assertNotIn("#/settings/developer\") render()", web)
+        self.assertIn("drop every frame of a file and still exit successfully", web)
+        self.assertIn("What this node measured", web)
+        self.assertIn("async function saveVerifiedDecode(", web)
+        self.assertIn(
+            "decoder_health_qualified_artifacts:document.getElementById"
+            '("dhqa").checked',
+            web,
+        )
+        self.assertIn(
+            "Verified decode states its cost, its prerequisites, and what this "
+            "node measured",
+            WEB_SETTINGS_TEST.read_text(encoding="utf-8"),
+        )
+
+        # And the document says what is still owed, which is the reason every
+        # fleet node will be refused on day one.
+        self.assertIn("no_contract_covers_this_build", self.status)
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.
