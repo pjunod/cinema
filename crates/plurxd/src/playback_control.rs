@@ -3866,6 +3866,13 @@ pub(crate) enum ProducerDecisionReason {
     FlowResumeDeadline,
     InstallDeadline,
     ExecutorLost,
+    /// The producer's own diagnostics said this source did not decode, under a
+    /// grammar qualified against this build.
+    ///
+    /// Not a timing verdict and not a process verdict. The process may well
+    /// exit zero — that is the failure this whole effort is named after — and
+    /// every timing reason tells a client to try again, which reproduces it.
+    SourceDecodeFailed,
 }
 
 impl ProducerDecisionReason {
@@ -3885,6 +3892,7 @@ impl ProducerDecisionReason {
             Self::FlowResumeDeadline => "flow_resume_deadline",
             Self::InstallDeadline => "install_deadline",
             Self::ExecutorLost => "executor_lost",
+            Self::SourceDecodeFailed => "source_decode_failed",
         }
     }
 
@@ -3902,11 +3910,14 @@ impl ProducerDecisionReason {
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
     pub(crate) fn is_permanent(self) -> bool {
-        matches!(self, Self::Unsupported | Self::InvalidConfiguration)
+        matches!(
+            self,
+            Self::Unsupported | Self::InvalidConfiguration | Self::SourceDecodeFailed
+        )
     }
 
     /// The bounded vocabulary, in the order the wire and metrics use.
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::StartupDeadline,
         Self::ProgressDeadline,
         Self::ExitClassificationDeadline,
@@ -3921,6 +3932,7 @@ impl ProducerDecisionReason {
         Self::FlowResumeDeadline,
         Self::InstallDeadline,
         Self::ExecutorLost,
+        Self::SourceDecodeFailed,
     ];
 
     pub(crate) fn from_status(status: &str) -> Option<Self> {
@@ -5746,6 +5758,16 @@ struct ProducerDecodeFault {
     input_video_stream: u32,
     primary_error_records: u64,
     diagnostic_contract: Option<String>,
+    /// Whether §7.3's gate permits this fault to drive an automatic action,
+    /// answered about the window that latched it.
+    ///
+    /// Travels with the fault rather than being asked later, because "later"
+    /// is after the deadline that would otherwise classify this attempt: the
+    /// receipt settles when the child's stderr reaches EOF, and a producer
+    /// that decodes nothing writes no segments, so a timing verdict is already
+    /// committed by then. The barrier exists to arrive first; the answer it
+    /// carries has to arrive with it.
+    action_qualified: bool,
 }
 
 /// One attempt's settled observation.
@@ -8358,6 +8380,7 @@ impl RollingControlActor {
                 fault.fault,
                 fault.primary_error_records,
                 fault.plan_digest.clone(),
+                fault.action_qualified,
             )
         });
         let Some(control) = self.prepublication.as_mut() else {
@@ -8374,10 +8397,37 @@ impl RollingControlActor {
         let decision_sequence = control.next_decision_sequence;
         control.next_decision_sequence = control.next_decision_sequence.saturating_add(1);
 
-        // Observe mode: the fault is part of the record whatever the process's
-        // own exit said, and it does not yet choose a different decision. The
-        // typed reasons that let it are M5b's.
-        if let Some((fault, records, plan_digest)) = latched_fault {
+        // A qualified fault replaces a timing verdict, and only a timing
+        // verdict.
+        //
+        // This is the seam the whole effort is named after. Every reason
+        // outside `is_permanent` tells the client the same thing — try again —
+        // and a source the decoder could not decode answers a retry with the
+        // identical failure, which is the reopen loop. The decoder's own
+        // diagnostics are the only evidence that distinguishes the two, and
+        // they arrive here as a latched fault.
+        //
+        // Two clauses, each load-bearing:
+        //
+        // * `action_qualified` is §7.3's gate, answered about the window that
+        //   latched rather than about the settled attempt, because the settle
+        //   happens at stderr EOF — after this decision. A producer that
+        //   decodes nothing writes no segments, so a timing verdict is always
+        //   already on its way. See `HealthAccumulator::latched_action_qualified`.
+        // * `!reason.is_permanent()` keeps a verdict that already knows more.
+        //   `Unsupported` says this pipeline cannot carry this source at all;
+        //   overwriting it with `SourceDecodeFailed` would trade a specific
+        //   answer for a general one and tell the operator less. The client
+        //   sees the same permanence either way, so there is nothing to gain.
+        //
+        // Overriding here rather than at the fault's own arrival is what makes
+        // it beat the timing verdict: the reason is rewritten inside the
+        // commit that the timing deadline triggered, so there is no race to
+        // lose. It is read below by `retry_eligibility.allows`, which is how a
+        // rewritten reason also cancels the retry it would otherwise have
+        // authorised.
+        if let Some((fault, records, plan_digest, action_qualified)) = latched_fault {
+            let overrides = action_qualified && !reason.is_permanent();
             tracing::warn!(
                 producer_attempt = failed_attempt,
                 decision_sequence,
@@ -8385,8 +8435,13 @@ impl RollingControlActor {
                 primary_error_records = records,
                 plan = %plan_digest,
                 observed_reason = ?reason,
+                action_qualified,
+                overrides,
                 "producer decision observes a latched decode fault"
             );
+            if overrides {
+                reason = ProducerDecisionReason::SourceDecodeFailed;
+            }
         }
 
         let producer_media_published = control.producer_media_published;
@@ -11031,6 +11086,7 @@ impl RollingControlHandle {
     /// facts that would otherwise be the last word about the attempt, and it
     /// travels in its own sticky slot so the progress batch — which collapses
     /// to a single observation at drain — cannot swallow it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_producer_decode_fault(
         &self,
         producer_attempt: u64,
@@ -11039,6 +11095,7 @@ impl RollingControlHandle {
         input_video_stream: u32,
         primary_error_records: u64,
         diagnostic_contract: Option<String>,
+        action_qualified: bool,
     ) {
         let _transition = self
             .producer_transition
@@ -11060,6 +11117,7 @@ impl RollingControlHandle {
                 input_video_stream,
                 primary_error_records,
                 diagnostic_contract,
+                action_qualified,
             });
     }
 
@@ -13473,13 +13531,21 @@ mod tests {
     #[test]
     fn only_a_verdict_about_the_source_itself_is_permanent() {
         // The split that decides whether a client should ever be told to give
-        // up. Twelve of the fourteen are timing, process, or executor facts:
+        // up. Twelve of the fifteen are timing, process, or executor facts:
         // the same file on the same pipeline may work on the next attempt.
-        // Two are verdicts about the source, and no retry changes those.
+        // Three are verdicts about the source, and no retry changes those.
+        //
+        // `SourceDecodeFailed` is the newest and the one that mattered most
+        // to get on this side of the line: it is produced when the decoder
+        // itself said the source did not decode, and the process very often
+        // exits zero. Classified as timing, a client reopens and reproduces
+        // it — which is the loop this whole effort exists to end.
         for reason in ProducerDecisionReason::ALL {
             let expected = matches!(
                 reason,
-                ProducerDecisionReason::Unsupported | ProducerDecisionReason::InvalidConfiguration
+                ProducerDecisionReason::Unsupported
+                    | ProducerDecisionReason::InvalidConfiguration
+                    | ProducerDecisionReason::SourceDecodeFailed
             );
             assert_eq!(
                 reason.is_permanent(),
@@ -13493,7 +13559,7 @@ mod tests {
                 .into_iter()
                 .filter(|reason| reason.is_permanent())
                 .count(),
-            2,
+            3,
         );
     }
 
@@ -13508,7 +13574,7 @@ mod tests {
                 Some(reason),
             );
         }
-        assert_eq!(ProducerDecisionReason::ALL.len(), 14);
+        assert_eq!(ProducerDecisionReason::ALL.len(), 15);
         assert_eq!(ProducerDecisionReason::from_status("invented"), None);
         // The names are wire-safe: lowercase, underscored, no spaces.
         for reason in ProducerDecisionReason::ALL {
@@ -24658,7 +24724,21 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn decode_fault(producer_attempt: u64, records: u64) -> ProducerDecodeFault {
+        decode_fault_qualified(producer_attempt, records, true)
+    }
+
+    /// The same fault with §7.3's gate answered either way.
+    ///
+    /// Separate from [`decode_fault`] rather than a parameter on it because
+    /// every pre-M5c test wants the qualified answer and reads better without
+    /// a bare `true` at each call site.
+    fn decode_fault_qualified(
+        producer_attempt: u64,
+        records: u64,
+        action_qualified: bool,
+    ) -> ProducerDecodeFault {
         ProducerDecodeFault {
+            action_qualified,
             producer_attempt,
             plan_digest: "plan-digest".to_owned(),
             fault: crate::decoder_health::DecodeFaultKind::VideoDecodeFailure,
@@ -24684,6 +24764,179 @@ mod tests {
             exit_disposition: crate::decoder_health::ExitDisposition::CleanEnd,
             qualification,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // M5c — a qualified decode fault replaces the timing verdict
+    // -----------------------------------------------------------------------
+
+    /// The loop this whole effort exists to end.
+    ///
+    /// A source the decoder cannot decode produces no segments, so a timing or
+    /// process verdict always arrives, and every one of those tells the client
+    /// to try again. It does, gets the identical failure, and tries again. The
+    /// decoder's own diagnostics are the only evidence that separates "this
+    /// attempt was unlucky" from "this source will never decode", and they
+    /// reach the decision as a latched fault.
+    #[test]
+    fn a_qualified_decode_fault_replaces_the_process_verdict_a_client_would_retry() {
+        let started = Instant::now();
+        let exited_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-qualified", "recipe-m5c-qualified"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exited_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                    observed_at: exited_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(actor.maybe_commit_producer_decision_at(exited_at));
+        assert!(
+            matches!(
+                actor.pending_decision.as_deref(),
+                Some(ProducerDecision::Fail {
+                    reason: ProducerDecisionReason::SourceDecodeFailed,
+                    ..
+                })
+            ),
+            "a qualified fault must rewrite the process verdict, not merely be logged beside it"
+        );
+    }
+
+    /// The gate is the whole difference between a verdict and a guess.
+    ///
+    /// An unqualified window is one this build cannot vouch for — an
+    /// unqualified grammar, a compressed log, a window that never met the
+    /// threshold. Acting on it would condemn a source on evidence the build
+    /// itself does not trust, and a permanent verdict is the one mistake a
+    /// client cannot recover from by trying again.
+    #[test]
+    fn an_unqualified_decode_fault_leaves_the_process_verdict_alone() {
+        let started = Instant::now();
+        let exited_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-unqualified", "recipe-m5c-unqualified"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, false)));
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exited_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                    observed_at: exited_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(actor.maybe_commit_producer_decision_at(exited_at));
+        assert!(
+            matches!(
+                actor.pending_decision.as_deref(),
+                Some(ProducerDecision::Fail {
+                    reason: ProducerDecisionReason::ProcessExit,
+                    ..
+                })
+            ),
+            "an unqualified window must not condemn a source"
+        );
+    }
+
+    /// The `!is_permanent` clause, and it is not a nicety.
+    ///
+    /// `Unsupported` is the copy pipeline saying it cannot carry this source —
+    /// and `UnsupportedOnly` eligibility exists precisely so that verdict
+    /// selects the one validated fallback. Overwriting it with
+    /// `SourceDecodeFailed`, which that eligibility does not allow, would
+    /// silently cancel a fallback the server was about to take and fail a
+    /// source that the successor recipe would have played.
+    #[test]
+    fn a_qualified_decode_fault_does_not_overwrite_a_verdict_that_already_knows_more() {
+        let started = Instant::now();
+        let classified_at = started + Duration::from_secs(1);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-permanent", "recipe-m5c-permanent"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert_eq!(
+            actor.classify_copy_producer_exit_at(
+                classified_at,
+                1,
+                CopyProducerExitClassification::Unsupported,
+            ),
+            Ok(())
+        );
+        assert!(
+            matches!(
+                actor.pending_decision.as_deref(),
+                Some(ProducerDecision::Retry {
+                    reason: ProducerDecisionReason::Unsupported,
+                    ..
+                })
+            ),
+            "a permanent verdict that still selects a fallback must survive the fault"
+        );
+    }
+
+    /// A rewritten reason does not steal the server's own fallback.
+    ///
+    /// `SourceDecodeFailed` is permanent to a *client*: no reopen of this
+    /// session changes the answer. It is not permanent to the server, which
+    /// may still hold a validated recipe on a different pipeline — the
+    /// hardware-to-software fallback is exactly that, and a source one decoder
+    /// refuses may well decode on another. `AnyPrepublicationFailure` allows
+    /// it through for that reason, and the client never sees a decision the
+    /// retry consumes.
+    #[test]
+    fn a_qualified_fault_renames_the_reason_without_consuming_the_servers_fallback() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c-fallback", "recipe-m5c-fallback"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        assert!(actor.settle_due_deadlines_at(deadline).is_some());
+        assert!(
+            matches!(
+                actor.pending_decision.as_deref(),
+                Some(ProducerDecision::Retry {
+                    reason: ProducerDecisionReason::SourceDecodeFailed,
+                    ..
+                })
+            ),
+            "the fault names the reason; it does not cancel a fallback on another pipeline"
+        );
     }
 
     /// The property this milestone exists for: a fault observed mid-attempt is

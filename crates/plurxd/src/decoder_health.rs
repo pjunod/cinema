@@ -957,6 +957,34 @@ impl HealthAccumulator {
     /// can be disqualified from acting and still be disqualified from the
     /// cache — the two questions have different answers and conflating them is
     /// how an unqualified build ends up killing sessions.
+    /// Whether the fault that just latched may drive an automatic action, at
+    /// the moment it latched.
+    ///
+    /// The same question as [`Self::automatic_action_allowed`] minus one
+    /// clause, and the missing clause is the point. That method answers it for
+    /// a *settled* attempt and requires a complete observation, because it is
+    /// also asked about attempts with no fault — and an attempt that did not
+    /// see the whole log cannot say the log was clean.
+    ///
+    /// This one is only ever asked of a positive finding: five attributed
+    /// decode failures inside two seconds, every one of them matched by a
+    /// contract qualified against this build. Completeness protects a claim of
+    /// *absence*; it adds nothing to evidence that is present. Requiring it
+    /// here would mean the barrier — which §7.4 publishes before the success
+    /// facts precisely so a decision can use it — could never drive one,
+    /// because at latch time the log is by definition still being read.
+    ///
+    /// The compression clause stays, and it is not symmetrical with the
+    /// others: a repeat summary seen *before* the latch means the window that
+    /// latched may have been assembled from a compressed log. One appearing
+    /// afterwards says nothing about a window that already matched.
+    pub fn latched_action_qualified(&self) -> bool {
+        self.fault.is_some()
+            && self.triggering_window_contract_qualified
+            && self.windowed_action_qualified
+            && !self.compressed_log()
+    }
+
     pub fn automatic_action_allowed(&self) -> bool {
         self.fault.is_some()
             && self.triggering_window_contract_qualified
@@ -1523,7 +1551,7 @@ pub(crate) async fn read_diagnostics<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    read_diagnostics_reporting(stream, grammar, log, progress, |_, _| {}).await
+    read_diagnostics_reporting(stream, grammar, log, progress, |_, _, _| {}).await
 }
 
 /// The same read, reporting a latch the moment it happens.
@@ -1538,7 +1566,7 @@ pub(crate) async fn read_diagnostics_reporting<R>(
     grammar: Option<DiagnosticGrammar>,
     mut log: impl FnMut(&str),
     mut progress: impl FnMut(&str) -> bool,
-    mut on_fault: impl FnMut(DecodeFaultKind, u64),
+    mut on_fault: impl FnMut(DecodeFaultKind, u64, bool),
 ) -> HealthAccumulator
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1601,7 +1629,7 @@ fn observe_line(
     accumulator: &mut HealthAccumulator,
     log: &mut impl FnMut(&str),
     progress: &mut impl FnMut(&str) -> bool,
-    on_fault: &mut impl FnMut(DecodeFaultKind, u64),
+    on_fault: &mut impl FnMut(DecodeFaultKind, u64, bool),
 ) {
     // A `-progress` block on this stream is telemetry, not a diagnostic. It is
     // sorted out before classification so a key=value line can never become a
@@ -1615,7 +1643,15 @@ fn observe_line(
         // which is what makes one barrier per attempt a property of the
         // accumulator rather than of the caller remembering to ask once.
         if let Some(fault) = accumulator.observe(std::time::Instant::now(), &record) {
-            on_fault(fault, accumulator.primary_error_records());
+            // The qualification travels with the fault because it is a fact
+            // about the window that just latched, and only the accumulator
+            // holds that. Answered here rather than at the settle, where it
+            // would arrive after the decisions it is meant to inform.
+            on_fault(
+                fault,
+                accumulator.primary_error_records(),
+                accumulator.latched_action_qualified(),
+            );
         }
     }
     // Without a grammar the line is still read, still bounded and still
