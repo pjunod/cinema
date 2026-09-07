@@ -477,7 +477,7 @@ a tight link, and on today's fleet **the values are missing almost everywhere**:
 
 | input | who fills it | who does not |
 |---|---|---|
-| `observed_download_bps` | the web client, from `hls.bandwidthEstimate` | Apple (`PlayerController.swift`) and Android (`Controller.kt`) both send null |
+| `observed_download_bps` | the web client, from `hls.bandwidthEstimate`; Android, counted off the wire by `MediaOrigin.kt`'s transfer listener over a rolling 500 ms window | Apple (`PlayerController.swift`) still sends null |
 | `delivered_bps` | Live sessions | every VOD session — `DeliveryView::from_status` leaves it `None`, and VOD serves most sessions |
 
 Folded into one `throughput_unproven`, that would have published a counter
