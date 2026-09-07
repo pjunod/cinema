@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["deddf924"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "record_action counted control outcomes into process atomics only, so no failure evidence survived a daemon restart — a viewer terminated at 21:04 left no trace once that process exited, which is usually the same restart that prompted the question. The node-local playback_events table already carried runway, delivered rate, hold reason and detail; nothing in the control path had ever written to it. durable_outcome now decides what deserves a row and keeps only terminals, retry backoffs, withheld recoveries and suppressed actions — an exchange happens every few seconds per viewer, so persisting the healthy path would bury the rows that matter and make ordinary playback write-heavy. only_the_outcomes_worth_explaining_later_are_kept pins both halves; a_withheld_recovery_and_a_suppressed_action_are_separate_rows asserts exact event names after an earlier version accepted either and survived deleting the withheld branch."

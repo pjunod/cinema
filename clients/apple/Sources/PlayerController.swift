@@ -531,6 +531,17 @@ struct PlayerReopenRequest: Equatable {
     var intent: PlayerOpenIntent = .normal
 }
 
+/// Desired recipe and attached media have different lifetimes. A later seek
+/// must carry an unpublished quality/audio change, not seek the old recipe.
+struct PlayerRecipeRevision: Equatable {
+    private(set) var desired = 0
+    private(set) var attached: Int?
+    var needsReopen: Bool { attached != desired }
+    mutating func change() { desired &+= 1 }
+    mutating func didAttach(_ revision: Int) { attached = revision }
+    mutating func clear() { desired &+= 1; attached = nil }
+}
+
 /// Why a create body is being posted. Everything a viewer does — a seek, a
 /// quality/audio/subtitle change, a fresh title — is `.normal` and carries no
 /// binding; exactly one stall recovery per stall is `.stallReopen`.
@@ -624,12 +635,49 @@ struct StallReopenBudget: Equatable {
 struct PlayerSeekState: Equatable {
     private(set) var pendingMs: Int?
     private(set) var generation = 0
+    private(set) var executedGeneration: Int?
+    private(set) var requiresMediaPresentation = false
+    private var lastAudioPositionMs: Int?
+    private var executionSampledAt: TimeInterval?
+    private var executionRate = 0.0
+    private var executionActiveSeconds = 0.0
+    private var plausibleProgressMs = 0.0
+    private var demandSampledAt: TimeInterval?
+    private var demandWasActive = false
+    private var demandActiveSeconds = 0.0
+
+    static let presentationDeadlineSeconds: TimeInterval = 8
+
+    /// A target still coalescing or awaiting execution suppresses recovery;
+    /// an executed target waiting for presentation is itself recoverable work.
+    var allowsStallRecovery: Bool {
+        pendingMs == nil || executedGeneration == generation
+    }
 
     mutating func absolute(_ requestedMs: Int, durationMs: Int) -> (target: Int, generation: Int) {
         generation &+= 1
         let target = Self.clamp(requestedMs, durationMs: durationMs)
         pendingMs = target
+        requiresMediaPresentation = true
+        executedGeneration = nil
+        lastAudioPositionMs = nil
+        resetPresentationClock()
         return (target, generation)
+    }
+
+    /// Changing an in-place selection cannot present an outstanding seek.
+    /// Carry that obligation into the new command even when its target is
+    /// unchanged; only a selection on an already presented item can settle
+    /// when the subtitle mutation completes.
+    mutating func selection(
+        at observedMs: Int,
+        durationMs: Int,
+        inPlace: Bool
+    ) -> (target: Int, generation: Int) {
+        let requiresMedia = (pendingMs != nil && requiresMediaPresentation) || !inPlace
+        let destination = absolute(pendingMs ?? observedMs, durationMs: durationMs)
+        requiresMediaPresentation = requiresMedia
+        return destination
     }
 
     mutating func relative(
@@ -640,20 +688,130 @@ struct PlayerSeekState: Equatable {
         absolute((pendingMs ?? observedMs) + deltaMs, durationMs: durationMs)
     }
 
-    /// Only the newest native AVPlayer seek may clear the optimistic target.
-    /// An older completion can arrive after AVPlayer cancels it for a newer
-    /// seek and must not snap the progress bar backward.
+    /// A completed seek/open is only execution. It is not presentation: the
+    /// transport can complete while the old frame remains on screen.
     @discardableResult
-    mutating func complete(generation expected: Int) -> Bool {
-        guard expected == generation else { return false }
-        pendingMs = nil
+    mutating func markExecuted(
+        generation expected: Int,
+        targetMs: Int,
+        at now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> Bool {
+        guard expected == generation, pendingMs == targetMs else { return false }
+        executedGeneration = expected
+        lastAudioPositionMs = nil
+        resetPresentationClock()
+        executionSampledAt = now
+        demandSampledAt = now
         return true
     }
 
-    /// Live HLS seeks are serialized by `PlayerReopenQueue`; the final open in
-    /// that drain clears the target it actually attached.
-    mutating func completeReopen(at positionMs: Int) {
-        if pendingMs == positionMs { pendingMs = nil }
+    /// Integrate the observed active clock between samples. A delayed first
+    /// callback can already be a second into healthy playback; a paused clock
+    /// earns no forward allowance. The allowance never grows beyond the
+    /// execution's eight active seconds; a pause does not spend that window.
+    mutating func observePlaybackClock(
+        at now: TimeInterval,
+        rate: Double,
+        isPlaying: Bool,
+        generation expected: Int
+    ) {
+        guard expected == generation,
+              executedGeneration == expected,
+              let sampledAt = executionSampledAt,
+              now.isFinite
+        else { return }
+        if executionRate > 0 {
+            let active = min(max(0, now - sampledAt),
+                             max(0, Self.presentationDeadlineSeconds - executionActiveSeconds))
+            plausibleProgressMs += active * executionRate * 1_000
+            executionActiveSeconds += active
+        }
+        executionSampledAt = max(now, sampledAt)
+        executionRate = isPlaying && rate.isFinite ? max(0, rate) : 0
+    }
+
+    /// A wrong-position clock may keep advancing, so destination timeout is
+    /// independent of media progress. Only time when presentation is wanted
+    /// and observable spends this budget, not a viewer pause or background.
+    mutating func observePresentationDemand(
+        at now: TimeInterval,
+        eligible: Bool,
+        generation expected: Int
+    ) -> Bool {
+        guard expected == generation, executedGeneration == expected,
+              let sampledAt = demandSampledAt, now.isFinite
+        else { return false }
+        if demandWasActive { demandActiveSeconds += max(0, now - sampledAt) }
+        demandSampledAt = max(now, sampledAt)
+        demandWasActive = eligible
+        return eligible && demandActiveSeconds >= Self.presentationDeadlineSeconds
+    }
+
+    private func isPlausibleLanding(_ positionMs: Int, targetMs: Int) -> Bool {
+        let delta = Double(positionMs) - Double(targetMs)
+        return delta >= -250 && delta <= plausibleProgressMs + 250
+    }
+
+    private mutating func resetPresentationClock() {
+        executionSampledAt = nil
+        executionRate = 0
+        executionActiveSeconds = 0
+        plausibleProgressMs = 0
+        demandSampledAt = nil
+        demandWasActive = false
+        demandActiveSeconds = 0
+    }
+
+    /// Only a frame from the latest executed generation, at its destination,
+    /// can retire the optimistic target.
+    @discardableResult
+    mutating func presentedVideo(positionMs: Int, generation expected: Int) -> Bool {
+        guard expected == generation,
+              executedGeneration == expected,
+              let target = pendingMs,
+              isPlausibleLanding(positionMs, targetMs: target)
+        else { return false }
+        pendingMs = nil
+        executedGeneration = nil
+        lastAudioPositionMs = nil
+        return true
+    }
+
+    /// Audio-only equivalent: the active clock must move after execution, not
+    /// merely jump to the target when AVPlayer accepts the seek.
+    @discardableResult
+    mutating func presentedAudio(positionMs: Int, generation expected: Int) -> Bool {
+        guard expected == generation,
+              executedGeneration == expected,
+              let target = pendingMs
+        else { return false }
+        guard let previous = lastAudioPositionMs else {
+            guard isPlausibleLanding(positionMs, targetMs: target) else { return false }
+            lastAudioPositionMs = positionMs
+            return false
+        }
+        guard positionMs > previous,
+              isPlausibleLanding(positionMs, targetMs: target)
+        else { return false }
+        pendingMs = nil
+        executedGeneration = nil
+        lastAudioPositionMs = nil
+        return true
+    }
+
+    /// An in-place selection has no successor item or frame generation. Its
+    /// completed AVPlayer/overlay mutation is the presentation boundary.
+    @discardableResult
+    mutating func presentedInPlace(generation expected: Int, targetMs: Int) -> Bool {
+        guard expected == generation,
+              executedGeneration == expected,
+              !requiresMediaPresentation,
+              pendingMs == targetMs
+        else { return false }
+        pendingMs = nil
+        executedGeneration = nil
+        lastAudioPositionMs = nil
+        return true
     }
 
     /// Also advances the generation: a teardown must invalidate every seek
@@ -662,6 +820,10 @@ struct PlayerSeekState: Equatable {
     /// into the next playback with the previous film's target.
     mutating func clear() {
         pendingMs = nil
+        executedGeneration = nil
+        requiresMediaPresentation = false
+        lastAudioPositionMs = nil
+        resetPresentationClock()
         generation &+= 1
     }
 
@@ -1269,6 +1431,105 @@ enum SameDeliveryRecoveryTransport: Equatable {
 /// first frame (`needsNativeSubtitleSession`).
 @MainActor
 final class PlayerController: ObservableObject {
+    /// AVFoundation preparation may suspend; only the controller's current
+    /// operation is allowed to commit the prepared selection to the item.
+    struct PreparedNativeSelection {
+        var hasSubtitleOptions: Bool
+        var apply: @MainActor () -> Bool
+    }
+
+    struct MediaSelectionPreparation {
+        var native: @MainActor (Int?, [SubtitleTrack], AVPlayerItem) async -> PreparedNativeSelection = {
+            index, tracks, item in
+            let group = try? await item.asset.loadMediaSelectionGroup(for: .legible)
+            return PreparedNativeSelection(
+                hasSubtitleOptions: group?.options.contains { $0.mediaType == .subtitle } ?? false,
+                apply: {
+                    guard let group else { return index == nil }
+                    return PlayerController.selectNativeSubtitle(index, tracks: tracks, in: group, of: item)
+                }
+            )
+        }
+        var audio: @MainActor (String, AVPlayerItem) async -> (@MainActor () -> Void)? = { language, item in
+            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .audible) else { return nil }
+            let preferred = AVMediaSelectionGroup.mediaSelectionOptions(
+                from: group.options,
+                filteredAndSortedAccordingToPreferredLanguages: PlayerController.languageSpellings(language)
+            )
+            guard let option = preferred.first else { return nil }
+            return { item.select(option, in: group) }
+        }
+    }
+
+    struct ItemPreparation {
+        var ready: @MainActor (AVPlayerItem) async throws -> Void = { try await PlayerController.awaitItemReady($0) }
+        var seek: @MainActor (AVPlayer, Int) async -> Void = { player, ms in
+            _ = await player.seek(
+                to: CMTime(seconds: Double(ms) / 1000.0, preferredTimescale: 600),
+                toleranceBefore: .zero, toleranceAfter: .zero
+            )
+        }
+    }
+
+    struct SeekPreparationOwner {
+        let actionEpoch: Int
+        let seekGeneration: Int
+        let targetMs: Int
+    }
+
+    enum DeliveryFallback: CaseIterable { case legacySubtitleBurn, hdrBase, transcode }
+
+    /// Delivery fallbacks are recipe changes, even when a newer viewer task
+    /// cancels the particular reopen that first requested them.
+    func requireDeliveryFallback(_ fallback: DeliveryFallback) {
+        switch fallback {
+        case .legacySubtitleBurn:
+            guard !forceLegacySubtitleBurn else { return }
+            forceLegacySubtitleBurn = true
+        case .hdrBase:
+            guard !forceCompatibleHDRBase else { return }
+            forceCompatibleHDRBase = true
+        case .transcode:
+            guard !forceCompatibilityTranscode else { return }
+            forceCompatibilityTranscode = true
+        }
+        recipeRevision.change()
+    }
+
+    private let requestPlaybackDecision: @MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps)
+    private let requestHlsSession: @MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart
+    private let readControlSequence: @MainActor (PlaybackControlSession) async -> UInt64?
+    private let mediaSelectionPreparation: MediaSelectionPreparation
+    private let itemPreparation: ItemPreparation
+    private let canPlayOffline: (AVURLAsset) -> Bool
+    private let waitInitialDecisionDeadline: @MainActor () async throws -> Void
+
+    init(
+        requestPlaybackDecision: @escaping @MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps) = {
+            try await $0.playbackDecision(fileId: $1, selection: $2, quality: $3)
+        },
+        mediaSelectionPreparation: MediaSelectionPreparation = MediaSelectionPreparation(),
+        itemPreparation: ItemPreparation = ItemPreparation(),
+        canPlayOffline: @escaping (AVURLAsset) -> Bool = { $0.assetCache?.isPlayableOffline == true },
+        waitInitialDecisionDeadline: @escaping @MainActor () async throws -> Void = {
+            try await Task.sleep(for: .seconds(20))
+        },
+        requestHlsSession: @escaping @MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart = {
+            try await $0.createHlsSession(fileId: $1, body: $2)
+        },
+        readControlSequence: @escaping @MainActor (PlaybackControlSession) async -> UInt64? = {
+            await $0.controlSequence
+        }
+    ) {
+        self.requestPlaybackDecision = requestPlaybackDecision
+        self.mediaSelectionPreparation = mediaSelectionPreparation
+        self.itemPreparation = itemPreparation
+        self.canPlayOffline = canPlayOffline
+        self.waitInitialDecisionDeadline = waitInitialDecisionDeadline
+        self.requestHlsSession = requestHlsSession
+        self.readControlSequence = readControlSequence
+    }
+
     /// The server retains 180 seconds behind the download frontier: the 120 s
     /// forward lead measured on a physical iPad, 30 s for back-buffering, and
     /// 30 s for retry/reload. `preferredForwardBufferDuration` is a hint, not a
@@ -1385,6 +1646,10 @@ final class PlayerController: ObservableObject {
     @Published private(set) var selectedSubtitle: Int?
     @Published private(set) var selectedAudio: Int?
     @Published private(set) var selectedHeight: Int?
+    /// `nil` height means either Auto or Original. Keep the viewer's explicit
+    /// no-encode choice distinct so control and replacement bodies do not
+    /// silently grant adaptation authority.
+    @Published private(set) var selectedQualityIsOriginal = false
     @Published private(set) var encoder: String?
     /// The dynamic range of the bytes this playback is actually receiving —
     /// `"dolby_vision" | "hdr10" | "hlg" | "sdr"`, or nil against a server that
@@ -1449,15 +1714,34 @@ final class PlayerController: ObservableObject {
     /// for it — which is exactly why it is not an `audioOverride`: overriding
     /// would force a copy session onto a choice the server judged direct-
     /// playable, downgrading delivery past what the verdict states.
-    private var prePlaySelection = PrePlaySelection.none
+    private struct InitialDecisionRequest {
+        var selection = PrePlaySelection.none
+        var quality = PlaybackQuality.auto
+        var explicitHeight: Int?
+    }
+    /// Desired input exists before metadata does. Resolved/displayed selections
+    /// below are outputs of this request, never defaults allowed to overwrite it.
+    private var initialDecisionRequest = InitialDecisionRequest()
+    private var prePlaySelection: PrePlaySelection { initialDecisionRequest.selection }
+    private var initialDecisionGeneration = 0
+    private var initialDecisionDeadlineTask: Task<Void, Never>?
     private weak var model: AppModel?
     private var timeObserver: Any?
+    private var interactiveSeekTask: Task<Void, Never>?
+    private var seekPresentationTask: Task<Void, Never>?
+    private var seekPresentationLifecycle: [AnyCancellable] = []
+    private var seekPresentationBackgrounded = false
+    private var seekVideoOutput: AVPlayerItemVideoOutput?
     private var endObserver: NSObjectProtocol?
     private var itemStatusObservation: NSKeyValueObservation?
     private var statusTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
     private var playbackNoticeTask: Task<Void, Never>?
     private var started = false
+    private(set) var loadingTask: Task<Void, Never>?
+    /// A title owns its decision and all subsequent asynchronous work. A new
+    /// title may reuse this controller while an old request is still waking.
+    private var lifecycleGeneration = 0
     /// This player's passive control reporting. Nothing about playback
     /// depends on it: a server that offers no bootstrap leaves it silent.
     private let playbackControl = PlaybackControlSession()
@@ -1519,7 +1803,7 @@ final class PlayerController: ObservableObject {
     /// the rung a title *starts* on. It shapes the `/decision` request and
     /// resolves to `selectedHeight` once the ladder is known; the player's
     /// own quality menu owns every change after that.
-    private var startingQuality: PlaybackQuality = .auto
+    private var startingQuality: PlaybackQuality { initialDecisionRequest.quality }
     /// Sticky for this playback. Once a native text track has been asked for —
     /// by automatic selection at cold start, or by the viewer — the stream keeps
     /// its subtitle renditions, including after subtitles are turned off again:
@@ -1532,9 +1816,20 @@ final class PlayerController: ObservableObject {
     /// Holds the newest seek/track intent that arrived mid-change so it wins
     /// instead of vanishing.
     private var reopenQueue = PlayerReopenQueue()
+    private(set) var recipeRevision = PlayerRecipeRevision()
     /// Optimistic absolute film position for an interactive seek. It is also
     /// the base for the next relative press until the newest seek lands.
     private var seekState = PlayerSeekState()
+    /// Production-linked read seam for intent/selection regression tests.
+    var pendingPlaybackIntentForTesting: (targetMs: Int?, generation: Int) {
+        (seekState.pendingMs, seekState.generation)
+    }
+    /// Every explicit viewer command invalidates recovery work that crossed an
+    /// await. Session generation alone cannot see pause/resume or native seek.
+    private var viewerActionEpoch = 0
+    /// Request sequence already published by a predecessor for the seek that a
+    /// replacement is about to attach. It lives above control-session lifetime.
+    private var pendingControlSequence: UInt64?
     private var playbackRecoveryMonitor = PlaybackRecoveryMonitor()
     /// A clock freeze without an AVPlayerItem failure is not proof that the
     /// decoder rejected the stream. The same is true of a sustained buffering
@@ -1554,6 +1849,10 @@ final class PlayerController: ObservableObject {
     /// lower rung.
     private var sessionHeight: Int?
     private var deliveryStarvation = DeliveryStarvationDetector()
+    /// One advisory control hold, with an absolute deadline measured from the
+    /// stall's first stagnant sample. Control may explain a pause; it may not
+    /// own a frozen picture indefinitely.
+    private var deferredStall: (event: PlaybackStallEvent, deadline: TimeInterval)?
     private var recoveryReopenBudget = RecoveryReopenBudget()
     /// Evidence that this server understands `native_subtitles`: its create
     /// response handed back a native master query. A server predating the
@@ -1801,6 +2100,12 @@ final class PlayerController: ObservableObject {
     ) {
         guard !started else { return }
         started = true
+        lifecycleGeneration &+= 1
+        let lifecycle = lifecycleGeneration
+        wantsPlayback = true
+        failed = false
+        playbackError = nil
+        decision = nil
         #if os(iOS)
         offlineId = nil
         offlineAssetURL = nil
@@ -1813,16 +2118,25 @@ final class PlayerController: ObservableObject {
         self.knownDurationMs = durationMs
         self.currentMs = max(0, startMs)
         self.title = title
-        self.prePlaySelection = selection
+        let explicitHeight = initialHeight.flatMap { $0 > 0 ? $0 : nil }
+        initialDecisionRequest = InitialDecisionRequest(
+            selection: selection,
+            quality: explicitHeight.map { Self.initialQuality(height: $0) } ?? model.playbackQuality,
+            explicitHeight: explicitHeight
+        )
+        selectedAudio = selection.audioIndex
+        selectedSubtitle = selection.subtitleIndex.flatMap { $0 >= 0 ? $0 : nil }
         selectedHeight = initialHeight.flatMap { $0 > 0 ? $0 : nil }
+        selectedQualityIsOriginal = initialHeight == nil && startingQuality == .original
         self.diagnosticProbesEnabled = diagnosticProbesEnabled
         audioOverride = nil
         finished = false
         playbackFailureTitle = Self.playbackStartFailureTitle
         subtitleReadiness = model.subtitleReadiness
-        startingQuality = model.playbackQuality
         markerAutoSkipLedger = MarkerAutoSkipLedger()
         wantsNativeSubtitleRenditions = false
+        forceLegacySubtitleBurn = false
+        activeBurnedSubtitle = nil
         canRetryCurrentItemWithHDRBase = false
         dolbyVisionFallbackAttempted = false
         forceCompatibleHDRBase = false
@@ -1871,7 +2185,7 @@ final class PlayerController: ObservableObject {
         addPeriodicObserver()
         startPlaybackRecoveryMonitor()
 
-        Task { await load(startMs: startMs) }
+        restartInitialDecision(lifecycle: lifecycle)
     }
 
     #if os(iOS)
@@ -1882,6 +2196,8 @@ final class PlayerController: ObservableObject {
     func startOffline(model: AppModel, item offline: OfflineItem) {
         guard !started, let path = offline.localAssetRelativePath else { return }
         started = true
+        lifecycleGeneration &+= 1
+        let lifecycle = lifecycleGeneration
         self.model = model
         offlineId = offline.id
         offlineAssetURL = OfflineCatalog.localURL(for: path)
@@ -1891,8 +2207,16 @@ final class PlayerController: ObservableObject {
         currentMs = max(0, offline.positionMs)
         title = offline.title
         finished = false
+        failed = false
+        playbackError = nil
+        activeBurnedSubtitle = nil
+        forceLegacySubtitleBurn = false
+        audioOverride = nil
+        audioLanguage = model.audioLang
         playbackFailureTitle = Self.playbackStartFailureTitle
         selectedHeight = offline.actualHeight
+        selectedQualityIsOriginal = false
+        initialDecisionRequest = InitialDecisionRequest()
         selectedAudio = offline.audioLabel == nil ? nil : 0
         selectedSubtitle = offline.subtitleIndex == nil ? nil : 0
         deliveredRange = "sdr"
@@ -1916,7 +2240,9 @@ final class PlayerController: ObservableObject {
         installRemoteCommands()
         addPeriodicObserver()
         startPlaybackRecoveryMonitor()
-        Task { await loadOffline(url: OfflineCatalog.localURL(for: path), startMs: currentMs) }
+        let startMs = currentMs
+        let url = OfflineCatalog.localURL(for: path)
+        loadingTask = Task { await loadOffline(url: url, startMs: startMs, lifecycle: lifecycle) }
     }
 
     nonisolated static func offlineDecision(_ item: OfflineItem) -> Decision {
@@ -1966,37 +2292,44 @@ final class PlayerController: ObservableObject {
         )
     }
 
-    private func loadOffline(url: URL, startMs: Int) async {
-        guard started else { return }
+    private func loadOffline(url: URL, startMs: Int, lifecycle: Int) async {
+        guard isCurrentLifecycle(lifecycle) else { return }
+        let startMs = seekState.pendingMs ?? startMs
+        let seekOwner = seekPreparationOwner(at: startMs)
+        openGeneration &+= 1
+        let generation = openGeneration
+        let requestedRecipeRevision = recipeRevision.desired
         let attemptId = UUID().uuidString
         let asset = AVURLAsset(url: url)
-        guard asset.assetCache?.isPlayableOffline == true else {
+        guard canPlayOffline(asset) else {
             fail(APIError.transport("Download incomplete"))
             return
         }
         let item = AVPlayerItem(asset: asset)
         Self.configureBuffering(item, growingHLS: false)
+        installSeekVideoOutput(on: item)
         item.externalMetadata = [titleMetadata(title)]
         observeEnd(of: item)
         observeStatus(of: item)
         player.replaceCurrentItem(with: item)
+        recipeRevision.didAttach(requestedRecipeRevision)
         playbackAttemptId = attemptId
         baseMs = 0
         player.play()
+        if !wantsPlayback { player.pause() }
         if startMs > 0 {
-            do { try await seekWhenReady(item, ms: startMs) }
+            do { try await seekWhenReady(item, ms: startMs, owner: seekOwner) }
             catch {
-                guard started, player.currentItem === item else { return }
+                guard isCurrentLifecycle(lifecycle), !isSuperseded(generation), player.currentItem === item else { return }
                 fail(error)
                 return
             }
         }
-        guard started, player.currentItem === item else { return }
-        await applyPreferredAudioSelection(to: item)
-        await applyNativeSubtitleSelection(selectedSubtitle, to: item)
-        guard started, player.currentItem === item else { return }
-        player.play()
-        isPlaying = true
+        guard isCurrentLifecycle(lifecycle), !isSuperseded(generation), player.currentItem === item else { return }
+        await reconcileNativeMediaSelections(to: item)
+        guard isCurrentLifecycle(lifecycle), !isSuperseded(generation), player.currentItem === item else { return }
+        if wantsPlayback { player.play() } else { player.pause() }
+        isPlaying = wantsPlayback
         failed = false
         attachmentRecovery.opened(at: startMs)
         blackFrameWatchdog.opened()
@@ -2005,11 +2338,14 @@ final class PlayerController: ObservableObject {
 
     private func reloadOffline(at positionMs: Int) async {
         guard let offlineAssetURL, started else { return }
+        let lifecycle = lifecycleGeneration
+        let generation = openGeneration &+ 1
         isChangingStream = true
         Session.shared.resetMediaFailover()
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
-        await loadOffline(url: offlineAssetURL, startMs: positionMs)
+        await loadOffline(url: offlineAssetURL, startMs: positionMs, lifecycle: lifecycle)
+        guard isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
         isChangingStream = false
         // The status observer holds its fire while `isChangingStream` is up;
         // a replacement that failed during its own load is caught here, the
@@ -2022,7 +2358,21 @@ final class PlayerController: ObservableObject {
     }
     #endif
 
+    @discardableResult
+    private func beginViewerAction() -> Int {
+        viewerActionEpoch &+= 1
+        playbackControl.clearVerdict()
+        deferredStall = nil
+        return viewerActionEpoch
+    }
+
+    private func retainControlSequence(_ sequence: UInt64?) {
+        guard let sequence else { return }
+        pendingControlSequence = max(pendingControlSequence ?? 0, sequence)
+    }
+
     func togglePlayPause() {
+        beginViewerAction()
         // A buffering player reports `.waitingToPlayAtSpecifiedRate` and rate
         // zero even though Play is still the viewer's intent. Keying this
         // control from the intent prevents a wait from masquerading as a user
@@ -2038,6 +2388,12 @@ final class PlayerController: ObservableObject {
             wantsPlayback = true
         }
         updateNowPlaying()
+        playbackControlPlayerChanged()
+        if let target = seekState.pendingMs {
+            // Pause changes recovery authority, but cannot erase an already
+            // requested seek/recipe whose publication was awaiting control.
+            issueSeek(to: target, generation: seekState.generation)
+        }
     }
 
     /// A terminal automatic retry stays terminal until the viewer explicitly
@@ -2045,7 +2401,8 @@ final class PlayerController: ObservableObject {
     /// an automatic loop while still offering recovery without dismissing the
     /// player.
     func retryAfterPlaybackFailure() {
-        guard started, failed, decision != nil else { return }
+        guard started, failed else { return }
+        beginViewerAction()
         let position = currentMs
         failed = false
         playbackError = nil
@@ -2054,18 +2411,31 @@ final class PlayerController: ObservableObject {
         // The viewer explicitly asked for another attempt; the automatic
         // brake must not carry a spent window into it.
         recoveryReopenBudget.reset()
-        wantsPlayback = true
+        if decision == nil {
+            // A decision timeout has no AVPlayerItem or server session yet.
+            // Retry the retained inputs and destination, including Pause.
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
+        // Retry authorizes another preparation, not a transport change.
+        let lifecycle = lifecycleGeneration
         #if os(iOS)
         if offlineAssetURL != nil {
-            Task { await reloadOffline(at: position) }
+            Task {
+                guard isCurrentLifecycle(lifecycle) else { return }
+                await reloadOffline(at: position)
+            }
             return
         }
         #endif
-        Task { await reopen(at: position) }
+        Task {
+            guard isCurrentLifecycle(lifecycle) else { return }
+            await reopen(at: position)
+        }
     }
 
     var canRetryPlaybackFailure: Bool {
-        started && decision != nil
+        started
     }
 
     func skip(seconds: Double) {
@@ -2152,6 +2522,7 @@ final class PlayerController: ObservableObject {
     }
 
     private func issueSeek(to target: Int, generation: Int) {
+        let actionEpoch = beginViewerAction()
         // Move the visible timeline immediately. The old implementation left
         // it on the paused predecessor for the whole server round trip, which
         // made tvOS look as though the progress command had not worked.
@@ -2160,17 +2531,36 @@ final class PlayerController: ObservableObject {
         refreshPGSOverlayWindow(at: target, force: true)
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
-        let route = Self.seekRoute(
-            targetMs: target,
-            baseMs: baseMs,
-            usesDirectTimeline: usesDirectTimeline,
-            isVOD: isVOD,
-            isChangingStream: isChangingStream,
-            seekableRangesMs: currentItemSeekableRangesMs()
-        )
-        Task {
+        interactiveSeekTask?.cancel()
+        interactiveSeekTask = Task {
+            // Coalesce native and replacement seeks alike. Executing every
+            // scrub event makes AVPlayer and the server race old destinations.
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled,
+                  generation == seekState.generation,
+                  actionEpoch == viewerActionEpoch
+            else { return }
+            retainControlSequence(await playbackControl.reportIntent())
+            guard !Task.isCancelled,
+                  generation == seekState.generation,
+                  actionEpoch == viewerActionEpoch
+            else { return }
+            if recipeRevision.needsReopen {
+                await reopen(at: target)
+                return
+            }
+            let route = Self.seekRoute(
+                targetMs: target,
+                baseMs: baseMs,
+                usesDirectTimeline: usesDirectTimeline,
+                isVOD: isVOD,
+                isChangingStream: isChangingStream,
+                seekableRangesMs: currentItemSeekableRangesMs()
+            )
             switch route {
             case .native(let itemMs):
+                let item = player.currentItem
+                let itemGeneration = openGeneration
                 _ = await player.seek(
                     to: CMTime(seconds: Double(itemMs) / 1000.0, preferredTimescale: 600),
                     toleranceBefore: .zero,
@@ -2178,7 +2568,20 @@ final class PlayerController: ObservableObject {
                 )
                 // Only the newest seek may publish or escalate; an older
                 // completion arriving after AVPlayer cancelled it must not.
-                guard generation == seekState.generation else { return }
+                guard generation == seekState.generation,
+                      actionEpoch == viewerActionEpoch,
+                      openGeneration == itemGeneration,
+                      player.currentItem === item
+                else { return }
+                // A seek or Pause may have invalidated an awaited native
+                // subtitle choice. Reconcile that retained choice on the
+                // same item before acknowledging the new destination.
+                if let item { await reconcileNativeMediaSelections(to: item) }
+                guard generation == seekState.generation,
+                      actionEpoch == viewerActionEpoch,
+                      openGeneration == itemGeneration,
+                      player.currentItem === item
+                else { return }
                 let landed = realPositionMs()
                 // A growing window can go stale between the route decision
                 // and the landing — AVPlayer then clamps somewhere else
@@ -2189,18 +2592,11 @@ final class PlayerController: ObservableObject {
                     await reopen(at: target)
                     return
                 }
-                guard seekState.complete(generation: generation) else { return }
+                guard seekState.markExecuted(generation: generation, targetMs: target) else { return }
                 currentMs = landed
+                beginSeekPresentationMonitor(generation: generation, targetMs: target)
                 updateNowPlaying()
             case .reopen:
-                // Coalesce a burst of out-of-window commands (remote-mash,
-                // repeated scrubs) into the single newest reopen instead of
-                // one server session per press. The optimistic target is
-                // already on screen; only the newest generation survives
-                // the pause. Track/quality changes never pass through here,
-                // so their reopens stay immediate.
-                try? await Task.sleep(for: .milliseconds(350))
-                guard generation == seekState.generation else { return }
                 await reopen(at: target)
             }
         }
@@ -2224,7 +2620,11 @@ final class PlayerController: ObservableObject {
     }
 
     func selectSubtitle(_ index: Int?) {
-        guard index != selectedSubtitle else { return }
+        let cold = started && decision == nil
+        let requestedIndex = index ?? PrePlaySelection.subtitleOff
+        guard index != selectedSubtitle
+                || (cold && initialDecisionRequest.selection.subtitleIndex != requestedIndex)
+        else { return }
         if Self.subtitleUsesOverlay(index, in: subtitles), player.isExternalPlaybackActive {
             showPlaybackNotice(Self.pgsOverlayExternalPlaybackNotice)
             return
@@ -2238,8 +2638,19 @@ final class PlayerController: ObservableObject {
             return
         }
         clearPlaybackNotice()
+        let actionEpoch = beginViewerAction()
         let activeOverlay = pgsOverlayTrackIndex
         selectedSubtitle = index
+        if cold {
+            initialDecisionRequest.selection.subtitleIndex = requestedIndex
+            let destination = seekState.absolute(
+                positionForPlaybackIntent(), durationMs: knownDurationMs
+            )
+            currentMs = destination.target
+            recipeRevision.change()
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
         let route = Self.subtitleSelectionRoute(
             for: index,
             tracks: subtitles,
@@ -2247,14 +2658,30 @@ final class PlayerController: ObservableObject {
             isDirectPlayback: isDirectPlayback,
             activeOverlay: activeOverlay
         )
-        updatePGSOverlaySelection(index)
+        let destination = seekState.selection(
+            at: positionForPlaybackIntent(),
+            durationMs: knownDurationMs,
+            inPlace: route != .reopen
+        )
+        if route == .reopen { recipeRevision.change() }
+        currentMs = destination.target
         // Set before the reopen is scheduled: the open it leads to reads this
         // to decide it may no longer direct-play, and it stays set for the rest
         // of the title, so turning subtitles off again costs no second restart.
         if let index, !Self.subtitleRequiresBurn(index, in: subtitles) {
             wantsNativeSubtitleRenditions = true
         }
-        Task { await applySubtitleSelection(index, route: route) }
+        Task {
+            retainControlSequence(await playbackControl.reportIntent())
+            guard actionEpoch == viewerActionEpoch, selectedSubtitle == index else { return }
+            guard destination.generation == seekState.generation else { return }
+            await applySubtitleSelection(
+                index,
+                route: route,
+                destination: destination,
+                expectedActionEpoch: actionEpoch
+            )
+        }
     }
 
     /// Nonfatal playback feedback shares the red player banner with recovery
@@ -2282,34 +2709,169 @@ final class PlayerController: ObservableObject {
         playbackNotice = nil
     }
 
-    private func applySubtitleSelection(_ index: Int?, route: SubtitleSelectionRoute) async {
+    private func applySubtitleSelection(
+        _ index: Int?,
+        route: SubtitleSelectionRoute,
+        destination: (target: Int, generation: Int)? = nil,
+        expectedActionEpoch: Int
+    ) async {
+        guard expectedActionEpoch == viewerActionEpoch else { return }
+        // Overlay teardown/installation changes visible presentation and
+        // external-output behavior, so it belongs after the urgent intent
+        // publication and stale-action guard just like the AVPlayer mutation.
+        updatePGSOverlaySelection(index)
         switch route {
         case .reopen:
-            await reopen(at: positionForPlaybackIntent())
+            await reopen(at: destination?.target ?? positionForPlaybackIntent())
         case .bitmapOverlay:
             // Moving from a native rendition to bitmap presentation must also
             // turn AVPlayer's legible option off. The synchronized layer then
             // owns the only subtitle pixels without replacing the video item.
-            await applyNativeSubtitleSelection(nil, to: player.currentItem)
+            let applied = await applyNativeSubtitleSelection(
+                nil,
+                to: player.currentItem,
+                expectedActionEpoch: expectedActionEpoch
+            )
+            if applied, Self.subtitleMutationIsCurrent(
+                expectedActionEpoch: expectedActionEpoch,
+                currentActionEpoch: viewerActionEpoch
+            ) {
+                settleInPlaceSubtitleDestination(destination)
+            }
         case .mediaSelection:
             // Selection belongs to AVPlayerItem, not the HLS session. This is
             // the no-restart path that preserves video copy, HDR, position,
             // and the viewer's selected quality.
-            await applyNativeSubtitleSelection(index, to: player.currentItem)
+            let applied = await applyNativeSubtitleSelection(
+                index,
+                to: player.currentItem,
+                expectedActionEpoch: expectedActionEpoch
+            )
+            if applied,
+               Self.subtitleMutationIsCurrent(
+                expectedActionEpoch: expectedActionEpoch,
+                currentActionEpoch: viewerActionEpoch
+               ) {
+                settleInPlaceSubtitleDestination(destination)
+            }
         }
+    }
+
+    private func settleInPlaceSubtitleDestination(
+        _ destination: (target: Int, generation: Int)?
+    ) {
+        guard let destination,
+              destination.generation == seekState.generation,
+              destination.target == seekState.pendingMs
+        else { return }
+        if seekState.requiresMediaPresentation {
+            // The subtitle command superseded the old seek task's action
+            // epoch. Reissue its destination through the normal seek route;
+            // selecting subtitles alone cannot prove that the target played.
+            issueSeek(to: destination.target, generation: destination.generation)
+            return
+        }
+        guard seekState.markExecuted(
+                generation: destination.generation,
+                targetMs: destination.target
+              ),
+              seekState.presentedInPlace(
+                generation: destination.generation,
+                targetMs: destination.target
+              )
+        else { return }
+        currentMs = realPositionMs()
+        playbackControlPlayerChanged()
+        updateNowPlaying()
     }
 
     func selectAudio(_ index: Int) {
         guard index != selectedAudio else { return }
+        let actionEpoch = beginViewerAction()
+        let destination = seekState.absolute(
+            positionForPlaybackIntent(),
+            durationMs: knownDurationMs
+        )
+        currentMs = destination.target
         selectedAudio = index
+        recipeRevision.change()
+        if started && decision == nil {
+            // The selection-aware decision decides whether this track can
+            // play directly, exactly as it does for a detail-screen choice.
+            initialDecisionRequest.selection.audioIndex = index
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
         audioOverride = index
-        Task { await reopen(at: positionForPlaybackIntent()) }
+        Task {
+            retainControlSequence(await playbackControl.reportIntent())
+            guard actionEpoch == viewerActionEpoch,
+                  destination.generation == seekState.generation,
+                  selectedAudio == index
+            else { return }
+            await reopen(at: destination.target)
+        }
     }
 
     func selectQuality(_ height: Int?) {
-        guard height != selectedHeight else { return }
+        let cold = started && decision == nil
+        let requestedQuality = height.map { Self.initialQuality(height: $0) } ?? .auto
+        guard height != selectedHeight || selectedQualityIsOriginal
+                || (cold && (initialDecisionRequest.quality != requestedQuality
+                    || initialDecisionRequest.explicitHeight != height))
+        else { return }
+        let actionEpoch = beginViewerAction()
+        let destination = seekState.absolute(
+            positionForPlaybackIntent(),
+            durationMs: knownDurationMs
+        )
+        currentMs = destination.target
         selectedHeight = height
-        Task { await reopen(at: positionForPlaybackIntent()) }
+        selectedQualityIsOriginal = false
+        recipeRevision.change()
+        if cold {
+            initialDecisionRequest.quality = requestedQuality
+            initialDecisionRequest.explicitHeight = height
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
+        Task {
+            retainControlSequence(await playbackControl.reportIntent())
+            guard actionEpoch == viewerActionEpoch,
+                  destination.generation == seekState.generation,
+                  selectedHeight == height,
+                  !selectedQualityIsOriginal
+            else { return }
+            await reopen(at: destination.target)
+        }
+    }
+
+    func selectOriginalQuality() {
+        guard selectedHeight != nil || !selectedQualityIsOriginal else { return }
+        let actionEpoch = beginViewerAction()
+        let destination = seekState.absolute(
+            positionForPlaybackIntent(),
+            durationMs: knownDurationMs
+        )
+        currentMs = destination.target
+        selectedHeight = nil
+        selectedQualityIsOriginal = true
+        recipeRevision.change()
+        if started && decision == nil {
+            initialDecisionRequest.quality = .original
+            initialDecisionRequest.explicitHeight = nil
+            restartInitialDecision(lifecycle: lifecycleGeneration)
+            return
+        }
+        Task {
+            retainControlSequence(await playbackControl.reportIntent())
+            guard actionEpoch == viewerActionEpoch,
+                  destination.generation == seekState.generation,
+                  selectedHeight == nil,
+                  selectedQualityIsOriginal
+            else { return }
+            await reopen(at: destination.target)
+        }
     }
 
     /// The link rate AVFoundation itself measured, in bits per second.
@@ -2371,7 +2933,7 @@ final class PlayerController: ObservableObject {
     /// in the right timeline.
     private func positionForPlaybackIntent() -> Int {
         if let pending = seekState.pendingMs { return pending }
-        return isChangingStream ? currentMs : realPositionMs()
+        return isChangingStream || player.currentItem == nil ? currentMs : realPositionMs()
     }
 
     /// Report the final position and hand any encoder back immediately.
@@ -2379,10 +2941,17 @@ final class PlayerController: ObservableObject {
         clearPlaybackNotice()
         let wasStarted = started
         started = false
+        lifecycleGeneration &+= 1
+        loadingTask?.cancel()
+        loadingTask = nil
+        initialDecisionGeneration &+= 1
+        initialDecisionDeadlineTask?.cancel()
+        initialDecisionDeadlineTask = nil
         // Invalidate every in-flight open before any of its awaits can attach
         // a replacement item after this teardown.
         openGeneration &+= 1
         reopenQueue.clear()
+        recipeRevision.clear()
         activeMediaPath = nil
         activeNativeSubtitle = nil
         Session.shared.resetMediaFailover()
@@ -2390,6 +2959,14 @@ final class PlayerController: ObservableObject {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
         }
+        interactiveSeekTask?.cancel()
+        interactiveSeekTask = nil
+        seekPresentationTask?.cancel()
+        seekPresentationTask = nil
+        seekPresentationLifecycle.removeAll()
+        seekVideoOutput = nil
+        viewerActionEpoch &+= 1
+        pendingControlSequence = nil
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
             self.endObserver = nil
@@ -2459,16 +3036,57 @@ final class PlayerController: ObservableObject {
 
     // MARK: - Stream lifecycle
 
-    private func load(startMs: Int) async {
-        guard let model else { return }
+    private func isCurrentLifecycle(_ generation: Int) -> Bool {
+        started && lifecycleGeneration == generation
+    }
+
+    private func restartInitialDecision(lifecycle: Int) {
+        guard isCurrentLifecycle(lifecycle), decision == nil else { return }
+        loadingTask?.cancel()
+        initialDecisionDeadlineTask?.cancel()
+        initialDecisionGeneration &+= 1
+        let generation = initialDecisionGeneration
+        let request = initialDecisionRequest
+        let file = fileId
+        let start = positionForPlaybackIntent()
+        failed = false
+        playbackError = nil
+        loadingTask = Task {
+            await load(startMs: start, lifecycle: lifecycle, generation: generation,
+                       file: file, request: request)
+        }
+        initialDecisionDeadlineTask = Task {
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  initialDecisionGeneration == generation, decision == nil else { return }
+            do { try await waitInitialDecisionDeadline() } catch { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  initialDecisionGeneration == generation, decision == nil
+            else { return }
+            initialDecisionGeneration &+= 1
+            loadingTask?.cancel()
+            fail(APIError.transport("Playback decision did not complete in time. Try again."))
+        }
+    }
+
+    private static func initialQuality(height: Int) -> PlaybackQuality {
+        // The decision endpoint accepts only a transcode category; the exact
+        // (including non-menu) height is retained for the session request.
+        PlaybackQuality(rawValue: String(height)) ?? .p1080
+    }
+
+    private func load(
+        startMs: Int, lifecycle: Int, generation: Int,
+        file: Int, request: InitialDecisionRequest
+    ) async {
+        guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+              initialDecisionGeneration == generation, let model else { return }
         do {
-            let playbackDecision = try await model.playbackDecision(
-                fileId: fileId,
-                selection: prePlaySelection,
-                quality: startingQuality
-            )
+            let playbackDecision = try await requestPlaybackDecision(model, file, request.selection, request.quality)
             let decision = playbackDecision.decision
-            guard started else { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  initialDecisionGeneration == generation else { return }
+            initialDecisionDeadlineTask?.cancel()
+            initialDecisionDeadlineTask = nil
             decisionCaps = playbackDecision.caps
             self.decision = decision
             if knownDurationMs <= 0 { knownDurationMs = decision.source?.durationMs ?? 0 }
@@ -2476,26 +3094,25 @@ final class PlayerController: ObservableObject {
             // now that the ladder says which rungs exist for this source. An
             // explicit `initialHeight` (debug acceptance) is a stronger
             // answer and is left alone.
-            if selectedHeight == nil {
-                selectedHeight = Self.startingHeight(
-                    for: startingQuality,
-                    ladder: decision.ladder ?? []
-                )
-            }
+            selectedHeight = request.explicitHeight ?? Self.startingHeight(
+                for: request.quality, ladder: decision.ladder ?? []
+            )
+            selectedQualityIsOriginal = request.quality == .original
             // `default` on a decision track is the server's own shared-policy
             // pick, not the muxer's flag (crates/plurxd http/stream.rs
             // overwrites both lists from `select_tracks`) — and for a
             // selection-aware request it is the *effective* pick, so a pre-play
             // audio choice already arrives marked here.
-            selectedAudio = decision.audio?.first(where: { $0.default })?.index
+            selectedAudio = request.selection.audioIndex
+                ?? decision.audio?.first(where: { $0.default })?.index
             let wantedSubtitle = Self.initialSubtitleIndex(
-                prePlay: prePlaySelection.subtitleIndex,
+                prePlay: request.selection.subtitleIndex,
                 serverSelection: decision.selection,
                 tracks: decision.subtitles ?? [],
                 deviceSubtitlesOff: model.subLang == "off"
             )
             let blockedByHDR = Self.startingSubtitleBlockedByHDR(
-                prePlaySubtitle: prePlaySelection.subtitleIndex,
+                prePlaySubtitle: request.selection.subtitleIndex,
                 wanted: wantedSubtitle,
                 serverSelection: decision.selection,
                 tracks: decision.subtitles ?? [],
@@ -2529,14 +3146,23 @@ final class PlayerController: ObservableObject {
                 request: PlayerReopenRequest(positionMs: initialPosition)
             )
         } catch {
-            guard started else { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  initialDecisionGeneration == generation else { return }
+            initialDecisionDeadlineTask?.cancel()
+            initialDecisionDeadlineTask = nil
             reopenQueue.clear()
-            seekState.clear()
+            // The request failed, not the viewer's retained destination.
             fail(error)
         }
     }
 
     private func reopen(at position: Int, intent: PlayerOpenIntent = .normal) async {
+        #if os(iOS)
+        if offlineId != nil {
+            await reloadOffline(at: position)
+            return
+        }
+        #endif
         // A growing EVENT playlist can momentarily announce its current end,
         // and several UI actions can also request a restart. Never overlap two
         // server-session replacements (see `PlayerReopenQueue`) — they share a
@@ -2545,6 +3171,7 @@ final class PlayerController: ObservableObject {
         // just deleted — but never discard one either: a request that lands
         // mid-change is remembered and replayed as the single trailing reopen.
         guard let decision, started else { return }
+        let lifecycle = lifecycleGeneration
         guard let next = reopenQueue.request(
             position,
             intent: intent,
@@ -2555,9 +3182,12 @@ final class PlayerController: ObservableObject {
         do {
             try await openAndDrain(decision: decision, request: next)
         } catch {
+            guard isCurrentLifecycle(lifecycle) else { return }
             reopenQueue.clear()
-            seekState.clear()
-            currentMs = realPositionMs()
+            if player.currentItem != nil {
+                seekState.clear()
+                currentMs = realPositionMs()
+            }
             fail(error)
         }
     }
@@ -2573,25 +3203,26 @@ final class PlayerController: ObservableObject {
     /// (unbound) or a genuinely new stall that minted its own ticket. One stall
     /// can therefore never step the ladder down twice.
     private func openAndDrain(decision: Decision, request: PlayerReopenRequest) async throws {
+        let lifecycle = lifecycleGeneration
         var request = request
         while true {
             let next = request.positionMs
             try await open(decision: decision, at: next, intent: request.intent)
-            guard started else {
-                reopenQueue.clear()
-                // Parity with `stop()`: nothing will complete a pending
-                // target after the viewer has left, and a stale one would
-                // freeze `currentMs` on the next playback of this view.
-                seekState.clear()
-                return
-            }
+            guard isCurrentLifecycle(lifecycle) else { return }
             // A newer `open()` superseded this one while it ran (P2-6). The
             // transition — and with it `isChangingStream`, which only the
             // owning open clears — belongs to that newer attempt, so the queued
             // request is its to drain and not this loop's.
             guard !isChangingStream else { return }
             guard let trailing = reopenQueue.takePending() else {
-                seekState.completeReopen(at: next)
+                if recipeRevision.needsReopen {
+                    request = PlayerReopenRequest(positionMs: positionForPlaybackIntent())
+                    continue
+                }
+                let seekGeneration = seekState.generation
+                if seekState.markExecuted(generation: seekGeneration, targetMs: next) {
+                    beginSeekPresentationMonitor(generation: seekGeneration, targetMs: next)
+                }
                 return
             }
             request = trailing
@@ -2604,8 +3235,15 @@ final class PlayerController: ObservableObject {
         intent: PlayerOpenIntent = .normal
     ) async throws {
         guard let model, started else { return }
+        let lifecycle = lifecycleGeneration
+        let requestedFile = fileId
         openGeneration &+= 1
         let generation = openGeneration
+        let requestedRecipeRevision = recipeRevision.desired
+        let seekOwner = seekPreparationOwner(at: startMs)
+        let requestedHeight = selectedHeight
+        let requestedOriginal = selectedQualityIsOriginal
+        let requestedAudioOverride = audioOverride
         // A fresh stream starts at the head of the node list. Without this,
         // one film's failover leaves the index advanced for every film after
         // it in the same process, and the second one has no node left to try.
@@ -2622,16 +3260,10 @@ final class PlayerController: ObservableObject {
         // audio, quality, or a burned subtitle — and must not pause one whose
         // player merely happens to be stopped right now, which is the state a
         // buffering item and a failed item both present.
-        let resumesPlayback = Self.reopenResumesPlayback(
-            wantsPlayback: wantsPlayback,
-            hasCurrentItem: player.currentItem != nil
-        )
-        let resumeRate = preferredRate
         // What `restoreAfterFailedChange` has to put back if no successor comes
         // into existence: a stream that is still worth watching, and the
         // viewer's own transport intent rather than the player's observed
         // state, which reads as paused while an item buffers (P2-5).
-        let wasPlaying = wantsPlayback && player.currentItem != nil
         player.pause()
         // The session this open replaces. It is retired only once its successor
         // exists: releasing first meant a failed create left the viewer's item
@@ -2655,8 +3287,8 @@ final class PlayerController: ObservableObject {
         )
         let burnSubtitle = subtitleFields.burn
         let nativeSubtitle = subtitleFields.native
-        let forceTranscode = burnSubtitle != nil || selectedHeight != nil || forceCompatibilityTranscode
-        let customAudio = audioOverride != nil
+        let forceTranscode = burnSubtitle != nil || requestedHeight != nil || forceCompatibilityTranscode
+        let customAudio = requestedAudioOverride != nil
         // Whether this open has to be a session for no reason other than making
         // the file's text subtitles selectable. Sticky once true, so leaving
         // subtitles again does not buy a second restart.
@@ -2721,20 +3353,25 @@ final class PlayerController: ObservableObject {
             // first stream, so the UI could say English while Italian played.
             // A viewer's later explicit choice remains the stronger value.
             let chosenAudio = Self.sessionAudioIndex(
-                explicit: audioOverride,
+                explicit: requestedAudioOverride,
                 plan: decision.delivery?.audio,
                 selected: selectedAudio
             )
             let aac = copy ? needsAAC(audioIndex: chosenAudio, decision: decision)
                 : nil
+            let reporterControlSequence = await readControlSequence(playbackControl)
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
+            let orderedControlSequence = [reporterControlSequence, pendingControlSequence]
+                .compactMap { $0 }
+                .max()
             let body = Self.applyOpenIntent(
                 to: CreateSessionRequest(
                     playbackId: playbackId,
-                    controlSequence: await playbackControl.controlSequence,
+                    controlSequence: orderedControlSequence,
                     height: Self.burnSessionHeight(
                         burnSubtitle: burnSubtitle,
                         mode: normalMode,
-                        selectedHeight: selectedHeight,
+                        selectedHeight: requestedHeight,
                         sourceHeight: decision.source?.height
                     ),
                     start: Double(startMs) / 1000.0,
@@ -2758,7 +3395,8 @@ final class PlayerController: ObservableObject {
                 ),
                 intent: intent,
                 currentSessionId: superseded,
-                selectedHeight: selectedHeight
+                selectedHeight: requestedHeight,
+                qualityIsOriginal: requestedOriginal
             )
             // The rung this open is stepping down *from*, read before the
             // successor overwrites it. Only a strictly lower answer proves the
@@ -2767,8 +3405,9 @@ final class PlayerController: ObservableObject {
             let hls: HlsStart
             do {
                 do {
-                    hls = try await model.createHlsSession(fileId: fileId, body: body)
+                    hls = try await requestHlsSession(model, requestedFile, body)
                 } catch let createError {
+                    guard !Task.isCancelled, isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
                     // The bound half of a stall reopen is the only part of this
                     // body the server can refuse on its own: the predecessor
                     // may have been superseded or retired between the stall and
@@ -2783,7 +3422,7 @@ final class PlayerController: ObservableObject {
                         for: body,
                         after: createError
                     ) else { throw createError }
-                    hls = try await model.createHlsSession(fileId: fileId, body: unbound)
+                    hls = try await requestHlsSession(model, requestedFile, unbound)
                 }
             } catch {
                 // A superseded attempt must not report its own failure over
@@ -2794,7 +3433,7 @@ final class PlayerController: ObservableObject {
                 // nothing about it changes: same session, same player item,
                 // telemetry running again, and playing if it was. The caller
                 // surfaces a transient error instead of a coming stall.
-                restoreAfterFailedChange(wasPlaying: wasPlaying, session: superseded)
+                restoreAfterFailedChange(session: superseded)
                 throw error
             }
             guard !isSuperseded(generation) else {
@@ -2857,7 +3496,7 @@ final class PlayerController: ObservableObject {
         }
 
         guard let url else {
-            restoreAfterFailedChange(wasPlaying: wasPlaying, session: superseded)
+            restoreAfterFailedChange(session: superseded)
             throw APIError.badURL
         }
         // Nothing backs a direct play, and `superseded` still names the session
@@ -2880,6 +3519,7 @@ final class PlayerController: ObservableObject {
         }
         let item = AVPlayerItem(url: url)
         Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
+        installSeekVideoOutput(on: item)
         #if os(iOS)
         // The tvOS 26 SDK exposes this setter, but some shipping Apple TV
         // runtimes do not implement it and abort on the Objective-C selector.
@@ -2894,6 +3534,7 @@ final class PlayerController: ObservableObject {
         pgsOverlayWindow = nil
         stallObservation.reset()
         player.replaceCurrentItem(with: item)
+        recipeRevision.didAttach(requestedRecipeRevision)
         playbackAttemptId = attemptId
         // Publish the new local-to-film mapping only once the new item is the
         // one whose clock `realPositionMs()` reads. Updating it during session
@@ -2909,14 +3550,14 @@ final class PlayerController: ObservableObject {
         // presenting a stopped transport. That regression is why a paused
         // reopen still calls `play()` here rather than betting that an item
         // reaches `.readyToPlay` at rate 0 on every shipping tvOS: prepare
-        // first, honor the pause immediately when nothing has to be waited
-        // for, and otherwise as soon as the resume seek lands.
+        // first and honor the latest pause immediately. A pending readiness
+        // or seek cannot grant permission to resume audible playback.
         player.play()
-        if !resumesPlayback && seekAfterAttach == nil { player.pause() }
-        isPlaying = resumesPlayback
+        if !wantsPlayback { player.pause() }
+        isPlaying = wantsPlayback
         if let seekAfterAttach {
             do {
-                try await seekWhenReady(item, ms: seekAfterAttach)
+                try await seekWhenReady(item, ms: seekAfterAttach, owner: seekOwner)
                 ttffMeasurement.rebasePosition(at: realPositionMs())
             } catch {
                 if isSuperseded(generation) { return }
@@ -2936,7 +3577,7 @@ final class PlayerController: ObservableObject {
             isVOD: isVOD,
             startMs: startMs,
             seeksAfterAttach: seekAfterAttach != nil,
-            resumesPlayback: resumesPlayback
+            resumesPlayback: wantsPlayback
         ) {
             // A fresh start has no seek to wait behind, so nothing used to
             // bound its wait for a first frame at all. An item AVFoundation
@@ -2944,7 +3585,7 @@ final class PlayerController: ObservableObject {
             // that cannot decode it — held this open forever, which is the
             // black screen viewers reported.
             do {
-                try await awaitItemReady(item)
+                try await itemPreparation.ready(item)
             } catch {
                 if isSuperseded(generation) { return }
                 if item.status == .failed {
@@ -2960,17 +3601,17 @@ final class PlayerController: ObservableObject {
                 throw error
             }
         }
-        await applyPreferredAudioSelection(to: item)
-        await applyNativeSubtitleSelection(nativeSubtitle, to: item)
         guard !isSuperseded(generation) else { return }
-        if resumesPlayback {
+        await reconcileNativeMediaSelections(to: item)
+        guard !isSuperseded(generation) else { return }
+        if wantsPlayback {
             player.play()
             // Restore the rate the viewer was last actually playing at (P2-5).
-            if resumeRate != 1 { player.rate = resumeRate }
+            if preferredRate != 1 { player.rate = preferredRate }
         } else {
             player.pause()
         }
-        isPlaying = resumesPlayback
+        isPlaying = wantsPlayback
         currentMs = startMs
         playbackRecoveryMonitor.reset()
         deliveryStarvation.reset()
@@ -2983,12 +3624,9 @@ final class PlayerController: ObservableObject {
             await handleItemFailure(item)
             return
         }
-        // P1-2: `reopen()` queues rather than overlaps an in-flight open, and
-        // this open applied the selection it captured at entry, so a track
-        // picked during a cold extraction would otherwise show a checkmark
-        // forever while the stream renders the old choice — a media-selection
-        // switch queues nothing, because it never asked for a reopen. Apply
-        // whatever the viewer last chose.
+        // Native choices were reconciled above, but the attached recipe was
+        // captured before session creation. A new burn/direct-session choice
+        // may still require replacement; reconcile that with a fresh owner.
         if let route = Self.subtitleReconciliation(
             applied: requestedSubtitle,
             current: selectedSubtitle,
@@ -2996,7 +3634,8 @@ final class PlayerController: ObservableObject {
             activeBurn: activeBurnedSubtitle,
             isDirectPlayback: isDirectPlayback
         ) {
-            await applySubtitleSelection(selectedSubtitle, route: route)
+            let actionEpoch = viewerActionEpoch
+            await applySubtitleSelection(selectedSubtitle, route: route, expectedActionEpoch: actionEpoch)
         }
     }
 
@@ -3024,18 +3663,21 @@ final class PlayerController: ObservableObject {
 
     /// Put back everything `open` disturbed before it discovered it could not
     /// produce a successor. The viewer keeps watching what they were watching.
-    private func restoreAfterFailedChange(wasPlaying: Bool, session: String?) {
+    private func restoreAfterFailedChange(session: String?) {
         isChangingStream = false
         // The create it failed on is a round trip too: if the viewer left
         // during it there is nothing left to keep watching, and resuming here
         // would restart a player `stop()` has already paused and detached from.
         guard started else { return }
         if session != nil { startStatusPolling() }
-        if wasPlaying {
+        if wantsPlayback {
             player.play()
             // Restore the rate the viewer was last actually playing at (P2-5).
             if preferredRate != 1 { player.rate = preferredRate }
             isPlaying = true
+        } else {
+            player.pause()
+            isPlaying = false
         }
     }
 
@@ -3325,7 +3967,7 @@ final class PlayerController: ObservableObject {
             && !finished
             && !failed
             && !isChangingStream
-            && seekState.pendingMs == nil
+            && seekState.allowsStallRecovery
             && player.currentItem != nil
         let position = realPositionMs()
         guard deliveryStarvation.observe(
@@ -3362,17 +4004,46 @@ final class PlayerController: ObservableObject {
         recoveryTask?.cancel()
         recoveryTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                // The ordinary health cadence is two seconds, but a control
+                // verdict owns the picture only until its absolute deadline.
+                // Recompute before every sleep so the final wait ends at that
+                // deadline instead of at the next cadence tick (up to two
+                // seconds late). `ceil` in the helper prevents an early wake
+                // from accidentally spending the client's recovery attempt.
+                let now = ProcessInfo.processInfo.systemUptime
+                let sleepMs = Self.recoveryPollDelayMs(
+                    now: now,
+                    deferredDeadline: self?.deferredStall?.deadline
+                )
+                if sleepMs > 0 {
+                    try? await Task.sleep(for: .milliseconds(sleepMs))
+                }
                 guard !Task.isCancelled, let self else { return }
                 let shouldMonitor = self.started
                     && self.wantsPlayback
                     && !self.finished
                     && !self.failed
                     && !self.isChangingStream
-                    && self.seekState.pendingMs == nil
+                    && self.seekState.allowsStallRecovery
                     && self.player.currentItem != nil
                 let timeControlStatus = self.player.timeControlStatus
                 let position = self.realPositionMs()
+                if !shouldMonitor || abs(position - (self.deferredStall?.event.positionMs ?? position)) >= 250 {
+                    self.deferredStall = nil
+                } else if let deferred = self.deferredStall,
+                          ProcessInfo.processInfo.systemUptime >= deferred.deadline {
+                    self.deferredStall = nil
+                    await self.retrySameDeliveryAfterStall(
+                        PlaybackStallEvent(
+                            kind: deferred.event.kind,
+                            action: .reopen,
+                            positionMs: position,
+                            durationMs: Self.controlStallDeferralDeadlineMs
+                        ),
+                        consultControl: false
+                    )
+                    continue
+                }
                 if self.diagnosticProbesEnabled, self.player.currentItem != nil {
                     self.reportPlaybackProbe(at: position)
                 }
@@ -3415,7 +4086,11 @@ final class PlayerController: ObservableObject {
     /// replacement uses the identical recipe — but it names the session that
     /// stalled, so the server resolves it one rung down instead of rebuilding
     /// the rung that just starved.
-    private func retrySameDeliveryAfterStall(_ event: PlaybackStallEvent) async {
+    private func retrySameDeliveryAfterStall(
+        _ event: PlaybackStallEvent,
+        consultControl: Bool = true
+    ) async {
+        if consultControl, deferredStall != nil { return }
         // The ask goes here, before the first statement, and the placement is
         // the one detail worth getting right. `next(for:)` below sets
         // `attempted` and returns `.stop` on every later call — it IS the
@@ -3423,10 +4098,27 @@ final class PlayerController: ObservableObject {
         // permanently retire the one same-delivery reopen this client had,
         // which is the exact failure a hold exists to avoid.
         let generation = openGeneration
-        let verdict = await controlVerdictForStall(event)
+        let actionEpoch = viewerActionEpoch
+        let deferralDeadline = consultControl
+            ? ProcessInfo.processInfo.systemUptime
+                + Double(max(0, Self.controlStallDeferralDeadlineMs - event.durationMs)) / 1_000
+            : nil
+        let verdict: ControlAction?
+        if consultControl, Self.controlMayDeferStall(durationMs: event.durationMs) {
+            verdict = await controlVerdictForStall(event)
+        } else {
+            verdict = nil
+        }
         // Everything the caller checked may have changed across that await.
-        guard openGeneration == generation, started, stallRecoveryStillEligible else { return }
-        if let verdict, applyStallVerdict(verdict, event: event) { return }
+        guard openGeneration == generation,
+              viewerActionEpoch == actionEpoch,
+              started,
+              stallRecoveryStillEligible
+        else { return }
+        if let verdict,
+           applyStallVerdict(verdict, event: event, deferralDeadline: deferralDeadline) {
+            return
+        }
         var decision = sameDeliveryStallRecovery.next(for: event.kind)
         #if os(iOS)
         let hasOfflineAsset = offlineAssetURL != nil
@@ -3491,6 +4183,28 @@ final class PlayerController: ObservableObject {
     /// while another is in flight.
     static let controlAskSeconds: TimeInterval = 1.5
     static let controlAskCapSeconds: TimeInterval = 3
+    nonisolated static let controlStallDeferralDeadlineMs = 20_000
+    static let seekPresentationDeadlineSeconds = PlayerSeekState.presentationDeadlineSeconds
+    nonisolated private static let recoveryPollCadenceMs: Int64 = 2_000
+
+    /// Wake at the earlier of the ordinary health cadence and a control
+    /// verdict's absolute deadline.
+    ///
+    /// The deadline is monotonic uptime, not another duration from the most
+    /// recent sample. Rounding up to a whole millisecond is important: waking
+    /// early would fail the deadline check and then wait another full cadence.
+    nonisolated static func recoveryPollDelayMs(
+        now: TimeInterval,
+        deferredDeadline: TimeInterval?
+    ) -> Int64 {
+        guard let deferredDeadline else { return recoveryPollCadenceMs }
+        let remainingMs = ceil(max(0, deferredDeadline - now) * 1_000)
+        return min(recoveryPollCadenceMs, Int64(remainingMs))
+    }
+
+    nonisolated static func controlMayDeferStall(durationMs: Int) -> Bool {
+        durationMs < controlStallDeferralDeadlineMs
+    }
 
     /// Publish this owner's evidence and wait, briefly, for the verdict.
     ///
@@ -3550,7 +4264,7 @@ final class PlayerController: ObservableObject {
             && !finished
             && !failed
             && !isChangingStream
-            && seekState.pendingMs == nil
+            && seekState.allowsStallRecovery
             && player.currentItem != nil
     }
 
@@ -3562,7 +4276,8 @@ final class PlayerController: ObservableObject {
     /// has ever completed a full-vocabulary exchange with one.
     func applyStallVerdict(
         _ verdict: ControlAction,
-        event: PlaybackStallEvent
+        event: PlaybackStallEvent,
+        deferralDeadline: TimeInterval? = nil
     ) -> Bool {
         switch verdict.type {
         case "terminal":
@@ -3592,8 +4307,10 @@ final class PlayerController: ObservableObject {
                 kind: event.kind,
                 publishedEndMs: sessionStatus?.publishedEndMs,
                 fetchedEndMs: sessionStatus?.fetchedEndMs,
-                runwaySeconds: bufferedRunwaySeconds()
+                runwaySeconds: bufferedRunwaySeconds(),
+                durationMs: event.durationMs
             ) else { return false }
+            guard deferStall(event, deadline: deferralDeadline) else { return false }
             // Production is deliberately not advancing, so a reopen would
             // churn against a server that already knows better — and it must
             // not spend the one same-delivery attempt either.
@@ -3612,6 +4329,8 @@ final class PlayerController: ObservableObject {
             // when to look again. The monitor is already a loop, so the honest
             // response is to spend nothing and let it come round — the pacing
             // this client can honour is "not now", not a precise interval.
+            guard Self.controlMayDeferStall(durationMs: event.durationMs) else { return false }
+            guard deferStall(event, deadline: deferralDeadline) else { return false }
             showPlaybackNotice(Self.holdNotice(verdict.reason), duration: .seconds(30))
             restartDeliveryPollAfterDeferral(event)
             reportPlaybackStall(event, outcome: .serverRetryResource)
@@ -3636,8 +4355,10 @@ final class PlayerController: ObservableObject {
         kind: PlaybackStallKind,
         publishedEndMs: Int?,
         fetchedEndMs: Int?,
-        runwaySeconds: Double?
+        runwaySeconds: Double?,
+        durationMs: Int = 0
     ) -> Bool {
+        guard controlMayDeferStall(durationMs: durationMs) else { return false }
         switch kind {
         case .delivery:
             return false
@@ -3655,6 +4376,18 @@ final class PlayerController: ObservableObject {
             return !(runwayGone
                 && unfetchedMs >= DeliveryStarvationDetector.pendingMediaThresholdMs)
         }
+    }
+
+    private func deferStall(
+        _ event: PlaybackStallEvent,
+        deadline: TimeInterval?
+    ) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let remainingMs = max(0, Self.controlStallDeferralDeadlineMs - event.durationMs)
+        let absoluteDeadline = deadline ?? now + Double(remainingMs) / 1_000
+        guard absoluteDeadline > now else { return false }
+        deferredStall = (event, absoluteDeadline)
+        return true
     }
 
     /// The server-side wedge signature, read from the last status poll: no
@@ -3854,10 +4587,11 @@ final class PlayerController: ObservableObject {
         to body: CreateSessionRequest,
         intent: PlayerOpenIntent,
         currentSessionId: String?,
-        selectedHeight: Int?
+        selectedHeight: Int?,
+        qualityIsOriginal: Bool = false
     ) -> CreateSessionRequest {
         var body = body
-        body.qualityAuto = selectedHeight == nil
+        body.qualityAuto = selectedHeight == nil && !qualityIsOriginal
         guard case .stallReopen(let ticket) = intent,
               let currentSessionId,
               ticket.previousSessionId == currentSessionId
@@ -3934,11 +4668,150 @@ final class PlayerController: ObservableObject {
 
     // MARK: - Observation and metadata
 
+    /// Install one passive frame-availability tap per attached item. It is
+    /// idle outside an interactive seek. A pixel buffer proves that this
+    /// item's output reached the requested timeline, but AVPlayerItemVideoOutput
+    /// does not acknowledge physical display by AVPlayerLayer; device playback
+    /// qualification must still verify that final rendering boundary.
+    private func installSeekVideoOutput(on item: AVPlayerItem) {
+        seekPresentationTask?.cancel()
+        seekPresentationTask = nil
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+        item.add(output)
+        seekVideoOutput = output
+    }
+
+    private func beginSeekPresentationMonitor(generation: Int, targetMs: Int) {
+        seekPresentationTask?.cancel()
+        guard let item = player.currentItem else { return }
+        let output = seekVideoOutput
+        let hasVideo = decision?.source?.videoCodec != nil
+        seekPresentationBackgrounded = UIApplication.shared.applicationState == .background
+        seekPresentationLifecycle = [
+            (UIApplication.didEnterBackgroundNotification, true),
+            (UIApplication.willEnterForegroundNotification, false)
+        ].map { name, backgrounded in
+            NotificationCenter.default.publisher(for: name).sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.seekPresentationBackgrounded = backgrounded
+                    self.sampleSeekPresentationClocks()
+                }
+            }
+        }
+        sampleSeekPresentationClocks()
+        seekPresentationTask = Task { [weak self, weak item] in
+            while !Task.isCancelled {
+                guard let self, let item,
+                      self.player.currentItem === item,
+                      self.seekState.pendingMs == targetMs,
+                      self.seekState.generation == generation
+                else { return }
+
+                let deadlineReached = self.sampleSeekPresentationClocks()
+
+                var settled = false
+                if hasVideo, let output {
+                    let itemTime = output.itemTime(
+                        forHostTime: ProcessInfo.processInfo.systemUptime
+                    )
+                    var displayTime = CMTime.invalid
+                    if itemTime.isValid,
+                       itemTime.seconds.isFinite,
+                       output.hasNewPixelBuffer(forItemTime: itemTime),
+                       output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime) != nil,
+                       displayTime.isValid, displayTime.seconds.isFinite {
+                        // Use the returned frame's own display time rather
+                        // than assigning the requested clock to an old image.
+                        let presentedMs = self.baseMs + max(0, Int(displayTime.seconds * 1_000))
+                        settled = self.seekState.presentedVideo(
+                            positionMs: presentedMs,
+                            generation: generation
+                        )
+                    }
+                } else if !hasVideo,
+                          self.player.timeControlStatus == .playing,
+                          self.player.rate > 0 {
+                    settled = self.seekState.presentedAudio(
+                        positionMs: self.realPositionMs(),
+                        generation: generation
+                    )
+                }
+
+                if settled {
+                    self.currentMs = self.realPositionMs()
+                    self.playbackControlPlayerChanged()
+                    self.updateNowPlaying()
+                    return
+                }
+                if deadlineReached {
+                    // An attached/seeked item that never presents is a stall,
+                    // not an indefinitely pending UI state. Recover from a
+                    // separate task: reopen installs a new video output and
+                    // cancels this monitor, so awaiting it here would cancel
+                    // the recovery halfway through its own open.
+                    self.currentMs = targetMs
+                    let recoveryGeneration = self.openGeneration
+                    let recoveryActionEpoch = self.viewerActionEpoch
+                    Task { [weak self] in
+                        guard let self,
+                              self.openGeneration == recoveryGeneration,
+                              self.viewerActionEpoch == recoveryActionEpoch,
+                              self.wantsPlayback, !self.failed, !self.finished,
+                              !(self.seekPresentationBackgrounded && hasVideo),
+                              self.seekState.pendingMs == targetMs,
+                              self.seekState.generation == generation
+                        else { return }
+                        await self.retrySameDeliveryAfterStall(
+                            PlaybackStallEvent(
+                                kind: .buffering,
+                                action: .reopen,
+                                positionMs: targetMs,
+                                durationMs: Int(Self.seekPresentationDeadlineSeconds * 1_000)
+                            ),
+                            consultControl: false
+                        )
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    @discardableResult
+    private func sampleSeekPresentationClocks() -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let generation = seekState.generation
+        seekState.observePlaybackClock(
+            at: now, rate: Double(player.rate),
+            isPlaying: player.timeControlStatus == .playing,
+            generation: generation
+        )
+        return seekState.observePresentationDemand(
+            at: now,
+            eligible: started && wantsPlayback && !failed && !finished && !isChangingStream
+                && !(seekPresentationBackgrounded && decision?.source?.videoCodec != nil),
+            generation: generation
+        )
+    }
+
     private func addPeriodicObserver() {
         let interval = CMTime(seconds: 1, preferredTimescale: 2)
-        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
+        let observe = makePeriodicPlaybackObservation()
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { _ in
+            MainActor.assumeIsolated { observe() }
+        }
+    }
+
+    /// The actual timer callback owns a title, and only samples an attached
+    /// item outside preparation. A no-item clock is not a resume position;
+    /// removing an observer does not revoke a callback already queued by AVF.
+    func makePeriodicPlaybackObservation() -> @MainActor () -> Void {
+        let lifecycle = lifecycleGeneration
+        return { [weak self] in
+                guard let self, self.isCurrentLifecycle(lifecycle),
+                      let item = self.player.currentItem, !self.isChangingStream else { return }
                 // Keep an interactive target on screen while its item is being
                 // prepared. Reading the predecessor here was the visible snap
                 // back after a progress-bar or skip-button command.
@@ -3974,8 +4847,11 @@ final class PlayerController: ObservableObject {
                     hasVideoSource: self.decision?.source?.videoCodec != nil,
                     playing: isActuallyPlaying
                 ) {
+                    let actionEpoch = self.viewerActionEpoch
                     Task { @MainActor [weak self] in
-                        guard let self else { return }
+                        guard let self, self.isCurrentLifecycle(lifecycle),
+                              self.player.currentItem === item, !self.isChangingStream,
+                              self.viewerActionEpoch == actionEpoch else { return }
                         await self.handleBlackFrameDecodeFailure(at: observedPosition)
                     }
                 }
@@ -4003,7 +4879,6 @@ final class PlayerController: ObservableObject {
                     self.report(self.currentMs)
                     self.reportObservedPlaybackStalls(at: self.currentMs)
                 }
-            }
         }
     }
 
@@ -4198,8 +5073,10 @@ final class PlayerController: ObservableObject {
         // recipe. A `hold` or a `retry_resource` governs nothing at all: on a
         // dead item they would leave a player with no path forward.
         let generation = openGeneration
+        let actionEpoch = viewerActionEpoch
         let itemVerdict = await controlVerdictForItemFailure(item)
-        guard openGeneration == generation, player.currentItem === item,
+        guard openGeneration == generation, viewerActionEpoch == actionEpoch,
+              player.currentItem === item,
               !isChangingStream else { return }
         var reportedFailure = false
         if started, !isCompatibilityFailure, isTransportFailure {
@@ -4304,10 +5181,13 @@ final class PlayerController: ObservableObject {
         // exactly what a replacement generation understands, and dropping it
         // would throw a viewer twenty minutes in back to the session origin.
         let resume = usesDirectTimeline ? currentMs : max(currentMs - baseMs, 0)
-        let resumesPlayback = wantsPlayback
+        let seekOwner = seekPreparationOwner(at: currentMs)
+        let executedSeekGeneration = seekState.generation
+        let executedSeekTarget = seekState.pendingMs
         isChangingStream = true
         let item = AVPlayerItem(url: url)
         Self.configureBuffering(item, growingHLS: sessionId != nil && !isVOD)
+        installSeekVideoOutput(on: item)
         #if os(iOS)
         item.externalMetadata = [titleMetadata(title)]
         #endif
@@ -4317,7 +5197,7 @@ final class PlayerController: ObservableObject {
         pgsOverlayWindowTask?.cancel()
         pgsOverlayWindow = nil
         player.replaceCurrentItem(with: item)
-        player.play()
+        if wantsPlayback { player.play() } else { player.pause() }
         // The overlay is per-item and was just torn down; `open()` rebuilds it
         // at this point and so must this, or a PGS-subtitled film loses its
         // subtitles at the first failover and never gets them back. It wants
@@ -4325,7 +5205,7 @@ final class PlayerController: ObservableObject {
         // session, and passing it would load the window for the wrong part of
         // the film whenever `baseMs` is nonzero.
         refreshPGSOverlayWindow(at: currentMs, force: true)
-        do { try await seekWhenReady(item, ms: resume) }
+        do { try await seekWhenReady(item, ms: resume, owner: seekOwner) }
         catch {
             // The status observer will drive the next node or terminal
             // surface after this transition leaves its suppression window.
@@ -4339,20 +5219,24 @@ final class PlayerController: ObservableObject {
             isChangingStream = false
             return true
         }
-        await applyPreferredAudioSelection(to: item)
-        // The selection this item was opened with, not the viewer-facing one:
-        // when the choice is burned into the transcode `nativeSubtitle` is nil,
-        // and selecting the source's text track on top of a burned-in one puts
-        // two sets of subtitles on screen.
-        await applyNativeSubtitleSelection(activeNativeSubtitle, to: item)
+        await reconcileNativeMediaSelections(to: item)
         guard !isSuperseded(generation) else { return true }
         guard started else {
             isChangingStream = false
             return true
         }
-        if resumesPlayback { player.play() } else { player.pause() }
-        isPlaying = resumesPlayback
+        if wantsPlayback { player.play() } else { player.pause() }
+        isPlaying = wantsPlayback
         isChangingStream = false
+        if let target = seekState.pendingMs {
+            let seekGeneration = seekState.generation
+            if recipeRevision.needsReopen || seekGeneration != executedSeekGeneration
+                || target != executedSeekTarget {
+                issueSeek(to: target, generation: seekGeneration)
+            } else if seekState.markExecuted(generation: seekGeneration, targetMs: target) {
+                beginSeekPresentationMonitor(generation: seekGeneration, targetMs: target)
+            }
+        }
         if item.status == .failed {
             await handleItemFailure(item)
         }
@@ -4982,13 +5866,13 @@ final class PlayerController: ObservableObject {
             return false
         case .hdrBase:
             dolbyVisionFallbackAttempted = true
-            forceCompatibleHDRBase = true
+            requireDeliveryFallback(.hdrBase)
             canRetryCurrentItemWithHDRBase = false
             isChangingStream = false
             playbackError = "Dolby Vision did not start. Retrying the HDR10-compatible picture…"
         case .transcode:
             compatibilityFallbackAttempted = true
-            forceCompatibilityTranscode = true
+            requireDeliveryFallback(.transcode)
             canRetryCurrentItemWithTranscode = false
             isChangingStream = false
             playbackError = "The compatible stream did not start. Retrying a universal stream…"
@@ -5080,7 +5964,7 @@ final class PlayerController: ObservableObject {
     /// the transport looking paused. Poll the authoritative status with a
     /// finite deadline so playback either resumes or surfaces a useful
     /// connection error.
-    private func awaitItemReady(_ item: AVPlayerItem) async throws {
+    private static func awaitItemReady(_ item: AVPlayerItem) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(Self.itemReadinessDeadlineSeconds))
         while item.status == .unknown {
@@ -5095,14 +5979,33 @@ final class PlayerController: ObservableObject {
         guard item.status == .readyToPlay else { throw PlaybackPreparationError.failed }
     }
 
-    private func seekWhenReady(_ item: AVPlayerItem, ms: Int) async throws {
-        try await awaitItemReady(item)
+    func seekPreparationOwner(at targetMs: Int) -> SeekPreparationOwner {
+        SeekPreparationOwner(actionEpoch: viewerActionEpoch, seekGeneration: seekState.generation, targetMs: targetMs)
+    }
 
-        _ = await player.seek(
-            to: CMTime(seconds: Double(ms) / 1000.0, preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        )
+    func seekWhenReady(_ item: AVPlayerItem, ms: Int, owner: SeekPreparationOwner) async throws {
+        let generation = openGeneration
+        let lifecycle = lifecycleGeneration
+        let ownsSeek = {
+            self.isCurrentLifecycle(lifecycle) && !self.isSuperseded(generation)
+                && self.player.currentItem === item
+                // Pause changes transport authority, not the resume point.
+                // A newer same-position selection also still needs this seek.
+                && (self.viewerActionEpoch == owner.actionEpoch
+                    || self.seekState.generation == owner.seekGeneration
+                    || self.seekState.pendingMs == owner.targetMs)
+                && !Task.isCancelled
+        }
+        guard ownsSeek() else { return }
+        do { try await itemPreparation.ready(item) }
+        catch {
+            guard ownsSeek() else { return }
+            throw error
+        }
+        // The check must precede the mutation, not merely guard the caller's
+        // eventual completion: `player` may now contain an unrelated item.
+        guard ownsSeek() else { return }
+        await itemPreparation.seek(player, ms)
     }
 
     /// Position in the HLS master rendition order. The server advertises only
@@ -5312,28 +6215,40 @@ final class PlayerController: ObservableObject {
         return correction >= minimumCorrectionMs ? correction : nil
     }
 
-    private func applyNativeSubtitleSelection(_ index: Int?, to item: AVPlayerItem?) async {
-        guard let item, player.currentItem === item else { return }
-        let group = try? await item.asset.loadMediaSelectionGroup(for: .legible)
-        guard started, player.currentItem === item else { return }
-        if let group, selectNativeSubtitle(index, in: group, of: item) { return }
+    @discardableResult
+    private func applyNativeSubtitleSelection(
+        _ index: Int?,
+        to item: AVPlayerItem?,
+        expectedActionEpoch: Int
+    ) async -> Bool {
+        guard let item, started, player.currentItem === item,
+              expectedActionEpoch == viewerActionEpoch else { return false }
+        let selection = await mediaSelectionPreparation.native(index, subtitles, item)
+        guard started,
+              player.currentItem === item,
+              Self.subtitleMutationIsCurrent(
+                expectedActionEpoch: expectedActionEpoch,
+                currentActionEpoch: viewerActionEpoch
+              )
+        else { return false }
+        if selection.apply() { return true }
         // Off never fails: without a legible group nothing is being rendered.
-        guard let index else { return }
+        guard let index else { return true }
         // "Has a legible group" is not "advertises subtitle renditions".
         // AVFoundation may synthesise a closed-caption option into `.legible`
         // for a variant that carries no CLOSED-CAPTIONS attribute, so a legacy
         // master can hand back a non-empty group with no subtitles in it.
-        let hasSubtitleOptions = group?.options.contains { $0.mediaType == .subtitle } ?? false
-        await recoverFromFailedNativeSelection(
+        return await recoverFromFailedNativeSelection(
             index,
             item: item,
-            hasSubtitleOptions: hasSubtitleOptions
+            hasSubtitleOptions: selection.hasSubtitleOptions
         )
     }
 
     /// False when the selection could not be resolved onto a real option.
-    private func selectNativeSubtitle(
+    private static func selectNativeSubtitle(
         _ index: Int?,
+        tracks: [SubtitleTrack],
         in group: AVMediaSelectionGroup,
         of item: AVPlayerItem
     ) -> Bool {
@@ -5347,7 +6262,7 @@ final class PlayerController: ObservableObject {
             )
         }
         var resolved = false
-        let eligible = Self.applyNativeSubtitleSelection(index, tracks: subtitles) { ordinal in
+        let eligible = Self.applyNativeSubtitleSelection(index, tracks: tracks) { ordinal in
             guard let ordinal else {
                 item.select(nil, in: group)
                 resolved = true
@@ -5355,7 +6270,7 @@ final class PlayerController: ObservableObject {
             }
             guard let position = Self.nativeSubtitleOptionIndex(
                 ordinal: ordinal,
-                tracks: subtitles,
+                tracks: tracks,
                 options: descriptors
             ), options.indices.contains(position) else { return }
             item.select(options[position], in: group)
@@ -5371,9 +6286,9 @@ final class PlayerController: ObservableObject {
         _ index: Int,
         item: AVPlayerItem,
         hasSubtitleOptions: Bool
-    ) async {
+    ) async -> Bool {
         // The item itself failing is the status observer's story, not ours.
-        guard item.status != .failed, selectedSubtitle == index else { return }
+        guard item.status != .failed, selectedSubtitle == index else { return false }
         let serverIsLegacy = Self.serverIsLegacy(
             servesNative: serverServesNativeSubtitles,
             hasSubtitleOptions: hasSubtitleOptions,
@@ -5381,19 +6296,29 @@ final class PlayerController: ObservableObject {
         )
         let isText = subtitles.first(where: { $0.index == index })?.text ?? false
         if serverIsLegacy && isText {
-            forceLegacySubtitleBurn = true
-            let position = realPositionMs()
+            requireDeliveryFallback(.legacySubtitleBurn)
+            let position = positionForPlaybackIntent()
             if isChangingStream {
                 // Called from inside `open()`, which `reopen()` refuses to
                 // overlap. Run the burn once this open has finished.
-                Task { [weak self] in await self?.reopen(at: position) }
+                let actionEpoch = viewerActionEpoch
+                Task { [weak self] in
+                    guard let self, self.started,
+                          self.viewerActionEpoch == actionEpoch,
+                          self.selectedSubtitle == index
+                    else { return }
+                    await self.reopen(at: position)
+                }
             } else {
                 await reopen(at: position)
             }
-            return
+            return false
         }
         selectedSubtitle = nil
         showPlaybackNotice("That subtitle track could not be turned on.")
+        // The selection resolved to Off without changing the item. The
+        // caller still owes any pending media destination to the viewer.
+        return true
     }
 
     /// The audible half of owning media selection (P2-8). An HLS session
@@ -5402,16 +6327,35 @@ final class PlayerController: ObservableObject {
     /// several, and with automatic criteria off nothing else would honor the
     /// viewer's language there. Best effort: no match leaves AVPlayer's own
     /// default in place, which is what mismatched criteria used to produce.
-    private func applyPreferredAudioSelection(to item: AVPlayerItem) async {
-        guard audioOverride == nil else { return }
-        guard let group = try? await item.asset.loadMediaSelectionGroup(for: .audible),
-              started, player.currentItem === item else { return }
-        let preferred = AVMediaSelectionGroup.mediaSelectionOptions(
-            from: group.options,
-            filteredAndSortedAccordingToPreferredLanguages: bcp47(audioLanguage)
-        )
-        guard let option = preferred.first else { return }
-        item.select(option, in: group)
+    private func applyPreferredAudioSelection(to item: AVPlayerItem, expectedActionEpoch: Int) async {
+        guard audioOverride == nil, prePlaySelection.audioIndex == nil,
+              started, player.currentItem === item,
+              expectedActionEpoch == viewerActionEpoch else { return }
+        let apply = await mediaSelectionPreparation.audio(audioLanguage, item)
+        guard started, player.currentItem === item, audioOverride == nil,
+              prePlaySelection.audioIndex == nil,
+              expectedActionEpoch == viewerActionEpoch else { return }
+        apply?()
+    }
+
+    /// Open, failover, and offline attachment share the same selection owner.
+    /// Capture the choice and epoch together, never an old choice with a new
+    /// epoch. An intervening command requires a fresh preparation; item
+    /// identity alone cannot fence two operations against the same item.
+    func reconcileNativeMediaSelections(to item: AVPlayerItem) async {
+        while started, player.currentItem === item {
+            let actionEpoch = viewerActionEpoch
+            let fields = Self.sessionSubtitleFields(
+                selected: selectedSubtitle, tracks: subtitles, legacyBurn: forceLegacySubtitleBurn
+            )
+            let nativeSubtitle = pgsOverlayIsActive || activeBurnedSubtitle != nil ? nil : fields.native
+            await applyPreferredAudioSelection(to: item, expectedActionEpoch: actionEpoch)
+            guard started, player.currentItem === item else { return }
+            if actionEpoch != viewerActionEpoch { continue }
+            await applyNativeSubtitleSelection(nativeSubtitle, to: item, expectedActionEpoch: actionEpoch)
+            guard started, player.currentItem === item else { return }
+            if actionEpoch == viewerActionEpoch { return }
+        }
     }
 
     #if os(iOS)
@@ -5423,10 +6367,6 @@ final class PlayerController: ObservableObject {
         return metadata
     }
     #endif
-
-    private func bcp47(_ code: String) -> [String] {
-        Self.languageSpellings(code)
-    }
 
     /// The audio index an HLS session must carry, in falling order of
     /// authority: `explicit` is a later in-player choice, `plan` is what the
@@ -5684,6 +6624,15 @@ final class PlayerController: ObservableObject {
         return .mediaSelection
     }
 
+    /// Rechecked after AVAsset's asynchronous legible-group load and before
+    /// touching the item. A delayed A completion must not overwrite B.
+    nonisolated static func subtitleMutationIsCurrent(
+        expectedActionEpoch: Int,
+        currentActionEpoch: Int
+    ) -> Bool {
+        expectedActionEpoch == currentActionEpoch
+    }
+
     /// P1-2: what an `open()` still owes the viewer when it completes. The
     /// selection it applied was captured before its awaits, so a track chosen
     /// during a cold extraction has to be applied afterwards; nil means the
@@ -5931,16 +6880,20 @@ extension PlayerController {
     /// only the legible selection when control reports the demanded window as
     /// ready; the video item and its producer stay untouched.
     private func retryNativeSubtitleAfterReadiness() {
-        guard let index = activeNativeSubtitle,
+        guard let index = selectedSubtitle,
+              activeNativeSubtitle != nil,
               let item = player.currentItem
         else { return }
+        let actionEpoch = viewerActionEpoch
         Task { @MainActor [weak self, weak item] in
-            guard let self, let item, self.player.currentItem === item else { return }
-            await self.applyNativeSubtitleSelection(nil, to: item)
-            guard self.activeNativeSubtitle == index,
+            guard let self, let item, self.player.currentItem === item,
+                  self.viewerActionEpoch == actionEpoch, self.selectedSubtitle == index
+            else { return }
+            await self.applyNativeSubtitleSelection(nil, to: item, expectedActionEpoch: actionEpoch)
+            guard self.viewerActionEpoch == actionEpoch, self.selectedSubtitle == index,
                   self.player.currentItem === item
             else { return }
-            await self.applyNativeSubtitleSelection(index, to: item)
+            await self.applyNativeSubtitleSelection(index, to: item, expectedActionEpoch: actionEpoch)
         }
     }
 
@@ -5974,6 +6927,7 @@ extension PlayerController {
             isPaused: !wantsPlayback,
             isEnded: finished,
             isSeeking: seekState.pendingMs != nil,
+            seekTargetMs: seekState.pendingMs,
             hasStarted: started,
             waitingForMs: controlWaitingSince.map {
                 max(0, Int(Date().timeIntervalSince($0) * 1_000))
@@ -6004,7 +6958,8 @@ extension PlayerController {
     func playbackControlSelection() -> ClientSelection {
         let mode = playbackControlSubtitleMode()
         return ClientSelection(
-            quality: selectedHeight.map { .manual(height: $0) } ?? .auto,
+            quality: selectedHeight.map { .manual(height: $0) }
+                ?? (selectedQualityIsOriginal ? .original : .auto),
             audioTrack: selectedAudio,
             subtitle: SubtitleSelection(
                 mode: mode,
@@ -6026,6 +6981,7 @@ extension PlayerController {
     /// Called wherever the player's state moves. The reporter coalesces, so
     /// this is cheap enough for the periodic time observer.
     func playbackControlPlayerChanged() {
+        sampleSeekPresentationClocks()
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()
         playbackControl.playerChanged()

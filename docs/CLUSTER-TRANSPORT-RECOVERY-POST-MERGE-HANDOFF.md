@@ -19,7 +19,7 @@ an older SHA is diagnostic only.
 
 The shipped confidence boundary is deliberately smaller: Rust 1.97.1 compile,
 Clippy, 27 focused recovery tests, operations/history contracts, three clean
-adversarial reviews, one unmeasured voter warmup, and three consecutive counted
+adversarial reviews, one unmeasured voter warmup, and four consecutive counted
 large-image voter recoveries. Paul chose that boundary so the implementation
 could run before the remaining minutiae finished.
 
@@ -27,10 +27,10 @@ could run before the remaining minutiae finished.
 
 | Evidence | State at handoff | Completion signal |
 |---|---|---|
-| Voter smoke | three counted cycles passed after one warmup | confidence only; never a qualification receipt |
+| Voter smoke | four counted cycles passed after one warmup | confidence only; never a qualification receipt |
 | Full recovery campaign | not run to completion | 20 voter and 20 learner cycles in the retained closed-schema artifact |
 | Full repository suite | deferred | every required Main promotion surface succeeds on one frozen tree |
-| Qualification receipt | absent | receipt SHA and Git tree match the tested candidate and every recorded job is successful |
+| Qualification receipt | absent | a first-attempt main-bound qualification PR binds the exact tested SHA/tree and records every required job as successful |
 | Main image | pending promotion/publication | immutable SHA image and the verified `main` alias exist in the Forgejo registry |
 | Fleet rollout | not verified | every intended voter reports the promoted build SHA and healthy cluster state |
 
@@ -66,7 +66,14 @@ candidate_sha="$(git rev-parse HEAD)"
 PLURX_BUILD_SHA="$candidate_sha" make cluster-transport-recovery-check
 ```
 
-Retain and validate all three outputs:
+The local command writes the closed-schema evidence only:
+
+```text
+target/validation/cluster-transport-recovery.json
+```
+
+The CI lane wraps that same command with `tee`, validates the evidence, and
+retains all three lane outputs:
 
 ```text
 target/validation/cluster-transport-recovery.log
@@ -74,9 +81,10 @@ target/validation/cluster-transport-recovery.json
 target/validation/cluster-transport-recovery-receipt.json
 ```
 
-The JSON must pass the Rust closed-schema and semantic validator. The receipt
-must bind the exact bytes, SHA, tree, lane command, and workflow attempt 1.
-Never substitute the voter smoke output: it deliberately creates no
+The JSON must pass the Rust closed-schema and semantic validator. The lane
+receipt binds the exact bytes, SHA, tree, lane command, and workflow attempt.
+Do not claim that a local `make` invocation creates the log or receipt, and
+never substitute the voter smoke output: it deliberately creates no retained
 qualification artifact.
 
 ## 5. Run the full suite once — same frozen tree
@@ -84,8 +92,12 @@ qualification artifact.
 Use the repository's complete Main promotion fan-out, not only `make check`.
 Require successful Rust, cluster store/topology/recovery/WAL/daemon, web/VOD,
 Android, Apple, package-smoke, cross-build, and aggregate promotion results.
-Download the qualification artifact and compare its candidate SHA and tree to
-the values recorded in §3.
+The current workflow emits the aggregate `qualification-receipt.json` only for
+a qualifying main-bound pull request; a post-merge `main` push does not create
+that artifact. The deploy-first merge therefore leaves the aggregate receipt
+open even when the post-merge fan-out and `publish_main` succeed. Close that
+gap with a first-attempt qualifying PR bound to the exact candidate, or add a
+truthful post-merge aggregate receipt path before claiming receipt completion.
 
 If a test fails, fix the cause in a proper `codex/` branch and PR, run its
 smallest focused regression until green, obtain three adversarial reviews, and
@@ -125,8 +137,11 @@ container.
 
 - [ ] Current `main` SHA and tree are frozen and recorded.
 - [ ] 20 voter and 20 learner measured recoveries pass on that exact SHA.
-- [ ] Closed-schema evidence and first-attempt receipt are retained.
+- [ ] Closed-schema evidence and lane receipt are retained.
 - [ ] The full Main promotion suite passes once on the same frozen tree.
+- [ ] An aggregate qualification receipt is retained from a first-attempt
+      main-bound qualification run, or the workflow has gained and used an
+      equivalent post-merge exact-tree receipt path.
 - [ ] Three adversarial reviews cover any corrective PR raised afterward.
 - [ ] Immutable image digest and `main` alias are verified.
 - [ ] Every intended voter reports the promoted SHA and healthy state.

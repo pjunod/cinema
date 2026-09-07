@@ -25,6 +25,18 @@ broken build gets reported instead of waited out. Verified on nynuc itself:
 the same command that refused now reports `health=1335s, snapshot=1200s
 (/srv/plurx/plurx.toml)`. `make operations-check` — 185 tests — passes.
 
+## Streaming reliability is under end-to-end review and repair
+
+**Effort `effort/streaming-reliability`, started 2026-09-04 from `48615baf`.**
+The live progress ledger is
+[STREAMING-RELIABILITY-STATUS.md](docs/STREAMING-RELIABILITY-STATUS.md): review
+scope, verified facts, task PRs, adversarial findings, test evidence, and the
+autonomous decisions made while Paul is away. The effort does not reach
+`main` until its final fixed tree has one full qualification receipt.
+Current writes, reviews, and merges use Forgejo (`noirr/plurx`); GitHub is a
+read-only historical remote. Client-recovery corrections are in local
+verification after the first adversarial pass rejected nine correctness gaps.
+
 ## The fragment-index queue built nothing for three days
 
 **PR [#873](https://github.com/pjunod/plurx/pull/873) — merged as `d90ca299`

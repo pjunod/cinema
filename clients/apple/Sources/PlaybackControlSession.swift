@@ -109,10 +109,23 @@ struct PlaybackControlTransport {
 final class PlaybackControlSession {
     private var reporter: PlaybackControlReporter?
     private var observe: (() -> PlayerControlObservation?)?
+    private var activeGeneration: Int?
+    private let scheduleSubtitleReady: @Sendable (
+        @escaping @MainActor @Sendable () -> Void
+    ) -> Void
 
-    /// What the reporter reads. See `PlaybackControlLatestSnapshot`: the
+    init(
+        scheduleSubtitleReady: @escaping @Sendable (
+            @escaping @MainActor @Sendable () -> Void
+        ) -> Void = { callback in Task { @MainActor in callback() } }
+    ) {
+        self.scheduleSubtitleReady = scheduleSubtitleReady
+    }
+
+    /// What the reporter reads. See `PlaybackControlLatestCapture`: the
     /// player pushes here, the reporter never pulls from the player.
-    private let latest = PlaybackControlLatestSnapshot()
+    private let latest = PlaybackControlLatestCapture()
+    private var captureRevision = 0
 
     /// What the reporter writes. The mirror of `latest`, and it exists for the
     /// same reason: the reporter is an actor and the player is `@MainActor`,
@@ -172,6 +185,10 @@ final class PlaybackControlSession {
         // given in, because the failure it explains usually arrives after a
         // reopen; `clearVerdict()` is how a new title starts clean.
         let generation = verdicts.beginGeneration()
+        let owner = PlaybackControlCaptureOwner(
+            lifecycleId: clientInstanceId, attachmentGeneration: generation
+        )
+        activeGeneration = generation
         answers.begin(generation: generation)
         let lease = TimeInterval(bootstrap.leaseTimeoutMs) / 1_000
         let subtitleReadiness = SubtitleReadinessRetryState()
@@ -182,7 +199,11 @@ final class PlaybackControlSession {
         reporter = PlaybackControlReporter(
             bootstrap: bootstrap,
             clientInstanceId: clientInstanceId,
-            snapshot: { [latest] in latest.load() },
+            owner: owner,
+            capture: { [latest] in
+                guard let value = latest.load(), value.owner == owner else { return nil }
+                return value
+            },
             send: { path, request in try await transport.send(path, request) },
             sleep: { milliseconds, _ in
                 try await Task.sleep(nanoseconds: UInt64(max(0, milliseconds)) * 1_000_000)
@@ -196,25 +217,43 @@ final class PlaybackControlSession {
             // `retry_resource` are exchange-level and the reporter already
             // honours them; a player that acted on them here would be
             // deciding, which is M5e.
-            onExchange: { [verdicts, answers] exchange in
+            onExchange: { [weak self, latest, verdicts, answers, scheduleSubtitleReady] exchange in
+                guard exchange.capture.owner == owner,
+                      latest.load()?.owner == owner
+                else { return }
                 // Every exchange advances the counter, including a failed one:
                 // an owner that asked must not wait out its whole bound for an
                 // exchange that has already come back with nothing.
                 answers.record(
                     exchange.response?.action,
                     requestSequence: exchange.request.sequence,
-                    generation: generation
+                    generation: generation,
+                    ownerChanged: exchange.failure == "transport:409:owner_changed"
                 )
-                if subtitleReadiness.record(
-                    exchange.response?.delivery?.subtitleReadiness
+                if exchange.capture.hasSameIntent(as: latest.load()), subtitleReadiness.record(
+                    exchange.response?.delivery?.subtitleReadiness, commitReady: false
                 ) {
-                    Task { @MainActor in onSubtitleReady() }
+                    scheduleSubtitleReady { [weak self] in
+                        // A ready edge can wait for MainActor while a new
+                        // session begins or playback ends. Validate when the
+                        // callback executes, not when it was enqueued.
+                        guard self?.activeGeneration == generation,
+                              exchange.capture.hasSameIntent(as: latest.load()),
+                              subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
+                        else { return }
+                        onSubtitleReady()
+                    }
                 }
                 guard let action = exchange.response?.action,
                       action.type == "terminal",
                       action.message?.isEmpty == false
                 else { return }
-                verdicts.store(action, generation: generation, lease: lease)
+                verdicts.store(
+                    action,
+                    generation: generation,
+                    intentGeneration: exchange.intentGeneration,
+                    lease: lease
+                )
             }
         )
         guard let reporter else {
@@ -228,9 +267,8 @@ final class PlaybackControlSession {
     /// reporter coalesces, so a notification between exchanges costs nothing
     /// but replaces what the next exchange will carry.
     func playerChanged() {
-        publish()
-        guard let reporter else { return }
-        Task { await reporter.notify() }
+        guard let capture = publish(), let reporter else { return }
+        Task { await reporter.notify(capture) }
     }
 
     /// A recovery owner published evidence and is about to act on it.
@@ -244,9 +282,18 @@ final class PlaybackControlSession {
     /// Restricted to callers that have evidence rather than a position, so the
     /// ordinary cadence is unchanged.
     func reportEvidence() {
-        publish()
-        guard let reporter else { return }
-        Task { await reporter.notifyUrgently() }
+        guard let capture = publish(), let reporter else { return }
+        Task { await reporter.notifyUrgently(capture) }
+    }
+
+    /// Publish an interactive intent before the media mutation it authorizes.
+    /// Snapshot capture happens synchronously on MainActor; awaiting only
+    /// queues that immutable value and returns the request-ordering floor.
+    func reportIntent() async -> UInt64? {
+        guard let capture = publish(), let reporter,
+              let floor = await reporter.notifyUrgently(capture)
+        else { return nil }
+        return UInt64(floor)
     }
 
     /// Publish what a recovery owner is about to act on, then wait — briefly —
@@ -283,6 +330,7 @@ final class PlaybackControlSession {
         // very exchange that carried this stall's evidence.
         let floor = await reporter.sequence + 1
         let seenAtStart = answers.count()
+        let ownerChangesAtStart = answers.ownerChangeCount()
         var seen = seenAtStart
         publish()
         // Monotonic, because this file's own stall policy is monotonic: a
@@ -302,6 +350,10 @@ final class PlaybackControlSession {
             return answer.action
         }
         while ProcessInfo.processInfo.systemUptime < deadline {
+            // The adopted owner has a new sequence space and did not answer
+            // this observation. Let it continue independently, but release the
+            // current recovery owner instead of extending a frozen wait.
+            if answers.ownerChangeCount() > ownerChangesAtStart { return nil }
             if let answer = settled() { return answer }
             let count = answers.count()
             if count > seen {
@@ -343,13 +395,22 @@ final class PlaybackControlSession {
     /// A new title. The old verdict described a source that is no longer
     /// playing, so keeping it would show a confident sentence about the wrong
     /// film.
-    func clearVerdict() { verdicts.clear() }
+    func clearVerdict() {
+        verdicts.clearAndAdvanceIntent()
+        latest.store(nil)
+    }
 
     func end() {
+        activeGeneration = nil
+        // A callback may already have passed the capture-slot guard on the
+        // reporter actor. Revoke publication under the verdict slot's lock;
+        // preserve any verdict armed before End, but reject later writes.
+        let generation = verdicts.beginGeneration()
+        answers.begin(generation: generation)
         latest.store(nil)
+        observe = nil
         guard let reporter else { return }
         self.reporter = nil
-        observe = nil
         Task { await reporter.stop() }
     }
 
@@ -357,12 +418,23 @@ final class PlaybackControlSession {
     /// reporter will read. The mapping runs here rather than in the reporter's
     /// closure for the same reason: everything that touches the player belongs
     /// on the player's actor.
-    private func publish() {
-        guard let observation = observe?() else {
+    @discardableResult
+    private func publish() -> PlaybackControlCapture? {
+        guard let generation = activeGeneration, let observation = observe?() else {
             latest.store(nil)
-            return
+            return nil
         }
-        latest.store(PlaybackControlMapping.snapshot(from: observation))
+        captureRevision += 1
+        let capture = PlaybackControlCapture(
+            snapshot: PlaybackControlMapping.snapshot(from: observation),
+            intentGeneration: verdicts.intentGeneration(),
+            owner: PlaybackControlCaptureOwner(
+                lifecycleId: clientInstanceId, attachmentGeneration: generation
+            ),
+            sourceRevision: captureRevision
+        )
+        latest.store(capture)
+        return capture
     }
 }
 
@@ -383,6 +455,7 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
     private let lock = NSLock()
     private var latest: Answer?
     private var answered = 0
+    private var ownerChanges = 0
     private var generation = 0
 
     /// Adopt the verdict slot's generation rather than keeping a second one.
@@ -393,13 +466,20 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
         self.generation = generation
         latest = nil
         answered = 0
+        ownerChanges = 0
     }
 
-    func record(_ action: ControlAction?, requestSequence: Int, generation: Int) {
+    func record(
+        _ action: ControlAction?,
+        requestSequence: Int,
+        generation: Int,
+        ownerChanged: Bool = false
+    ) {
         lock.lock()
         defer { lock.unlock() }
         guard generation == self.generation else { return }
         answered += 1
+        if ownerChanged { ownerChanges += 1 }
         latest = Answer(requestSequence: requestSequence, action: action)
     }
 
@@ -408,6 +488,12 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return answered
+    }
+
+    func ownerChangeCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return ownerChanges
     }
 
     func answer(atOrAfter sequence: Int) -> Answer? {
@@ -428,9 +514,10 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
 private final class PlaybackControlLatestVerdict: @unchecked Sendable {
     private let lock = NSLock()
     private var value: ControlAction?
-    private var armedAt = Date.distantPast
+    private var armedAt: TimeInterval = 0
     private var lease: TimeInterval = 0
     private var generation = 0
+    private var viewerIntentGeneration = 0
 
     /// Claim the next generation. Deliberately does not clear the verdict: a
     /// reopen is the same viewer on the same title, and the failure a verdict
@@ -442,19 +529,33 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
         return generation
     }
 
-    func store(_ action: ControlAction, generation: Int, lease: TimeInterval) {
+    func store(
+        _ action: ControlAction,
+        generation: Int,
+        intentGeneration: Int,
+        lease: TimeInterval
+    ) {
         lock.lock()
         defer { lock.unlock() }
-        guard generation == self.generation else { return }
+        guard generation == self.generation,
+              intentGeneration == viewerIntentGeneration
+        else { return }
         value = action
-        armedAt = Date()
+        armedAt = ProcessInfo.processInfo.systemUptime
         self.lease = lease
     }
 
-    func clear() {
+    func clearAndAdvanceIntent() {
         lock.lock()
         defer { lock.unlock() }
+        viewerIntentGeneration += 1
         value = nil
+    }
+
+    func intentGeneration() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return viewerIntentGeneration
     }
 
     /// A verdict outlives its reporter and its session, but not the lease the
@@ -465,7 +566,7 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard value != nil else { return nil }
-        if Date().timeIntervalSince(armedAt) > lease {
+        if ProcessInfo.processInfo.systemUptime - armedAt > lease {
             value = nil
             return nil
         }
@@ -487,17 +588,17 @@ private final class PlaybackControlLatestVerdict: @unchecked Sendable {
 /// The staleness this admits is bounded by how often the player reports that
 /// it changed — once a second from the periodic time observer, plus every
 /// rate change — against an exchange cadence the server never sets faster.
-private final class PlaybackControlLatestSnapshot: @unchecked Sendable {
+private final class PlaybackControlLatestCapture: @unchecked Sendable {
     private let lock = NSLock()
-    private var value: PlaybackControlSnapshot?
+    private var value: PlaybackControlCapture?
 
-    func store(_ snapshot: PlaybackControlSnapshot?) {
+    func store(_ snapshot: PlaybackControlCapture?) {
         lock.lock()
         defer { lock.unlock() }
         value = snapshot
     }
 
-    func load() -> PlaybackControlSnapshot? {
+    func load() -> PlaybackControlCapture? {
         lock.lock()
         defer { lock.unlock() }
         return value

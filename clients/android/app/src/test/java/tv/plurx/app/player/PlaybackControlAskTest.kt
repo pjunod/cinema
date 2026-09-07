@@ -5,6 +5,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -13,6 +15,11 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
+import okio.Buffer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -34,6 +41,52 @@ import kotlin.test.assertTrue
  * pass or flake for reasons unrelated to the code.
  */
 class PlaybackControlAskTest {
+
+    @Test
+    fun `source thread publishes immutable evidence before queued reporter and cadence`() = runBlocking {
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val blocked = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        scope.launch { blocked.countDown(); release.await(5, TimeUnit.SECONDS) }
+        assertTrue(blocked.await(5, TimeUnit.SECONDS))
+        val requests = LinkedBlockingQueue<ControlRequest>()
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val buffer = Buffer()
+            chain.request().body!!.writeTo(buffer)
+            val request = json.decodeFromString<ControlRequest>(buffer.readUtf8())
+            requests.add(request)
+            val body = """{"protocol":"${PlaybackControl.PROTOCOL}","generation":"$GENERATION","control_epoch":7,"accepted_sequence":${request.sequence},"action":{"type":"none"}}"""
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200)
+                .message("OK").body(body.toResponseBody("application/json".toMediaType())).build()
+        }.build()
+        val session = PlaybackControlSession(scope)
+        var position = 4_000L
+        var reads = 0
+        val sourceThread = Thread.currentThread()
+        try {
+            session.begin(bootstrap(), {
+                assertTrue(Thread.currentThread() === sourceThread, "Media3 observation stays on source thread")
+                reads += 1
+                observation().copy(positionMs = position)
+            }, PlaybackControlTransport("https://cinema.example", client, json))
+            session.clearVerdict()
+            position = 7_000
+            session.reportEvidence()
+            position = 99_000 // not published; queue/cadence cannot observe it
+            release.countDown()
+            val first = requests.poll(5, TimeUnit.SECONDS)
+            val next = requests.poll(5, TimeUnit.SECONDS)
+            assertEquals(7_000L, first?.positionMs)
+            assertEquals(7_000L, next?.positionMs)
+            assertEquals(2, reads)
+        } finally {
+            release.countDown()
+            session.end()
+            scope.cancel()
+            dispatcher.close()
+        }
+    }
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
@@ -91,6 +144,81 @@ class PlaybackControlAskTest {
                         """{"code":"control_unavailable"}"""
                             .toResponseBody("application/json".toMediaType()),
                     )
+                    .build()
+            },
+        ).build()
+        return PlaybackControlTransport("https://cinema.example", client, json)
+    }
+
+    private fun subtitleReadinessTransport(sequence: AtomicLong): PlaybackControlTransport {
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val accepted = sequence.incrementAndGet()
+            val readiness = if (accepted == 1L) "pending" else "ready"
+            val body = """{"protocol":"${PlaybackControl.PROTOCOL}",""" +
+                """"generation":"$GENERATION","control_epoch":7,""" +
+                """"accepted_sequence":$accepted,"action":{"type":"none"},""" +
+                """"delivery":{"subtitle_readiness":"$readiness"}}"""
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(body.toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        return PlaybackControlTransport("https://cinema.example", client, json)
+    }
+
+    private fun ownerChangingTransport(sequence: AtomicLong): PlaybackControlTransport {
+        val client = OkHttpClient.Builder().addInterceptor(
+            Interceptor { chain ->
+                val request = sequence.incrementAndGet()
+                val status = if (request == 1L) 200 else 409
+                val body = if (request == 1L) {
+                    """{"protocol":"${PlaybackControl.PROTOCOL}",""" +
+                        """"generation":"$GENERATION","control_epoch":7,""" +
+                        """"accepted_sequence":1,"action":{"type":"none"}}"""
+                } else {
+                    """{"code":"owner_changed",""" +
+                        """"generation":"44444444-4444-4444-8444-444444444444",""" +
+                        """"control_epoch":9,"retry_after_ms":250}"""
+                }
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(status)
+                    .message(if (status == 200) "OK" else "owner changed")
+                    .body(body.toResponseBody("application/json".toMediaType()))
+                    .build()
+            },
+        ).build()
+        return PlaybackControlTransport("https://cinema.example", client, json)
+    }
+
+    private fun heldTerminalTransport(
+        sequence: AtomicLong,
+        terminalArrived: CountDownLatch,
+        releaseTerminal: CountDownLatch,
+    ): PlaybackControlTransport {
+        val client = OkHttpClient.Builder().addInterceptor(
+            Interceptor { chain ->
+                val accepted = sequence.incrementAndGet()
+                val action = if (accepted == 2L) {
+                    terminalArrived.countDown()
+                    releaseTerminal.await(5, TimeUnit.SECONDS)
+                    """{"type":"terminal","code":"unsupported","message":"stale intent"}"""
+                } else {
+                    """{"type":"none"}"""
+                }
+                val body = """{"protocol":"${PlaybackControl.PROTOCOL}",""" +
+                    """"generation":"$GENERATION","control_epoch":7,""" +
+                    """"accepted_sequence":$accepted,"action":$action}"""
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType()))
                     .build()
             },
         ).build()
@@ -198,6 +326,107 @@ class PlaybackControlAskTest {
         }
     }
 
+    @Test
+    fun `clearing verdict fences a terminal response already in flight`() = runBlocking {
+        val scope = scope()
+        val session = PlaybackControlSession(scope)
+        val sequence = AtomicLong(0)
+        val terminalArrived = CountDownLatch(1)
+        val releaseTerminal = CountDownLatch(1)
+        try {
+            session.begin(
+                bootstrap(),
+                ::observation,
+                heldTerminalTransport(sequence, terminalArrived, releaseTerminal),
+            )
+            awaitFirstExchange(sequence)
+            session.playerChanged()
+            assertTrue(terminalArrived.await(5, TimeUnit.SECONDS), "terminal request never arrived")
+
+            session.clearVerdict()
+            session.playerChanged()
+            releaseTerminal.countDown()
+            val deadline = monotonicNowMs() + 5_000
+            while (sequence.get() < 3 && monotonicNowMs() < deadline) {
+                kotlinx.coroutines.delay(10)
+            }
+
+            assertTrue(sequence.get() >= 3, "the stale terminal must not stop the reporter")
+            assertNull(session.terminalVerdict, "the old viewer intent must not re-arm")
+        } finally {
+            releaseTerminal.countDown()
+            session.end()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `queued subtitle readiness belongs only to its current session and intent`() = runBlocking {
+        // This drives the real session/reporter/HTTP response path and holds
+        // only the final UI dispatch, the window in which the race occurred.
+        for (transition in listOf("current", "replacement", "end", "new-intent")) {
+            val scope = scope()
+            val callbacks = LinkedBlockingQueue<() -> Unit>()
+            val session = PlaybackControlSession(scope) { callbacks.add(it) }
+            val sequence = AtomicLong(0)
+            var retries = 0
+            try {
+                session.begin(
+                    bootstrap(),
+                    ::observation,
+                    subtitleReadinessTransport(sequence),
+                    onSubtitleReady = { retries += 1 },
+                )
+                awaitFirstExchange(sequence)
+                session.reportIntent()
+                val queued = callbacks.poll(5, TimeUnit.SECONDS)
+                assertTrue(queued != null, "subtitle readiness never queued for $transition")
+
+                when (transition) {
+                    "replacement" -> session.begin(bootstrap(), ::observation, transport("none"))
+                    "end" -> session.end()
+                    "new-intent" -> session.clearVerdict()
+                }
+                queued()
+                assertEquals(if (transition == "current") 1 else 0, retries, transition)
+                if (transition == "new-intent") {
+                    session.playerChanged()
+                    val deadline = monotonicNowMs() + 5_000
+                    while (retries == 0 && monotonicNowMs() < deadline) callbacks.poll(100, TimeUnit.MILLISECONDS)?.invoke()
+                    assertEquals(1, retries, "discarded A readiness must remain available to current B")
+                    session.reportIntent()
+                    kotlinx.coroutines.delay(300)
+                    while (true) (callbacks.poll() ?: break).invoke()
+                    assertEquals(1, retries, "ready cadence commits exactly one retry")
+                }
+            } finally {
+                session.end()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `ending reporting preserves the predecessor ordering for replacement`() = runBlocking {
+        val scope = scope()
+        val session = PlaybackControlSession(scope)
+        try {
+            val sequence = AtomicLong(0)
+            session.begin(bootstrap(), ::observation, transport("none", sequence = sequence))
+            awaitFirstExchange(sequence)
+            val before = session.controlSequence()
+            session.end()
+
+            assertFalse(session.isReporting)
+            assertTrue(before != null && before > 0)
+            assertEquals(before, session.controlSequence())
+            assertNull(session.reportIntent(), "ended reporting cannot enqueue onto its predecessor")
+        } finally {
+            session.end()
+            scope.cancel()
+        }
+    }
+
     /**
      * The ask always settles. A stalled viewer waiting on something nothing
      * will resolve is worse than the guess the client would have made.
@@ -241,6 +470,27 @@ class PlaybackControlAskTest {
             assertTrue(
                 monotonicNowMs() - startedAt < CONTROL_ASK_CAP_MS * 3,
                 "the bound is the bound",
+            )
+        } finally {
+            session.end()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `an owner change settles the current ask without waiting on the new owner`() = runBlocking {
+        val scope = scope()
+        val session = PlaybackControlSession(scope)
+        try {
+            val sequence = AtomicLong(0)
+            session.begin(bootstrap(), ::observation, ownerChangingTransport(sequence))
+            awaitFirstExchange(sequence)
+            val startedAt = monotonicNowMs()
+            val verdict = session.askForAction(boundMs = 5_000, capMs = 8_000, publish = {})
+            assertNull(verdict)
+            assertTrue(
+                monotonicNowMs() - startedAt < 2_000,
+                "the old ask is released while the reporter adopts the new owner",
             )
         } finally {
             session.end()

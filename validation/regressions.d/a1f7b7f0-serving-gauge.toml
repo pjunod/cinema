@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a1f7b7f0"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "resource-bounds"]
+reason = "serve_segment opens a materialized segment and returns without ever reaching the wait pool, so the overwhelmingly common GET was counted by nothing and bounded by nothing: a node serving a hundred concurrent cache hits and one serving none reported identical pool numbers, leaving ps as the only way to see the busiest thing the server does. A serving gauge now counts them, held by a guard so it falls when the request future is dropped rather than only on success — the disconnect path is exactly the one worth seeing. Deliberately a gauge and not a cap: refusing a viewer a segment already on disk is a decision about what that viewer loses and nobody has made it. a_served_get_is_counted_and_bounded_by_nothing pins the gauge rising past both existing caps without refusal, never entering the pool, and falling on drop; adding a ceiling fails it and forces its replacement to state what the viewer at the ceiling loses."

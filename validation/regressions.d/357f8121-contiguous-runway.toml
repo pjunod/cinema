@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["357f8121"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "client_runway_ms was buffered_through_ms minus the anchor and consulted buffered_from_ms nowhere, so a client whose buffered region does not reach its playhead reported the same runway as one comfortably ahead — the server then held production on the strength of buffer the client cannot play through. The web client already selects the buffered range containing currentTime and reports a null start when none does; the server simply discarded that evidence. Runway is now zero when the reported region starts after the anchor, and unchanged when buffered_from_ms is absent, because a missing field is no contiguity evidence rather than a hole and reading it as one would stall production for every client predating the field. runway_counts_only_a_buffer_that_reaches_the_playhead pins the contiguous, scattered, absent and exactly-at-the-anchor cases; removing the contiguity check fails it."

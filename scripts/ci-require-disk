@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Fail a job that cannot possibly succeed, with the reason on the first line.
+#
+# A self-hosted runner that has run out of disk does not report running out of
+# disk. It reports this:
+#
+#     error: linking with `cc` failed: exit status: 1
+#     = note: collect2: fatal error: ld terminated with signal 7 [Bus error]
+#
+# — because the linker was writing when the filesystem filled, and a truncated
+# write surfaces as SIGBUS. That reads like a compiler or toolchain fault, and
+# it is the same message a genuine miscompile would produce. The real cause
+# appears hundreds of lines later, if at all, as one `No space left on device`
+# from whichever crate happened to need a temp dir next.
+#
+# So this runs first and says the true thing while it is still cheap to say.
+# It does not delete anything: `_work` holds other jobs' checkouts on a shared
+# runner, and a cleanup that guesses which are dead is how a concurrent job
+# loses its tree mid-run. Pruning belongs to whoever owns the host.
+set -euo pipefail
+
+die() { echo "ci-require-disk: $*" >&2; exit 1; }
+
+[ "$#" -eq 2 ] || die "usage: ci-require-disk <path> <required-gb>"
+path=$1
+required_gb=$2
+[[ "$required_gb" =~ ^[1-9][0-9]*$ ]] || die "required space must be whole gigabytes"
+[ -d "$path" ] || die "no such directory: $path"
+
+# POSIX output, so this reads the same on every runner rather than depending on
+# the local `df` dialect.
+available_kb=$(df -Pk "$path" | awk 'NR==2 {print $4}')
+[[ "$available_kb" =~ ^[0-9]+$ ]] || die "could not read available space for $path"
+available_gb=$((available_kb / 1024 / 1024))
+
+if [ "$available_gb" -ge "$required_gb" ]; then
+  echo "ci-require-disk: ${available_gb}G available at $path (need ${required_gb}G)"
+  exit 0
+fi
+
+# Name the runner. On a fleet, "a runner is full" is not actionable and "this
+# one is full" is — and the job log is the only place that mapping survives.
+runner="${RUNNER_NAME:-$(hostname)}"
+
+{
+  echo "::error::${runner} is out of disk: ${available_gb}G available at ${path}, need ${required_gb}G"
+  echo
+  echo "This job is stopping now rather than failing later as a linker crash."
+  echo "A build that runs out of disk mid-link reports 'ld terminated with"
+  echo "signal 7 [Bus error]', which looks like a toolchain fault and is not."
+  echo
+  echo "Largest directories under the work root, for whoever prunes this host:"
+} >&2
+
+# Best-effort and never fatal: this is a diagnostic, and a `du` that trips over
+# one unreadable directory must not replace the message above with its own.
+work_root="${path}"
+du -sh "${work_root}"/* 2>/dev/null | sort -rh | head -10 >&2 || true
+
+echo >&2
+echo "Nothing is deleted automatically: this root holds other jobs' checkouts," >&2
+echo "and a cleanup that guesses which are finished can delete a running job's" >&2
+echo "tree. Prune it on the host." >&2
+
+exit 1

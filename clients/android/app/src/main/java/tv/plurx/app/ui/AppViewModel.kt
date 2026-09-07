@@ -641,12 +641,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     internal suspend fun playbackDecision(
         fileId: Long,
         tracks: PreplayTracks = PreplayTracks.NONE,
+        quality: PlaybackQuality = _preferences.value.playbackQuality,
     ): PlaybackDecision {
         val snapshot = Caps.snapshot(getApplication<Application>())
         // Request-local only. Omitting a parameter keeps the shared playback-
         // default policy and the response older clients get; the server never
         // writes a Playback setting from these.
-        val request = mapOf("force" to decisionForce(_preferences.value.playbackQuality)) +
+        val request = mapOf("force" to decisionForce(quality)) +
             preplayQueryParams(tracks)
         val decision = try {
             api().decisionV2(fileId, request, DecisionCapsReq(snapshot.document))

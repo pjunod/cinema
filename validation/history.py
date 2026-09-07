@@ -315,13 +315,84 @@ def _is_test_path(path: str) -> bool:
     )
 
 
+def _audit_tips(root: Path) -> tuple[str, ...]:
+    """The commits whose combined history this audit should cover.
+
+    Normally just HEAD, which the pre-commit hook sees as the parent of the
+    commit being made. While a merge is in progress the commit will have two
+    parents and its tree already carries both sides' coverage files, so the
+    audit has to see both -- otherwise every entry arriving through MERGE_HEAD
+    looks unmatched and a correct merge cannot be committed at all.
+
+    MERGE_HEAD can name more than one commit for an octopus merge, so every
+    line is taken.
+    """
+    # Asked of git rather than assembled from `root / ".git"`, because in a
+    # worktree `.git` is a file and the real path lives elsewhere.
+    merge_head = Path(_git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip())
+    if not merge_head.is_absolute():
+        merge_head = root / merge_head
+    try:
+        tips = merge_head.read_text(encoding="ascii").splitlines()
+    except FileNotFoundError:
+        return ("HEAD",)
+    except (OSError, UnicodeError) as exc:
+        raise HistoryError(f"cannot read pending merge heads: {exc}") from exc
+    if not tips or any(
+        not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", tip) for tip in tips
+    ):
+        raise HistoryError("pending MERGE_HEAD must contain full Git commit hashes")
+    return ("HEAD", *tips)
+
+
+def _history_heads(root: Path) -> tuple[str, ...]:
+    """[`_audit_tips`] as resolved commit hashes, with the pending merge checked.
+
+    The same tips, and deliberately a second function rather than a stricter
+    version of the first. `_audit_tips` answers in the symbolic form a `git log`
+    argument list wants and is what the audit's own contract tests pin. This
+    answers in resolved hashes, because these heads are also handed to
+    `rev-list ... --not <boundary>`, where a symbolic `HEAD` would silently mean
+    whatever the boundary comparison happened to be run against.
+
+    Resolving is also where a malformed pending merge stops being someone
+    else's problem: `MERGE_HEAD` that does not hold full hashes is a broken
+    worktree, and reading it as an ordinary single-parent audit would let
+    unreachable regression mappings pass. That is an error, not a fallback.
+    """
+
+    tips = _audit_tips(root)
+    pending = tips[1:]
+    # A `MERGE_HEAD` that exists and names nothing is the same broken worktree
+    # as one that names a non-hash, and `_audit_tips` cannot tell them apart:
+    # it drops blank lines, so an empty file and no file both come back as
+    # `("HEAD",)`. Asked here, where the difference decides between an error and
+    # an ordinary single-parent audit.
+    merge_head = Path(_git(root, "rev-parse", "--git-path", "MERGE_HEAD").strip())
+    if not merge_head.is_absolute():
+        merge_head = root / merge_head
+    if merge_head.is_file() and not pending:
+        raise HistoryError("pending MERGE_HEAD must contain full Git commit hashes")
+    if any(
+        not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) for head in pending
+    ):
+        raise HistoryError("pending MERGE_HEAD must contain full Git commit hashes")
+    heads = [
+        _git(root, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
+        for head in tips
+    ]
+    return tuple(dict.fromkeys(heads))
+
+
 def discover_issues(
     root: Path,
     catalog: Catalog,
     explicit_prefixes: tuple[str, ...] = (),
+    history_heads: tuple[str, ...] | None = None,
 ) -> tuple[IssueCommit, ...]:
     issues: list[IssueCommit] = []
-    history = _git(root, "log", "--no-merges", "--format=%H%x09%s")
+    heads = history_heads if history_heads is not None else _history_heads(root)
+    history = _git(root, "log", "--no-merges", "--format=%H%x09%s", *heads, "--")
     for line in history.splitlines():
         sha, subject = line.split("\t", 1)
         if not ISSUE_RE.search(subject) and not any(
@@ -376,11 +447,13 @@ def audit_history(
         client_fixes_path or root / "tests" / "client-fixes.toml"
     )
     catalog = catalog or load_catalog()
+    history_heads = _history_heads(root)
     issues = discover_issues(
         root,
         catalog,
         tuple(prefix for entry in entries for prefix in entry.commits)
         + tuple(prefix for entry in client_fixes.fixes for prefix in entry.commits),
+        history_heads,
     )
     errors: list[str] = []
     by_sha = {issue.sha: issue for issue in issues}
@@ -476,8 +549,11 @@ def audit_history(
     explicit_commits: set[str] = set()
     if client_fixes.enforce_after:
         try:
+            boundary = _git(
+                root, "rev-parse", "--verify", f"{client_fixes.enforce_after}^{{commit}}"
+            ).strip()
             explicit_commits.update(
-                _git(root, "rev-list", f"{client_fixes.enforce_after}..HEAD").splitlines()
+                _git(root, "rev-list", *history_heads, "--not", boundary, "--").splitlines()
             )
         except HistoryError:
             errors.append(

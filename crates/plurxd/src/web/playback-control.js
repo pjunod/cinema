@@ -97,6 +97,29 @@
     return request;
   }
 
+  // Capture on the player's synchronous source turn, before any queue/await.
+  // The JSON-shaped payload and local owner are recursively copied and frozen;
+  // later selection/capability mutation cannot relabel an exact retry.
+  function immutableCopy(value) {
+    if (!value || typeof value !== "object") return value;
+    const copy = Array.isArray(value) ? value.map(immutableCopy)
+      : Object.fromEntries(Object.entries(value).map(([key, item]) => [key, immutableCopy(item)]));
+    return Object.freeze(copy);
+  }
+
+  function capture(snapshot, intentGeneration, owner) {
+    if (!validSnapshot(snapshot) || !Number.isSafeInteger(intentGeneration)
+        || intentGeneration < 0 || !owner || typeof owner.lifecycleId !== "string"
+        || !Number.isSafeInteger(owner.attachmentGeneration)) return null;
+    return immutableCopy({ snapshot, intentGeneration, owner });
+  }
+
+  function sameIntent(left, right) {
+    return !!left && !!right && left.intentGeneration === right.intentGeneration
+      && left.owner.lifecycleId === right.owner.lifecycleId
+      && left.owner.attachmentGeneration === right.owner.attachmentGeneration;
+  }
+
   function validResponse(bootstrap, request, response) {
     return !!response
       && response.protocol === PROTOCOL
@@ -136,12 +159,12 @@
       if (typeof value.clientInstanceId !== "string" || !UUID_RE.test(value.clientInstanceId)) {
         throw new TypeError("invalid playback-control client identity");
       }
-      if (typeof value.snapshot !== "function" || typeof value.send !== "function") {
-        throw new TypeError("playback-control reporter requires snapshot and send functions");
+      if (typeof value.capture !== "function" || typeof value.send !== "function") {
+        throw new TypeError("playback-control reporter requires capture and send functions");
       }
       this.bootstrap = Object.assign({}, value.bootstrap);
       this.clientInstanceId = value.clientInstanceId;
-      this.snapshot = value.snapshot;
+      this.capture = value.capture;
       this.send = value.send;
       // Wrapped, not assigned. `setTimeout` and `clearTimeout` are
       // WindowTimers methods and every browser brand-checks their receiver:
@@ -169,6 +192,7 @@
       this.lastAccepted = null;
       this.lastStartedAt = null;
       this.retryRequest = null;
+      this.retryCapture = null;
       this.acceptedCapabilitiesKey = null;
       this.nextAllowedAt = 0;
     }
@@ -178,17 +202,17 @@
       return this;
     }
 
-    notify(snapshot) {
+    notify(value) {
       if (this.stopped) return null;
-      const newest = snapshot || this.snapshot();
-      if (!validSnapshot(newest)) return null;
+      const newest = value || this.capture();
+      if (!newest || !validSnapshot(newest.snapshot)) return null;
       this.pending = newest;
       if (this.timer !== null) {
         this.clearTimer(this.timer);
         this.timer = null;
       }
       this.drain();
-      return this.contextFor(newest);
+      return this.contextFor(newest.snapshot);
     }
 
     schedule() {
@@ -223,8 +247,10 @@
         return;
       }
       let request = this.retryRequest;
+      let requestCapture = this.retryCapture;
       if (!request) {
-        const snapshot = this.pending;
+        requestCapture = this.pending;
+        const snapshot = requestCapture.snapshot;
         this.pending = null;
         const sequence = this.sequence + 1;
         if (!Number.isSafeInteger(sequence)) {
@@ -262,6 +288,7 @@
           throw error;
         }
         this.retryRequest = null;
+        this.retryCapture = null;
         if (request.capabilities) {
           this.acceptedCapabilitiesKey = JSON.stringify(request.capabilities);
         }
@@ -286,12 +313,15 @@
           this.nextAllowedAt = this.now()
             + Math.max(MIN_EXCHANGE_MS, response.action.after_ms);
         }
-        this.onExchange({ request, response, error: null });
+        this.onExchange({ request, response, error: null, capture:requestCapture,
+          intentGeneration:requestCapture.intentGeneration });
         // A terminal verdict ends reporting. It does not tear down the player:
         // this reporter still owns no recovery, and the buffer already fetched
         // is still worth playing. The milestone that moves that authority is
         // the one that acts on this.
-        if (request.demand === "end" || response.action.type === "terminal") {
+        if (request.demand === "end"
+            || (response.action.type === "terminal"
+              && sameIntent(requestCapture, this.capture()))) {
           this.stop();
           return;
         }
@@ -303,7 +333,8 @@
             reportedError = new Error("playback-control exchange deadline exceeded");
             reportedError.name = "TimeoutError";
           }
-          this.onExchange({ request, response: null, error: reportedError });
+          this.onExchange({ request, response: null, error: reportedError,
+            capture:requestCapture, intentGeneration:requestCapture.intentGeneration });
           const status = Number(reportedError && reportedError.status);
           const terminalProtocolError = reportedError
             && reportedError.name === "PlaybackControlProtocolError";
@@ -317,6 +348,7 @@
             this.nextAllowedAt = this.now() + retryDelay(reportedError, MIN_EXCHANGE_MS);
           } else if (!terminalProtocolError && (retryableControl || retryableTransport)) {
             this.retryRequest = request;
+            this.retryCapture = requestCapture;
             const fallback = retryableControl ? 500 : this.bootstrap.next_exchange_ms;
             this.nextAllowedAt = this.now() + retryDelay(reportedError, fallback);
           } else {
@@ -365,13 +397,14 @@
       if (typeof generation !== "string" || !UUID_RE.test(generation)
           || !Number.isSafeInteger(epoch) || epoch <= 0) return false;
       let newest = null;
-      try { newest = this.snapshot(); } catch (_) {}
-      if (!validSnapshot(newest)) return false;
+      try { newest = this.capture(); } catch (_) {}
+      if (!newest || !validSnapshot(newest.snapshot)) return false;
       this.bootstrap.generation = generation;
       this.bootstrap.control_epoch = epoch;
       this.sequence = 0;
       this.acceptedSequence = 0;
       this.retryRequest = null;
+      this.retryCapture = null;
       this.acceptedCapabilitiesKey = null;
       this.lastAccepted = null;
       this.lastStartedAt = null;
@@ -397,6 +430,7 @@
       this.stopped = true;
       this.pending = null;
       this.retryRequest = null;
+      this.retryCapture = null;
       this.nextAllowedAt = 0;
       if (this.timer !== null) this.clearTimer(this.timer);
       this.timer = null;
@@ -407,5 +441,5 @@
     }
   }
 
-  return Object.freeze({ PROTOCOL, Reporter, validBootstrap, validResponse });
+  return Object.freeze({ PROTOCOL, Reporter, capture, sameIntent, validBootstrap, validResponse });
 });

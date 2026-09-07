@@ -149,6 +149,19 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // The Live TV configuration is generation-fenced, so its write is a
+    // compare-and-set: read the stored generation, branch on whether it still
+    // matches the caller's, and write the batch only then. That is
+    // ReadBranchWrite rather than the VerbatimBatch of plain `put_settings`,
+    // and the branch is the entire reason the boundary exists -- two
+    // administrators must not be able to half-apply two configurations.
+    SqliteTransactionSite {
+        module: "mod.rs",
+        method: "put_settings_if_generation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
     SqliteTransactionSite {
         module: "watch.rs",
         method: "set_watched_tree",
@@ -435,6 +448,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "record_desired_selection",
+        is_async: true,
+        // The write decides its own revision — the statement compares the
+        // stored digest and either advances or does not — so the transaction
+        // wraps a write and a read-back rather than a read that a branch then
+        // acts on. Reading first and writing after would let two exchanges for
+        // the same playback observe the same revision and both write its
+        // successor, which is exactly the collision a monotone revision exists
+        // to prevent.
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteUntilStable,
     },
     SqliteTransactionSite {
         module: "sessions.rs",
@@ -837,7 +864,13 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 65);
+        // 67: main's 66 — the last of them `put_settings_if_generation`,
+        // whose generation-fenced write opens its own boundary — plus
+        // `record_desired_selection`, which this branch reintroduces along
+        // with the table it writes. Main does not carry the desired-selection
+        // work, so merging main in deleted the entry and merging this back
+        // restores it; the site is real and classified either way.
+        assert_eq!(methods.len(), 67);
     }
 
     #[test]

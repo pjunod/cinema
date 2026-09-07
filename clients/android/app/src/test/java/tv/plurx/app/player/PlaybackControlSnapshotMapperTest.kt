@@ -79,14 +79,16 @@ class PlaybackControlMappingOrdinaryStateTest {
     @Test
     fun `a seek outranks every other busy state`() {
         val snapshot = map(
-            playing().copy(isSeeking = true, isLikelyToKeepUp = false, waitingForMs = 20_000),
+            playing().copy(
+                isSeeking = true,
+                seekTargetMs = 125_000,
+                isLikelyToKeepUp = false,
+                waitingForMs = 20_000,
+            ),
         )
         assertEquals(RenderState.SEEKING, snapshot.renderState)
-        assertEquals(
-            snapshot.positionMs,
-            snapshot.seekTargetMs,
-            "the target is the playhead the viewer asked for",
-        )
+        assertEquals(60_000, snapshot.positionMs, "the current playhead remains current")
+        assertEquals(125_000, snapshot.seekTargetMs, "the explicit destination is retained")
     }
 
     @Test

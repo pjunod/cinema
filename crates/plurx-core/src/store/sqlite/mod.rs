@@ -36,7 +36,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
-use super::{keys, ArtworkRepairFence, MetricsStore, PrometheusStoreSnapshot, SettingsStore};
+use super::{
+    keys, validate_generated_settings, ArtworkRepairFence, MetricsStore, PrometheusStoreSnapshot,
+    SettingsStore,
+};
 use crate::cluster::coordination::Lease;
 use crate::domain::{DolbyVisionFacts, Item, ItemKind, MediaFile, OfflinePackageStats, User};
 use crate::error::StoreError;
@@ -44,7 +47,9 @@ use crate::store::telemetry::{NETWORK_PRIORS_V2_SCHEMA, PLAYBACK_EVENTS_SCHEMA};
 
 /// Ordered, append-only migration list. `PRAGMA user_version` tracks the last
 /// applied index + 1. Never edit an entry that has shipped — append instead.
-const MIGRATIONS: &[&str] = &[
+/// Visible to the import inventory guard, which needs to know which migration
+/// first creates each table it plans to read.
+pub(crate) const MIGRATIONS: &[&str] = &[
     // v1: settings KV — the seed of all replicated durable state.
     "CREATE TABLE settings (
         key        TEXT PRIMARY KEY,
@@ -972,6 +977,19 @@ const MIGRATIONS: &[&str] = &[
     // converting one. Empty means whichever identity is next, which is what
     // every row written before this column meant.
     crate::store::fragment_index_cluster::ANALYSIS_REQUEST_IDENTITY_SCHEMA,
+    // v48: what a viewer has asked for, per playback. Every other row about a
+    // playback records what happened; this is the only one that records what
+    // was wanted, and it has to be able to exist before the session that
+    // satisfies it — which is why it is its own table rather than columns on
+    // `media_playback_pointers`, whose `current_incarnation_id` is NOT NULL.
+    crate::store::MEDIA_PLAYBACK_DESIRED_SCHEMA,
+    // v49: the revision a pointer write was decided against, and the triggers
+    // that refuse a write naming the wrong one — or naming none while an ask
+    // exists to name, which is the only shape a binary from before this column
+    // can produce. Application SQL fences this binary against a stale ask;
+    // nothing fenced a process that was already running when the schema moved,
+    // because compatibility is checked at open and never again.
+    crate::store::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1881,6 +1899,53 @@ impl SettingsStore for SqliteStore {
         .await
     }
 
+    async fn put_settings_if_generation(
+        &self,
+        generation_key: &str,
+        expected_generation: i64,
+        values: &[(&str, &str)],
+    ) -> Result<bool, StoreError> {
+        validate_generated_settings(generation_key, expected_generation, values)?;
+        let generation_key = generation_key.to_owned();
+        let values = values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect::<Vec<_>>();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let current = tx
+                .query_row(
+                    "SELECT value FROM settings WHERE key = ?1",
+                    params![generation_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|value| value.parse::<i64>())
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::InvalidParameterName(format!(
+                        "invalid settings generation: {error}"
+                    ))
+                })?
+                .unwrap_or(0);
+            if current != expected_generation {
+                return Ok(false);
+            }
+            for (key, value) in values {
+                tx.execute(
+                    "INSERT INTO settings (key, value, updated_at)
+                     VALUES (?1, ?2, unixepoch())
+                     ON CONFLICT(key) DO UPDATE
+                        SET value = excluded.value, updated_at = unixepoch()",
+                    params![key, value],
+                )?;
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
     async fn instance_id(&self) -> Result<String, StoreError> {
         self.get_setting(keys::INSTANCE_ID).await?.ok_or_else(|| {
             StoreError::Database("instance.id missing — migration invariant broken".to_owned())
@@ -1967,6 +2032,141 @@ mod tests {
         holder.await.expect("join").expect("holder");
     }
 
+    /// The revision advances on a change of ask and on nothing else.
+    ///
+    /// That is the entire difference between this and the four counters §1
+    /// rules out. A capture revision moves on every snapshot publish, an
+    /// attachment generation on every reconnection, a generic intent
+    /// generation on a title change, a control sequence on every heartbeat —
+    /// so none of them can answer "has the viewer asked for something else".
+    /// A revision that moved when a client merely repeated itself would be the
+    /// same kind of number wearing a better name, and every admission point
+    /// comparing it would refuse work that nothing was wrong with.
+    ///
+    /// Monotonicity is the other half: two asks have to be *orderable*, which
+    /// a content hash alone can never be. Going back to an earlier selection
+    /// is a new ask, not a return to an old one, so the revision goes forward
+    /// while the digest goes back — which is what makes ABA visible.
+    #[tokio::test]
+    async fn a_desired_revision_advances_on_a_new_ask_and_never_on_a_repeat() {
+        use crate::store::MediaSessionStore;
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        assert_eq!(
+            store.desired_selection(7, "play-a").await.expect("read"),
+            None,
+            "a playback nobody has asked anything about says so, rather than \
+             inventing a default that an admission point would compare against"
+        );
+
+        let auto = "a".repeat(64);
+        let manual = "b".repeat(64);
+        let record = |digest: &str, form: &str, now: i64| {
+            let store = &store;
+            let digest = digest.to_owned();
+            let form = form.to_owned();
+            async move {
+                store
+                    .record_desired_selection(7, "play-a", &digest, &form, now)
+                    .await
+                    .expect("record")
+            }
+        };
+        let first = record(&auto, "v1;quality=auto", 1_000).await;
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.updated_at_ms, 1_000);
+
+        // The same ask again, twice, from a client doing exactly what clients
+        // do: repeating its selection on every exchange.
+        let repeated = record(&auto, "v1;quality=auto", 2_000).await;
+        assert_eq!(
+            repeated, first,
+            "repeating an ask is not changing it — not the revision, and not \
+             even the timestamp, which would otherwise make an unchanged row \
+             look freshly decided"
+        );
+        assert_eq!(record(&auto, "v1;quality=auto", 3_000).await, first);
+
+        // A different ask.
+        let second = record(&manual, "v1;quality=manual:720", 4_000).await;
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.updated_at_ms, 4_000);
+        assert_eq!(second.canonical_form, "v1;quality=manual:720");
+
+        // And back to the first selection. The digest returns; the revision
+        // does not. Without that, an ask that went A → B → A would be
+        // indistinguishable from one that never left A, and a staged
+        // successor for the first A could be committed against the second.
+        let third = record(&auto, "v1;quality=auto", 5_000).await;
+        assert_eq!(third.digest, first.digest);
+        assert_eq!(
+            third.revision, 3,
+            "returning to an earlier selection is a new ask, not a return to an old one"
+        );
+
+        assert_eq!(
+            store.desired_selection(7, "play-a").await.expect("read"),
+            Some(third),
+            "and the row that is read back is the one that was written"
+        );
+        assert_eq!(
+            store.desired_selection(8, "play-a").await.expect("read"),
+            None,
+            "asks are per viewer as well as per playback"
+        );
+        assert_eq!(
+            store.desired_selection(7, "play-b").await.expect("read"),
+            None
+        );
+    }
+
+    /// The row refuses what its own constraints refuse, before the statement.
+    ///
+    /// Both backends have to reject the same inputs or a replicated import
+    /// disagrees with the node it imported from — and the disagreement would
+    /// surface as an opaque constraint violation during a restore, which is
+    /// the worst possible moment to discover it.
+    #[tokio::test]
+    async fn a_desired_selection_is_bounded_before_it_reaches_the_table() {
+        use crate::store::MediaSessionStore;
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        const NOT_HEX: &str = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        let digest = "c".repeat(64);
+        for (playback_id, digest, form, now, why) in [
+            ("", digest.as_str(), "v1;x", 1, "an empty playback id"),
+            (
+                "play-a",
+                "short",
+                "v1;x",
+                1,
+                "a digest that is not a sha-256",
+            ),
+            ("play-a", NOT_HEX, "v1;x", 1, "a digest that is not hex"),
+            ("play-a", digest.as_str(), "", 1, "an empty canonical form"),
+            (
+                "play-a",
+                digest.as_str(),
+                "v1;x",
+                0,
+                "a timestamp before the epoch",
+            ),
+        ] {
+            assert!(
+                store
+                    .record_desired_selection(7, playback_id, digest, form, now)
+                    .await
+                    .is_err(),
+                "{why} must be refused"
+            );
+        }
+        assert_eq!(
+            store.desired_selection(7, "play-a").await.expect("read"),
+            None,
+            "and a refused write leaves nothing behind"
+        );
+    }
+
     #[tokio::test]
     async fn settings_roundtrip_and_upsert() {
         let store = SqliteStore::open_in_memory().expect("open");
@@ -2003,6 +2203,62 @@ mod tests {
                 .await
                 .expect("get pair"),
             (Some("quality".to_owned()), Some("22".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_settings_compare_and_swap_the_complete_tuple() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let first = [
+            ("live_tv.enabled", "0"),
+            ("live_tv.device_ipv4", "192.168.4.20"),
+            ("live_tv.config_generation", "1"),
+        ];
+        assert!(store
+            .put_settings_if_generation("live_tv.config_generation", 0, &first)
+            .await
+            .expect("first CAS"));
+        let stale = [
+            ("live_tv.enabled", "1"),
+            ("live_tv.device_ipv4", "192.168.4.21"),
+            ("live_tv.config_generation", "1"),
+        ];
+        assert!(!store
+            .put_settings_if_generation("live_tv.config_generation", 0, &stale)
+            .await
+            .expect("stale CAS"));
+        let snapshot = store.settings_snapshot().await.expect("snapshot");
+        assert_eq!(
+            snapshot.get("live_tv.enabled").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            snapshot.get("live_tv.device_ipv4").map(String::as_str),
+            Some("192.168.4.20")
+        );
+        assert_eq!(
+            snapshot
+                .get("live_tv.config_generation")
+                .map(String::as_str),
+            Some("1")
+        );
+
+        store
+            .put_setting("live_tv.config_generation", "garbage")
+            .await
+            .expect("inject corrupt generation");
+        let next = [("live_tv.enabled", "1"), ("live_tv.config_generation", "1")];
+        assert!(store
+            .put_settings_if_generation("live_tv.config_generation", 0, &next)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .get_setting("live_tv.config_generation")
+                .await
+                .expect("corrupt generation remains")
+                .as_deref(),
+            Some("garbage")
         );
     }
 
@@ -2126,7 +2382,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 47,
+            version, 49,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2854,7 +3110,9 @@ mod tests {
         );
         for (table, columns) in [
             ("media_session_requests", 10),
-            ("media_playback_pointers", 4),
+            // 5 since v49 added `desired_revision`, the ask a pointer write
+            // was decided against.
+            ("media_playback_pointers", 5),
             ("media_sessions", 19),
         ] {
             assert_eq!(

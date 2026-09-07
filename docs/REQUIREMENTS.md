@@ -6,7 +6,7 @@ Captured from the founding interview (2026-07-19). Each section states the requi
 
 A media server + client family that recreates what old Plex got right — scan a folder, get a beautiful library, press play on any screen in the house — with modern efficiency (hardware decode everywhere, hardware transcode when needed) and one genuinely new capability: high-availability clustering with shared settings and state.
 
-**Non-goals:** streaming service integration, live TV/DVR, ads, discovery feeds, any hosted cloud component, any feature that requires an internet account to function.
+**Non-goals:** streaming service integration, DVR (recording, scheduling, retention), ads, discovery feeds, any hosted cloud component, any feature that requires an internet account to function. *Live* television from one locally configured HDHomeRun tuner is in scope and off by default (§3a); recording it is not.
 
 ## 2. Media types (v1)
 
@@ -33,6 +33,27 @@ The defining requirement: **the server gets out of the way**.
 - **REQ-SUB-1 — Baseline subtitles.** SRT/VTT (text) and PGS/VobSub (image) supported at launch; image subs burn in when the target can't render them.
 - **REQ-SUB-2 — Styled subs (ASS/SSA).** Full styling — fonts, positioning, karaoke — via libass on clients that can, burn-in during transcode elsewhere. May ship as a fast-follow to v1, but track selection defaults for dual-audio anime (prefer-original + subs vs. dub) are v1 data-model requirements.
 - **REQ-PLAY-7 — Trickplay/seek.** Accurate seeking in all modes (direct, remux, transcode); chapter support; resume from watch state on any client.
+
+## 3a. Live TV (one HDHomeRun tuner)
+
+One over-the-air tuner, played live on every first-party client. Explicitly
+**not** a DVR: no recording, no scheduling, no retention, no conflict
+resolution, and no streaming-service aggregation.
+
+- One HDHomeRun, configured by hand as a private or link-local IPv4. No
+  broadcast discovery.
+- One cluster node owns the device and is the only one that opens it; every
+  other node relays the same stream over the authenticated cluster API.
+- One tuner open and one FFmpeg process per session; a bounded six-segment live
+  HLS window; sessions addressed by an opaque capability that carries no
+  account bearer.
+- Off by default. Always compiled — there is no build variant — and enabled by
+  an administrator as a replicated runtime setting after readiness passes.
+- DRM-flagged channels are listed and refused. Captions are out of scope until
+  a 608/708 fixture exists. ATSC 3.0 reception does not imply the installed
+  FFmpeg can decode HEVC or AC-4.
+- Losing the owner node ends the live session. Automatic timeout-based takeover
+  is out of scope: elapsed time cannot prove a tuner socket closed.
 
 ## 4. Users, auth, remote access
 

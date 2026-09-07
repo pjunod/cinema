@@ -30,6 +30,7 @@ pub async fn serve(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Query(q): Query<PhotoQuery>,
+    method: axum::http::Method,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     let item = state
@@ -56,5 +57,5 @@ pub async fn serve(
         .into_iter()
         .next()
         .ok_or(ApiError::NotFound("photo file"))?;
-    super::stream::serve_file_range(&file.path, &headers).await
+    super::stream::serve_file_range(&file.path, &headers, &method).await
 }

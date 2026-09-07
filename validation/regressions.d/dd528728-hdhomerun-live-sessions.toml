@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["dd528728"]
+points = ["live-tv.integration"]
+checks = ["rust-gate"]
+reason = "The Rust gate compiles both default and no-default daemon surfaces and runs the focused live-TV capability, one-open stream, bounded scratch, routing, fencing, and admission regressions added with this session lifecycle."

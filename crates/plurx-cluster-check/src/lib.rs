@@ -2924,6 +2924,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         protocol_version: AUTH_PROTOCOL_VERSION,
                         protocol_min: AUTH_PROTOCOL_MIN,
                         protocol_max: AUTH_PROTOCOL_MAX,
+                        live_tv_v1: true,
                     },
                 },
             )
@@ -2947,6 +2948,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         protocol_version: AUTH_PROTOCOL_VERSION,
                         protocol_min: AUTH_PROTOCOL_MIN,
                         protocol_max: AUTH_PROTOCOL_MAX,
+                        live_tv_v1: true,
                     },
                 },
             )
@@ -3018,6 +3020,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             protocol_version: AUTH_PROTOCOL_VERSION,
             protocol_min: AUTH_PROTOCOL_MIN,
             protocol_max: AUTH_PROTOCOL_MAX,
+            live_tv_v1: true,
         };
         if node_id == 2 {
             let mut no_http_resume = request.clone();
@@ -3131,6 +3134,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         protocol_version: AUTH_PROTOCOL_VERSION,
                         protocol_min: AUTH_PROTOCOL_MIN,
                         protocol_max: AUTH_PROTOCOL_MAX,
+                        live_tv_v1: true,
                     },
                 },
             )
@@ -4340,6 +4344,7 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         protocol_version: AUTH_PROTOCOL_VERSION,
                         protocol_min: AUTH_PROTOCOL_MIN,
                         protocol_max: AUTH_PROTOCOL_MAX,
+                        live_tv_v1: true,
                     },
                 },
             )
@@ -5357,6 +5362,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                     protocol_version: AUTH_PROTOCOL_MIN,
                     protocol_min: AUTH_PROTOCOL_MIN,
                     protocol_max: AUTH_PROTOCOL_MAX,
+                    live_tv_v1: true,
                 },
             },
         )
@@ -5954,6 +5960,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
                     protocol_version: AUTH_PROTOCOL_MIN,
                     protocol_min: AUTH_PROTOCOL_MIN,
                     protocol_max: AUTH_PROTOCOL_MAX,
+                    live_tv_v1: true,
                 },
             },
         )

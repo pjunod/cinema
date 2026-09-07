@@ -45,6 +45,10 @@ struct PlayerControlObservation: Equatable {
     /// The bytes ran out. Not necessarily the title: see `endedSlackMs`.
     var isEnded: Bool
     var isSeeking: Bool
+    /// The newest destination the viewer asked for. This is deliberately
+    /// separate from [positionMs], which remains the frame AVPlayer is still
+    /// presenting while a seek or replacement is in flight.
+    var seekTargetMs: Int? = nil
     /// True once real playback has begun. Before it, the player is starting
     /// however busy it looks.
     var hasStarted: Bool
@@ -95,10 +99,11 @@ extension PlaybackControlMapping {
             bufferedThroughMs: range.through,
             playbackRate: playbackRate(observation, demand: demand),
             renderState: render,
-            // Only a seek reports a target, and the target *is* the position:
-            // the playhead the viewer asked for, not the one AVPlayer is
-            // still rendering.
-            seekTargetMs: render == .seeking ? position : nil,
+            seekTargetMs: render == .seeking
+                ? observation.seekTargetMs.map {
+                    min(max(0, $0), observation.durationMs > 0 ? observation.durationMs : Int.max)
+                }
+                : nil,
             observedDownloadBps: observation.observedDownloadBps
                 .flatMap { $0 > 0 ? $0 : nil },
             selection: observation.selection,

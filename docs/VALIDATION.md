@@ -36,7 +36,8 @@ Task PRs into `effort/**` use `make effort-rust-check` plus affected client and
 web compile/static checks instead of a validation profile. That lane is a
 deliberate integration proof, not release evidence. The final `effort/**` to
 `main` PR runs the full CI fan-out and writes an exact-tree qualification
-record.
+record. A conflict-resolution branch named `integration/*-into-main` uses the
+same qualification lane so resolving the merge does not discard that evidence.
 
 ## CI control plane — Forgejo is authoritative
 
@@ -126,7 +127,7 @@ executed with identical feature resolution.
 | Profile | Intended use | Additional evidence |
 |---|---|---|
 | `commit` | Pre-commit and ordinary local work | Mandatory Rust/catalog baseline; shared API wire check; web syntax, contrast, golden, and accessibility when affected |
-| `ci` | Main-bound PRs and `main` | Ordinary PRs scope to the diff; `effort/**` qualification PRs and push events enable every surface. Task PRs into `effort/**` use the separate compile-only workflow |
+| `ci` | Main-bound PRs and `main` | Ordinary PRs scope to the diff; `effort/**` and `integration/*-into-main` qualification PRs plus push events enable every surface. Task PRs into `effort/**` use the separate compile-only workflow |
 | `full` | Before a risky merge or release | Browser playback; both native-client suites; Android device tests when an explicit disposable device is selected; container startup/restart |
 | `nightly` | Scheduled deep regression search | Exhaustive playback and restart matrix; interrupted-production recovery; resource bounds; all runnable full checks; a gating 15-minute PGS parser fuzz campaign; report-only mutation sampling over Rust files changed in the last seven days |
 

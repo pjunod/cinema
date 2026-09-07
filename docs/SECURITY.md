@@ -316,6 +316,57 @@ Kept honest by
 which asserts a scan key gets 401/403 from `/settings`, `/users` and `/me` —
 and by `only_an_admin_manages_keys`, which asserts a key cannot mint another.
 
+## Live TV capabilities — one tuner, one URL, no account bearer
+
+A live session is not a library read, and its URLs end up in places library
+URLs do not: a player's network panel, a `<video>` element's `src`, a Media3
+log. So a Live TV session is a capability in exactly the sense the offline and
+EPUB sections use, with the tuner as the thing being protected.
+
+- **Starting a channel is an authenticated, ordinary request.** The account
+  bearer is required to list the lineup and to POST a session, and configuring
+  the device or flipping `live_tv.enabled` additionally requires administrator
+  access and an exact settings generation.
+- **Reading the stream is not.** The playlist, its segments, the status poll,
+  the keepalive, and the release all authenticate with the opaque capability
+  and nothing else. No account bearer travels on those routes, which is what
+  makes a leaked live URL worth one live session — it cannot read a library,
+  write progress, mint a key, or reach an account.
+- **A capability is bound, not just random.** It carries the node that issued
+  it and the settings generation it was issued under. It is refused by any
+  other node, and by the same node after the generation moves — so a
+  reconfiguration or a change of owner invalidates outstanding capabilities
+  rather than leaving them addressing a device that is no longer the device.
+- **Relay between voters is signed, and bounded.** When a non-owner serves a
+  live resource it fetches it over the authenticated internal cluster API; the
+  owner's responses — playlists included — are authenticated, and every
+  relayed read is size-bounded. A voter cannot be talked into streaming an
+  arbitrary URL by asking it nicely.
+- **The device is pinned to an address, not to a name.** The configured private
+  IPv4 is the only host contacted, on port 80 for `discover.json` and port 5004
+  for the stream. Loopback and public addresses are refused. The **hostname**
+  the device advertises in its `BaseURL` and `LineupURL` is never followed: the
+  request is always re-pinned to the configured address. What is taken from the
+  advertised `LineupURL` is only its port, and only from an allowlist of 80 and
+  5004, and only for the exact path `/lineup.json` — a URL carrying userinfo, a
+  query, a fragment, a non-`http` scheme, another path, another port, or more
+  than 2048 bytes is refused outright. Redirects are refused, no proxy is
+  honoured, and the documents are bounded, so a compromised or merely confused
+  tuner cannot point the server at something else and cannot exhaust it with an
+  endless JSON body.
+- **The lineup is sanitized before it is stored or rendered.** Channel names and
+  numbers come from the device, which is untrusted input; they are sanitized on
+  the way in, and a DRM marker that is missing, unknown, or null fails
+  *closed* — the channel is treated as protected rather than as playable.
+- **Transport logs carry no capability.** Live TV diagnostics are redacted, so a
+  log shipped for support does not hand over a live session.
+
+**Not defended against.** A capability holder on the LAN can watch the channel
+for the life of that session; the boundary here is between "a live stream" and
+"an account", not between two people who both have the URL. And plurx cannot
+stop another HDHomeRun client on the network from taking a tuner out from under
+it — the device arbitrates its own hardware, and a `503` is the honest report.
+
 ## Who can reach what
 
 Every route sits in one of three tiers. The public tier is small and holds no

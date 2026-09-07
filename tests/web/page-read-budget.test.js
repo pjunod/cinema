@@ -1650,6 +1650,7 @@ test("logout clears every protected page cache before rendering auth", () => {
        LOGS_RUN={},CLUSTER_LOGS_RUN={},CLUSTER_LOADED=true,CLUSTER_LEAVING=true,
        CLUSTER_TOKEN={token:"secret"},CLUSTER_REFUSAL={message:"secret"},ACT_TIMER=2,rendered=0;
      function forgetJoinToken(){CLUSTER_TOKEN=null;CLUSTER_REFUSAL=null;}
+     async function stopLiveTv(){}
      function render(){rendered++;}
      ${shippedSource("logout")};
      return {logout,state:()=>({TOKEN,ME,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,

@@ -15,6 +15,7 @@
 #   scripts/ship --deploy                # ansible → every plurx node
 #   scripts/ship --apple                 # Ansible → archive + TestFlight upload
 #   scripts/ship --android               # Ansible → build + physical devices
+#   scripts/ship --status                # ask every node what it is running
 #   scripts/ship --all                   # check, push, deploy, apple, android
 #   scripts/ship --deploy --dry-run      # print the commands, run nothing
 #
@@ -31,7 +32,7 @@ ANSIBLE_DIR="${PLURX_ANSIBLE_DIR:-$HOME/code/ansible/media}"
 ANSIBLE_INVENTORY="${PLURX_ANSIBLE_INVENTORY:-$ANSIBLE_DIR/inventory.yml}"
 MOBILE_VARS_FILE="${PLURX_MOBILE_VARS_FILE:-}"
 
-DO_CHECK=0; DO_PUSH=0; DO_DEPLOY=0; DO_APPLE=0; DO_ANDROID=0
+DO_CHECK=0; DO_PUSH=0; DO_DEPLOY=0; DO_APPLE=0; DO_ANDROID=0; DO_STATUS=0
 DRY=0; RUNG=""
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -52,6 +53,7 @@ while [ $# -gt 0 ]; do
     --deploy)  DO_DEPLOY=1; shift ;;
     --apple)   DO_APPLE=1; shift ;;
     --android) DO_ANDROID=1; shift ;;
+    --status)  DO_STATUS=1; shift ;;
     --all)     DO_CHECK=1; DO_PUSH=1; DO_DEPLOY=1; DO_APPLE=1; DO_ANDROID=1; shift ;;
     --rung)    RUNG="${2:-}"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
@@ -60,7 +62,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ $((DO_CHECK + DO_PUSH + DO_DEPLOY + DO_APPLE + DO_ANDROID)) -eq 0 ]; then
+if [ $((DO_CHECK + DO_PUSH + DO_DEPLOY + DO_APPLE + DO_ANDROID + DO_STATUS)) -eq 0 ]; then
   usage 1
 fi
 
@@ -183,6 +185,122 @@ if [ $((DO_APPLE + DO_ANDROID)) -gt 0 ]; then
   note "controller inventory: $ANSIBLE_INVENTORY"
   note "targets: $MOBILE_TAGS"
   run "${MOBILE_ARGS[@]}"
+fi
+
+# --- the status probe ------------------------------------------------------
+# What is actually running out there, asked of the nodes rather than inferred
+# from what we last pushed.
+#
+# Deploying and then believing it worked is how a node sits on an old binary
+# for a week: `--deploy` reports what Ansible did, which is not the same fact
+# as what the node is now serving. This asks each node directly and prints the
+# answer, including for the nodes that do not answer at all.
+#
+# Read-only by construction — GETs against `/readyz` and `/metrics`, no
+# argument that changes anything — so it is safe to run at any time, including
+# against a node mid-deploy.
+if [ "$DO_STATUS" -eq 1 ]; then
+  say "status"
+
+  # The inventory is Ansible's, so ask Ansible rather than parsing its YAML:
+  # the schema is the private repository's to change, and a parser here would
+  # break silently the first time it did. PLURX_NODES overrides for a node not
+  # in the inventory yet, or when the controller is unavailable.
+  if [ -n "${PLURX_NODES:-}" ]; then
+    read -r -a NODES <<< "$PLURX_NODES"
+    note "nodes: from PLURX_NODES"
+  else
+    [ -f "$ANSIBLE_INVENTORY" ] || die "no ansible inventory at $ANSIBLE_INVENTORY (set PLURX_ANSIBLE_INVENTORY, or PLURX_NODES to skip it)"
+    command -v ansible-inventory >/dev/null 2>&1 \
+      || die "ansible-inventory not found; set PLURX_NODES=\"host1 host2\" to probe without it"
+    mapfile -t NODES < <(
+      ansible-inventory -i "$ANSIBLE_INVENTORY" --list 2>/dev/null \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); h=d.get("_meta",{}).get("hostvars",{}); print("\n".join(sorted(h)))'
+    )
+    note "nodes: $ANSIBLE_INVENTORY"
+  fi
+  [ "${#NODES[@]}" -gt 0 ] || die "no nodes to probe"
+
+  # An entry may carry its own port. Nodes do not all listen on the same one
+  # once a spare is running beside a production daemon, and a probe that can
+  # only ask one port is a probe that quietly omits the interesting node.
+  PORT="${PLURX_PORT:-8080}"
+  printf '\n    %-16s %-10s %-22s %-9s %s\n' NODE READY VERSION SERVING WAITING
+
+  probe_failed=0
+  for node in "${NODES[@]}"; do
+    case "$node" in
+      *:*) base="http://$node" ;;
+      *)   base="http://$node:$PORT" ;;
+    esac
+    # Separate calls on purpose: a node can be up and unready, and the two
+    # facts are reported independently rather than one masking the other.
+    #
+    # No `-f` on the readiness call, and that is the whole point of it.
+    # `/readyz` answers 503 with the reason in the body — `maintenance`,
+    # `quorum unavailable`, `store unavailable` — and `curl -f` throws the body
+    # away on a non-2xx, which discards precisely the sentence worth reading.
+    # A node that is down is told apart from one that is unready by curl's exit
+    # status, not by whether a body arrived.
+    if ready="$(curl -sS --max-time 5 "$base/readyz" 2>/dev/null | tr -d '\n')"; then
+      reachable=1
+    else
+      reachable=0; ready=""
+    fi
+    metrics="$(curl -fsS --max-time 5 "$base/metrics" 2>/dev/null)" || metrics=""
+
+    if [ "$reachable" -eq 0 ] && [ -z "$metrics" ]; then
+      printf '    %-16s \033[31m%-10s\033[0m %s\n' "$node" "no answer" "(nothing listening on $PORT, or the daemon is down)"
+      probe_failed=1
+      continue
+    fi
+
+    version="$(printf '%s' "$metrics" | sed -n 's/^plurx_build_info{version="\([^"]*\)",build="\([^"]*\)"}.*/\1+\2/p' | head -1)"
+    serving="$(printf '%s' "$metrics" | sed -n 's/^plurx_vod_gets_serving \(.*\)/\1/p' | head -1)"
+    waiting="$(printf '%s' "$metrics" | sed -n 's/^plurx_vod_blocked_gets_waiting \(.*\)/\1/p' | head -1)"
+    cap="$(printf '%s' "$metrics" | sed -n 's/^plurx_vod_blocked_get_cap \(.*\)/\1/p' | head -1)"
+
+    # An older binary predates a metric rather than reporting zero for it, and
+    # printing 0 would read as "idle" for a node that cannot answer the
+    # question at all.
+    [ -n "$version" ] || version="unknown"
+    [ -n "$serving" ] || serving="n/a"
+    if [ -n "$waiting" ] && [ -n "$cap" ]; then waiting="$waiting/$cap"; else waiting="n/a"; fi
+
+    case "$ready" in
+      ready) printf '    %-16s \033[32m%-10s\033[0m %-22s %-9s %s\n' "$node" ready "$version" "$serving" "$waiting" ;;
+      "")    printf '    %-16s \033[31m%-10s\033[0m %-22s %-9s %s\n' "$node" "unready" "$version" "$serving" "$waiting"
+             probe_failed=1 ;;
+      *)     printf '    %-16s \033[33m%-10s\033[0m %-22s %-9s %s\n' "$node" "$ready" "$version" "$serving" "$waiting"
+             probe_failed=1 ;;
+    esac
+  done
+
+  # Distinct versions are worth naming: a partial deploy is the failure this
+  # probe exists to catch, and it is invisible in a per-node list nobody adds up.
+  distinct="$(
+    for node in "${NODES[@]}"; do
+      if [[ "$node" == *:* ]]; then
+        probe_base="http://$node"
+      else
+        probe_base="http://$node:$PORT"
+      fi
+      curl -fsS --max-time 5 "$probe_base/metrics" 2>/dev/null \
+        | sed -n 's/^plurx_build_info{version="\([^"]*\)",build="\([^"]*\)"}.*/\1+\2/p' | head -1
+    done | sort -u | grep -c . || true
+  )"
+  if [ "${distinct:-0}" -gt 1 ]; then
+    printf '\n'
+    note "WARNING: $distinct different builds are serving — this fleet is mid-deploy or a node was missed"
+    probe_failed=1
+  fi
+
+  # Non-zero so a caller can gate on it, and because a probe that always
+  # succeeds is one nobody reads.
+  if [ "$probe_failed" -eq 1 ]; then
+    printf '\n'
+    note "at least one node is not ready, not answering, or not on the same build"
+  fi
 fi
 
 say "done"

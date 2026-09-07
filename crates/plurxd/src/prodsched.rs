@@ -31,7 +31,7 @@
 //! watch the producer walk backwards to refill an evicted index 5 it might
 //! rewind into some day, and time out while it did.
 
-use crate::titlestore::Manifest;
+use crate::titlestore::{Manifest, ReaderWindow};
 
 /// How far ahead of the furthest demand a producer may run before it is
 /// suspended. Today's ahead-window value in film-time terms; ledger D9 keeps
@@ -54,9 +54,15 @@ pub struct Demand {
     /// can make a producer move against the ahead window, and the only one
     /// that can make it move backwards.
     pub blocked_on: Option<u32>,
-    /// The furthest segment this reader has asked for. Where the ahead window
-    /// is measured from once nothing is blocked.
+    /// The reader's current playback anchor. Accepted control owns this
+    /// position; GET order and speculative prefetch do not advance it.
     pub frontier: u32,
+    /// This admitted GET is nearest to the reader's accepted playback anchor
+    /// inside its current buffer window.
+    /// Other admitted GETs remain owed, but cannot make an abandoned seek
+    /// destination outrank the one the viewer has just selected.
+    pub foreground: bool,
+    pub arrival_order: Option<u64>,
 }
 
 impl Demand {
@@ -66,6 +72,8 @@ impl Demand {
         Demand {
             blocked_on: None,
             frontier,
+            foreground: false,
+            arrival_order: None,
         }
     }
 
@@ -74,6 +82,8 @@ impl Demand {
         Demand {
             blocked_on: Some(index),
             frontier: index,
+            foreground: false,
+            arrival_order: None,
         }
     }
 }
@@ -255,7 +265,12 @@ impl Position {
 /// `demands` is every attached reader. An empty slice means nothing is
 /// attached, which is [`Action::Idle`] however much of the rendition exists —
 /// a producer with no reader is spending the machine on nobody.
-pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Action {
+pub fn decide(
+    manifest: &Manifest,
+    demands: &[Demand],
+    position: Position,
+    readers: &[ReaderWindow],
+) -> Action {
     if demands.is_empty() {
         return Action::Idle;
     }
@@ -296,7 +311,7 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
             // it. Eviction is what makes room and nothing else will run it —
             // unless there is nothing to evict, which is a stall and has to be
             // said rather than spun on.
-            return if manifest.has_evictable(&owed) {
+            return if manifest.has_evictable(&owed, readers) {
                 Action::MakeRoom { wanted }
             } else {
                 Action::Suspend {
@@ -305,7 +320,47 @@ pub fn decide(manifest: &Manifest, demands: &[Demand], position: Position) -> Ac
                 }
             };
         }
-        return serve_blocked(manifest, &owed, position, reposition);
+        let mut foreground = demands
+            .iter()
+            .filter(|demand| demand.foreground)
+            .filter_map(|demand| demand.blocked_on)
+            .filter(|index| owed.binary_search(index).is_ok())
+            .collect::<Vec<_>>();
+        foreground.sort_unstable();
+        foreground.dedup();
+        // Keep every admitted request in `owed` for capacity protection. Only
+        // select the next producer move from the current playback windows;
+        // old requests resume when these are served or end by their deadline.
+        let candidates = if foreground.is_empty() {
+            &owed
+        } else {
+            &foreground
+        };
+        if let Some(oldest) = demands
+            .iter()
+            .filter(|demand| {
+                demand
+                    .blocked_on
+                    .is_some_and(|index| candidates.binary_search(&index).is_ok())
+            })
+            .filter_map(|demand| Some((demand.arrival_order?, demand.blocked_on?)))
+            .min()
+        {
+            // Each current viewer's nearest GET competes in admission order.
+            // Opportunistic production near the current cursor must not let
+            // one viewer's continuing prefetch starve a rewind by another.
+            return serve_blocked(manifest, &[oldest.1], position, reposition);
+        }
+        return serve_blocked(
+            manifest,
+            if foreground.is_empty() {
+                &owed
+            } else {
+                &foreground
+            },
+            position,
+            reposition,
+        );
     }
 
     // Nothing is blocked, so this is ahead-fill, and it runs *forward from the
@@ -483,6 +538,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn current_playback_beats_both_an_old_low_wait_and_later_far_prefetch() {
+        let manifest = manifest(200);
+        let mut current = Demand::waiting_on(90);
+        current.foreground = true;
+        assert_eq!(
+            decide(
+                &manifest,
+                &[waiting(3), current, waiting(180)],
+                position(None),
+                &[]
+            ),
+            Action::Reposition { to: 90 }
+        );
+        // A backward seek is equally authoritative; no numeric or arrival
+        // ordering heuristic can substitute for accepted playback intent.
+        current.blocked_on = Some(3);
+        current.frontier = 3;
+        assert_eq!(
+            decide(
+                &manifest,
+                &[waiting(90), current, waiting(180)],
+                positioned(90),
+                &[]
+            ),
+            Action::Reposition { to: 3 }
+        );
+        // The old admitted requests remain owed once current work settles.
+        assert_eq!(
+            decide(&manifest, &[waiting(90), waiting(180)], position(None), &[]),
+            Action::Reposition { to: 90 }
+        );
+    }
+
+    #[test]
+    fn continuing_forward_fetches_cannot_starve_another_viewers_rewind() {
+        let manifest = manifest(200);
+        let first_viewer = Demand {
+            blocked_on: Some(90),
+            frontier: 90,
+            foreground: true,
+            arrival_order: Some(1),
+        };
+        let rewind_viewer = Demand {
+            blocked_on: Some(3),
+            frontier: 3,
+            foreground: true,
+            arrival_order: Some(2),
+        };
+        assert_eq!(
+            decide(
+                &manifest,
+                &[first_viewer, rewind_viewer],
+                positioned(90),
+                &[]
+            ),
+            Action::Produce { next: 90 }
+        );
+        let next_forward_get = Demand {
+            blocked_on: Some(91),
+            frontier: 91,
+            foreground: true,
+            arrival_order: Some(3),
+        };
+        assert_eq!(
+            decide(
+                &manifest,
+                &[next_forward_get, rewind_viewer],
+                positioned(90),
+                &[]
+            ),
+            Action::Reposition { to: 3 }
+        );
+    }
+
     /// The same position, under a working set of `used` against `budget`.
     fn under_pressure(through: Option<u32>, used: u64, budget: u64, held: bool) -> Position {
         Position {
@@ -508,15 +638,15 @@ mod tests {
     #[test]
     fn no_readers_means_no_production_however_empty_the_rendition_is() {
         let manifest = manifest(40);
-        assert_eq!(decide(&manifest, &[], position(None)), Action::Idle);
-        assert_eq!(decide(&manifest, &[], position(Some(3))), Action::Idle);
+        assert_eq!(decide(&manifest, &[], position(None), &[]), Action::Idle);
+        assert_eq!(decide(&manifest, &[], position(Some(3)), &[]), Action::Idle);
     }
 
     #[test]
     fn a_fresh_rendition_starts_at_the_beginning() {
         let manifest = manifest(40);
         assert_eq!(
-            decide(&manifest, &[demand(0)], position(None)),
+            decide(&manifest, &[demand(0)], position(None), &[]),
             Action::Produce { next: 0 }
         );
     }
@@ -528,7 +658,7 @@ mod tests {
             manifest.materialize(index, 1_000, 0);
         }
         assert_eq!(
-            decide(&manifest, &[demand(6)], position(Some(4))),
+            decide(&manifest, &[demand(6)], position(Some(4)), &[]),
             Action::Produce { next: 5 }
         );
     }
@@ -541,7 +671,7 @@ mod tests {
         }
         // One reader at the start, one well ahead: the near one does not hold
         // the producer back, and the far one does not strand the near one.
-        let action = decide(&manifest, &[demand(0), demand(20)], position(Some(4)));
+        let action = decide(&manifest, &[demand(0), demand(20)], position(Some(4)), &[]);
         assert_eq!(action, Action::Produce { next: 5 });
     }
 
@@ -553,7 +683,7 @@ mod tests {
         }
         // 180 s at 7 s a segment is 26 segments; a reader at 2 with the
         // producer through 40 is past the horizon.
-        match decide(&manifest, &[demand(2)], position(Some(40))) {
+        match decide(&manifest, &[demand(2)], position(Some(40)), &[]) {
             Action::Suspend {
                 produced_through,
                 reason: Hold::Ahead { horizon },
@@ -578,7 +708,7 @@ mod tests {
             manifest.materialize(index, 1_000, i64::from(index));
         }
         assert_eq!(
-            decide(&manifest, &[Demand::waiting_on(34)], positioned(34)),
+            decide(&manifest, &[Demand::waiting_on(34)], positioned(34), &[]),
             Action::Produce { next: 34 }
         );
     }
@@ -589,7 +719,7 @@ mod tests {
         // producer where it cannot reach what is owed.
         let manifest = manifest(80);
         assert_eq!(
-            decide(&manifest, &[Demand::waiting_on(70)], positioned(4)),
+            decide(&manifest, &[Demand::waiting_on(70)], positioned(4), &[]),
             Action::Reposition { to: 70 }
         );
     }
@@ -605,7 +735,7 @@ mod tests {
         // The producer sits at 4. The request at 35 is 31 segments ahead, over
         // the 9-segment reposition gap, so a restart at the boundary beats
         // reading there.
-        match decide(&manifest, &[waiting(35)], position(Some(4))) {
+        match decide(&manifest, &[waiting(35)], position(Some(4)), &[]) {
             Action::Reposition { to } => assert_eq!(to, 35),
             other => panic!("expected a reposition, got {other:?}"),
         }
@@ -621,7 +751,7 @@ mod tests {
         // at several times realtime gets there before a new process would
         // finish starting.
         assert_eq!(
-            decide(&manifest, &[waiting(10)], position(Some(4))),
+            decide(&manifest, &[waiting(10)], position(Some(4)), &[]),
             Action::Produce { next: 5 }
         );
     }
@@ -641,8 +771,10 @@ mod tests {
         let readers = [Demand {
             blocked_on: Some(3),
             frontier: 30,
+            foreground: false,
+            arrival_order: None,
         }];
-        match decide(&manifest, &readers, position(Some(29))) {
+        match decide(&manifest, &readers, position(Some(29)), &[]) {
             Action::Reposition { to } => assert_eq!(to, 3),
             other => panic!("expected a backwards reposition, got {other:?}"),
         }
@@ -660,7 +792,7 @@ mod tests {
         }
         manifest.evict(3);
         assert_eq!(
-            decide(&manifest, &[waiting(30)], position(Some(29))),
+            decide(&manifest, &[waiting(30)], position(Some(29)), &[]),
             Action::Produce { next: 30 },
             "the open request outranks a hole nobody has asked for; serving \
              the hole first is how the waiting reader times out"
@@ -680,7 +812,12 @@ mod tests {
         // The ahead-fill reader at 2 puts the horizon at 28, so 38 is well
         // outside it. It is still owed: somebody is holding a connection open
         // for it.
-        match decide(&manifest, &[demand(2), waiting(38)], position(Some(39))) {
+        match decide(
+            &manifest,
+            &[demand(2), waiting(38)],
+            position(Some(39)),
+            &[],
+        ) {
             Action::Reposition { to } => assert_eq!(to, 38),
             other => panic!("expected the blocked request to win, got {other:?}"),
         }
@@ -697,7 +834,12 @@ mod tests {
             manifest.materialize(index, 1_000, 0);
         }
         manifest.evict(5);
-        match decide(&manifest, &[waiting(5), waiting(60)], position(Some(30))) {
+        match decide(
+            &manifest,
+            &[waiting(5), waiting(60)],
+            position(Some(30)),
+            &[],
+        ) {
             Action::Reposition { to } => assert_eq!(to, 5),
             other => panic!("expected a reposition to the lowest owed, got {other:?}"),
         }
@@ -712,7 +854,7 @@ mod tests {
             manifest.materialize(index, 1_000, 0);
         }
         assert_eq!(
-            decide(&manifest, &[waiting(4)], position(Some(9))),
+            decide(&manifest, &[waiting(4)], position(Some(9)), &[]),
             Action::Produce { next: 10 },
             "an already-materialized request must not drag the producer back"
         );
@@ -729,7 +871,7 @@ mod tests {
         // and the producer must not go chasing an index that has no plan
         // entry.
         assert_eq!(
-            decide(&manifest, &[waiting(len + 5)], position(Some(len - 1))),
+            decide(&manifest, &[waiting(len + 5)], position(Some(len - 1)), &[]),
             Action::Idle
         );
     }
@@ -747,7 +889,7 @@ mod tests {
         for index in 5..40 {
             manifest.materialize(index, 1_000, 0);
         }
-        match decide(&manifest, &[demand(2)], position(Some(39))) {
+        match decide(&manifest, &[demand(2)], position(Some(39)), &[]) {
             Action::Suspend { .. } => {}
             other => panic!("expected suspension past the horizon, got {other:?}"),
         }
@@ -760,7 +902,7 @@ mod tests {
             manifest.materialize(index, 1_000, 0);
         }
         assert_eq!(
-            decide(&manifest, &[demand(2)], position(Some(3))),
+            decide(&manifest, &[demand(2)], position(Some(3)), &[]),
             Action::Idle
         );
     }
@@ -782,12 +924,63 @@ mod tests {
             &manifest,
             &[Demand::waiting_on(4)],
             under_pressure(Some(3), 12_000, 10_000, false),
+            &[],
         );
         assert_eq!(
             action,
             Action::MakeRoom { wanted: 7_000 },
             "measured to the release line, so one sweep clears the hold"
         );
+    }
+
+    /// A working set held entirely inside live reader windows is a stall, and
+    /// has to say so rather than ask for a sweep that cannot free anything.
+    ///
+    /// `has_evictable` used to answer without looking at what was protected,
+    /// so it said yes, `decide` returned `MakeRoom`, the sweep skipped every
+    /// index a reader covers and freed zero bytes, and the driver then
+    /// terminated the producer as one that had made no progress. The viewer's
+    /// control plane saw a producer stop; it never saw `no_room`, which is the
+    /// one fact that explains why nothing is arriving.
+    #[test]
+    fn a_working_set_locked_inside_reader_windows_is_no_room_not_a_sweep() {
+        let mut manifest = manifest(80);
+        for index in 0..4u32 {
+            manifest.materialize(index, 1_000, 1);
+        }
+        let demands = [waiting(9)];
+        let position = under_pressure(Some(3), 12_000, 10_000, false);
+
+        // Nothing protected: the old answer, and still the right one.
+        assert!(
+            matches!(
+                decide(&manifest, &demands, position, &[]),
+                Action::MakeRoom { .. }
+            ),
+            "with nothing protected there is room to make"
+        );
+
+        // A reader parked across the whole materialized run protects all of it.
+        let covering = [ReaderWindow {
+            back: 2,
+            playhead: 2,
+            frontier: 2,
+            ahead: 2,
+        }];
+        assert!(
+            (0..4u32).all(|index| covering.iter().any(|window| window.covers(index))),
+            "the fixture window must actually cover the materialized run"
+        );
+        match decide(&manifest, &demands, position, &covering) {
+            Action::Suspend {
+                reason: Hold::NoRoom { .. },
+                ..
+            } => {}
+            other => panic!(
+                "every materialized segment is protected, so waiting cannot \
+                 help and the answer is the stall, not a sweep: got {other:?}"
+            ),
+        }
     }
 
     #[test]
@@ -800,6 +993,7 @@ mod tests {
             &manifest,
             &[Demand::waiting_on(4)],
             under_pressure(Some(3), 12_000, 10_000, false),
+            &[],
         ) {
             Action::Suspend {
                 reason: Hold::NoRoom { wanted },
@@ -824,6 +1018,7 @@ mod tests {
                 &manifest,
                 &[Demand::waiting_on(4)],
                 under_pressure(Some(3), just_under_the_line, 10_000, false),
+                &[],
             ),
             Action::Produce { next: 4 },
             "under the budget and not held: serve the blocked reader"
@@ -835,6 +1030,7 @@ mod tests {
                 &manifest,
                 &[Demand::waiting_on(4)],
                 under_pressure(Some(3), just_under_the_line, 10_000, true),
+                &[],
             ),
             Action::MakeRoom { wanted: 4_999 },
             "held and above half: free to the release line in one sweep"
@@ -844,6 +1040,7 @@ mod tests {
                 &manifest,
                 &[Demand::waiting_on(4)],
                 under_pressure(Some(3), 4_999, 10_000, true),
+                &[],
             ),
             Action::Produce { next: 4 },
             "held and under half: released"
@@ -861,6 +1058,7 @@ mod tests {
                 &manifest,
                 &[Demand::waiting_on(4)],
                 under_pressure(Some(3), u64::MAX, 0, false),
+                &[],
             ),
             Action::Produce { next: 4 }
         );
@@ -875,7 +1073,8 @@ mod tests {
             decide(
                 &manifest,
                 &[],
-                under_pressure(Some(3), 12_000, 10_000, false)
+                under_pressure(Some(3), 12_000, 10_000, false),
+                &[]
             ),
             Action::Idle
         );

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["abb872ba"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The Rust gate executes vodserve, waitpool, and prodsched regressions for atomic admitted-demand clocks, cancellation-safe control anchors, notified-file retention, bidirectional mixed-client fairness, zero-progress eviction, and absolute request deadlines. The development loop independently ran all 103 focused tests, including real FFmpeg generation."

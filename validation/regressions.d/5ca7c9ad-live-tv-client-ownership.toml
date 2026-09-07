@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5ca7c9ad"]
+points = ["live-tv.integration"]
+checks = ["web-static", "web-layout"]
+reason = "The shipped-function and lease regressions cover ambiguous typed starts, monotonic deadlines, durable pre-POST and active ownership, denied persistence, LAN HTTP randomness, stale-expiry/rearm races, fullscreen teardown and release-before-switch. The browser fixture requires actual H.264/AAC frame advancement and zero finite-file mutations."

@@ -30,7 +30,6 @@ use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 
-#[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::admission::Admission;
 use crate::admission::{
     Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
@@ -43,6 +42,10 @@ use crate::ffmpeg::pacing_caps;
 use crate::media_sessions::SessionSettlementGuard;
 use crate::meter::Meter;
 
+/// Namespace below the transcode work root which is owned by the Live TV
+/// lifecycle rather than `TranscodeManager.sessions`.
+pub(crate) const LIVE_TV_WORK_DIR_NAME: &str = "live-tv";
+
 /// Idle timeout after which a session's ffmpeg is killed and its dir removed.
 const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS as u64 / 1_000;
 /// Stable classification for a start that lost a bounded admission wait.
@@ -51,7 +54,6 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
-#[cfg(any(test, feature = "live-hls-recovery"))]
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
@@ -257,7 +259,6 @@ const ACTOR_HARDWARE_STARTUP_BUDGET: Duration = Duration::from_secs(12);
 const ACTOR_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
 /// How long ffmpeg's output timestamp may sit still. It is the actor's
 /// progress budget for every actor-managed rolling producer.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 /// How long a flow evaluation waits for the actor to order its desire.
 ///
 /// This bounds a mailbox round trip, not a producer: it selects no recipe,
@@ -276,12 +277,10 @@ const COPY_READER_INGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// process reap could not yet be confirmed. This owner never makes playback
 /// policy or replacement decisions; it only retains resources until physical
 /// cleanup converges.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 const PREPUBLICATION_REAP_RETRY: Duration = Duration::from_secs(5);
 /// One supervisor terminate/reap request may not monopolize lifecycle
 /// serialization. Timeout retains the child and permits for the next repair
 /// attempt; it never treats an unconfirmed reap as success.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 const PREPUBLICATION_REAP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Slack on top of both exact actor startup budgets for scheduler latency,
 /// predecessor reap, successor spawn/install, and the request's 100 ms file
@@ -1680,7 +1679,6 @@ fn is_progress_line(line: &str) -> bool {
 }
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
-#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn clear_session_dir(dir: &std::path::Path) -> std::io::Result<()> {
     let mut entries = tokio::fs::read_dir(dir).await.map_err(|error| {
         std::io::Error::new(
@@ -6356,10 +6354,12 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         resume_below_seconds: None,
         resume_below_bytes: None,
         ahead_bytes: None,
-        delivered_bytes: 0,
-        delivered_bps: None,
-        delivered_idle_ms: i64::try_from(info.idle_seconds.saturating_mul(1_000))
-            .unwrap_or(i64::MAX),
+        // Measured, not assumed. The zero and the session-touch age this
+        // replaces looked like a reading and were not one: a handle touched a
+        // second ago reported a fresh delivery whether or not a byte had moved.
+        delivered_bytes: info.delivered_bytes,
+        delivered_bps: info.delivered_bps,
+        delivered_idle_ms: info.delivered_idle_ms,
         readrate: 0.0,
         suspended: false,
         suspend_count: 0,
@@ -8198,11 +8198,18 @@ enum PartEnd {
 
 /// The owner-aware permits a foreground encoder keeps for its whole lifetime.
 /// Constructed only after every background permit has been released.
-#[cfg(any(test, feature = "live-hls-recovery"))]
-struct LiveAdmission {
-    encoder: Encoder,
+pub(crate) struct LiveAdmission {
+    pub(crate) encoder: Encoder,
     hw_slot: Option<HwSlot>,
     sw_permit: Option<crate::admission::SwPermit>,
+}
+
+impl LiveAdmission {
+    pub(crate) fn software_threads(&self) -> Option<u32> {
+        self.sw_permit
+            .as_ref()
+            .map(|permit| permit.threads() as u32)
+    }
 }
 
 /// Which tracks a session carries. Part of its recipe, which is why it is a
@@ -10044,6 +10051,19 @@ impl TranscodeManager {
         self.cache_readers
             .begin_eviction(recipe)
             .expect("test eviction claim")
+    }
+
+    /// Blocked-GET admission counters for the operator surfaces.
+    ///
+    /// Read through `self.vod` at call time rather than captured once. This
+    /// manager replaces its own `VodServe` on the cluster boot path, so a
+    /// handle taken at construction can address a pool nothing serves from —
+    /// and an admission counter that quietly stops moving is worse than no
+    /// counter, because it reads as a quiet node.
+    pub(crate) fn blocked_get_metrics_handle(
+        &self,
+    ) -> std::sync::Arc<crate::waitpool::BlockedGetMetrics> {
+        self.vod.blocked_get_metrics_handle()
     }
 
     /// Narrow process-metrics handle with no session map or Store access.
@@ -13801,6 +13821,12 @@ impl TranscodeManager {
         const MAX_BLOCK_BUDGET_SECS: f64 = 30.0;
         const DEFAULT_MATERIALIZE_BUDGET_SECS: f64 = 30.0;
         const MAX_MATERIALIZE_BUDGET_SECS: f64 = 300.0;
+        /// Sixteen viewers each at the per-session cap of four. The ceiling is
+        /// a sanity bound, not a capacity claim: each parked GET holds a
+        /// response open and a retention pin, so an unbounded value lets one
+        /// seek storm park work until the node runs out of sockets.
+        const DEFAULT_BLOCKED_GET_CAP: usize = 64;
+        const MAX_BLOCKED_GET_CAP: usize = 4_096;
         let working_set_bytes = match read(plurx_core::store::keys::VOD_WORKING_SET_BYTES).await? {
             Some(raw) => match raw.trim().parse::<u64>() {
                 // The settings surface refuses a zero on the way in; one that
@@ -13849,11 +13875,27 @@ impl TranscodeManager {
                 .saturating_mul(1 << 30),
             None => 0,
         };
+        // Absent or unparseable keeps the built-in default: a node that has
+        // never been tuned still bounds its parked work. Clamped rather than
+        // trusted, because a zero would refuse every blocked GET — turning
+        // every seek into an immediate 503 — and an unbounded value would let
+        // one seek storm park work until the node ran out of sockets.
+        let blocked_get_cap = match read(plurx_core::store::keys::VOD_BLOCKED_GET_CAP).await? {
+            Some(raw) => raw
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|cap| *cap > 0)
+                .map(|cap| cap.min(MAX_BLOCKED_GET_CAP))
+                .unwrap_or(DEFAULT_BLOCKED_GET_CAP),
+            None => DEFAULT_BLOCKED_GET_CAP,
+        };
         Ok(Some(crate::vodserve::VodSettings {
             working_set_bytes,
             completed_cache_bytes,
             block_budget: Duration::from_secs_f64(block_secs),
             materialize_budget: Duration::from_secs_f64(materialize_secs),
+            blocked_get_cap,
         }))
     }
 
@@ -15049,7 +15091,6 @@ impl TranscodeManager {
     /// capacity back. The permit then carries live ownership for the session's
     /// whole lifetime, keeping every background pool parked after this method
     /// drops the short-lived waiter.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn admit_live(
         &self,
         preferred: Encoder,
@@ -15150,6 +15191,26 @@ impl TranscodeManager {
             tracing::warn!(class = %work.software_class(), "{why}");
             return Err(capacity_error(why));
         }
+    }
+
+    /// Reserve the same foreground encoder pool used by ordinary playback for
+    /// one always-compiled HDHomeRun session. The pessimistic 4K HEVC/HDR
+    /// shape prevents an unmeasured software fallback from promising a live
+    /// stream that cannot run in real time; the returned opaque guard owns the
+    /// permit until the live session ends.
+    pub(crate) async fn admit_live_tv(
+        &self,
+        target_height: u16,
+        max_wait: Duration,
+    ) -> Result<LiveAdmission, String> {
+        let preferred = self.encoder().await;
+        let work = Workload {
+            source_height: 2160,
+            codec: "hevc",
+            hdr: Some("hdr"),
+            target_height: i64::from(target_height),
+        };
+        self.admit_live(preferred, work, max_wait).await
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
@@ -17274,6 +17335,28 @@ impl TranscodeManager {
         }
         let control = self.sessions.lock().await.get(session_id)?.control.clone();
         Some(Arc::new(control) as Arc<dyn crate::playback_control::PreparationGate>)
+    }
+
+    /// Record that the durable row now names this ask.
+    ///
+    /// Both engines, because either may own the session and neither knows
+    /// which. A session that has gone by the time this lands is not an error:
+    /// the row is written and keyed by playback, so it outlives the session
+    /// that recorded it and the only thing lost is one exchange's worth of
+    /// suppression.
+    pub(crate) async fn record_desired_persisted(&self, session_id: &str, digest: &str) {
+        if self.vod.record_desired_persisted(session_id, digest).await {
+            return;
+        }
+        let control = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|session| session.control.clone());
+        if let Some(control) = control {
+            control.record_desired_persisted(digest).await;
+        }
     }
 
     pub(crate) fn session_adoption_token(&self, session_id: &str) -> Option<SessionAdoptionToken> {
@@ -19750,7 +19833,9 @@ impl TranscodeManager {
         let mut removed = 0usize;
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if live.contains(&path) || !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
+            if entry.file_name() == LIVE_TV_WORK_DIR_NAME
+                || live.contains(&path)
+                || !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
             {
                 continue;
             }
@@ -21509,6 +21594,38 @@ fn test_session(dir: PathBuf) -> Session {
 pub(crate) mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn orphan_sweep_never_enters_the_live_tv_owned_namespace() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work root");
+        let live_session = work
+            .path()
+            .join(LIVE_TV_WORK_DIR_NAME)
+            .join("live-tv-active");
+        tokio::fs::create_dir_all(&live_session)
+            .await
+            .expect("active Live TV scratch");
+        tokio::fs::write(live_session.join("index.m3u8"), b"active")
+            .await
+            .expect("active playlist");
+        let ordinary_orphan = work.path().join("orphan-vod");
+        tokio::fs::create_dir(&ordinary_orphan)
+            .await
+            .expect("ordinary orphan");
+        let manager = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+
+        assert!(manager.sweep_orphan_dirs().await >= 1);
+        assert!(live_session.join("index.m3u8").is_file());
+        assert!(!ordinary_orphan.exists());
+    }
+
     #[test]
     fn retired_rolling_marker_prewarm_ambiguity_survives_plan_method_drift() {
         let scope = "[\"user_id\",1]";
@@ -21621,6 +21738,7 @@ pub(crate) mod tests {
             .await
             .expect("assign route owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            expected_desired_revision: None,
             incarnation_id: generation.to_owned(),
             session_id: session_id.to_owned(),
             user_id: 7,
@@ -22553,6 +22671,81 @@ pub(crate) mod tests {
             read_scratch_sample(&generation, &bytes, &sampled_at),
             (0, 0)
         );
+    }
+
+    /// P2-10. The stored key reaches `VodSettings`, and an absent or unusable
+    /// value keeps the built-in default.
+    ///
+    /// This is the layer the first version of the change never tested: its
+    /// only test hand-built a `VodSettings` in Rust, so the entire
+    /// store → reader → pool wire could be deleted with the whole suite green.
+    /// A setting nothing reads is not a setting.
+    #[tokio::test]
+    async fn the_blocked_get_cap_setting_is_read_and_bounded() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("work");
+        let manager = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            dir.path().to_owned(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let req = SessionRequest {
+            control_sequence: None,
+            file_id: 1,
+            playback_id: "cap-probe".to_owned(),
+            request_id: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
+        };
+        let cap = |manager: &Arc<TranscodeManager>, req: &SessionRequest| {
+            let manager = Arc::clone(manager);
+            let req = req.clone();
+            async move {
+                manager
+                    .vod_settings(&req)
+                    .await
+                    .expect("settings read")
+                    .expect("VOD presentation is on")
+                    .blocked_get_cap
+            }
+        };
+
+        assert_eq!(
+            cap(&manager, &req).await,
+            64,
+            "an unconfigured node still bounds its parked work"
+        );
+
+        for (stored, expected, why) in [
+            ("512", 512, "the operator's number"),
+            ("", 64, "cleared means the default, not zero"),
+            ("0", 64, "zero would refuse every blocked GET"),
+            ("banana", 64, "unparseable is not a budget"),
+            ("999999", 4_096, "clamped to the sanity bound"),
+            ("1", 1, "the floor is usable"),
+        ] {
+            store
+                .put_setting(plurx_core::store::keys::VOD_BLOCKED_GET_CAP, stored)
+                .await
+                .expect("store the setting");
+            assert_eq!(cap(&manager, &req).await, expected, "{stored:?}: {why}");
+        }
     }
 
     #[tokio::test]
@@ -26108,6 +26301,7 @@ pub(crate) mod tests {
         starved: bool,
     ) -> crate::playback_control::ControlRequestV1 {
         crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation: uuid::Uuid::new_v4().to_string(),
             control_epoch: 1,
@@ -26258,6 +26452,7 @@ pub(crate) mod tests {
             ),
             crate::playback_control::ControlAction::Hold {
                 reason: crate::playback_control::HoldReason::Time,
+                revisit_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
             },
         );
     }
