@@ -399,6 +399,40 @@ client names `prepare_replacement` in `supported_actions`, so the server never
 tells anyone a successor is staged. That single missing string is the whole
 remaining gap, and closing it correctly is what these three briefs are for.
 
+> **Correction, 2026-09-07 — a staged successor has no media behind it.**
+> The paragraph above says the server half is finished, and it is finished
+> *as a transaction*: the row, the fences, the CAS, the deadline. It is not
+> finished as a *stream*. `stage_prepared_successor`'s own doc comment
+> (`crates/plurxd/src/http/hls.rs:6657-6663`) says so — "**Stage only.** This
+> is the second of §5.1's eight phases — propose · stage · **reserve and
+> prime** · prepare · commit · … — and it is: a durable row and the actor's
+> one successor slot, **nothing produced yet**." The third phase is not
+> implemented.
+>
+> The consequence for a client is concrete and was traced end to end. The
+> staged row is written with `publication_ready_at_ms =
+> MEDIA_SESSION_PUBLICATION_BLOCKED` (`plurx-core/src/store/sqlite/sessions.rs`),
+> so `classify_durable_route` answers `OwnerTransition`
+> (`media_sessions.rs`), and `relay_if_remote` refuses the request before any
+> playlist work: **a `GET` of the successor's `playlist_url` answers `503
+> media_owner_transition`, on every request, until the pointer moves.** Commit
+> does not publish it either — the fence is cleared later by
+> `reconcile_owned_publication_fences`.
+>
+> So a client built from §8's diagram will build a second pipeline that can
+> never reach `.readyToPlay`, wait out its readiness bound, settle `failed`
+> and fall back — correctly, but on every quality change, which is a
+> regression rather than an improvement. **Every client must therefore treat a
+> successor that dies before it was ever playable as evidence about this
+> playback and stop asking for the rest of it**, so the cost is paid once
+> rather than per change and disappears on its own the day the priming phase
+> lands. Apple does this in `PreparedReplacementCoordinator`; web and Android
+> owe the same rule.
+>
+> The standing instruction above applies to this document as much as to the
+> code it describes: the code wins, and this section was the bug.
+
+
 There is no `M6a` or `M6b` server milestone to wait for. There never was — the
 letters do not appear anywhere in the repository. The slices that exist are
 `M6-CALLER-HANDOFF.md` §3.1–§3.5, and all five are shipped.

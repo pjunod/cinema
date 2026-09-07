@@ -4,6 +4,63 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Apple viewers were paying for encoders nobody told them about
+
+**Open, on effort branch `effort/m6-apple-prepared-replacement` into
+`main`. Not deployed.**
+Apple is the only platform whose `dual_player_preparation` is `true`,
+measured on an iPhone 17 Pro Max and an Apple TV 4K at 20/20 on both cases.
+So the server has been staging real successors for Apple viewers all along —
+minting an incarnation, taking the actor's one preparation slot, writing a
+durable row — and then refusing to mention them, because no shipped client
+ever named `prepare_replacement` in `supported_actions`. `prepared_successor`
+resolved to `NotRequested`, the client was told `{"type":"none"}`, the
+`suppressed` counter moved, and 330 seconds later the deadline reaped a
+successor nobody had heard of.
+
+Apple now declares the action and drives the whole transaction: a second
+`AVPlayer` that is muted, never on a layer and never asked to play, primed to
+the viewer's film position through the successor's own `media_origin_ms`;
+`metadata_ready` and `buffer_ready` as it gets there; the item handed to the
+authoritative player so the layer, Picture in Picture, the time observer and
+every KVO survive the switch; and `committed` carrying the wall clock of the
+successor's own first qualifying frame, taken from the item's video output
+against the film position the switch happened at rather than from a timer.
+Every exit frees the second pipeline and settles the staging — a seek, a
+second quality change, an audio change, backgrounding, the player ending —
+because a staging left to the deadline costs that session its only
+preparation for the rest of its life.
+
+**The finding that changed the shape of the work.** The contract this was
+built from says the server half is finished. It is finished as a transaction
+and not as a stream: `stage_prepared_successor`'s own comment says
+"**Stage only** … nothing produced yet", the third of its eight phases —
+*reserve and prime* — is not implemented, and the staged row carries the
+blocked publication sentinel, so `classify_durable_route` answers
+`OwnerTransition` and **a GET of the successor's playlist is answered `503
+media_owner_transition` on every request until the pointer moves.** Commit
+does not publish it either. A client built from the sequence diagram would
+therefore build a second pipeline that can never become playable and pay for
+finding that out on *every* quality change. So a successor that dies before
+it was ever playable is taken as evidence about this playback rather than
+this attempt, and the asking stops for the rest of it: the viewer pays once,
+nothing configures it, and the day the priming phase lands this client uses
+it with no change at all. The same rule is now written into the contract for
+web and Android, and the contract's §1 is corrected — the code wins.
+
+Also here: the contract and its three per-platform briefs, which lived only
+on an effort branch 381 commits behind `main`, move into
+`docs/playback-control/`; the caller handoff's claim that Apple and Android
+send `observed_download_bps` as null is corrected, because both fill it now;
+and Settings → Developer's prepared-handoff card says, per requirement,
+whether it is currently met — advisory, gating nothing.
+
+**Not proven here:** a directed replacement on real hardware, on a live
+session (VOD cannot reach the preparation path at all, because
+`delivered_bps` is absent there), and the fallback interruption Apple has
+never measured. Both are operator steps; the prompt for them is in the pull
+request.
+
 ## Settings put the operator on the login page, and the cause was a tombstone
 
 **PR [#101](http://192.168.4.7:3000/noirr/plurx/pulls/101) — merged into
