@@ -251,6 +251,52 @@ def _filesystem_reader(root: Path) -> Callable[[str], str]:
     return lambda path: (root / path).read_text(encoding="utf-8")
 
 
+# Source suffixes whose comments are not compiled into a shipped binary. A
+# change confined to comment lines in one of these alters no bytes the store
+# receives, so it is not a release input — see _touches_shipped_bytes.
+COMMENTABLE_SUFFIXES = (".swift", ".kt", ".kts", ".java", ".m", ".mm", ".h")
+
+# A comment line, a block-comment delimiter, or a blank line. Deliberately
+# narrow: anything this does not recognise counts as shipped.
+_COMMENT_LINE = re.compile(r"(//|/\*|\*/|\*(?!/)|$)")
+
+
+def _touches_shipped_bytes(root: Path, path: str, *diff_arguments: str) -> bool:
+    """Answer whether this file's change reaches the shipped binary.
+
+    The counter contract is about *shipped* changes: a store build exists to
+    carry different bytes to a device. Correcting a documentation path inside
+    a `///` comment carries none, and demanding a build number for it is worse
+    than pedantic — the number has to be mirrored into the parity document and
+    the status page, which turns a comment fix into a claim that a build
+    nobody produced was released.
+
+    So a file is exempt only when *every* line the diff touched, added and
+    removed alike, is a comment or blank. Every other answer is "shipped",
+    including one this cannot compute: an unreadable diff, an unknown suffix,
+    a rename, a deletion. Failing open here would let a real change ship
+    without a counter, which is the defect the check exists to catch.
+    """
+    if not path.endswith(COMMENTABLE_SUFFIXES):
+        return True
+    try:
+        diff = _git(root, "diff", "-U0", *diff_arguments, "--", path)
+    except MobileVersionError:
+        return True
+    touched = False
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if not line.startswith(("+", "-")):
+            continue
+        touched = True
+        if not _COMMENT_LINE.match(line[1:].strip()):
+            return True
+    # No touched lines at all means the diff said nothing about this file;
+    # that is not evidence of a comment-only change.
+    return not touched
+
+
 def _changed_paths(root: Path, *diff_arguments: str) -> tuple[str, ...]:
     output = _git(
         root,
@@ -261,6 +307,15 @@ def _changed_paths(root: Path, *diff_arguments: str) -> tuple[str, ...]:
         *diff_arguments,
     )
     return tuple(path for path in output.split("\0") if path)
+
+
+def _release_input_paths(root: Path, *diff_arguments: str) -> tuple[str, ...]:
+    """The changed paths that could reach a store build, comments excluded."""
+    return tuple(
+        path
+        for path in _changed_paths(root, *diff_arguments)
+        if _touches_shipped_bytes(root, path, *diff_arguments)
+    )
 
 
 def check_repository(
@@ -292,13 +347,13 @@ def check_repository(
     baseline_label: str | None = None
     scope_baseline: MobileVersions | None = None
     if mode == "staged":
-        changed = _changed_paths(root, "--cached", "HEAD")
+        changed = _release_input_paths(root, "--cached", "HEAD")
         current = read_versions(_git_reader(root, ""))
         baseline = read_versions(_git_reader(root, "HEAD"))
     elif mode == "changed-from":
         if not base:
             raise MobileVersionError("changed-from validation requires a Git base")
-        changed = _changed_paths(root, f"{base}...HEAD")
+        changed = _release_input_paths(root, f"{base}...HEAD")
         current = read_versions(_git_reader(root, "HEAD"))
         baseline = scope_baseline = read_versions(_git_reader(root, base))
         if merge_target:
