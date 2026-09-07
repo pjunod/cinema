@@ -5078,13 +5078,27 @@ pub(crate) async fn preparation_ack_replay(
     request: &crate::playback_control::ControlRequestV1,
     deadline_unix_ms: i64,
 ) -> Result<Option<TerminalAckReplay>, ()> {
-    if route.state != "ended"
-        || route.terminal_reason.as_deref() != Some("superseded")
-        || !matches!(
-            request.acknowledgement.as_ref().map(|ack| ack.state),
-            Some(crate::playback_control::AcknowledgementState::Committed)
-        )
-    {
+    // Gated on the receipt, not on the route's state.
+    //
+    // The state check was the same fact by a different name — the commit
+    // retires the predecessor in its own transaction, so `ended`/`superseded`
+    // and "this commit already happened" were one condition. §4 has to break
+    // that pairing: a predecessor a client may still be displaying cannot be
+    // retired at commit, and the moment it is not, a client whose commit
+    // response was lost would be answered by the live control plane instead of
+    // by the exact durable answer — the one case §4 says must always replay.
+    //
+    // The receipt is a stricter fence than the state was. Its two writers are
+    // the commit transaction and `record_media_session_terminal_ack`, which
+    // ends the session in the same transaction, and every field of the
+    // exchange is compared below: incarnation, owner, epoch, client instance,
+    // sequence and request fingerprint. Only the byte-identical request that
+    // produced a receipt can replay it, so a live serving session cannot have
+    // a real exchange short-circuited.
+    if !matches!(
+        request.acknowledgement.as_ref().map(|ack| ack.state),
+        Some(crate::playback_control::AcknowledgementState::Committed)
+    ) {
         return Ok(None);
     }
     let Some(receipt) = state

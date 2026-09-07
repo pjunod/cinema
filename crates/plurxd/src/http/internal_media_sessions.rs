@@ -1138,8 +1138,17 @@ mod tests {
         assert_eq!(body["retry_after_ms"], 500);
     }
 
+    /// A lost commit response is answered from the durable receipt.
+    ///
+    /// It used to be answered because the predecessor's route said `ended`,
+    /// which is the same fact only while the commit retires it in its own
+    /// transaction. §4 has to stop it doing that, so the gate moved to the
+    /// receipt — a stricter fence, since it compares every field of the
+    /// exchange and only the identical request that produced it can replay.
+    /// Retained under its old name's intent: the answer is the durable one,
+    /// not whatever the live control plane would say now.
     #[tokio::test]
-    async fn the_relay_replays_a_committed_preparation_before_returning_ended() {
+    async fn the_relay_replays_a_committed_preparation_from_its_durable_receipt() {
         let (_app, state) = super::super::tests::test_app_with_state();
         let user = state
             .store
