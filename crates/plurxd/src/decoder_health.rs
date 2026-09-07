@@ -451,6 +451,11 @@ impl DiagnosticGrammar {
         &self.contract
     }
 
+    /// The absolute input stream index this grammar attributes failures to.
+    pub fn selected_stream(&self) -> u32 {
+        self.selected_stream
+    }
+
     /// Classify one line.
     ///
     /// Deliberately conservative in one direction only: anything this cannot
@@ -1490,8 +1495,28 @@ impl Drop for ObservedDiagnostics {
 pub(crate) async fn read_diagnostics<R>(
     stream: R,
     grammar: Option<DiagnosticGrammar>,
+    log: impl FnMut(&str),
+    progress: impl FnMut(&str) -> bool,
+) -> HealthAccumulator
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    read_diagnostics_reporting(stream, grammar, log, progress, |_, _| {}).await
+}
+
+/// The same read, reporting a latch the moment it happens.
+///
+/// §7.4's ordering is the reason this is not simply read off the returned
+/// accumulator: the fault has to reach its owner *before* the success facts
+/// that would otherwise be the last word about this attempt, and the
+/// accumulator is not returned until stderr reaches EOF — which, for a
+/// producer that stops decoding and keeps running, is the rest of the film.
+pub(crate) async fn read_diagnostics_reporting<R>(
+    stream: R,
+    grammar: Option<DiagnosticGrammar>,
     mut log: impl FnMut(&str),
     mut progress: impl FnMut(&str) -> bool,
+    mut on_fault: impl FnMut(DecodeFaultKind, u64),
 ) -> HealthAccumulator
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1530,6 +1555,7 @@ where
                 &mut accumulator,
                 &mut log,
                 &mut progress,
+                &mut on_fault,
             );
         }
     }
@@ -1540,6 +1566,7 @@ where
             &mut accumulator,
             &mut log,
             &mut progress,
+            &mut on_fault,
         );
     }
     accumulator
@@ -1551,6 +1578,7 @@ fn observe_line(
     accumulator: &mut HealthAccumulator,
     log: &mut impl FnMut(&str),
     progress: &mut impl FnMut(&str) -> bool,
+    on_fault: &mut impl FnMut(DecodeFaultKind, u64),
 ) {
     // A `-progress` block on this stream is telemetry, not a diagnostic. It is
     // sorted out before classification so a key=value line can never become a
@@ -1560,7 +1588,12 @@ fn observe_line(
     }
     if let Some(grammar) = grammar {
         let record = grammar.classify(line);
-        accumulator.observe(std::time::Instant::now(), &record);
+        // `observe` answers with the fault only on the line that latched it,
+        // which is what makes one barrier per attempt a property of the
+        // accumulator rather than of the caller remembering to ask once.
+        if let Some(fault) = accumulator.observe(std::time::Instant::now(), &record) {
+            on_fault(fault, accumulator.primary_error_records());
+        }
     }
     // Without a grammar the line is still read, still bounded and still
     // logged; it is simply not evidence. `mark_grammar_unavailable` said so

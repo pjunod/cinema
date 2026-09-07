@@ -4808,6 +4808,14 @@ pub struct RollingProducerOperationalSnapshot {
     pub last_probe_outcome: &'static str,
     pub producer_ended_with_proposal: bool,
     pub proposal: Option<RollingProducerProposalSnapshot>,
+    /// The latched decode fault's kind, if this attempt has one. A bounded
+    /// vocabulary, never a message: §9 keeps raw diagnostics out of the
+    /// operational snapshot.
+    pub decode_fault: Option<&'static str>,
+    /// Structural primary records observed on the selected video stream.
+    pub decode_error_records: Option<u64>,
+    /// What the settled observation concluded, once it has settled.
+    pub diagnostics_qualification: Option<&'static str>,
     pub completion: &'static str,
     pub completion_attempt: Option<u64>,
     pub completion_final_segment: Option<i64>,
@@ -5679,6 +5687,16 @@ struct RollingProducerIngressState {
     progress_watermark_out_time_ms: Option<i64>,
     progress: Option<ProgressCoverageBatch>,
     exit: Option<SequencedProducerBarrier>,
+    /// The attempt's decode fault, if one latched. Its own slot, outside the
+    /// progress batch: a batch collapses to one observation at drain, so
+    /// anything riding on an intermediate sample is dropped silently — and a
+    /// progress publication for an older attempt is discarded before it
+    /// reaches any slot at all.
+    health: Option<SequencedProducerBarrier>,
+    /// The attempt's settled receipt. Separate from `exit` because §7.4 keeps
+    /// diagnostic completion separate from process exit, and separate from
+    /// `health` because an attempt can have both.
+    diagnostics: Option<SequencedProducerBarrier>,
     flow: std::collections::VecDeque<SequencedProducerBarrier>,
     flow_reservations: usize,
     /// Applied flow barriers moved into queued command envelopes still occupy
@@ -5697,6 +5715,8 @@ impl Default for RollingProducerIngressState {
             progress_watermark_out_time_ms: None,
             progress: None,
             exit: None,
+            health: None,
+            diagnostics: None,
             flow: std::collections::VecDeque::new(),
             flow_reservations: 0,
             sealed_flow_barriers: 0,
@@ -5713,11 +5733,39 @@ struct SequencedProducerEvent {
     event: RollingProducerEvent,
 }
 
+/// One attempt's decode fault, as §7.4 specifies it.
+///
+/// Delivered the moment the reader latches, not at exit: the whole point is
+/// that it arrives *before* the success facts that would otherwise be the last
+/// word about this attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProducerDecodeFault {
+    producer_attempt: u64,
+    plan_digest: String,
+    fault: crate::decoder_health::DecodeFaultKind,
+    input_video_stream: u32,
+    primary_error_records: u64,
+    diagnostic_contract: Option<String>,
+}
+
+/// One attempt's settled observation.
+///
+/// §7.4 keeps diagnostic completion separate from process exit, because the
+/// two are separate facts: a process can exit long before its stderr reaches
+/// EOF, and "the process finished" is not "we saw everything it said".
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProducerDiagnosticsComplete {
+    producer_attempt: u64,
+    receipt: crate::decoder_health::ProducerHealthReceipt,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RollingProducerEvent {
     Progress(RollingProducerProgressObservation),
     Exit(RollingProducerExitObservation),
     FlowApplied(RollingProducerFlowObservation),
+    DecodeFault(ProducerDecodeFault),
+    DiagnosticsComplete(ProducerDiagnosticsComplete),
 }
 
 impl RollingProducerEvent {
@@ -5726,6 +5774,43 @@ impl RollingProducerEvent {
             Self::Progress(observation) => observation.producer_attempt,
             Self::Exit(observation) => observation.producer_attempt,
             Self::FlowApplied(observation) => observation.producer_attempt,
+            Self::DecodeFault(observation) => observation.producer_attempt,
+            Self::DiagnosticsComplete(observation) => observation.producer_attempt,
+        }
+    }
+}
+
+/// Which sticky slot an ingress publication belongs in.
+///
+/// Progress is the only one that coalesces; the rest are barriers, and each
+/// barrier kind has its own slot so that one cannot overwrite another. A
+/// health fault sharing the exit slot would be lost the moment the process
+/// exited, which is the ordering §7.4 exists to fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProducerIngressSlot {
+    Progress,
+    Exit,
+    Health,
+    Diagnostics,
+}
+
+impl ProducerIngressSlot {
+    fn is_progress(self) -> bool {
+        matches!(self, Self::Progress)
+    }
+
+    /// Which published ingress counter this publication belongs to.
+    ///
+    /// Health and diagnostics share one bucket and neither borrows the exit
+    /// label: folding them into `event="exit"` would make that series read
+    /// three times the number of exits, and a rejected fault would be
+    /// indistinguishable from a rejected stale exit — which is exactly the
+    /// signal an operator would go looking for.
+    fn metric_index(self) -> usize {
+        match self {
+            Self::Progress => 0,
+            Self::Exit => 1,
+            Self::Health | Self::Diagnostics => 2,
         }
     }
 }
@@ -5916,11 +6001,31 @@ impl RollingProducerIngress {
     }
 
     fn publish_progress(&self, observation: RollingProducerProgressObservation) {
-        self.publish(RollingProducerEvent::Progress(observation), false);
+        self.publish(
+            RollingProducerEvent::Progress(observation),
+            ProducerIngressSlot::Progress,
+        );
     }
 
     fn publish_exit(&self, observation: RollingProducerExitObservation) {
-        self.publish(RollingProducerEvent::Exit(observation), true);
+        self.publish(
+            RollingProducerEvent::Exit(observation),
+            ProducerIngressSlot::Exit,
+        );
+    }
+
+    fn publish_decode_fault(&self, observation: ProducerDecodeFault) {
+        self.publish(
+            RollingProducerEvent::DecodeFault(observation),
+            ProducerIngressSlot::Health,
+        );
+    }
+
+    fn publish_diagnostics_complete(&self, observation: ProducerDiagnosticsComplete) {
+        self.publish(
+            RollingProducerEvent::DiagnosticsComplete(observation),
+            ProducerIngressSlot::Diagnostics,
+        );
     }
 
     fn set_progress_budget(&self, progress_budget: Duration) {
@@ -6042,19 +6147,24 @@ impl RollingProducerIngress {
         self.notify.notify_one();
     }
 
-    fn publish(&self, event: RollingProducerEvent, is_exit: bool) {
-        self.publish_with_timestamp(event, is_exit, None);
+    fn publish(&self, event: RollingProducerEvent, slot: ProducerIngressSlot) {
+        self.publish_with_timestamp(event, slot, None);
     }
 
     #[cfg(test)]
-    fn publish_at(&self, event: RollingProducerEvent, is_exit: bool, published_at: Instant) {
-        self.publish_with_timestamp(event, is_exit, Some(published_at));
+    fn publish_at(
+        &self,
+        event: RollingProducerEvent,
+        slot: ProducerIngressSlot,
+        published_at: Instant,
+    ) {
+        self.publish_with_timestamp(event, slot, Some(published_at));
     }
 
     fn publish_with_timestamp(
         &self,
         mut event: RollingProducerEvent,
-        is_exit: bool,
+        slot: ProducerIngressSlot,
         published_at: Option<Instant>,
     ) {
         let mut state = self
@@ -6065,7 +6175,7 @@ impl RollingProducerIngress {
         // fence is held. A producer task cannot obtain a pre-deadline stamp,
         // lose the CPU, and insert the event after that deadline.
         let published_at = published_at.unwrap_or_else(rolling_now);
-        let metric_index = usize::from(is_exit);
+        let metric_index = slot.metric_index();
         ROLLING_PRODUCER_EVENT_INGRESS[metric_index].fetch_add(1, Ordering::Relaxed);
         if let RollingProducerEvent::Progress(observation) = &mut event {
             let attempt = observation.producer_attempt;
@@ -6092,8 +6202,18 @@ impl RollingProducerIngress {
             }
         }
         let incoming_attempt = event.producer_attempt();
-        if is_exit {
-            if let Some(pending) = state.exit.as_ref() {
+        // Every barrier slot is first-write-wins for one attempt and replaced
+        // only by a later attempt — an attempt has one terminal outcome, one
+        // latched fault, and one settled receipt. Written as one rule so a
+        // third barrier kind cannot quietly acquire a fourth policy.
+        if !slot.is_progress() {
+            let pending = match slot {
+                ProducerIngressSlot::Exit => state.exit.as_ref(),
+                ProducerIngressSlot::Health => state.health.as_ref(),
+                ProducerIngressSlot::Diagnostics => state.diagnostics.as_ref(),
+                ProducerIngressSlot::Progress => None,
+            };
+            if let Some(pending) = pending {
                 // An attempt has exactly one terminal outcome. Preserve the
                 // first observation even if a contradictory waiter or test
                 // source reports another; only a later attempt can replace
@@ -6139,16 +6259,25 @@ impl RollingProducerIngress {
         }
         state.next_sequence = state.next_sequence.saturating_add(1);
         let sequence = state.next_sequence;
-        if is_exit {
+        if !slot.is_progress() {
+            // The barrier absorbs the open progress batch, which is what makes
+            // it a barrier: everything published before it is applied before
+            // it, and nothing published after can reorder ahead of it.
             let preceding_progress = state.progress.take();
-            state.exit = Some(SequencedProducerBarrier {
+            let barrier = SequencedProducerBarrier {
                 preceding_progress,
                 event: SequencedProducerEvent {
                     sequence,
                     published_at,
                     event,
                 },
-            });
+            };
+            match slot {
+                ProducerIngressSlot::Exit => state.exit = Some(barrier),
+                ProducerIngressSlot::Health => state.health = Some(barrier),
+                ProducerIngressSlot::Diagnostics => state.diagnostics = Some(barrier),
+                ProducerIngressSlot::Progress => unreachable!("progress is not a barrier"),
+            }
         } else {
             let RollingProducerEvent::Progress(observation) = event else {
                 unreachable!("progress publication contains a progress event");
@@ -6167,9 +6296,15 @@ impl RollingProducerIngress {
     }
 
     fn take_blocks(state: &mut RollingProducerIngressState) -> Vec<RollingProducerIngressBlock> {
-        let mut pending = Vec::with_capacity(2 + state.flow.len());
+        let mut pending = Vec::with_capacity(4 + state.flow.len());
         if let Some(exit) = state.exit.take() {
             pending.push(RollingProducerIngressBlock::Barrier(exit));
+        }
+        if let Some(health) = state.health.take() {
+            pending.push(RollingProducerIngressBlock::Barrier(health));
+        }
+        if let Some(diagnostics) = state.diagnostics.take() {
+            pending.push(RollingProducerIngressBlock::Barrier(diagnostics));
         }
         pending.extend(
             state
@@ -7189,6 +7324,12 @@ struct RollingControlActor {
     last_decision: Option<Arc<ProducerDecision>>,
     decision_committed_at: Option<Instant>,
     executor_lost: bool,
+    /// This attempt's decode fault, latched. Kept on the actor rather than on
+    /// the prepublication control because a fault can arrive for a producer
+    /// that has already published, and §7.4's precedence rule is about the
+    /// attempt, not about the phase it was in.
+    producer_decode_fault: Option<ProducerDecodeFault>,
+    producer_diagnostics: Option<ProducerDiagnosticsComplete>,
     prepublication: Option<PrepublicationProducerControl>,
     response_publication_contract: Option<RollingResponsePublicationContract>,
     next_install_revision: u64,
@@ -7294,6 +7435,8 @@ impl RollingControlActor {
             last_decision: None,
             decision_committed_at: None,
             executor_lost: false,
+            producer_decode_fault: None,
+            producer_diagnostics: None,
             prepublication: prepublication_transcode.then(PrepublicationProducerControl::new),
             response_publication_contract: None,
             next_install_revision: 1,
@@ -7544,6 +7687,21 @@ impl RollingControlActor {
                 source: proposal.source,
                 severity: proposal.severity,
             }),
+            decode_fault: self.latched_decode_fault().map(|fault| fault.fault.name()),
+            // From the fault when there is one, and otherwise from the settled
+            // receipt: four records is below the fault threshold and still not
+            // zero, and reporting `null` there is indistinguishable from a
+            // stream that never failed to decode at all.
+            decode_error_records: self
+                .latched_decode_fault()
+                .map(|fault| fault.primary_error_records)
+                .or_else(|| {
+                    self.settled_diagnostics()
+                        .map(|settled| settled.receipt.video_decode_error_records)
+                }),
+            diagnostics_qualification: self
+                .settled_diagnostics()
+                .map(|settled| settled.receipt.qualification.name()),
             completion: completion.status(),
             completion_attempt,
             completion_final_segment,
@@ -7997,6 +8155,14 @@ impl RollingControlActor {
         })
     }
 
+    /// Forget the previous attempt's health. A successor gets fresh counters
+    /// (§7.3), and a predecessor's fault is not evidence about work it never
+    /// touched.
+    fn clear_producer_health(&mut self) {
+        self.producer_decode_fault = None;
+        self.producer_diagnostics = None;
+    }
+
     fn begin_producer_attempt_with_budget_at(
         &mut self,
         now: Instant,
@@ -8030,6 +8196,7 @@ impl RollingControlActor {
             desired: ProducerPhysicalFlowState::Running,
         };
         self.producer_flow_signal_outstanding = false;
+        self.clear_producer_health();
         self.pending_producer_action = None;
         self.producer_signal_authorized = true;
         self.arm_producer_deadline(
@@ -8181,6 +8348,18 @@ impl RollingControlActor {
         {
             return false;
         }
+        // §7.4: classifying exit must first observe every preceding health
+        // barrier. Read before `prepublication` is borrowed mutably, and
+        // through the one accessor, so this site cannot drift from the others
+        // — `failed_attempt` is the current attempt here, because the guard
+        // above returns early otherwise.
+        let latched_fault = self.latched_decode_fault().map(|fault| {
+            (
+                fault.fault,
+                fault.primary_error_records,
+                fault.plan_digest.clone(),
+            )
+        });
         let Some(control) = self.prepublication.as_mut() else {
             return false;
         };
@@ -8194,6 +8373,21 @@ impl RollingControlActor {
         };
         let decision_sequence = control.next_decision_sequence;
         control.next_decision_sequence = control.next_decision_sequence.saturating_add(1);
+
+        // Observe mode: the fault is part of the record whatever the process's
+        // own exit said, and it does not yet choose a different decision. The
+        // typed reasons that let it are M5b's.
+        if let Some((fault, records, plan_digest)) = latched_fault {
+            tracing::warn!(
+                producer_attempt = failed_attempt,
+                decision_sequence,
+                fault = fault.name(),
+                primary_error_records = records,
+                plan = %plan_digest,
+                observed_reason = ?reason,
+                "producer decision observes a latched decode fault"
+            );
+        }
 
         let producer_media_published = control.producer_media_published;
         let retry_recipe = match &control.retry_state {
@@ -8905,7 +9099,83 @@ impl RollingControlActor {
                     },
                 );
             }
+            RollingProducerEvent::DecodeFault(observation) => {
+                let accepted = self.observe_producer_decode_fault(observation);
+                ROLLING_PRODUCER_EVENT_OUTCOMES[4 + usize::from(!accepted)]
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            RollingProducerEvent::DiagnosticsComplete(observation) => {
+                let accepted = self.observe_producer_diagnostics_complete(observation);
+                ROLLING_PRODUCER_EVENT_OUTCOMES[4 + usize::from(!accepted)]
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
+    }
+
+    /// Latch this attempt's decode fault.
+    ///
+    /// Sticky and first-wins: §7.4 requires a fault to survive every later
+    /// success fact for the same attempt, and re-latching would let a second
+    /// observation relabel a decision that has already been made from the
+    /// first. A fault for an attempt that is no longer current is dropped —
+    /// its successor gets fresh counters, and a predecessor's fault following
+    /// it would condemn work it never touched.
+    fn observe_producer_decode_fault(&mut self, observation: ProducerDecodeFault) -> bool {
+        if self.retired || observation.producer_attempt != self.delivery.producer_attempt {
+            return false;
+        }
+        // Attempt-scoped, through the accessor. A bare `is_some()` here is
+        // the same words and a different rule: a stale fault from a
+        // predecessor would refuse the successor's *first* fault, so the
+        // recovery attempt — the one this whole feature exists to inform —
+        // would be the one running blind, silently.
+        if self.latched_decode_fault().is_some() {
+            return false;
+        }
+        tracing::warn!(
+            producer_attempt = observation.producer_attempt,
+            fault = observation.fault.name(),
+            input_video_stream = observation.input_video_stream,
+            primary_error_records = observation.primary_error_records,
+            contract = observation.diagnostic_contract.as_deref().unwrap_or("none"),
+            "producer decode fault observed"
+        );
+        self.producer_decode_fault = Some(observation);
+        true
+    }
+
+    /// Record this attempt's settled observation.
+    ///
+    /// Last-wins rather than first-wins, and deliberately so: unlike a fault,
+    /// which is a claim about something that happened, a receipt is the
+    /// summary of an attempt that has finished, and the only way a second one
+    /// arrives for the same attempt is a caller correcting the first.
+    fn observe_producer_diagnostics_complete(
+        &mut self,
+        observation: ProducerDiagnosticsComplete,
+    ) -> bool {
+        if self.retired || observation.producer_attempt != self.delivery.producer_attempt {
+            return false;
+        }
+        self.producer_diagnostics = Some(observation);
+        true
+    }
+
+    /// This attempt's latched fault, if it has one.
+    ///
+    /// The accessor every decision point goes through, so that "observe the
+    /// health barrier first" is one call rather than a field read repeated at
+    /// several sites with several chances to compare the wrong attempt.
+    fn latched_decode_fault(&self) -> Option<&ProducerDecodeFault> {
+        self.producer_decode_fault
+            .as_ref()
+            .filter(|fault| fault.producer_attempt == self.delivery.producer_attempt)
+    }
+
+    fn settled_diagnostics(&self) -> Option<&ProducerDiagnosticsComplete> {
+        self.producer_diagnostics
+            .as_ref()
+            .filter(|settled| settled.producer_attempt == self.delivery.producer_attempt)
     }
 
     fn handle_producer_block_at(&mut self, now: Instant, block: RollingProducerIngressBlock) {
@@ -8994,6 +9264,12 @@ impl RollingControlActor {
     fn handle_producer_event(&mut self, event: RollingProducerEvent) {
         let now = rolling_now();
         let (metric_index, accepted) = match event {
+            RollingProducerEvent::DecodeFault(observation) => {
+                (4, self.observe_producer_decode_fault(observation))
+            }
+            RollingProducerEvent::DiagnosticsComplete(observation) => {
+                (4, self.observe_producer_diagnostics_complete(observation))
+            }
             RollingProducerEvent::Progress(observation) => {
                 (0, self.observe_producer_progress_at(now, observation))
             }
@@ -10748,6 +11024,74 @@ impl RollingControlHandle {
             });
     }
 
+    /// Report that this attempt's diagnostic reader latched a decode fault.
+    ///
+    /// Published the moment it latches, not at exit. That is the whole
+    /// ordering §7.4 asks for: the fault reaches the actor before the success
+    /// facts that would otherwise be the last word about the attempt, and it
+    /// travels in its own sticky slot so the progress batch — which collapses
+    /// to a single observation at drain — cannot swallow it.
+    pub(crate) fn observe_producer_decode_fault(
+        &self,
+        producer_attempt: u64,
+        plan_digest: String,
+        fault: crate::decoder_health::DecodeFaultKind,
+        input_video_stream: u32,
+        primary_error_records: u64,
+        diagnostic_contract: Option<String>,
+    ) {
+        let _transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.retired.load(Ordering::Acquire)
+            || self.sender.is_closed()
+            || self.current_producer_attempt() != producer_attempt
+        {
+            ROLLING_PRODUCER_EVENT_INGRESS[1].fetch_add(1, Ordering::Relaxed);
+            ROLLING_PRODUCER_EVENT_COALESCED[1].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.producer_events
+            .publish_decode_fault(ProducerDecodeFault {
+                producer_attempt,
+                plan_digest,
+                fault,
+                input_video_stream,
+                primary_error_records,
+                diagnostic_contract,
+            });
+    }
+
+    /// Report this attempt's settled observation.
+    ///
+    /// Separate from exit because §7.4 keeps the two apart: a process can exit
+    /// long before its stderr reaches EOF, and "the process finished" is not
+    /// "we saw everything it said".
+    pub(crate) fn observe_producer_diagnostics_complete(
+        &self,
+        producer_attempt: u64,
+        receipt: crate::decoder_health::ProducerHealthReceipt,
+    ) {
+        let _transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.retired.load(Ordering::Acquire)
+            || self.sender.is_closed()
+            || self.current_producer_attempt() != producer_attempt
+        {
+            ROLLING_PRODUCER_EVENT_INGRESS[1].fetch_add(1, Ordering::Relaxed);
+            ROLLING_PRODUCER_EVENT_COALESCED[1].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.producer_events
+            .publish_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt,
+                receipt,
+            });
+    }
+
     /// Publish one exact-attempt terminal process fact without making a
     /// recovery decision. The actor rejects stale attempts and preserves the
     /// first terminal observation for the current one.
@@ -11874,10 +12218,12 @@ static ROLLING_LEASE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RETIREMENTS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_HOLDS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_PRODUCER_RESUMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static ROLLING_PRODUCER_EVENT_INGRESS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-/// Progress accepted/rejected, then exit accepted/rejected.
-static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static ROLLING_PRODUCER_EVENT_INGRESS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Progress accepted/rejected, exit accepted/rejected, then health
+/// accepted/rejected — where health covers both the decode fault and the
+/// settled receipt.
+static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -12392,7 +12738,7 @@ pub(crate) fn prometheus() -> String {
          # HELP plurx_playback_rolling_producer_event_coalesced_total Rolling producer observations folded or deduplicated into bounded same-attempt ingress evidence, or superseded by a newer attempt before actor drain.\n\
          # TYPE plurx_playback_rolling_producer_event_coalesced_total counter\n",
     );
-    for (index, event) in ["progress", "exit"].iter().enumerate() {
+    for (index, event) in ["progress", "exit", "health"].iter().enumerate() {
         output.push_str(&format!(
             "plurx_playback_rolling_producer_event_ingress_total{{event=\"{event}\"}} {}\n\
              plurx_playback_rolling_producer_event_coalesced_total{{event=\"{event}\"}} {}\n",
@@ -12404,7 +12750,7 @@ pub(crate) fn prometheus() -> String {
         "# HELP plurx_playback_rolling_producer_event_outcomes_total Rolling producer observations accepted or rejected by the exact-attempt actor fence.\n\
          # TYPE plurx_playback_rolling_producer_event_outcomes_total counter\n",
     );
-    for (event_index, event) in ["progress", "exit"].iter().enumerate() {
+    for (event_index, event) in ["progress", "exit", "health"].iter().enumerate() {
         for (outcome_index, outcome) in ["accepted", "rejected"].iter().enumerate() {
             output.push_str(&format!(
                 "plurx_playback_rolling_producer_event_outcomes_total{{event=\"{event}\",outcome=\"{outcome}\"}} {}\n",
@@ -16449,7 +16795,7 @@ mod tests {
                     900,
                     started + Duration::from_secs(seconds),
                 )),
-                false,
+                ProducerIngressSlot::Progress,
                 started + Duration::from_secs(seconds),
             );
         }
@@ -16488,7 +16834,7 @@ mod tests {
                     900,
                     started + Duration::from_secs(seconds),
                 )),
-                false,
+                ProducerIngressSlot::Progress,
                 started + Duration::from_secs(seconds),
             );
         }
@@ -16598,7 +16944,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(60),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(5),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(6), ingress.drain_blocks());
@@ -16620,7 +16966,7 @@ mod tests {
                 1_000,
                 started + Duration::from_secs(7),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(16),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(16), ingress.drain_blocks());
@@ -16645,7 +16991,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_000, 900, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + PRODUCER_STARTUP_BUDGET,
         );
 
@@ -16680,7 +17026,7 @@ mod tests {
                     900,
                     started + Duration::from_secs(seconds),
                 )),
-                false,
+                ProducerIngressSlot::Progress,
                 started + Duration::from_secs(seconds),
             );
         }
@@ -16710,7 +17056,7 @@ mod tests {
                     900,
                     started + Duration::from_secs(seconds),
                 )),
-                false,
+                ProducerIngressSlot::Progress,
                 started + Duration::from_secs(seconds),
             );
         }
@@ -16737,7 +17083,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_000, 900, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(1),
         );
         ingress.publish_at(
@@ -16748,7 +17094,7 @@ mod tests {
                 None,
                 started + Duration::from_secs(2),
             )),
-            true,
+            ProducerIngressSlot::Exit,
             started + Duration::from_secs(2),
         );
         ingress.publish_at(
@@ -16759,7 +17105,7 @@ mod tests {
                 1_000,
                 started + Duration::from_secs(3),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(3),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(3), ingress.drain_blocks());
@@ -16787,7 +17133,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Exit(producer_exit(1, false, Some(9), None, deadline)),
-            true,
+            ProducerIngressSlot::Exit,
             deadline,
         );
         actor.handle_producer_blocks_at(deadline + Duration::from_secs(1), ingress.drain_blocks());
@@ -16813,7 +17159,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(5),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(6), ingress.drain_blocks());
@@ -16821,7 +17167,7 @@ mod tests {
 
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_100, 1_000, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(8),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(9), ingress.drain_blocks());
@@ -16843,7 +17189,11 @@ mod tests {
             Ok(1)
         );
         let ingress = RollingProducerIngress::new();
-        ingress.publish_at(RollingProducerEvent::Exit(exit.clone()), true, exit_at);
+        ingress.publish_at(
+            RollingProducerEvent::Exit(exit.clone()),
+            ProducerIngressSlot::Exit,
+            exit_at,
+        );
         before_classification.handle_producer_blocks_at(
             classification_at - Duration::from_millis(1),
             ingress.drain_blocks(),
@@ -16880,7 +17230,11 @@ mod tests {
             Ok(1)
         );
         let ingress = RollingProducerIngress::new();
-        ingress.publish_at(RollingProducerEvent::Exit(exit), true, exit_at);
+        ingress.publish_at(
+            RollingProducerEvent::Exit(exit),
+            ProducerIngressSlot::Exit,
+            exit_at,
+        );
         after_classification.handle_producer_blocks_at(
             classification_at + Duration::from_secs(1),
             ingress.drain_blocks(),
@@ -16904,12 +17258,12 @@ mod tests {
 
         ingress.publish_at(
             RollingProducerEvent::Exit(first.clone()),
-            true,
+            ProducerIngressSlot::Exit,
             started + Duration::from_secs(1),
         );
         ingress.publish_at(
             RollingProducerEvent::Exit(first.clone()),
-            true,
+            ProducerIngressSlot::Exit,
             started + Duration::from_secs(2),
         );
 
@@ -16942,7 +17296,7 @@ mod tests {
                 None,
                 started + Duration::from_secs(31),
             )),
-            true,
+            ProducerIngressSlot::Exit,
             started + Duration::from_secs(31),
         );
         ingress.publish_at(
@@ -16953,7 +17307,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(35),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(35),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(43), ingress.drain_blocks());
@@ -16979,7 +17333,7 @@ mod tests {
         let ingress = Arc::clone(&actor.producer_events);
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_000, 900, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(25),
         );
 
@@ -16996,7 +17350,7 @@ mod tests {
         cutoff_started.recv().expect("cutoff started");
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 200, 1_100, 1_000, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(34),
         );
         drop(transition_guard);
@@ -17360,7 +17714,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 1_000, 900, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(50),
         );
         actor.handle_producer_blocks_at(started + Duration::from_secs(51), ingress.drain_blocks());
@@ -17384,7 +17738,7 @@ mod tests {
         let ingress = Arc::clone(&actor.producer_events);
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(20),
         );
         ingress.publish_flow_at(
@@ -17396,7 +17750,7 @@ mod tests {
         );
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 200, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(30),
         );
         ingress.publish_flow_at(
@@ -17408,7 +17762,7 @@ mod tests {
         );
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 300, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(50),
         );
 
@@ -17707,7 +18061,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started,
         );
         ingress.publish_at(
@@ -17718,7 +18072,7 @@ mod tests {
                 850,
                 started + Duration::from_secs(1),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(1),
         );
         let (reply, _response) = tokio::sync::oneshot::channel();
@@ -17746,7 +18100,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(2),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(2),
         );
         let successor_blocks = ingress.drain_blocks();
@@ -17772,7 +18126,7 @@ mod tests {
         let ingress = Arc::clone(&actor.producer_events);
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(1),
         );
         let (reply, response) = tokio::sync::oneshot::channel();
@@ -17782,7 +18136,7 @@ mod tests {
         sender.try_send(envelope).expect("command queued");
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 200, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(2),
         );
 
@@ -18039,7 +18393,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started,
         );
         let initial_blocks = ingress.drain_blocks();
@@ -18062,7 +18416,7 @@ mod tests {
                 850,
                 started + Duration::from_secs(5),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(5),
         );
         ingress.publish_at(
@@ -18073,7 +18427,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(14),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(14),
         );
         let repeated_blocks = ingress.drain_blocks();
@@ -18107,7 +18461,7 @@ mod tests {
         let ingress = RollingProducerIngress::new();
         ingress.publish_at(
             RollingProducerEvent::Progress(producer_progress(1, 50_000, 900, 800, started)),
-            false,
+            ProducerIngressSlot::Progress,
             started,
         );
         let predecessor_blocks = ingress.drain_blocks();
@@ -18131,7 +18485,7 @@ mod tests {
                 900,
                 started + Duration::from_secs(1),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(1),
         );
         ingress.publish_at(
@@ -18142,7 +18496,7 @@ mod tests {
                 1_900,
                 started + Duration::from_secs(2),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(2),
         );
         ingress.publish_at(
@@ -18153,7 +18507,7 @@ mod tests {
                 1_000,
                 started + Duration::from_secs(3),
             )),
-            false,
+            ProducerIngressSlot::Progress,
             started + Duration::from_secs(3),
         );
         let successor_blocks = ingress.drain_blocks();
@@ -23493,7 +23847,7 @@ mod tests {
                 1_000,
                 progressed_at,
             )),
-            false,
+            ProducerIngressSlot::Progress,
             progressed_at,
         );
         let preceding_producer = actor.producer_events.drain_blocks();
@@ -23573,7 +23927,7 @@ mod tests {
                     signal: None,
                     observed_at: exit_at,
                 }),
-                true,
+                ProducerIngressSlot::Exit,
                 exit_at,
             );
             actor.producer_events.publish_at(
@@ -23584,7 +23938,7 @@ mod tests {
                     signal: None,
                     observed_at: exit_at + Duration::from_nanos(1),
                 }),
-                true,
+                ProducerIngressSlot::Exit,
                 exit_at + Duration::from_nanos(1),
             );
             let preceding_producer = actor.producer_events.drain_blocks();
@@ -24295,5 +24649,413 @@ mod tests {
         })
         .await
         .expect("actor must exit promptly after its final external sender is dropped");
+    }
+
+    // -----------------------------------------------------------------------
+    // M3b2 — the health barrier
+    // -----------------------------------------------------------------------
+
+    fn decode_fault(producer_attempt: u64, records: u64) -> ProducerDecodeFault {
+        ProducerDecodeFault {
+            producer_attempt,
+            plan_digest: "plan-digest".to_owned(),
+            fault: crate::decoder_health::DecodeFaultKind::VideoDecodeFailure,
+            input_video_stream: 0,
+            primary_error_records: records,
+            diagnostic_contract: Some("contract".to_owned()),
+        }
+    }
+
+    fn health_receipt(
+        qualification: crate::decoder_health::Qualification,
+    ) -> crate::decoder_health::ProducerHealthReceipt {
+        crate::decoder_health::ProducerHealthReceipt {
+            receipt_version: crate::decoder_health::PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest: "plan-digest".to_owned(),
+            diagnostic_contract: Some("contract".to_owned()),
+            // Deliberately different from the fault's record count, so a
+            // snapshot field sourced from the wrong one is visible.
+            observation_complete: true,
+            video_decode_error_records: 4,
+            contract_qualified_error_records: 3,
+            terminal_fault: None,
+            exit_disposition: crate::decoder_health::ExitDisposition::CleanEnd,
+            qualification,
+        }
+    }
+
+    /// The property this milestone exists for: a fault observed mid-attempt is
+    /// still the answer after the burst of healthy progress and the successful
+    /// exit that follow it.
+    ///
+    /// Progress compaction is what makes this non-trivial. A batch collapses
+    /// to exactly one observation at drain, so anything riding on an
+    /// intermediate sample is dropped silently — which is why the fault has
+    /// its own sticky slot rather than a field on a progress observation.
+    #[test]
+    fn a_decode_fault_survives_the_healthy_progress_and_clean_exit_that_follow_it() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        let ingress = RollingProducerIngress::new();
+
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                attempt,
+                1_000,
+                1_000,
+                1_000,
+                started + Duration::from_millis(100),
+            )),
+            ProducerIngressSlot::Progress,
+            started + Duration::from_millis(100),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::DecodeFault(decode_fault(attempt, 5)),
+            ProducerIngressSlot::Health,
+            started + Duration::from_millis(200),
+        );
+        // Everything a producer does after it stops decoding: more output,
+        // faster, and then a clean exit. None of it is evidence that the
+        // picture was ever decoded.
+        for step in 1..=20_u64 {
+            ingress.publish_at(
+                RollingProducerEvent::Progress(producer_progress(
+                    attempt,
+                    1_000 + step as i64 * 1_000,
+                    2_000,
+                    2_000,
+                    started + Duration::from_millis(200 + step * 10),
+                )),
+                ProducerIngressSlot::Progress,
+                started + Duration::from_millis(200 + step * 10),
+            );
+        }
+        ingress.publish_at(
+            RollingProducerEvent::Exit(producer_exit(
+                attempt,
+                true,
+                Some(0),
+                None,
+                started + Duration::from_secs(1),
+            )),
+            ProducerIngressSlot::Exit,
+            started + Duration::from_secs(1),
+        );
+
+        // Twenty-two progress publications, one open batch: the coalescing is
+        // real, and it is what a fault riding on a progress observation would
+        // have been collapsed into.
+        let blocks = ingress.drain_blocks();
+        let progress_blocks = blocks
+            .iter()
+            .filter(|block| matches!(block, RollingProducerIngressBlock::Progress(_)))
+            .count();
+        assert!(
+            progress_blocks <= 1,
+            "the progress publications coalesce: {blocks:?}"
+        );
+        let order: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                RollingProducerIngressBlock::Barrier(barrier) => match barrier.event.event {
+                    RollingProducerEvent::DecodeFault(_) => Some("fault"),
+                    RollingProducerEvent::Exit(_) => Some("exit"),
+                    _ => None,
+                },
+                RollingProducerIngressBlock::Progress(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec!["fault", "exit"],
+            "the fault is applied before the exit that would otherwise be the \
+             last word about this attempt"
+        );
+
+        actor.handle_producer_blocks_at(started + Duration::from_secs(2), blocks);
+        let latched = actor
+            .latched_decode_fault()
+            .expect("a fault observed mid-attempt is still the answer at the end of it");
+        assert_eq!(latched.producer_attempt, attempt);
+        assert_eq!(latched.primary_error_records, 5);
+        assert_eq!(
+            latched.fault,
+            crate::decoder_health::DecodeFaultKind::VideoDecodeFailure
+        );
+        // And the exit really did reach the actor after it, so this is not a
+        // fault that survived by never meeting one.
+        assert!(actor.producer_exit_at.is_some(), "the exit was applied too");
+    }
+
+    /// A barrier absorbs the progress batch open when it arrives, which is
+    /// what makes it a barrier: everything published before it is applied
+    /// before it, and it cannot be reordered behind later progress.
+    #[test]
+    fn a_health_barrier_takes_the_open_progress_batch_with_it() {
+        let started = Instant::now();
+        let ingress = RollingProducerIngress::new();
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 1_000, 1_000, 1_000, started)),
+            ProducerIngressSlot::Progress,
+            started,
+        );
+        ingress.publish_at(
+            RollingProducerEvent::DecodeFault(decode_fault(1, 5)),
+            ProducerIngressSlot::Health,
+            started + Duration::from_millis(10),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                1,
+                2_000,
+                1_000,
+                1_000,
+                started + Duration::from_millis(20),
+            )),
+            ProducerIngressSlot::Progress,
+            started + Duration::from_millis(20),
+        );
+
+        let blocks = ingress.drain_blocks();
+        assert_eq!(blocks.len(), 2, "the barrier and the progress after it");
+        let RollingProducerIngressBlock::Barrier(barrier) = &blocks[0] else {
+            panic!("the barrier is applied first: {blocks:?}");
+        };
+        assert!(
+            matches!(
+                barrier.event.event,
+                RollingProducerEvent::DecodeFault(ref fault) if fault.primary_error_records == 5
+            ),
+            "{blocks:?}"
+        );
+        assert!(
+            barrier.preceding_progress.is_some(),
+            "the batch open when the fault landed travels with it, not after it"
+        );
+        assert!(matches!(
+            blocks[1],
+            RollingProducerIngressBlock::Progress(_)
+        ));
+
+        // Carried is not applied. Drive the blocks through an actor and assert
+        // the absorbed batch reached the delivery snapshot: gutting the
+        // `preceding_progress` arm of `handle_producer_block_at` would leave
+        // the ingress assertions above green and silently drop that progress.
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        assert_eq!(attempt, 1);
+        assert_eq!(actor.delivery.producer_out_time_ms, None);
+        actor.handle_producer_blocks_at(started + Duration::from_millis(30), blocks);
+        assert_eq!(
+            actor.delivery.producer_out_time_ms,
+            Some(2_000),
+            "the batch the barrier absorbed is applied, and so is the one after it"
+        );
+    }
+
+    /// A fault, an exit and a receipt are three facts about one attempt, and
+    /// each has its own slot. Sharing one would lose whichever arrived first.
+    #[test]
+    fn a_health_barrier_and_an_exit_barrier_do_not_displace_each_other() {
+        let started = Instant::now();
+        let ingress = RollingProducerIngress::new();
+        ingress.publish_at(
+            RollingProducerEvent::DecodeFault(decode_fault(1, 5)),
+            ProducerIngressSlot::Health,
+            started,
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Exit(producer_exit(
+                1,
+                true,
+                Some(0),
+                None,
+                started + Duration::from_millis(10),
+            )),
+            ProducerIngressSlot::Exit,
+            started + Duration::from_millis(10),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::DiagnosticsComplete(ProducerDiagnosticsComplete {
+                producer_attempt: 1,
+                receipt: health_receipt(crate::decoder_health::Qualification::Rejected),
+            }),
+            ProducerIngressSlot::Diagnostics,
+            started + Duration::from_millis(20),
+        );
+
+        let blocks = ingress.drain_blocks();
+        assert_eq!(blocks.len(), 3, "three facts, three slots: {blocks:?}");
+        let kinds: Vec<_> = blocks
+            .iter()
+            .map(|block| match block {
+                RollingProducerIngressBlock::Barrier(barrier) => match barrier.event.event {
+                    RollingProducerEvent::DecodeFault(_) => "fault",
+                    RollingProducerEvent::Exit(_) => "exit",
+                    RollingProducerEvent::DiagnosticsComplete(_) => "diagnostics",
+                    _ => "other",
+                },
+                RollingProducerIngressBlock::Progress(_) => "progress",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["fault", "exit", "diagnostics"],
+            "and they are applied in the order they were published"
+        );
+    }
+
+    /// One barrier per attempt. A second observation cannot relabel a decision
+    /// already made from the first, and a predecessor's fault cannot follow
+    /// the attempt that replaced it.
+    #[test]
+    fn a_fault_latches_once_per_attempt_and_never_crosses_into_the_next() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let first = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        assert!(actor.observe_producer_decode_fault(decode_fault(first, 5)));
+        assert!(
+            !actor.observe_producer_decode_fault(decode_fault(first, 9)),
+            "a second fault for one attempt is not a second barrier"
+        );
+        assert_eq!(
+            actor
+                .latched_decode_fault()
+                .expect("latched")
+                .primary_error_records,
+            5,
+            "and the first observation is the one that stands"
+        );
+
+        let second = actor
+            .begin_producer_attempt_at(started + Duration::from_secs(1))
+            .expect("prepublication replacement");
+        assert_ne!(first, second);
+        assert!(
+            actor.latched_decode_fault().is_none(),
+            "a successor gets fresh counters; the predecessor's fault is not \
+             evidence about work it never touched"
+        );
+        assert!(
+            !actor.observe_producer_decode_fault(decode_fault(first, 5)),
+            "and a late fault for the predecessor cannot condemn the successor"
+        );
+        assert!(actor.latched_decode_fault().is_none());
+
+        // The direction that matters most, and the one a bare `is_some()`
+        // re-latch guard gets wrong: the successor's *own* first fault. A
+        // stale predecessor fault refusing it would leave the recovery attempt
+        // — the one this whole feature exists to inform — running blind.
+        assert!(
+            actor.observe_producer_decode_fault(decode_fault(second, 9)),
+            "the successor's first fault is its first fault"
+        );
+        assert_eq!(
+            actor
+                .latched_decode_fault()
+                .expect("the successor's own fault")
+                .primary_error_records,
+            9
+        );
+    }
+
+    /// The settled receipt is a separate fact from the fault and from the
+    /// exit, and it reaches the operational snapshot so an operator can see
+    /// that a producer which exited cleanly was failing to decode.
+    #[test]
+    fn a_settled_receipt_reaches_the_operational_snapshot() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        let snapshot = actor.producer_operational_snapshot_at(started);
+        assert_eq!(snapshot.decode_fault, None);
+        assert_eq!(snapshot.diagnostics_qualification, None);
+
+        assert!(actor.observe_producer_decode_fault(decode_fault(attempt, 5)));
+        assert!(
+            actor.observe_producer_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt: attempt,
+                receipt: health_receipt(crate::decoder_health::Qualification::Rejected),
+            })
+        );
+        let snapshot = actor.producer_operational_snapshot_at(started);
+        assert_eq!(snapshot.decode_fault, Some("video_decode_failure"));
+        assert_eq!(
+            snapshot.decode_error_records,
+            Some(5),
+            "the fault's own count, not the receipt's"
+        );
+        assert_eq!(snapshot.diagnostics_qualification, Some("rejected"));
+
+        // A later receipt for the same attempt corrects the earlier one: a
+        // receipt is a summary of a finished attempt, and the only way a
+        // second arrives is a caller correcting the first.
+        assert!(
+            actor.observe_producer_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt: attempt,
+                receipt: health_receipt(crate::decoder_health::Qualification::Unqualified),
+            })
+        );
+        assert_eq!(
+            actor
+                .producer_operational_snapshot_at(started)
+                .diagnostics_qualification,
+            Some("unqualified")
+        );
+
+        // A receipt for an attempt that is no longer current is not this
+        // attempt's evidence.
+        let _ = actor
+            .begin_producer_attempt_at(started + Duration::from_secs(1))
+            .expect("prepublication replacement");
+        let snapshot = actor.producer_operational_snapshot_at(started + Duration::from_secs(1));
+        assert_eq!(snapshot.decode_fault, None);
+        assert_eq!(snapshot.diagnostics_qualification, None);
+    }
+
+    /// A retired session accepts neither. There is nobody left to act on them
+    /// and nothing left for them to be evidence about.
+    #[test]
+    fn a_retired_session_accepts_no_health_observations() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        // Both guards have two clauses, and both clauses are load-bearing.
+        assert!(
+            !actor.observe_producer_decode_fault(decode_fault(attempt + 1, 5)),
+            "an attempt this session is not running is not this session's evidence"
+        );
+        assert!(
+            !actor.observe_producer_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt: attempt + 1,
+                receipt: health_receipt(crate::decoder_health::Qualification::Qualified),
+            })
+        );
+
+        actor.retired = true;
+        assert!(!actor.observe_producer_decode_fault(decode_fault(attempt, 5)));
+        assert!(
+            !actor.observe_producer_diagnostics_complete(ProducerDiagnosticsComplete {
+                producer_attempt: attempt,
+                receipt: health_receipt(crate::decoder_health::Qualification::Qualified),
+            })
+        );
+        assert!(actor.latched_decode_fault().is_none());
     }
 }

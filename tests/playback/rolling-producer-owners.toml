@@ -132,7 +132,12 @@ replacement = "response EOF enters the actor with a move-only RollingMediaCommit
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 79
+# 79 -> 80 with M3b2's end-to-end reporting test: one `tokio::spawn` runs a
+# real diagnostic reader against a duplex so the fault can travel through the
+# real sink, handle and actor. It is joined by the test before any assertion —
+# without it, replacing `DecodeFaultSink::report` with an empty body left the
+# whole workspace green and the feature dead in production.
+expected_occurrences = 80
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -1245,7 +1250,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # now with an owner that joins it. The other eight are in the `decoder_health`
 # suite, each awaited or aborted by the test that made it, several of them
 # proving precisely that a reader is not left running.
-expected_occurrences = 437
+# 437 -> 439 with M3b2's two test spawns: the reader above, and the
+# `RollingControlHandle::spawn` that gives that test a real actor to report
+# into. Both are owned by the test that made them; neither is shipped.
+expected_occurrences = 439
 
 [[module_structures]]
 id = "method-spawn"

@@ -1,8 +1,8 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3b candidate; M0–M5a merged into the effort · **Updated:**
+**Status:** M3b2 candidate; M0–M3b1 merged into the effort · **Updated:**
 2026-09-07 · **Integration branch:** `effort/decoder-selection-recovery` ·
-**M3b task base:** M5a candidate `e463220448a36113cd29fae965b18e163733de91`
+**M3b2 task base:** M3b1 candidate `de05be0494d846bc3b77e462505f1d3ecdb21b46`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -19,14 +19,14 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3b — owned observation |
-| Task branch | `codex/decoder-selection-m3b`, based on effort head `e4632204` |
+| Milestone | M3b2 — the health barrier |
+| Task branch | `codex/decoder-selection-m3b2`, based on effort head `de05be04` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | This head on pinned 1.97.1: `decoder_health` 38/38, daemon `transcode::tests::` 223/223, `live_tv::tests::` 40/40, core `decoder_selection` 44/44 and core `transcode::` 138/138, `make effort-rust-check`, `make lint`, `make validation-lint` and `make history-check` clean, `git diff --check` clean |
-| Exact receipt | M5a's is `e4632204`, merged. M3b's is the head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
+| Focused validation | This head on pinned 1.97.1: daemon `playback_control::tests::` 225/225 including six new health-barrier contracts, `decoder_health` 38/38, `transcode::tests::` 223/223, `live_tv::tests::` 40/40, core `decoder_selection` 44/44, `make effort-rust-check`, `make lint` and `make validation-lint` clean, the rolling-producer ownership ledger unchanged, `git diff --check` clean |
+| Exact receipt | M3b1's is `de05be04`, merged. M3b2's is the head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
 | Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
 | Blocker | The Forgejo `Effort development gate` on this head. Per `AGENTS.md` a task PR into an effort branch defers the full suite to the `Main promotion gate`; the effort's one `make validate-full` is owed at promotion, not here |
 
@@ -37,7 +37,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a merged; M3b candidate; M3c not started | M3a's grammar merged as [Forgejo #79](http://192.168.4.7:3000/noirr/plurx/pulls/79). M3b owns the reading: both FFmpeg readers are joined rather than detached, every attempt settles a `ProducerHealthReceipt`, and no receipt gates anything yet |
+| M3 · owned observation and health receipts | M3a and M3b1 merged; M3b2 candidate; M3c not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)) and M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) are in. M3b2 carries a latched fault to the actor as a sticky barrier progress compaction cannot lose, and settles every rolling attempt's receipt at its exit classification. No receipt gates anything yet |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -639,6 +639,135 @@ defaults to having no grammar; a copy attempt's receipt is named after its
 session rather than by an empty digest; and the orphaned doc comment left
 sitting above `ffmpeg_version` is back where it belongs.
 
+
+## M3b2 working tree — the health barrier
+
+M3b1 made the reading owned. It left the fault with nowhere to go: a reader
+latched one, the receipt recorded it, and the actor — the thing that decides
+what an attempt is allowed to do — never heard about it.
+
+Two new producer events carry it. `DecodeFault` is published the moment the
+reader latches, not when the stream ends, and that timing is the whole point: a
+producer that stops decoding and keeps running holds its stderr open for the
+rest of the film, so a fault delivered at EOF arrives after every success fact
+it was supposed to precede. `DiagnosticsComplete` carries the settled receipt,
+and §7.4 keeps it separate from process exit because a process can exit long
+before its stderr reaches EOF — "the process finished" is not "we saw
+everything it said".
+
+### Why the fault needs its own slot
+
+The ingress has a progress slot that *coalesces*. A batch of progress
+publications collapses to exactly one observation at drain, chosen by a
+precedence chain over the samples; anything riding on an intermediate sample is
+dropped silently. A publication for an attempt older than the watermark is
+discarded before it reaches any slot at all. §7.4's phrase for this is "cannot
+be overwritten by progress compaction", and a field on a progress observation
+would be overwritten by exactly that.
+
+So the fault gets a sticky `Option<SequencedProducerBarrier>` slot beside the
+existing `exit` one, and the receipt gets a third. Each is first-write-wins for
+one attempt and replaced only by a later attempt, written as one rule rather
+than three — an attempt has one terminal outcome, one latched fault and one
+settled receipt. Sharing a slot would lose whichever arrived first, and the
+case that matters is precisely a fault followed by a clean exit.
+
+A barrier absorbs the progress batch that was open when it arrived. That is
+what makes it a barrier: everything published before it is applied before it,
+and nothing published after can reorder ahead of it. The retained test replays
+the shape this milestone exists for — a fault, then twenty progress
+publications at twice the speed, then an exit with status zero — and asserts
+three things about it: that the twenty publications really do coalesce into one
+block, that the fault barrier is applied *before* the exit that would otherwise
+be the last word, and that the fault is still the answer afterwards. A companion
+test drives an absorbed batch through the actor, because a batch that travels
+with a barrier and is never applied would satisfy every ingress-shaped
+assertion.
+
+### Attempt scope, and what the actor does with it
+
+A fault belongs to one attempt. A successor gets fresh counters, and a
+predecessor's fault arriving late cannot condemn work it never touched, so the
+actor drops a fault whose attempt is not current and a `latched_decode_fault()`
+accessor is the single place that comparison is made. Re-latching is refused:
+a second observation must not relabel a decision already taken from the first.
+
+`commit_producer_decision_at` observes the latched fault before it builds the
+decision, which is §7.4's "classifying exit must first observe all preceding
+health barriers". **It does not yet change the decision.** This is observe
+mode, and the plan's exit criterion for M3 says so: "Observation mode does not
+initiate a new decoder retry." The typed reasons that let a fault select a
+different alternative — `VideoDecodeFailure`, `DecodeBackendUnavailable`,
+`DecoderRecoveryExhausted` — are M5b's, and the veto of a *reusable* artifact is
+M3c's. What M3b2 owes is that the fault is present, ordered, and visible when
+those arrive.
+
+Visible means the operational snapshot: `decode_fault`, `decode_error_records`
+and `diagnostics_qualification`, a bounded vocabulary and never a message, per
+§9's rule that raw diagnostics stay out of the snapshot. An operator can now see
+that a producer which exited cleanly was failing to decode the whole time,
+which before this effort could not be seen at all.
+
+### Where the rolling receipt settles
+
+In the child supervisor, after it publishes the terminal and before it goes
+away. That is the one place that knows how the process actually ended — so the
+disposition is derived rather than assumed, and only a process that exited zero
+on its own is a `CleanEnd` — and the one place holding no session lock, which
+is what M3b1's review found wrong with settling in the teardown path.
+
+### Still not here
+
+Nothing consumes a receipt: no cache reader, no publication authorization, no
+actor decision, and `artifact_namespace()` still returns
+`decoder-plan-v1-unqualified` for everything. That is M3c.
+
+Live TV keeps its bounded 2 KiB window, and the reason is unchanged and worth
+repeating rather than quietly dropping: its `decoder_unavailable` latch is a
+*setup* signal that has to survive a diagnostic arriving inside an over-long
+line, and the retained test writes exactly that — a 32 KiB preamble with no
+newline followed by the diagnostic. The shared line reader would discard that
+tail by design. Live TV also has no resolved plan and therefore no codec to bind
+a grammar to. It needs a selected-stream grammar of its own, which is M3c's
+qualified-inventory work.
+
+Focused evidence, pinned `rustc 1.97.1`:
+`cargo test -p plurxd --bin plurxd playback_control::tests::` — 225/225, with
+six new contracts: the fault surviving healthy progress and a clean exit, the
+barrier absorbing its open batch and that batch reaching the actor, three
+barrier kinds keeping three slots, the once-per-attempt latch together with the
+successor's own first fault being accepted, the snapshot's two sources being
+distinguishable, and both clauses of both admission guards.
+`transcode::tests::` 225/225, with the reporting path driven end to end: a
+grammar latches inside a real reader, the sink reports, the handle publishes,
+and the actor's snapshot carries it. Without that one, replacing
+`DecodeFaultSink::report` with an empty body left the entire workspace green.
+`decoder_health` 38/38, `live_tv::tests::` 40/40 and core `decoder_selection`
+44/44 unchanged. `make effort-rust-check`, `make lint` and
+`make validation-lint` clean; the rolling-producer ownership ledger is unchanged,
+because this milestone adds no task, timer or process shape.
+
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate. It found two blockers and a
+test gap that mattered more than either; all are repaired in this head, together
+with four of its non-blocking findings.
+
+| Finding | Disposition |
+|---|---|
+| The re-latch guard was a bare `is_some()` on a field that is never cleared. A stale fault from a predecessor therefore refused the *successor's first* fault — so the recovery attempt, the one this feature exists to inform, was the one running blind, and the drop was counted as a rejected stale exit | The guard reads through `latched_decode_fault()`, and both health fields are cleared when an attempt begins. The test now asserts the successor's own fault is accepted, which the original did not |
+| The teardown path still took and dropped the same diagnostics handle the supervisor now owns, racing it. Whoever won decided whether the attempt got a receipt at all | The teardown leaves it alone; the supervisor is the only owner. `AttemptChild::observing` also takes the reader at construction, closing the window in which a child that died immediately could reach the take before the reader was stored |
+| Nothing tested the *reporting* path. Replacing `DecodeFaultSink::report` with an empty body left all six new tests and the whole `decoder_health` suite green — the feature dead in production and the suite silent about it | `a_latched_fault_travels_from_the_reader_to_the_actor` drives a real reader, a real sink and a real actor handle, and asserts the fault reaches the operational snapshot |
+
+Also repaired: health no longer borrows the `exit` metrics label;
+`decode_error_records` falls back to the settled receipt; the fault's plan
+digest is read rather than carried unused; and a doc comment orphaned onto the
+wrong function is back where it belongs. The review's remaining observations —
+that a retried attempt's receipt is usually dropped, that a copy session reports
+nothing, and that only one of §7.4's four observation points is wired — are
+recorded above as limits rather than repaired, because each is M3c's or M5b's to
+close.
 
 ### A correction to the plan's own command list
 

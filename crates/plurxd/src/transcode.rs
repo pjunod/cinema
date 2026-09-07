@@ -1532,7 +1532,48 @@ struct DiagnosticObservation {
     grammar: Option<crate::decoder_health::DiagnosticGrammar>,
 }
 
+/// Where a latched fault goes.
+///
+/// Holds the actor handle, the attempt it belongs to, and the identity §7.4's
+/// `ProducerDecodeFault` carries. Built once at spawn so the reader task owns
+/// everything it needs and borrows nothing.
+#[derive(Clone)]
+struct DecodeFaultSink {
+    control: crate::playback_control::RollingControlHandle,
+    producer_attempt: u64,
+    plan_digest: String,
+    input_video_stream: u32,
+    diagnostic_contract: Option<String>,
+}
+
+impl DecodeFaultSink {
+    fn report(&self, fault: crate::decoder_health::DecodeFaultKind, records: u64) {
+        self.control.observe_producer_decode_fault(
+            self.producer_attempt,
+            self.plan_digest.clone(),
+            fault,
+            self.input_video_stream,
+            records,
+            self.diagnostic_contract.clone(),
+        );
+    }
+}
+
 impl DiagnosticObservation {
+    /// The sink this attempt's reader reports a latch to, when there is both a
+    /// grammar that can latch one and an actor to receive it.
+    fn fault_sink(&self, observer: &FfmpegProgressObserver) -> Option<DecodeFaultSink> {
+        let grammar = self.grammar.as_ref()?;
+        let control = observer.control.clone()?;
+        Some(DecodeFaultSink {
+            control,
+            producer_attempt: observer.generation,
+            plan_digest: self.plan_digest.clone(),
+            input_video_stream: grammar.selected_stream(),
+            diagnostic_contract: self.contract_id.clone(),
+        })
+    }
+
     /// The observation this plan's attempt is entitled to.
     ///
     /// A grammar only when the installed policy has a contract covering the
@@ -1709,6 +1750,9 @@ fn spawn_ffmpeg(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("spawning ffmpeg: {e}"))?;
+    // Built before the progress observer is moved into its own task: the sink
+    // needs the actor handle and the attempt, and both live on the observer.
+    let fault_sink = observation.fault_sink(&progress_observer);
     // Both readers are owned. They used to be detached `tokio::spawn`s, which
     // is why a reader that died looked exactly like a stream that was clean —
     // and a stream that looked clean is what let a broken title into the
@@ -1723,16 +1767,25 @@ fn spawn_ffmpeg(
             }
         })
     });
+    // The fault reaches the actor when it latches, not when the stream ends: a
+    // producer that stops decoding and keeps running holds its stderr open for
+    // the rest of the film, and a fault delivered then arrives after every
+    // success fact it was supposed to precede.
     let reader = child.stderr.take().map(|stderr| {
         let sid = session_id.to_owned();
         let started = Instant::now();
         let grammar = observation.grammar.clone();
         tokio::spawn(async move {
-            let accumulator = crate::decoder_health::read_diagnostics(
+            let accumulator = crate::decoder_health::read_diagnostics_reporting(
                 stderr,
                 grammar,
                 |line| log_ffmpeg_stderr(&sid, encoder_label, line),
                 |_| false,
+                |fault, records| {
+                    if let Some(sink) = fault_sink.as_ref() {
+                        sink.report(fault, records);
+                    }
+                },
             )
             .await;
             // Stderr closing means the process ended. Logging it (with how long
@@ -2252,22 +2305,16 @@ async fn terminate_exact_prepublication_child(
             "producer attempt {producer_attempt} termination returned before confirmed reap"
         ));
     }
-    // Taken and dropped, which aborts the reader. Deliberately *not* settled
-    // here, for two reasons that are easy to get wrong.
+    // The diagnostics are deliberately left alone here. The child's supervisor
+    // owns them: it is the one task that knows how the process actually ended,
+    // so it derives the disposition rather than assuming one, and it holds no
+    // session lock while it settles. Taking them here would be a race for the
+    // same handle — whoever won would decide whether the attempt got a receipt
+    // at all — and two of this function's callers hold `child_transition`
+    // across the call, whose own comment forbids sleeping under it.
     //
-    // This function is the teardown path for every ending an attempt can have,
-    // including ordinary retirement of a healthy session — so any disposition
-    // it hardcoded would be wrong most of the time, and a receipt that says
-    // `failed_termination` about a clean session is worse than no receipt. And
-    // two of its callers hold `child_transition` across the call, whose own
-    // comment forbids sleeping under it because that blocks the global reaper
-    // and every explicit stop; settling here would sleep up to the whole drain
-    // budget with it held.
-    //
-    // The rolling receipt lands in M3b2, at the exit classification that
-    // already knows which of the three dispositions this ending was, and which
-    // holds no session lock.
-    drop(child.take_diagnostics());
+    // The child is confirmed reaped by this point, so the supervisor's own
+    // `wait` has already returned and its settle is imminent.
     *slot = None;
     Ok(())
 }
@@ -4339,8 +4386,6 @@ struct AttemptChild {
     /// It lives with the child rather than with the session because it is
     /// scoped to one attempt: a successor gets its own counters, and a
     /// predecessor's fault must not follow the attempt that replaced it.
-    /// Taken exactly once, at classification.
-    diagnostics: std::sync::Mutex<Option<crate::decoder_health::ObservedDiagnostics>>,
     terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
     terminal_notify: Arc<tokio::sync::Notify>,
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
@@ -4380,35 +4425,26 @@ impl AttemptChildTerminal {
 }
 
 impl AttemptChild {
-    /// Attach this attempt's diagnostic reader.
+    /// Construct the child and, with it, the reader that decides whether its
+    /// output can be trusted.
     ///
-    /// Separate from `new` so every existing construction — the lifecycle
-    /// fixtures especially — keeps meaning "a child with no observation",
-    /// which is exactly what those tests are about.
-    fn observing(self, diagnostics: crate::decoder_health::ObservedDiagnostics) -> Self {
-        *self
-            .diagnostics
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(diagnostics);
-        self
-    }
-
-    /// Take the reader, once. A second caller gets nothing rather than a
-    /// second receipt for one attempt.
-    fn take_diagnostics(&self) -> Option<crate::decoder_health::ObservedDiagnostics> {
-        self.diagnostics
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-
+    /// The reader is a constructor argument rather than something attached
+    /// afterwards, because the supervisor is spawned inside this function and
+    /// takes the reader when the process ends: a child that is already dead
+    /// when construction returns could otherwise reach that take before the
+    /// reader was stored, and settle nothing at all.
     fn new(
         producer_attempt: u64,
         mut child: Child,
         control: crate::playback_control::RollingControlHandle,
+        diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
     ) -> Self {
         let pid = child.id();
-        let diagnostics = std::sync::Mutex::new(None);
+        // Owned by the supervisor alone. Nothing else may take it: two owners
+        // would race for one handle, and whoever won would decide whether the
+        // attempt got a receipt at all.
+        let supervisor_diagnostics = std::sync::Mutex::new(diagnostics);
+        let supervisor_control = control.clone();
         let terminal = Arc::new(std::sync::Mutex::new(None));
         let terminal_notify = Arc::new(tokio::sync::Notify::new());
         let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -4567,11 +4603,30 @@ impl AttemptChild {
             for reply in terminate_replies {
                 let _ = reply.send(terminal.wait_result());
             }
+            // The one place that knows how this attempt's process actually
+            // ended, and the one place with no session lock held. §7.4 keeps
+            // diagnostic completion separate from process exit: the receipt is
+            // settled *after* the terminal is published, because a process can
+            // exit long before its stderr reaches EOF and "the process
+            // finished" is not "we saw everything it said".
+            let diagnostics = supervisor_diagnostics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(diagnostics) = diagnostics {
+                let receipt = diagnostics
+                    .settle(
+                        crate::decoder_health::DIAGNOSTIC_DRAIN_BUDGET,
+                        Self::attempt_exit_disposition(&terminal),
+                    )
+                    .await;
+                report_producer_health(&format!("attempt {producer_attempt}"), &receipt);
+                supervisor_control.observe_producer_diagnostics_complete(producer_attempt, receipt);
+            }
         });
         Self {
             producer_attempt,
             pid,
-            diagnostics,
             terminal,
             terminal_notify,
             commands,
@@ -4581,6 +4636,25 @@ impl AttemptChild {
             signal_after_flow_reservation_pause,
             #[cfg(test)]
             terminate_before_reap_pause,
+        }
+    }
+
+    /// How this attempt's process ended, in the receipt's vocabulary.
+    ///
+    /// Only a process that exited zero on its own ran to the end of its input.
+    /// Everything else — a non-zero exit, a signal, a wait this daemon could
+    /// not perform — is a failed termination, and a failed termination never
+    /// qualifies whatever its stream looked like.
+    fn attempt_exit_disposition(
+        terminal: &AttemptChildTerminal,
+    ) -> crate::decoder_health::ExitDisposition {
+        match terminal {
+            AttemptChildTerminal::Exited(status, _) if status.success() => {
+                crate::decoder_health::ExitDisposition::CleanEnd
+            }
+            AttemptChildTerminal::Exited(_, _) | AttemptChildTerminal::WaitFailed(_, _) => {
+                crate::decoder_health::ExitDisposition::FailedTermination
+            }
         }
     }
 
@@ -5977,10 +6051,12 @@ impl Session {
             ));
         }
         let (candidate, diagnostics) = spawn()?.into_parts();
-        *slot = Some(
-            AttemptChild::new(producer_attempt, candidate, self.control.clone())
-                .observing(diagnostics),
-        );
+        *slot = Some(AttemptChild::new(
+            producer_attempt,
+            candidate,
+            self.control.clone(),
+            Some(diagnostics),
+        ));
         drop(slot);
 
         let install_authorization = match self
@@ -6057,10 +6133,12 @@ impl Session {
         }
         let (observed, stdout) = spawn()?;
         let (candidate, diagnostics) = observed.into_parts();
-        *slot = Some(
-            AttemptChild::new(producer_attempt, candidate, self.control.clone())
-                .observing(diagnostics),
-        );
+        *slot = Some(AttemptChild::new(
+            producer_attempt,
+            candidate,
+            self.control.clone(),
+            Some(diagnostics),
+        ));
         drop(slot);
 
         let install_authorization = match self
@@ -6210,6 +6288,7 @@ impl Session {
                         producer_attempt,
                         candidate,
                         self.control.clone(),
+                        None,
                     ));
                     drop(install);
                     None
@@ -22329,7 +22408,7 @@ fn test_session(dir: PathBuf) -> Session {
         scratch_cleanup_started: AtomicBool::new(false),
         retirement_context: None,
         cache_integrity_cleanup_started: AtomicBool::new(false),
-        child: Mutex::new(Some(AttemptChild::new(0, child, control.clone()))),
+        child: Mutex::new(Some(AttemptChild::new(0, child, control.clone(), None))),
         child_transition: Mutex::new(()),
         replacing_child: AtomicBool::new(false),
         #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -25904,7 +25983,7 @@ pub(crate) mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("spawn exiting producer");
-        let mut current = AttemptChild::new(current_attempt, child, control.clone());
+        let mut current = AttemptChild::new(current_attempt, child, control.clone(), None);
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if current
@@ -25941,7 +26020,7 @@ pub(crate) mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("spawn delayed predecessor");
-        let mut predecessor = AttemptChild::new(predecessor_attempt, child, control.clone());
+        let mut predecessor = AttemptChild::new(predecessor_attempt, child, control.clone(), None);
         let successor_attempt = control
             .begin_producer_attempt()
             .await
@@ -25975,7 +26054,7 @@ pub(crate) mod tests {
             .begin_producer_attempt()
             .await
             .expect("producer attempt");
-        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
         let pid = child.id().expect("running producer pid");
 
         assert_eq!(
@@ -26032,7 +26111,7 @@ pub(crate) mod tests {
             .begin_producer_attempt()
             .await
             .expect("producer attempt");
-        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
         assert!(control.reserve_producer_flow_capacity_for_test());
         assert!(control.reserve_producer_flow_capacity_for_test());
 
@@ -26070,7 +26149,7 @@ pub(crate) mod tests {
             .begin_producer_attempt()
             .await
             .expect("producer attempt");
-        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
         assert!(control.reserve_producer_flow_capacity_for_test());
         assert!(control.reserve_producer_flow_capacity_for_test());
 
@@ -26106,6 +26185,7 @@ pub(crate) mod tests {
             attempt,
             long_running_child(),
             control.clone(),
+            None,
         ));
         let pause = Arc::new(std::sync::Barrier::new(2));
         child.pause_signal_after_flow_reservation(Arc::clone(&pause));
@@ -26161,6 +26241,7 @@ pub(crate) mod tests {
             attempt,
             long_running_child(),
             control.clone(),
+            None,
         ));
         let pause = Arc::new(std::sync::Barrier::new(2));
         child.pause_signal_after_authorization(Arc::clone(&pause));
@@ -26237,7 +26318,7 @@ pub(crate) mod tests {
             .begin_producer_attempt()
             .await
             .expect("producer attempt");
-        let child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
         let pid = child.id().expect("running producer pid");
         drop(child);
 
@@ -26287,7 +26368,7 @@ pub(crate) mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("spawn terminal producer");
-        *session.child.get_mut() = Some(AttemptChild::new(0, child, session.control.clone()));
+        *session.child.get_mut() = Some(AttemptChild::new(0, child, session.control.clone(), None));
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if session
@@ -26361,6 +26442,7 @@ pub(crate) mod tests {
             predecessor,
             long_running_child(),
             session.control.clone(),
+            None,
         ));
 
         let pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -26407,8 +26489,12 @@ pub(crate) mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("spawn successor terminal producer");
-        *session.child.lock().await =
-            Some(AttemptChild::new(successor, child, session.control.clone()));
+        *session.child.lock().await = Some(AttemptChild::new(
+            successor,
+            child,
+            session.control.clone(),
+            None,
+        ));
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let terminal = session
@@ -28520,6 +28606,7 @@ pub(crate) mod tests {
             session.control.current_producer_attempt(),
             long_running_child(),
             session.control.clone(),
+            None,
         ));
         replacement.complete();
         attempt
@@ -29472,6 +29559,7 @@ pub(crate) mod tests {
             failed_attempt,
             long_running_child(),
             session.control.clone(),
+            None,
         ));
         let result = execute_prepublication_transcode_retry(
             Arc::clone(&session),
@@ -29929,6 +30017,7 @@ pub(crate) mod tests {
                     session.control.current_producer_attempt(),
                     long_running_child(),
                     session.control.clone(),
+                    None,
                 ));
                 replacement.complete();
                 attempt
@@ -31476,7 +31565,8 @@ pub(crate) mod tests {
             retirement_context: None,
             cache_integrity_cleanup_started: AtomicBool::new(false),
             child: Mutex::new(
-                child.map(|child| AttemptChild::new(producer_attempt, child, control.clone())),
+                child
+                    .map(|child| AttemptChild::new(producer_attempt, child, control.clone(), None)),
             ),
             child_transition: Mutex::new(()),
             replacing_child: AtomicBool::new(false),
@@ -33529,6 +33619,7 @@ pub(crate) mod tests {
                     producer_attempt,
                     long_running_child(),
                     session.control.clone(),
+                    None,
                 ));
                 replacement.complete();
             }
@@ -37191,6 +37282,110 @@ pub(crate) mod tests {
         assert_eq!(
             part_exit_disposition(&PartEnd::Failed("boom".to_owned())),
             ExitDisposition::FailedTermination
+        );
+    }
+
+    /// The reporting path end to end: a grammar latches, the sink reports, the
+    /// handle publishes, the actor stores it.
+    ///
+    /// Without this, `DecodeFaultSink::report` could be replaced with an empty
+    /// body and every other test in the workspace would still pass — the
+    /// feature would be dead in production and the suite silent about it.
+    #[tokio::test]
+    async fn a_latched_fault_travels_from_the_reader_to_the_actor() {
+        let control = crate::playback_control::RollingControlHandle::spawn("session-start");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("initial producer attempt");
+
+        let contract = crate::decoder_health::DiagnosticContract {
+            id: "fixture".to_owned(),
+            host: "test".to_owned(),
+            ffmpeg_version: "8.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "h264".to_owned(),
+            decoder: "h264".to_owned(),
+            require_context_addresses: true,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "test".to_owned(),
+            backend_fault_detail: None,
+        };
+        let observation = DiagnosticObservation {
+            plan_digest: "plan-digest".to_owned(),
+            contract_id: Some(contract.id.clone()),
+            grammar: Some(crate::decoder_health::DiagnosticGrammar::new(
+                contract, 0, 0,
+            )),
+        };
+        let observer =
+            FfmpegProgressObserver::rolling(Arc::new(Progress::new()), attempt, control.clone());
+        let sink = observation
+            .fault_sink(&observer)
+            .expect("a grammar and an actor is a sink");
+
+        // Through the reader, not around it: the callback fires exactly on the
+        // line that latches, which is what makes one barrier per attempt a
+        // property of the accumulator rather than of this test.
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let line = "[vist#0:0/h264 @ 0x1] [dec:h264 @ 0x2] [error] Error submitting packet to decoder: corrupt input packet\n";
+        let grammar = observation.grammar.clone();
+        let reads = tokio::spawn(async move {
+            crate::decoder_health::read_diagnostics_reporting(
+                reader,
+                grammar,
+                |_| {},
+                |_| false,
+                move |fault, records| sink.report(fault, records),
+            )
+            .await
+        });
+        {
+            use tokio::io::AsyncWriteExt;
+            for _ in 0..crate::decoder_health::VIDEO_DECODE_ERROR_LIMIT {
+                writer
+                    .write_all(line.as_bytes())
+                    .await
+                    .expect("write a primary record");
+            }
+        }
+        drop(writer);
+        let accumulator = reads.await.expect("join the reader");
+        assert_eq!(
+            accumulator.fault(),
+            Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure)
+        );
+
+        let snapshot = control
+            .snapshot()
+            .await
+            .expect("the session is live")
+            .producer_control;
+        assert_eq!(
+            snapshot.decode_fault,
+            Some("video_decode_failure"),
+            "the fault the reader latched reached the actor"
+        );
+        assert_eq!(
+            snapshot.decode_error_records,
+            Some(crate::decoder_health::VIDEO_DECODE_ERROR_LIMIT as u64)
+        );
+    }
+
+    /// A sink exists only when there is both a grammar that can latch a fault
+    /// and an actor to receive it. An offline part has neither.
+    #[test]
+    fn an_attempt_with_no_grammar_or_no_actor_has_no_sink() {
+        let observer = FfmpegProgressObserver::offline(Arc::new(Progress::new()), 1);
+        assert!(
+            DiagnosticObservation::default()
+                .fault_sink(&observer)
+                .is_none(),
+            "no grammar, no sink"
         );
     }
 }
