@@ -1,0 +1,14 @@
+version = 1
+
+[[coverage]]
+commits = ["2ced00ce"]
+points = [
+  "cluster.auth",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate-ci",
+  "operations-contract",
+]
+reason = "The transport-recovery campaign's idle-resource sampler could expire for a leak or for a loaded machine and reported both with one sentence that named neither, which is why the lane's four recent failures — main's included — were unactionable. The regression is the report itself: three tests pin that a node over its warmed baseline is named with its resource, ceiling and observed value; that every node still owning transport work is listed; and that a run which had settled inside its baseline says so rather than implying a leak. `resources_over_limits` is now the one comparison behind both the predicate and the message, so a future change cannot move one without the other. No margin, horizon or sample count moved, and the existing rejection tests still pin the unchanged predicate. The lane's expected test count is a contract in two places, so the operations contract moves with the Makefile."
