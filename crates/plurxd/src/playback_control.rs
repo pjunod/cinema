@@ -591,6 +591,40 @@ pub(crate) struct ActionAcknowledgement {
     pub action_id: String,
     pub state: AcknowledgementState,
     pub buffered_through_ms: Option<i64>,
+    /// The source position the client's successor timeline actually starts
+    /// at, echoed back from the offer it is committing to.
+    ///
+    /// This is what a commit is proof *of*. `action_id` says which offer the
+    /// client is answering; this says the client built the thing that offer
+    /// described. Between `Prepare` and `Committed` the server's own intent
+    /// can move — a seek, a quality change, a new recipe — and an
+    /// acknowledgement that carries only an id cannot tell a client that
+    /// committed to the current offer from one that committed to a stale one
+    /// and is about to present media nobody asked for.
+    ///
+    /// Required on `Committed` and compared against the offer in
+    /// [`Self::bound_preparation_acknowledgement`]. A commit the server
+    /// cannot contradict would not be evidence, so this field is only worth
+    /// carrying because the mismatch is refused.
+    ///
+    /// It closes a narrower gap than it first appears. A changed *ask* —
+    /// quality, codec, dynamic range, subtitles — is already caught at commit
+    /// by `desired_digest`. What that digest does not cover is position, so a
+    /// successor built for one point in the film and committed after the
+    /// viewer seeked elsewhere was previously indistinguishable from a
+    /// correct commit. That is the case this closes.
+    pub committed_media_origin_ms: Option<i64>,
+    /// When the client's first frame appeared.
+    ///
+    /// Still required on `Committed`, and deliberately not relaxed. It is not
+    /// *proof* — a wall clock from an unsynchronised device establishes
+    /// neither ownership nor freshness nor that what was displayed is what
+    /// was offered — but it is a measurement, frozen against a corrected
+    /// hardware instrument (`docs/M6-CALLER-HANDOFF.md`), and dropping it
+    /// would delete the only signal that instrument produces.
+    ///
+    /// So the change here is additive: `committed_media_origin_ms` is the
+    /// evidence, this stays the measurement, and a commit carries both.
     pub first_frame_unix_ms: Option<i64>,
 }
 
@@ -608,12 +642,21 @@ impl ActionAcknowledgement {
         if self.first_frame_unix_ms.is_some_and(|value| value <= 0) {
             return Err("acknowledgement.first_frame_unix_ms");
         }
+        if self
+            .committed_media_origin_ms
+            .is_some_and(|value| !(0..=MAX_MEDIA_MILLIS).contains(&value))
+        {
+            return Err("acknowledgement.committed_media_origin_ms");
+        }
         match self.state {
             AcknowledgementState::BufferReady if self.buffered_through_ms.is_none() => {
                 Err("acknowledgement.buffered_through_ms")
             }
             AcknowledgementState::Committed if self.first_frame_unix_ms.is_none() => {
                 Err("acknowledgement.first_frame_unix_ms")
+            }
+            AcknowledgementState::Committed if self.committed_media_origin_ms.is_none() => {
+                Err("acknowledgement.committed_media_origin_ms")
             }
             _ => Ok(()),
         }
@@ -3677,6 +3720,26 @@ impl ControlState {
             return None;
         };
         if acknowledgement.action_id != *action_id {
+            return None;
+        }
+        // A commit must name the origin it was offered.
+        //
+        // `action_id` says which offer is being answered; it does not say the
+        // client built what that offer described. The ask is already compared
+        // at commit through `desired_digest`, which covers quality, codec,
+        // dynamic range and subtitles — but not position. So a successor
+        // prepared for one point in the film and acknowledged after the viewer
+        // seeked somewhere else arrived indistinguishable from a correct
+        // commit, and publishing it would present media nobody is waiting for
+        // using the client's own acknowledgement as the authority.
+        //
+        // Only `Committed` is checked. The earlier states report progress
+        // toward a successor that is not being published yet, and demanding an
+        // origin from a client that has not built one would make ordinary
+        // progress unreportable.
+        if acknowledgement.state == AcknowledgementState::Committed
+            && acknowledgement.committed_media_origin_ms != Some(binding.successor.media_origin_ms)
+        {
             return None;
         }
         let staged_incarnation_id = binding.successor.staged_incarnation_id.clone();
@@ -14640,6 +14703,192 @@ mod tests {
         assert_eq!(event.event, "control_action_suppressed");
     }
 
+    /// A commit proves what the client built, not what time it was.
+    ///
+    /// `Committed` used to require `first_frame_unix_ms`, which made a
+    /// wall-clock reading from an unsynchronised device the gate on a durable
+    /// server commit. It proves neither ownership, nor freshness, nor that
+    /// what was displayed is what was offered — a client whose clock is wrong
+    /// is not a client whose switch failed, and a client that lies about the
+    /// time still gets its commit.
+    ///
+    /// What the server can actually contradict is the origin. Between
+    /// `Prepare` and `Committed` its own intent can move — a seek, a quality
+    /// change, a new recipe — and an acknowledgement carrying only an
+    /// `action_id` cannot distinguish a client that committed to the current
+    /// offer from one that committed to a stale one and is about to present
+    /// media nobody asked for.
+    ///
+    /// First-frame time stays accepted, because it is genuinely useful for
+    /// diagnosis. It is simply not the proof.
+    /// A commit for a different origin is not this offer's commit.
+    ///
+    /// This is the assertion that makes the field worth carrying. Validation
+    /// only proves a client *said* something; refusing the mismatch is what
+    /// lets the server contradict a stale commit, and without this test the
+    /// field would be a required value nothing reads.
+    ///
+    /// The gap is narrower than it looks, and worth stating precisely: a
+    /// changed **ask** — quality, codec, dynamic range, subtitles — is already
+    /// refused at commit by `desired_digest`. What the digest does not cover
+    /// is **position**. So the case this closes is a successor prepared for
+    /// one point in the film and acknowledged after the viewer seeked
+    /// somewhere else: previously indistinguishable from a correct commit, and
+    /// published using the client's own acknowledgement as the authority.
+    #[test]
+    fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
+        let offered_origin_ms = 600_000;
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let staged = uuid::Uuid::new_v4().to_string();
+
+        let bound = |origin: Option<i64>, state| {
+            let control = ControlState {
+                prepared_action: Some(PreparedActionBinding {
+                    successor: PreparedSuccessorAction {
+                        staged_incarnation_id: staged.clone(),
+                        deadline_ms: i64::MAX,
+                        session_id: "session".to_owned(),
+                        playlist_url: "/hls/session/index.m3u8".to_owned(),
+                        media_origin_ms: offered_origin_ms,
+                        effective_selection: EffectiveSelection {
+                            quality_auto: true,
+                            height: 1080,
+                            audio_track: None,
+                            subtitle_burn: None,
+                            audio_offset_ms: 0,
+                            codec: "h264".to_owned(),
+                            dynamic_range: None,
+                        },
+                    },
+                    action: ControlAction::Prepare {
+                        action_id: action_id.clone(),
+                        session_id: "session".to_owned(),
+                        playlist_url: "/hls/session/index.m3u8".to_owned(),
+                        media_origin_ms: offered_origin_ms,
+                        effective_selection: EffectiveSelection {
+                            quality_auto: true,
+                            height: 1080,
+                            audio_track: None,
+                            subtitle_burn: None,
+                            audio_offset_ms: 0,
+                            codec: "h264".to_owned(),
+                            dynamic_range: None,
+                        },
+                    },
+                    acknowledgement: None,
+                }),
+                ..ControlState::default()
+            };
+            control.bound_preparation_acknowledgement(Some(&ActionAcknowledgement {
+                action_id: action_id.clone(),
+                state,
+                buffered_through_ms: None,
+                committed_media_origin_ms: origin,
+                first_frame_unix_ms: Some(1_700_000_000_000),
+            }))
+        };
+
+        assert_eq!(
+            bound(Some(offered_origin_ms), AcknowledgementState::Committed),
+            Some(staged.clone()),
+            "the commit that echoes the offer binds to the staged successor",
+        );
+        assert_eq!(
+            bound(
+                Some(offered_origin_ms + 30_000),
+                AcknowledgementState::Committed
+            ),
+            None,
+            "a successor built for a different point in the film is not this \
+             offer's commit, and must not publish on the strength of it",
+        );
+        assert_eq!(
+            bound(Some(0), AcknowledgementState::Committed),
+            None,
+            "zero is a real origin, not a wildcard",
+        );
+
+        // Progress toward a successor that is not being published yet reports
+        // no origin, and demanding one would make ordinary progress
+        // unreportable.
+        assert_eq!(
+            bound(None, AcknowledgementState::BufferReady),
+            Some(staged),
+            "only a commit is held to the offered origin",
+        );
+    }
+
+    #[test]
+    fn a_commit_carries_the_origin_it_adopted_and_not_a_wall_clock() {
+        let ack = |state, origin, first_frame| ActionAcknowledgement {
+            action_id: "8a1f2c3d-4b5e-6f70-8192-a3b4c5d6e7f8".to_owned(),
+            state,
+            buffered_through_ms: Some(30_000),
+            committed_media_origin_ms: origin,
+            first_frame_unix_ms: first_frame,
+        };
+
+        assert_eq!(
+            ack(
+                AcknowledgementState::Committed,
+                None,
+                Some(1_700_000_000_000)
+            )
+            .validate(),
+            Err("acknowledgement.committed_media_origin_ms"),
+            "a first-frame time is not a substitute for saying what was built",
+        );
+        assert_eq!(
+            ack(AcknowledgementState::Committed, Some(0), None).validate(),
+            Err("acknowledgement.first_frame_unix_ms"),
+            "and the origin does not replace the measurement either — this is \
+             additive, so a commit carries both",
+        );
+        assert!(
+            ack(
+                AcknowledgementState::Committed,
+                Some(600_000),
+                Some(1_700_000_000_000),
+            )
+            .validate()
+            .is_ok(),
+            "origin zero is an ordinary film start rather than a missing \
+             value, and a complete commit is accepted",
+        );
+        assert!(ack(AcknowledgementState::Committed, Some(0), Some(1))
+            .validate()
+            .is_ok(),);
+
+        // The other states are unchanged: only a commit claims to have built
+        // something, so only a commit has to say what.
+        assert!(ack(AcknowledgementState::MetadataReady, None, None)
+            .validate()
+            .is_ok(),);
+        assert!(
+            ack(AcknowledgementState::Failed, None, None)
+                .validate()
+                .is_ok(),
+            "a failure has no origin to report, and demanding one would make \
+             the client's own error unreportable",
+        );
+
+        // Range, so a garbage origin is refused at the door rather than
+        // compared against an offer it could never match.
+        assert_eq!(
+            ack(AcknowledgementState::Committed, Some(-1), None).validate(),
+            Err("acknowledgement.committed_media_origin_ms"),
+        );
+        assert_eq!(
+            ack(
+                AcknowledgementState::Committed,
+                Some(MAX_MEDIA_MILLIS + 1),
+                None,
+            )
+            .validate(),
+            Err("acknowledgement.committed_media_origin_ms"),
+        );
+    }
+
     #[test]
     fn a_hold_says_when_to_ask_again_and_no_room_says_later() {
         for reason in [
@@ -15101,7 +15350,12 @@ mod tests {
                         .asking(staged_for),
                 )
                 .expect("the successor is announced");
-            let ControlAction::Prepare { action_id, .. } = &announced.2 else {
+            let ControlAction::Prepare {
+                action_id,
+                media_origin_ms: offered_origin_ms,
+                ..
+            } = &announced.2
+            else {
                 panic!("an occupied preparation slot announces its successor");
             };
 
@@ -15120,6 +15374,9 @@ mod tests {
                             action_id: action_id.clone(),
                             state: AcknowledgementState::Committed,
                             buffered_through_ms: None,
+                            // Echo the offer this test announced; a commit naming a
+                            // different origin is refused.
+                            committed_media_origin_ms: Some(*offered_origin_ms),
                             first_frame_unix_ms: None,
                         }),
                 )
@@ -15346,7 +15603,12 @@ mod tests {
                     .asking(&asked_for),
             )
             .expect("announced");
-        let ControlAction::Prepare { action_id, .. } = &announced.2 else {
+        let ControlAction::Prepare {
+            action_id,
+            media_origin_ms: offered_origin_ms,
+            ..
+        } = &announced.2
+        else {
             panic!("an occupied preparation slot announces its successor");
         };
         let action_id = action_id.clone();
@@ -15400,6 +15662,9 @@ mod tests {
                         action_id,
                         state: AcknowledgementState::Committed,
                         buffered_through_ms: None,
+                        // Echo the offer this test announced; a commit naming a
+                        // different origin is refused.
+                        committed_media_origin_ms: Some(*offered_origin_ms),
                         first_frame_unix_ms: None,
                     }),
             )
@@ -15452,7 +15717,12 @@ mod tests {
                     .asking(&selection_at(QualitySelection::Auto)),
             )
             .expect("announced");
-        let ControlAction::Prepare { action_id, .. } = &announced.2 else {
+        let ControlAction::Prepare {
+            action_id,
+            media_origin_ms: offered_origin_ms,
+            ..
+        } = &announced.2
+        else {
             panic!("an occupied preparation slot announces its successor");
         };
         state
@@ -15470,6 +15740,9 @@ mod tests {
                         action_id: action_id.clone(),
                         state: AcknowledgementState::Committed,
                         buffered_through_ms: None,
+                        // Echo the offer this test announced; a commit naming a
+                        // different origin is refused.
+                        committed_media_origin_ms: Some(*offered_origin_ms),
                         first_frame_unix_ms: None,
                     }),
             )
@@ -15929,6 +16202,7 @@ mod tests {
             action_id: action_id.clone(),
             state: AcknowledgementState::MetadataReady,
             buffered_through_ms: None,
+            committed_media_origin_ms: None,
             first_frame_unix_ms: None,
         };
         let progress = state
@@ -15956,6 +16230,7 @@ mod tests {
             action_id: action_id.clone(),
             state: AcknowledgementState::BufferReady,
             buffered_through_ms: Some(55_000),
+            committed_media_origin_ms: None,
             first_frame_unix_ms: None,
         };
         let buffered_response = state
@@ -15981,6 +16256,9 @@ mod tests {
             action_id: uuid::Uuid::new_v4().to_string(),
             state: AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer this test announced; a commit naming a
+            // different origin is refused.
+            committed_media_origin_ms: Some(successor.media_origin_ms),
             first_frame_unix_ms: Some(10),
         };
         let ignored = state
@@ -16000,6 +16278,9 @@ mod tests {
             action_id,
             state: AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer this test announced; a commit naming a
+            // different origin is refused.
+            committed_media_origin_ms: Some(successor.media_origin_ms),
             first_frame_unix_ms: Some(11),
         };
         let accepted = state
@@ -16091,6 +16372,7 @@ mod tests {
                         action_id,
                         state: AcknowledgementState::Failed,
                         buffered_through_ms: None,
+                        committed_media_origin_ms: None,
                         first_frame_unix_ms: None,
                     },
                 ),
@@ -16116,10 +16398,16 @@ mod tests {
         let mut request = request();
         request.demand = PlaybackDemand::End;
         request.playback_rate = 0.0;
+        // Well-formed on purpose. `ControlRequestV1::validate` runs the
+        // acknowledgement's own field checks before this rule, so an
+        // acknowledgement missing a field would trip on that instead and this
+        // test would stop exercising the rule it is named for while still
+        // passing.
         request.acknowledgement = Some(ActionAcknowledgement {
             action_id: uuid::Uuid::new_v4().to_string(),
             state: AcknowledgementState::Committed,
             buffered_through_ms: None,
+            committed_media_origin_ms: Some(0),
             first_frame_unix_ms: Some(1),
         });
         assert_eq!(request.validate(None, 6_000), Err("acknowledgement.state"));
@@ -16159,7 +16447,12 @@ mod tests {
                         .at_unix_ms(preparation_deadline - 1),
                 )
                 .expect("Prepare is announced");
-            let ControlAction::Prepare { action_id, .. } = first.2 else {
+            let ControlAction::Prepare {
+                action_id,
+                media_origin_ms: offered_origin_ms,
+                ..
+            } = first.2
+            else {
                 panic!("expected Prepare");
             };
             if abort_wins_first {
@@ -16178,6 +16471,9 @@ mod tests {
                             action_id,
                             state: AcknowledgementState::Committed,
                             buffered_through_ms: None,
+                            // Echo the offer this test announced; a commit naming a
+                            // different origin is refused.
+                            committed_media_origin_ms: Some(offered_origin_ms),
                             first_frame_unix_ms: Some(preparation_deadline),
                         }),
                 )
@@ -16244,7 +16540,12 @@ mod tests {
                     .at_unix_ms(preparation_deadline - 1),
             )
             .expect("Prepare is announced");
-        let ControlAction::Prepare { action_id, .. } = first.2 else {
+        let ControlAction::Prepare {
+            action_id,
+            media_origin_ms: offered_origin_ms,
+            ..
+        } = first.2
+        else {
             panic!("expected Prepare");
         };
 
@@ -16273,6 +16574,9 @@ mod tests {
                         action_id,
                         state: AcknowledgementState::Committed,
                         buffered_through_ms: None,
+                        // Echo the offer this test announced; a commit naming a
+                        // different origin is refused.
+                        committed_media_origin_ms: Some(offered_origin_ms),
                         first_frame_unix_ms: Some(preparation_deadline + 1),
                     }),
             )
@@ -17353,7 +17657,12 @@ mod tests {
             )
             .await
             .expect("Prepare accepted");
-        let ControlAction::Prepare { action_id, .. } = first.action else {
+        let ControlAction::Prepare {
+            action_id,
+            media_origin_ms: offered_origin_ms,
+            ..
+        } = first.action
+        else {
             panic!("expected Prepare");
         };
         tokio::time::sleep(MIN_CONTROL_INTERVAL).await;
@@ -17363,6 +17672,9 @@ mod tests {
             action_id,
             state: AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer this test announced; a commit naming a
+            // different origin is refused.
+            committed_media_origin_ms: Some(offered_origin_ms),
             first_frame_unix_ms: Some(crate::media_sessions::unix_ms()),
         });
         let (reply, response) = tokio::sync::oneshot::channel();
