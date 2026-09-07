@@ -415,6 +415,90 @@ a settled contract instead of three guesses.
   successor, which is exactly the window §4's drain needs. No schema change is
   required.
 
+  **BUILT AND WITHDRAWN, 2026-09-07 — the lease is the wrong thing to bound a
+  drain with, and the paragraph below is the first of three reasons why.** An
+  implementation reached green contracts on both backends and three
+  independent adversarial reviews each found a different P0 in it. It is not
+  in the tree. What is in the tree is this record, because the next reader
+  will otherwise reach the same design a fourth time.
+
+  The shape that was tried: the commit stops retiring the predecessor and
+  writes it a lease ceiling instead; the drain is bounded by a rule in
+  `renew_media_sessions` about which incarnation the playback pointer names.
+  Every variant of that rule fails, and they fail for the same underlying
+  reason — **the owner's lease loop already owns the meaning of a lease, and a
+  drain is not a lease.**
+
+  1. **Refusing the renewal kills the worker in one tick.** The paragraph
+     below says the maintenance sweep bounds the drain. It cannot:
+     `renew_media_sessions` consults no pointer, and neither does
+     `owned_media_sessions`, which is what feeds the owner's lease loop. The
+     old commit hid the predecessor from all of these at once by setting the
+     blocked publication sentinel — **that sentinel, not `state = 'ended'`, was
+     doing the work.** So the owner keeps offering the predecessor, reads an
+     omitted renewal as `cluster lease lost`, and fences and kills the worker
+     on its next three-second tick, while the store still says `active`.
+  2. **Clamping the renewal only delays it by about eight seconds.** Make the
+     renewal succeed at an unmoving value and the loop still drops the route
+     from its batch at `ceiling - LEASE_RENEWAL_MIN_REMAINING_MS` (4 s) and
+     fails it closed down the same `cluster lease lost` path. Every healthy
+     prepared switch then emits the split-brain log line and metric. And after
+     that reap the row is a zombie: `fence_and_reap_sessions`'s VOD arm handles
+     `ended` and missing, so an `active` route falls through it writing no
+     terminal and stopping nothing, and the row sits with a lapsed lease until
+     the maintenance sweep — `now - 60 s` on a five-minute tick, so up to six
+     minutes.
+  3. **"Absence of a pointer row renews normally" makes the session
+     immortal.** That rule is needed because a session mid-creation has no
+     pointer yet. But `end_media_session` *deletes* the pointer row, which is
+     what happens when the viewer closes the tab. Sequence: commit at t=0,
+     viewer stops at t=2 s, pointer deleted; at t=3 s the predecessor is still
+     `active` with a live lease and a live worker, the clamp finds no pointer,
+     and it renews. Forever. An encoder, one of two admission permits and a
+     shared-cache generation, held for a stream nobody is watching, until the
+     process exits — and node removal refuses the whole time
+     (`membership.rs` `begin_removal_attempt_sql` is a **third** reader with no
+     pointer predicate, alongside `expired_media_sessions` and
+     `claim_media_session_takeover`).
+
+  **What the design has to be instead: the owner ends the predecessor
+  explicitly, and the lease machinery is not touched at all.** The node that
+  performed the commit schedules the end — `end_media_session_if_owner` with
+  cause `superseded`, whose pointer delete is already guarded on the exact
+  incarnation so it cannot take the successor's pointer. That writes the right
+  cause, stops the worker through the ordinary path, leaves renewal,
+  `owned_media_sessions` and the reap classifier untouched, and needs no new
+  column. If the owner dies first, renewal stops on its own, the lease lapses,
+  and the existing sweep is the backstop — which is what the paragraph below
+  wanted the sweep to be, reached honestly.
+
+  Step 2 then replaces "after the window" with "when `Switched` arrives, or the
+  window lapses", which is the same call at a different trigger. **Land step 1
+  and step 2 together.** Step 1 alone makes the product worse for the window it
+  opens: today a superseded predecessor answers a clean terminal `410
+  session_ended`, and a half-built drain replaces that with a retry or a
+  `owner_lost` for a client that has no `Switched` to send.
+
+  **Two things to settle before the candidate worker lands.**
+  `DEFAULT_MAX_HW_SESSIONS` is 2 and an admission permit is held for a
+  session's whole life, so prepare-plus-drain with a real successor costs two
+  of two per viewer — the first real cutover on a two-slot node refuses its own
+  successor. And a drained predecessor's `cache_consumer_pins` are not renewed
+  by any statement that survives the commit, so the drain window has to be
+  shorter than the pin TTL or the generation it is reading can be swept.
+
+  **Landed from that work, because it is correct on its own:**
+  `preparation_ack_replay` no longer gates on `state = 'ended' AND
+  terminal_reason = 'superseded'`. That was the same fact as "this commit
+  already happened" only while the commit retires the predecessor; the receipt
+  is the real fence and a stricter one, comparing incarnation, owner, epoch,
+  client instance, sequence and request fingerprint, so only the byte-identical
+  request that produced a receipt can replay it. Doing this first means step 1
+  cannot silently break lost-commit replay when it lands.
+
+  **Two stale numbers while we are here:** SQLite schema is **49** and
+  replicated AUTH schema is **29** (next available 50/30), not 47/27.
+
   **And the bound the drain needs already exists: the predecessor's lease.**
   The maintenance sweep at `sessions.rs:3372` ends any session with
   `state = 'active' AND lease_expires_at_ms <= ?`, in batches, without
