@@ -467,7 +467,18 @@ pub(crate) async fn cache_admin_revocation_activation_loop(
                         Ok(blockers) if !blockers.is_empty() => {
                             format!("{error:?}; blocked by: {}", blockers.join(", "))
                         }
-                        _ => format!("{error:?}"),
+                        // An empty list is a finding, not a shrug: every
+                        // standing local precondition is clear, so the refusal
+                        // is later in the protocol — the peer fanout, or the
+                        // roster read that precedes it.
+                        Ok(_) => format!(
+                            "{error:?}; no local precondition is refusing the exclusion, so the \
+                             refusal is in the peer phase"
+                        ),
+                        Err(blocker_error) => format!(
+                            "{error:?}; the blocking precondition could not be read: \
+                             {blocker_error:?}"
+                        ),
                     },
                 ),
             }

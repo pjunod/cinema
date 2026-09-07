@@ -38,23 +38,29 @@ function shippedSource(name) {
 
 // The real shipped `api`, executed — not read. A harness that only matched the
 // source text would pass against a function whose branch had been rewired.
-function apiHarness(response) {
+// `responses` maps a path to its answer, because the recovery branch makes a
+// second request of its own and the two answers are the whole point.
+function apiHarness(responses) {
   const calls = { logout: 0, fetched: [] };
   const run = new Function(
-    "PlaybackPolicy", "response", "calls",
+    "PlaybackPolicy", "responses", "calls",
     [
       "const API='/api/v1';let TOKEN='t';let AUTH_GENERATION=0;",
       "function logout(){calls.logout++;}",
-      "function fetch(url,init){calls.fetched.push({url,init});return Promise.resolve(response);}",
+      "function fetch(url,init){calls.fetched.push(url);",
+      "  const path=url.slice(API.length);",
+      "  const answer=responses[path];",
+      "  if(!answer) throw new Error('no fixture for '+path);",
+      "  return Promise.resolve(answer);}",
       shippedSource("api"),
       "return api;",
     ].join("\n"),
   );
-  const api = run({ parseStreamFailure: () => null }, response, calls);
+  const api = run({ parseStreamFailure: () => null }, responses, calls);
   return { api, calls };
 }
 
-function refusal(status, body) {
+function reply(status, body) {
   const text = JSON.stringify(body);
   return {
     status,
@@ -63,6 +69,13 @@ function refusal(status, body) {
     json: () => Promise.resolve(body),
   };
 }
+
+const OK_ME = reply(200, { id: 1, username: "paul", is_admin: true });
+const DEAD_CREDENTIAL = reply(401, { error: "authentication required" });
+const NODE_CANNOT_VOUCH = reply(401, {
+  code: "cluster_recovery_authorization_unavailable",
+  message: "this node could not authorize a cluster recovery read",
+});
 
 async function refusalFrom(api, path, options) {
   try {
@@ -77,39 +90,59 @@ async function main() {
 // 1. An ordinary route's 401 still ends the session. That is the credential
 //    contract and this change must not weaken it.
 {
-  const { api, calls } = apiHarness(refusal(401, { error: "authentication required" }));
+  const { api, calls } = apiHarness({ "/libraries": DEAD_CREDENTIAL });
   const error = await refusalFrom(api, "/libraries");
   assert.equal(error.status, 401);
   assert.equal(calls.logout, 1, "an ordinary 401 must still end the session");
 }
 
-// 2. The recovery reads refuse without ending it, and the caller still learns
-//    the status and the server's stable code so the panel can say why.
+// 2. A recovery read refused by a node whose credential route still answers:
+//    the session is alive, so it survives, and the caller learns the status
+//    and the server's stable code so the panel can say why.
 {
-  const body = {
-    code: "cluster_recovery_authorization_unavailable",
-    message: "this node could not authorize a cluster recovery read",
-  };
-  const { api, calls } = apiHarness(refusal(401, body));
+  const { api, calls } = apiHarness({
+    "/cluster/status": NODE_CANNOT_VOUCH,
+    "/me": OK_ME,
+  });
   const error = await refusalFrom(api, "/cluster/status", { keepSessionOn401: true });
   assert.equal(calls.logout, 0, "a cluster-recovery refusal must not end the session");
+  assert.deepEqual(
+    calls.fetched.map((url) => url.replace("/api/v1", "")),
+    ["/cluster/status", "/me"],
+    "the session is confirmed against the credential's own route, not guessed",
+  );
   assert.equal(error.status, 401);
-  assert.equal(error.code, body.code, "the panel needs the stable code, not a sentence");
-  assert.equal(error.message, body.message);
+  assert.equal(error.code, "cluster_recovery_authorization_unavailable");
 }
 
-// 3. A 403 there is a verdict on the user and never ended the session anyway;
-//    pin it so the new branch cannot swallow it.
+// 3. The other half, and the reason this is a probe rather than a blanket
+//    exemption: a token that really died mid-tick must still end the session,
+//    or the Cluster tab paints forever against a credential that is gone.
 {
-  const { api, calls } = apiHarness(refusal(403, { error: "admin privileges required" }));
+  const { api, calls } = apiHarness({
+    "/cluster/status": DEAD_CREDENTIAL,
+    "/me": DEAD_CREDENTIAL,
+  });
+  const error = await refusalFrom(api, "/cluster/status", { keepSessionOn401: true });
+  assert.equal(calls.logout, 1, "a dead credential still ends the session here");
+  assert.equal(error.status, 401);
+}
+
+// 4. A 403 there is a verdict on the user and never ended the session anyway;
+//    pin it so the new branch cannot swallow it, and so it costs no probe.
+{
+  const { api, calls } = apiHarness({
+    "/cluster/status": reply(403, { error: "admin privileges required" }),
+  });
   const error = await refusalFrom(api, "/cluster/status", { keepSessionOn401: true });
   assert.equal(calls.logout, 0);
   assert.equal(error.status, 403);
+  assert.equal(calls.fetched.length, 1, "a 403 needs no credential probe");
 }
 
 }
 
-// 4. The option reaches the two call sites that need it, and only those. A
+// 5. The option reaches the two call sites that need it, and only those. A
 //    working `api` with the flag never passed is the same bug again.
 assert.equal(
   (SHIPPED_UI.match(/api\("\/cluster\/status",\{keepSessionOn401:true\}\)/g) || []).length,

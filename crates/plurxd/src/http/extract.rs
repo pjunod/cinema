@@ -27,19 +27,30 @@ pub struct AdminUser(pub User);
 /// digest, the user id needed for explicit revocation, and a fixed expiry.
 /// Cache-only reads never renew that expiry.
 ///
-/// **The Store is never required, and never asked first.** A cached proof
-/// answers with no Store contact at all, which is the property these two
-/// reads exist for: an operator diagnosing a wedged cluster must still be
-/// able to load the page that describes it. What the cache must not do is
-/// answer *for* the Store when it has nothing to say. A miss — no proof yet,
-/// or the whole cache fenced closed by the revocation protocol — is this
-/// node's condition, not a verdict on the caller's credential, so the guard
-/// falls back to a bounded Store read for the same authority every other
-/// admin route already grants, and returns [`ApiError::Forbidden`] for a real
-/// non-admin, `401` only for a credential the Store does not know, and a
-/// named `503` when it cannot find out. Answering `401` from the cache alone
-/// is what logged an administrator out of a working session every time they
-/// opened Settings while the protocol activation was stuck.
+/// **The Store is never asked first.** A cached proof answers with no Store
+/// contact at all, which is the property these two reads exist for: an
+/// operator diagnosing a wedged cluster must still be able to load the page
+/// that describes it, for as long as a proof lives.
+///
+/// What the cache must not do is answer *for* the Store when it has nothing to
+/// say. A miss — no proof yet, or the whole cache fenced closed by the
+/// revocation protocol — is this node's condition, not a verdict on the
+/// caller's credential, so the guard falls back to a bounded Store read for
+/// the same authority every other admin route already grants, and returns
+/// [`ApiError::Forbidden`] for a real non-admin, `401` only for a credential
+/// the Store does not know, and a named `503` when it cannot find out.
+/// Answering `401` from the cache alone is what logged an administrator out of
+/// a working session every time they opened Settings while the protocol
+/// activation was stuck.
+///
+/// Two limits worth stating plainly rather than discovering during an
+/// incident. The fallback is a linearizable read, so it cannot answer while
+/// quorum is lost: past the five-minute proof TTL these reads degrade to the
+/// named `503` in that incident rather than to data. And `user_for_token` also
+/// touches the token's `last_seen_at`, so the bound can cancel a replicated
+/// write mid-flight — that write is an idempotent activity stamp whose own
+/// caller already tolerates losing it, and the ordinary [`AuthUser`] path
+/// makes the same write with no bound at all.
 pub struct CacheOnlyAdminUser;
 
 const CACHE_ONLY_ADMIN_PROOF_TTL: Duration = Duration::from_secs(5 * 60);
@@ -391,8 +402,13 @@ impl CacheOnlyAdminProofCache {
     }
 
     /// Why the Store-free answer was unavailable, for the refusal that has to
-    /// explain itself. Read after [`Self::authenticate`] has already said no,
-    /// so it reports the condition rather than deciding anything.
+    /// explain itself. Read after [`Self::authenticate`] has already said no.
+    ///
+    /// Not read-only: like `authenticate`, it prunes expired revocations, and
+    /// that prune clears the cache and bumps the generation when a remote
+    /// revocation or the ambiguity fence has just lapsed. Same behaviour as
+    /// the call that preceded it, so it introduces no hazard of its own — but
+    /// it is a state transition, not an observation.
     pub(crate) fn closure_reason(&self) -> CacheOnlyAdminClosure {
         let Ok(mut state) = self.inner.lock() else {
             return CacheOnlyAdminClosure::Poisoned;
@@ -701,7 +717,19 @@ impl FromRequestParts<AppState> for CacheOnlyAdminUser {
             // node's condition, not the caller's credential, and it has to
             // say so: a 401 here logs an administrator out of a working
             // session over a cluster fault they were trying to look at.
-            Ok(Err(_)) | Err(_) => Err(cache_only_admin_unavailable(closure)),
+            //
+            // The precise condition goes to the log, not the body. This point
+            // is reachable with any bearer string, and "a credential change is
+            // propagating" or "the cache was poisoned by an earlier panic" is
+            // cluster-internal state that an unauthenticated caller has not
+            // earned. The operator reads it beside the rest of the incident.
+            Ok(Err(_)) | Err(_) => {
+                tracing::warn!(
+                    closure = closure.describe(),
+                    "refused a cluster recovery read: the Store did not answer within the bound"
+                );
+                Err(cache_only_admin_unavailable())
+            }
         }
     }
 }
@@ -712,18 +740,17 @@ impl FromRequestParts<AppState> for CacheOnlyAdminUser {
 /// named refusal instead of hanging the request that reports the wedge.
 const CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Why a cluster recovery read could not be authorized, in the operator's
-/// terms. The proof cache being closed is a cluster-protocol condition with a
-/// name of its own, and naming it is the difference between "the cluster
-/// cannot vouch for you here" and the untrue "your session expired".
-fn cache_only_admin_unavailable(closure: CacheOnlyAdminClosure) -> ApiError {
+/// A cluster recovery read this node could not authorize. The code is stable
+/// so a client can tell it apart from a verdict on the credential; the sentence
+/// says which of the two it is and nothing else, because the caller has not
+/// authenticated. The specific condition is logged.
+fn cache_only_admin_unavailable() -> ApiError {
     ApiError::typed(
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         "cluster_recovery_authorization_unavailable",
         format!(
-            "this node could not authorize a cluster recovery read: {}, and the Store did not \
-             answer within {} seconds",
-            closure.describe(),
+            "this node could not authorize a cluster recovery read within {} seconds; this is \
+             the node's condition, not a verdict on your credential",
             CACHE_ONLY_ADMIN_STORE_FALLBACK_TIMEOUT.as_secs()
         ),
     )

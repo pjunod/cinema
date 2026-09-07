@@ -3254,11 +3254,23 @@ async function api(path, {method="GET", body=null, raw=false, signal=null, keepS
   // answers from a process-local proof cache. A closed cache there is a
   // statement about the cluster, not about this credential, and ending the
   // session over it is how a stuck protocol activation threw an administrator
-  // at the login screen on every visit to Settings. The server no longer
-  // conflates the two; this keeps the client from doing it either, because
-  // the cost of being wrong is asymmetric — a refusal painted in the panel is
-  // recoverable, a wrongly destroyed session is not.
-  if(res.status===401&&!keepSessionOn401){
+  // at the login screen on every visit to Settings.
+  //
+  // So don't guess: ask. `/me` is the credential's own route and has no
+  // cluster opinion. If it answers, the session is alive and the refusal
+  // belongs to the panel; if it refuses, that call ends the session on the
+  // ordinary path and this one just reports. Guessing either way is wrong in
+  // a real case — a node still running the old build refuses these reads with
+  // 401 while the credential is fine, and a token that genuinely died mid-tick
+  // must not leave the Cluster tab painting forever.
+  if(res.status===401&&keepSessionOn401&&authGeneration===AUTH_GENERATION){
+    // The probe is the whole mechanism: `/me` refused by an expired credential
+    // ends the session on the ordinary path above, inside this very call, and
+    // `/me` answered means the session is alive and the refusal is the
+    // cluster's. Either way this request then reports its own refusal to its
+    // caller, and the panel paints it.
+    try{ await api("/me"); }catch(probe){ void probe; }
+  }else if(res.status===401){
     // Parallel requests from an expired credential may finish after the user
     // has already signed in again. Only the credential generation that sent
     // this request may clear the current session.
@@ -12796,6 +12808,10 @@ const SETTINGS_ENDPOINTS={
   clusterOps:()=>api("/cluster/status",{keepSessionOn401:true}).then(ops=>{
     clusterOpsStamp(); return clusterOpsReceived(ops);
   }).catch(error=>{
+    // A request from a credential generation that has already been replaced
+    // describes nothing about the current session; let it stay an error rather
+    // than painting it into the new one.
+    if(error&&error.staleAuth) throw error;
     // A refused recovery read is a fact about the cluster, so it is reported
     // by the panel that reports the cluster — named, dated and retryable —
     // rather than as a page-level failure or, as it once was, as the end of
