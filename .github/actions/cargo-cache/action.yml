@@ -15,6 +15,12 @@ inputs:
     description: Explicit non-voter scheduling proof; defaults off.
     required: false
     default: "false"
+  disk-gb:
+    description: >-
+      Free space required before this job starts, in whole gigabytes. A full
+      debug workspace tree is 21G; lanes that also carry Playwright browsers or
+      build ffmpeg should ask for more.
+    default: "30"
   budget-gb:
     description: Maximum Cargo bytes retained across every toolchain on this runner.
     required: false
@@ -45,11 +51,29 @@ runs:
       shell: bash
       env:
         CACHE_BUDGET_GB: ${{ inputs.budget-gb }}
+        DISK_GB: ${{ inputs.disk-gb }}
         CACHE_LANE: ${{ inputs.lane }}
         EXECUTION_MODE: ${{ inputs.execution-mode }}
         PERSISTENT_ELIGIBLE: ${{ inputs.persistent-eligible }}
       run: |
         set -euo pipefail
+        # First, and before the cache mode is even chosen. A runner that
+        # cannot fit this build reports a linker bus error rather than a full
+        # disk, and that message costs an hour to read correctly.
+        #
+        # This lived inside the persistent-cache branch on its first attempt,
+        # which meant it never ran on any lane that took the hosted path —
+        # including the `fast Rust gate`, which then filled the disk exactly
+        # as before while the check reported nothing at all. A preflight that
+        # only guards some jobs is worse than none, because the jobs it
+        # skips look identically clean.
+        #
+        # The number is measured rather than chosen: a full debug workspace
+        # tree is 21G on the pinned toolchain. 20G was the first guess and
+        # could never have been enough. `disk-gb` lets a heavier lane ask for
+        # what it needs instead of every lane inheriting the worst case.
+        "$GITHUB_WORKSPACE/scripts/ci-require-disk" \
+          "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" "${DISK_GB:-30}"
         [[ "$CACHE_LANE" =~ ^[a-z0-9][a-z0-9.-]*$ ]] || {
           echo "::error::Cargo cache lane must be filesystem-safe"
           exit 1
@@ -73,11 +97,6 @@ runs:
           echo "::error::Cannot derive the pinned Rust toolchain"
           exit 1
         }
-        # Before anything expensive: a runner that cannot fit this build
-        # reports a linker bus error rather than a full disk, and that message
-        # costs an hour to read correctly. 20G is a fitted build tree plus the
-        # temp space the linker needs, not a guess at the cache budget.
-        "$GITHUB_WORKSPACE/scripts/ci-require-disk" "${RUNNER_WORKSPACE:-$GITHUB_WORKSPACE}" 20
         mapfile -t cache_paths < <(
           "$GITHUB_WORKSPACE/scripts/ci-cargo-cache-prepare" \
             "$RUNNER_TOOL_CACHE" "$runner_name" "$toolchain" "$CACHE_LANE"

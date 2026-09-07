@@ -596,6 +596,10 @@ jobs:
         with:
           lane: vod-web
           execution-mode: ${{ needs.scope.outputs.execution_mode }}
+          # This lane carries Playwright browsers and an ffmpeg build on top
+          # of the 21G workspace tree, and it is the one that passed the
+          # default check and then filled the disk mid-build.
+          disk-gb: "45"
       - uses: https://data.forgejo.org/actions/setup-node@v4
         with:
           node-version: "22"
