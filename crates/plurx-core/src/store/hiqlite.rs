@@ -74,7 +74,8 @@ const DV_RECOVERY_GUARDS_SCHEMA_VERSION: i64 = 25;
 const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
 const REQUEST_IDENTITY_SCHEMA_VERSION: i64 = 27;
 const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 28;
-pub const AUTH_SCHEMA_VERSION: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
+const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 29;
+pub const AUTH_SCHEMA_VERSION: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -100,6 +101,7 @@ const DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE: i64 = DV_CONVERSIONS_SCHEMA_VE
 const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
 const REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
 const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
+const RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2071,6 +2073,36 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // `ADD COLUMN`, so the `REQUEST_IDENTITY` shape rather than
+                    // the `PRODUCER_RECOVERY` one: not idempotent, two voters
+                    // can observe the same predecessor, and
+                    // `settle_migration_attempt` is what turns the loser's
+                    // duplicate-column failure into an observation that the
+                    // step is already done.
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA.to_owned(),
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3"
+                                    .to_owned(),
+                                params!(
+                                    RECOVERY_EPOCH_SCHEMA_VERSION,
+                                    now,
+                                    RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3564,7 +3596,8 @@ fn schema_migration_action(
         | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE
         | ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE
         | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE
-        | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE => {
+        | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
+        | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5358,9 +5391,21 @@ mod tests {
             "v27 must advance exactly one step to the producer-recovery schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 23,
+            RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 28,
+            "the recovery-epoch migration must start from the exact v28 shape. \
+             The literal is the point: every other step in this chain asserts \
+             its source against the constant it is defined as, which cannot \
+             fail, so it guards the version bump and not the source"
+        );
+        assert_eq!(
+            RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE + 1,
+            RECOVERY_EPOCH_SCHEMA_VERSION,
+            "v28 must advance exactly one step to the recovery-epoch schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 24,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v28 step"
+            "this implementation contains every additive v5→v29 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

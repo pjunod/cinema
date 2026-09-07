@@ -829,6 +829,15 @@ pub struct MediaSessionRoute {
     pub session_id: String,
     pub user_id: i64,
     pub playback_id: String,
+    /// The server-owned budget identity this session belongs to.
+    ///
+    /// Empty for a session that predates the column, which had no epoch and
+    /// therefore no budget. Never a fence and never client-supplied: the
+    /// point of it is that a new request id, a new client session id or a
+    /// different node cannot present themselves as a fresh playback and be
+    /// granted a second automatic recovery.
+    #[serde(default)]
+    pub recovery_epoch: String,
     pub request_fingerprint: String,
     pub owner_node_id: String,
     pub owner_epoch: i64,
@@ -917,6 +926,15 @@ pub struct MediaSessionActivation {
     pub session_id: String,
     pub user_id: i64,
     pub playback_id: String,
+    /// The budget identity this activation belongs to.
+    ///
+    /// A deliberate new play mints one; every continuation carries its
+    /// predecessor's. The caller decides which, because only the caller knows
+    /// whether the playback pointer named a predecessor — and that decision is
+    /// the entire difference between one automatic recovery per playback and
+    /// one per attempt.
+    #[serde(default)]
+    pub recovery_epoch: String,
     /// Activation uses a predecessor CAS when `fence_predecessor` is true:
     /// `Some` requires the playback pointer to name this exact incarnation,
     /// while `None` requires the pointer to be absent. Ordinary starts and

@@ -31,7 +31,7 @@ const RESOLVED_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
 const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id, \
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, \
-    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms";
+    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch";
 
 fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
     Ok(MediaSessionRoute {
@@ -54,6 +54,7 @@ fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
         media_sequence: row.get(16)?,
         discontinuity_sequence: row.get(17)?,
         updated_at_ms: row.get(18)?,
+        recovery_epoch: row.get(19)?,
     })
 }
 
@@ -422,9 +423,16 @@ fn prepare_within(
              owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
              response_json, produced_playable_through_ms, fetched_through_ms,
              media_origin_ms, media_sequence, discontinuity_sequence,
-             publication_ready_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 'active', ?8, ?9,
-                 0, 0, ?10, 0, 0, ?11, ?12)",
+             publication_ready_at_ms, updated_at_ms, recovery_epoch)
+         -- The staged successor inherits its predecessor's epoch, read from
+         -- the predecessor's own row rather than passed in. A successor
+         -- continues one playback, so minting here would grant a second
+         -- automatic recovery to a playback that has already spent its one.
+         -- Reading it here means no caller can get it wrong.
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 'active', ?8, ?9,
+                0, 0, ?10, 0, 0, ?11, ?12,
+                COALESCE((SELECT recovery_epoch FROM media_sessions
+                           WHERE incarnation_id = ?13), '')",
         params![
             preparation.incarnation_id,
             preparation.session_id,
@@ -438,6 +446,7 @@ fn prepare_within(
             preparation.media_origin_ms,
             MEDIA_SESSION_PUBLICATION_BLOCKED,
             preparation.now_ms,
+            preparation.expected_predecessor_incarnation_id,
         ],
     )?;
     tx.execute(
@@ -1003,9 +1012,14 @@ impl MediaSessionStore for SqliteStore {
                      owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
                      response_json, produced_playable_through_ms, fetched_through_ms,
                      media_origin_ms, media_sequence, discontinuity_sequence,
-                     publication_ready_at_ms, updated_at_ms)
+                     publication_ready_at_ms, updated_at_ms, recovery_epoch)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, 'active', ?8, ?9,
-                         0, 0, ?10, 0, 0, ?13, ?11)
+                         0, 0, ?10, 0, 0, ?13, ?11, ?14)
+                 -- The epoch is written once, with the row. An idempotent
+                 -- replay updates the lease and the response and deliberately
+                 -- not this: a replay that re-minted the budget identity would
+                 -- hand the same playback a second automatic recovery, which
+                 -- is the one thing the ledger exists to refuse.
                  ON CONFLICT(incarnation_id) DO UPDATE SET
                     lease_expires_at_ms = excluded.lease_expires_at_ms,
                     response_json = excluded.response_json,
@@ -1033,6 +1047,7 @@ impl MediaSessionStore for SqliteStore {
                     activation.now_ms,
                     lease_resource,
                     activation.publication_ready_at_ms,
+                    activation.recovery_epoch,
                 ],
             )?;
             let route = tx

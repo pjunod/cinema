@@ -652,6 +652,7 @@ async fn current_media_session(
     backend: &str,
 ) -> MediaSessionActivation {
     let activation = MediaSessionActivation {
+        recovery_epoch: String::new(),
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
         user_id,
@@ -767,6 +768,7 @@ async fn media_activation_confirmation_recovers_a_committed_timeout() {
         .await
         .expect("create committed-timeout user");
     let activation = MediaSessionActivation {
+        recovery_epoch: String::new(),
         incarnation_id: "00000000-0000-4000-8000-00000000fc11".to_owned(),
         session_id: "00000000-0000-4000-8000-00000000fc12".to_owned(),
         user_id: user.id,
@@ -1686,6 +1688,7 @@ async fn media_session_rejoin_cannot_retarget_an_occupied_preparation_after_poin
 
         let current = "00000000-0000-4000-8000-00000000d365";
         let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: current.to_owned(),
             session_id: "00000000-0000-4000-8000-00000000d366".to_owned(),
             user_id: user.id,
@@ -3344,6 +3347,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         let request_id = "activation-settle-request";
         let incarnation_id = "00000000-0000-4000-8000-0000000000e1";
         let activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: incarnation_id.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e2".to_owned(),
             user_id: user.id,
@@ -3539,6 +3543,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
 
         let race_incarnation = "00000000-0000-4000-8000-0000000000e3";
         let race_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: race_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
             user_id: user.id,
@@ -3666,6 +3671,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         let finite_incarnation = "00000000-0000-4000-8000-0000000000f1";
         let finite_request_id = "activation-finite-handoff";
         let finite_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: finite_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000f2".to_owned(),
             user_id: user.id,
@@ -3906,6 +3912,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
 
         let failed_confirm_incarnation = "00000000-0000-4000-8000-0000000000e6";
         let failed_confirm_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: failed_confirm_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e7".to_owned(),
             user_id: user.id,
@@ -4567,6 +4574,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: assign request owner: {error}")));
 
         let first_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
                 incarnation_id: incarnation_a.to_owned(),
                 session_id: session_a.to_owned(),
                 user_id: first_user.id,
@@ -4665,6 +4673,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let session_b = "00000000-0000-4000-8000-0000000000b2";
         let incarnation_b = "00000000-0000-4000-8000-0000000000a3";
         let second_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
                 incarnation_id: incarnation_b.to_owned(),
                 session_id: session_b.to_owned(),
                 user_id: second_user.id,
@@ -4705,6 +4714,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let session_a2 = "00000000-0000-4000-8000-0000000000b3";
         let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
         let superseding_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: incarnation_a2.to_owned(),
             session_id: session_a2.to_owned(),
             user_id: first_user.id,
@@ -4949,6 +4959,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         let boundary_session = "00000000-0000-4000-8000-0000000000bb";
         store
             .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
                 incarnation_id: boundary_incarnation.to_owned(),
                 session_id: boundary_session.to_owned(),
                 user_id: second_user.id,
@@ -5030,6 +5041,7 @@ async fn media_session_contract_runs_through_dyn_store() {
 
         let stale = store
             .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
                 incarnation_id: "00000000-0000-4000-8000-0000000000a5".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b4".to_owned(),
                 user_id: first_user.id,
@@ -5054,6 +5066,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
         let stale_legacy = store
             .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
                 incarnation_id: "00000000-0000-4000-8000-0000000000a8".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b6".to_owned(),
                 user_id: first_user.id,
@@ -5346,6 +5359,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: assign expiring activation: {error}")));
         assert!(store
             .activate_media_session(&MediaSessionActivation {
+                recovery_epoch: String::new(),
                 incarnation_id: expired_activation_incarnation.to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b5".to_owned(),
                 user_id: first_user.id,
@@ -5439,6 +5453,7 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
         let incarnation = "00000000-0000-4000-8000-00000000f001";
         let session = "00000000-0000-4000-8000-00000000f002";
         let terminal_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
             user_id: user.id,
@@ -5566,6 +5581,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
         let session = "00000000-0000-4000-8000-00000000e002";
 
         let takeover_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
             user_id: user.id,
@@ -5755,6 +5771,7 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
         for index in 0_u128..33 {
             let incarnation_id = uuid::Uuid::from_u128(0x4000 + index).to_string();
             let activation = MediaSessionActivation {
+                recovery_epoch: String::new(),
                 incarnation_id,
                 session_id: uuid::Uuid::from_u128(0x5000 + index).to_string(),
                 user_id: user.id,
@@ -5844,6 +5861,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             let session_id = uuid::Uuid::from_u128(0x2000 + index).to_string();
             let playback_id = format!("cap-playback-{index}");
             let activation = MediaSessionActivation {
+                recovery_epoch: String::new(),
                 incarnation_id: incarnation_id.clone(),
                 session_id,
                 user_id: user.id,
@@ -5918,6 +5936,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: own capped replacement: {error}")));
         let replacement_activation = MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: replacement.clone(),
             session_id: uuid::Uuid::from_u128(0x4000).to_string(),
             user_id: user.id,
@@ -6024,6 +6043,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     .expect("seed exhausted media lease");
     assert!(store
         .activate_media_session(&MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: max_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
             user_id: user.id,
@@ -6091,6 +6111,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     .expect("mark media owner removed");
     assert!(store
         .activate_media_session(&MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: removed_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c4".to_owned(),
             user_id: user.id,
@@ -6129,6 +6150,7 @@ async fn hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease() {
     let incarnation_id = "00000000-0000-4000-8000-0000000000d1";
     let session_id = "00000000-0000-4000-8000-0000000000d2";
     let activation = MediaSessionActivation {
+        recovery_epoch: String::new(),
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
         user_id: user.id,
@@ -23682,6 +23704,167 @@ async fn a_cache_completion_without_a_digest_never_clears_the_one_on_the_row() {
                 "{backend}: fenced completion writing {written:?}"
             );
         }
+    })
+    .await;
+}
+
+/// The recovery epoch is written once with the session, and a staged successor
+/// inherits its predecessor's rather than being handed one.
+///
+/// It is the key to the decoder-recovery budget: one row per
+/// `(user_id, playback_id, recovery_epoch)`, so anything that mints a second
+/// epoch for one playback hands that playback a second automatic recovery. The
+/// two ways that could happen are an idempotent activation replay re-minting
+/// on the way through, and a staged successor being given a fresh one — so
+/// both are asserted here rather than left to the callers to get right.
+#[tokio::test]
+async fn a_recovery_epoch_is_written_once_and_inherited_by_a_successor() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("epoch-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create epoch user: {error}"))
+            .id;
+        let epoch = "epoch-one";
+        let mut activation = MediaSessionActivation {
+            recovery_epoch: epoch.to_owned(),
+            incarnation_id: "00000000-0000-4000-8000-0000000ec001".to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000ec101".to_owned(),
+            user_id: user,
+            playback_id: "epoch-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "staged-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"current"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_000,
+            lease_expires_at_ms: 900_000,
+        };
+        let route = store
+            .activate_media_session(&activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: activation must win"));
+        assert_eq!(
+            route.route.recovery_epoch, epoch,
+            "{backend}: the activation's epoch reaches the row"
+        );
+
+        // An idempotent replay refreshes the lease and the response. It must
+        // not re-mint the budget identity: a replay that did would let one
+        // playback present two epochs and be granted two recoveries.
+        // An idempotent replay, identical except for the epoch. That is the
+        // only shape a replay can take: `activation_route_matches` compares
+        // every field the conflict arm is able to write, so a replay differing
+        // in any of them is refused whole. The epoch is the one field it
+        // compares nothing about — which is exactly why re-minting on replay
+        // would be invisible, and why it is asserted here.
+        activation.recovery_epoch = "epoch-two".to_owned();
+        let replayed = store
+            .activate_media_session(&activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay: {error}"));
+        let observed = store
+            .media_session_route("00000000-0000-4000-8000-0000000ec101")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read back: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the session is still there"));
+        assert_eq!(
+            observed.recovery_epoch, epoch,
+            "{backend}: a replay never re-mints the epoch"
+        );
+        // Which mechanism kept it is a real difference between the backends,
+        // and asserting only the epoch would pass whether the upsert declined
+        // to touch it or never ran at all. SQLite's activate is an
+        // unconditional `ON CONFLICT DO UPDATE`, so the conflict arm fires and
+        // refreshes the lease; the replicated twin guards the whole statement
+        // on the pointer not already naming this incarnation, so a replay
+        // after activation is refused whole. Both satisfy the invariant; this
+        // pins which one happened rather than leaving the coverage ambiguous.
+        assert!(
+            replayed.is_some(),
+            "{backend}: a replay identical but for the epoch is accepted, so \
+             the epoch reached the statement and was declined rather than \
+             never having been offered"
+        );
+
+        // And the other direction: a replay that also changes something the
+        // conflict arm can write is refused whole, so there is no shape in
+        // which a second epoch arrives alongside an ordinary refresh.
+        let mut smuggled = activation.clone();
+        smuggled.recovery_epoch = "epoch-three".to_owned();
+        smuggled.response_json = r#"{"session":"smuggled"}"#.to_owned();
+        assert!(
+            store
+                .activate_media_session(&smuggled)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: smuggled replay: {error}"))
+                .is_none(),
+            "{backend}: a replay that changes anything else is refused"
+        );
+        assert_eq!(
+            store
+                .media_session_route("00000000-0000-4000-8000-0000000ec101")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read back: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: the session is still there"))
+                .recovery_epoch,
+            epoch,
+            "{backend}: and takes its epoch with it"
+        );
+        activation.recovery_epoch = epoch.to_owned();
+
+        store
+            .settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                activation.now_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: confirm: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: confirmation must win"));
+
+        // A staged successor continues one playback, so it carries the same
+        // budget. Nothing passes the epoch in: it is read from the
+        // predecessor's own row, so no caller can get it wrong.
+        store
+            .prepare_media_session(&staged_preparation(
+                user,
+                "epoch-playback",
+                "00000000-0000-4000-8000-0000000ec002",
+                "00000000-0000-4000-8000-0000000ec102",
+                "00000000-0000-4000-8000-0000000ec001",
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: preparation must win"));
+        let staged = store
+            .media_session_route("00000000-0000-4000-8000-0000000ec102")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: staged read: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the staged row exists"));
+        assert_eq!(
+            staged.recovery_epoch, epoch,
+            "{backend}: a successor inherits the budget it continues"
+        );
+
+        // The whole safety of `NOT NULL DEFAULT ''` rests on an empty epoch
+        // not being able to address a ledger row. That is a claim about
+        // `validated_epoch_key`, so it is asserted rather than assumed.
+        assert!(
+            store
+                .producer_recovery_for_epoch(user, "epoch-playback", "")
+                .await
+                .is_err(),
+            "{backend}: an empty epoch names no budget, so a row that has one \
+             cannot reach the ledger by accident"
+        );
     })
     .await;
 }

@@ -928,6 +928,7 @@ mod tests {
             .await
             .expect("assign relay owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
             user_id,
@@ -1404,6 +1405,7 @@ mod tests {
     #[test]
     fn active_lease_expiring_after_classification_is_transition_not_gone() {
         let route = plurx_core::domain::MediaSessionRoute {
+            recovery_epoch: String::new(),
             incarnation_id: uuid::Uuid::new_v4().to_string(),
             session_id: uuid::Uuid::new_v4().to_string(),
             user_id: 7,

@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3f candidate; M0–M3e, M4, M5a, M3c5 and the M5a census repair
-merged into the effort · **Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M3f task base:** effort head
-`b2dcf458500e210032197b3a3c73abbbe89092b8`
+**Status:** M5b candidate; M0–M3f, M4, M5a and the M5a census repair merged
+into the effort · **Updated:** 2026-09-07 · **Integration branch:**
+`effort/decoder-selection-recovery` · **M5b task base:** effort head
+`02831892f096c047d5300ac0c89cbff2ed7216a3`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,13 +20,13 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3f — the control, and what a node is allowed to do with it |
-| Task branch | `codex/decoder-selection-m3f`, based on effort head `b2dcf458` |
-| Task PR | Open against the effort branch. One whole-PR adversarial review has run against this candidate; it raised one claimed blocker that was not a defect and eight documentation and comment findings that were, and all are repaired in this head |
+| Milestone | M5b — the budget's key, on the row that owns it |
+| Task branch | `codex/decoder-selection-m5b`, based on effort head `02831892` |
+| Task PR | Open against the effort branch. One whole-PR adversarial review is owed on this candidate before it merges |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Full validation | On this exact head, pinned 1.97.1: `cargo test --workspace` all green — `plurxd` 1876 passed 0 failed 3 ignored, `plurx-core` lib 992/0, `store_contract` 143/0/2, `plurx-cluster-check` 79/79. `node tests/web/settings-sections.test.js` 15/15 including four new verified-decode contracts. `tests.operations.test_decoder_diagnostic_qualification` + `tests.validation.test_decoder_recovery_status` 45/45. `make lint`, `make validation-lint`, `make history-check`, `cargo fmt --all --check` and `git diff --check` clean |
+| Full validation | On this exact head, pinned 1.97.1: `plurxd` 1877 passed 0 failed 3 ignored, `plurx-core` lib 991 passed with the one documented `cluster::migration` flake under load (a different test each run; 72/72 in isolation, including on Forgejo `main`), `store_contract` 97/97 including one new run through both backends, `plurx-cluster-check` 79/79. Web suite 15/15. Python validators 46/46. `make lint`, `make validation-lint`, `make history-check`, `cargo fmt --all --check` and `git diff --check` clean |
 | Repairs | The five inherited failures described in *M5a census repair* below are green on this head: the two sqlite transaction censuses, the migration count, the hiqlite additive-chain assertion, and the downgrade-fixture guard |
 | Exact receipt | The head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
 | Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
@@ -39,9 +39,9 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a–M3e and M3c5 merged; M3f is this candidate | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f adds the operator request, the node effective-mode intersection that decides whether it may be honoured, and the `Settings > Developer` enable section that states the cost and shows what this node measured |
+| M3 · owned observation and health receipts | Complete — M3a–M3f and M3c5 merged | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f ([#99](http://192.168.4.7:3000/noirr/plurx/pulls/99), head `02831892`) adds the operator request, the node effective-mode intersection that decides whether it may be honoured, and the `Settings > Developer` enable section that states the cost and shows what this node measured |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
-| M5 · durable budget and prepublication recovery | M5a merged and its census repair is this candidate; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change. M5a left five inherited test failures invisible to the effort gate; the repair candidate closes them |
+| M5 · durable budget and prepublication recovery | M5a and its census repair merged; M5b is this candidate; M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. M5a left five inherited test failures invisible to the effort gate; its census repair ([#96](http://192.168.4.7:3000/noirr/plurx/pulls/96), head `b2dcf458`) closes them. M5b gives the ledger the key it was missing: a server-owned `recovery_epoch` on the session row, minted by a deliberate new play and inherited by every continuation. Still no recovery behaviour — nothing reads the epoch until M5c |
 | M6 · postpublication replacement and client intent | Not started | — |
 | M7 · offline, shared cache, and handoff enforcement | Not started | — |
 | M8 · fleet qualification and promotion | Not started | — |
@@ -2081,6 +2081,160 @@ Cluster convergence is by restart, and nothing yet reports the fleet's
 identities in one place. An operator rolling this out sees each node's own
 answer on that node's settings page and has to hold the fleet view themselves.
 
+## M5b working tree — the budget's key, on the row that owns it
+
+M5a gave the decoder-recovery budget a durable ledger keyed by
+`(user_id, playback_id, recovery_epoch)` and nothing could say what a session's
+epoch was. The ledger had a key nobody could present, which is why no daemon
+code called it.
+
+This is that key: `media_sessions.recovery_epoch`, minted by a deliberate new
+play and inherited by every continuation.
+
+### What the epoch buys, stated exactly
+
+Under one `playback_id`: a new request id, a new client session id, or a
+different owner node cannot present themselves as a fresh playback and be
+granted a second budget. Those are the three ways one viewer's continuing
+playback used to look like three different playbacks, and the epoch closes all
+three.
+
+It does **not** bound a client that varies `playback_id` itself. The ledger's
+key contains `playback_id`, so a fresh one lands on a fresh row whatever the
+epoch is. That client is bounded by the ordinary session caps —
+`MAX_CURRENT_PER_USER` and the per-node active count — and not by this. The
+first draft of this milestone claimed otherwise in a code comment, a document
+section and a test that pinned the sentence; the review caught all three.
+
+### The one expression the whole budget rests on
+
+```rust
+fn recovery_epoch_for(predecessor: Option<&MediaSessionRoute>) -> String
+```
+
+No predecessor means the pointer named nobody: a deliberate new play, and one
+budget. A predecessor means this continues a playback that already has one — an
+automatic reopen, a seek, a track change, an ownership handoff — and it carries
+that predecessor's epoch. Mint on a continuation instead and a viewer whose
+file cannot be decoded gets a fresh automatic retry after every reopen and
+every seek: an unbounded loop against a decoder that will never succeed, which
+is the outcome the ledger exists to make impossible.
+
+The pointer read and the mint/inherit decision are the same fact, so they are
+in the same place. `admit_restart` was already deriving the predecessor CAS
+from that read; the epoch now comes from it too.
+
+### Empty is a state, not a missing value
+
+`NOT NULL DEFAULT ''`. Empty means what every row written before the column
+meant: a session that predates the epoch and therefore has no budget. It is not
+a valid epoch — `validated_epoch_key` refuses an empty one — so it cannot
+address a ledger row by accident.
+
+A continuation of such a session inherits the empty value rather than minting.
+Minting there would hand a fresh allowance to every continuation of every
+session that was live during the upgrade — the failure this prevents, arriving
+through an upgrade instead of through a client. Those playbacks gain an epoch
+the next time somebody deliberately presses play.
+
+### Written once, and inherited rather than passed
+
+Two ways a playback could end up with two budgets, and both are closed in the
+store rather than left to callers:
+
+An idempotent activation replay refreshes the lease and the response and
+deliberately does not touch the epoch. A replay that re-minted it would let one
+playback present two epochs and be granted two recoveries.
+
+A staged successor reads its predecessor's epoch **from the predecessor's own
+row**, in the same statement that installs it — `COALESCE((SELECT
+recovery_epoch FROM media_sessions WHERE incarnation_id = <predecessor>), '')`.
+Nothing passes it in, so no caller can get it wrong. On the replicated backend
+that reuses the predecessor placeholder rather than adding one, because hiqlite
+refuses a statement whose placeholders first appear out of order — and a SQL
+comment is text like any other, so a comment naming a placeholder breaks it
+too. That cost one confusing failure here and is written down in the statement.
+
+### Schema
+
+SQLite v49 and cluster schema v29, the same `ALTER TABLE ... ADD COLUMN`
+spelled identically for both. The replicated arm follows the `REQUEST_IDENTITY`
+shape rather than the `PRODUCER_RECOVERY` one: `ADD COLUMN` is not idempotent,
+two voters can observe the same predecessor, and `settle_migration_attempt` is
+what turns the loser's duplicate-column failure into an observation that the
+step is already done.
+
+All five census gates the M5a repair closed were answered in this milestone
+rather than discovered later: the migration count, the additive chain with its
+paired step assertion, the v43 downgrade fixture and `DROPPED_BY_THE_FIXTURE`,
+and the `media_sessions` column census in the v25 migration test. The v14
+fixture needs nothing, because it drops `media_sessions` outright.
+
+### Where inheritance holds, and the one place it does not
+
+A takeover inherits by construction rather than by care:
+`claim_media_session_takeover` is an `UPDATE` over the existing row — there are
+exactly four `INSERT INTO media_sessions` statements in the tree, and none of
+them is in a takeover path — so a handoff cannot change an epoch because it
+never writes one. The same is true of every other owner transition.
+
+The gap is the reaped pointer, and it is real. "New play" and "continuation"
+are told apart by whether the playback pointer named a predecessor, and the
+pointer is deleted when a session ends *and* when `maintain_media_sessions`
+reaps an expired one. A viewer watching a file that cannot be decoded, whose
+session stalls and is reaped while their player stays open, reopens to no
+pointer — and mints. That is one extra budget per lease-expiry cycle for as
+long as they leave it open: not the unbounded loop the ledger removes, but the
+same loop with a timer on it, and it is exactly the case most correlated with a
+broken decode. Closing it needs the pointer to outlive the session it names, as
+a tombstone carrying the epoch, and that is recorded as owed rather than
+guessed at here.
+
+### Empty means three different things, and M5c has to care
+
+`''` is produced four ways: a row that predates the column; a successor whose
+predecessor row was gone when it was staged, so the `COALESCE` default applied;
+an activation relayed from a node that predates the field, defaulted by serde;
+and any future `INSERT` that omits the column. The store cannot tell them
+apart, and no policy M5c picks for `''` is right for all of them — refusing
+recovery loses a retry a viewer was entitled to, and minting hands unlimited
+budgets to every pre-upgrade session.
+
+Every one of those is fail-closed today, which is the correct direction, and
+the two that are silent — the `COALESCE` default and the serde default —
+deserve to be observable before M5c decides anything on top of them. Recorded
+below.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran. It found one blocker and six majors; the blocker
+was real, two of the majors were real, one was a documentation lie this
+milestone had told three times, and three were cleared by reading code the
+reviewer could not see — which is worth recording, because two of those three
+are now measured facts in this document instead of assumptions.
+
+| Finding | Disposition |
+|---|---|
+| The replay test proved nothing. It asserted only that the epoch was unchanged, which passes whether the conflict arm declined to touch it or never ran at all — and the two backends reach that arm differently, so the invariant might have been untested on the replicated one | The replay is now the only shape a replay can take (identical but for the epoch, because `activation_route_matches` compares every field the arm can write), and it asserts the store *accepted* it — so the epoch reached the statement and was declined. A second case proves a replay that also changes a writable field is refused whole, so no shape smuggles a second epoch in alongside an ordinary refresh |
+| "A client that varied `playback_id` would mint itself an unlimited supply of budgets" was false, and the epoch does not prevent it: the ledger's key contains `playback_id`, so a fresh one lands on a fresh row whatever the epoch is. Stated in a code comment, in this document, and pinned by a test | All three corrected to the property that holds, and the test now pins the corrected sentence and refuses the old one |
+| A session reaped mid-watch mints a second budget when the client reopens, because the pointer is the only discriminator and maintenance deletes it | Measured, quantified, and recorded as owed with the fix named (a pointer tombstone that outlives its session). Not closed here: it needs a lifetime change to a record this milestone does not otherwise touch |
+| `''` means four different things and M5c cannot tell them apart | Documented as its own section, with the two silent producers — the successor `COALESCE` default and the cross-node serde default — recorded as owed observability before M5c chooses a policy |
+| The caller's epoch and the row's epoch could diverge, and `activation_route_matches` compares nothing about the field | The local binding is gone: the value is read at the point of use, so there is no copy to believe. The store's returned route is the authority, stated where it matters |
+| **Not a defect.** "The takeover path may insert a `media_sessions` row with raw SQL and lose the epoch" | There are exactly four `INSERT INTO media_sessions` statements in the tree and none is in an owner-transition path — `claim_media_session_takeover` is an `UPDATE`. A takeover inherits by construction. Now a stated measured fact rather than an assumption |
+| **Not a defect.** "The hiqlite preparation statement's `$13` may not be the predecessor" | It is `expected_predecessor_incarnation_id`, verified against the `params!` list. The reuse is correct |
+| **Not a defect.** "`validated_epoch_key` refusing an empty epoch is an unmeasured claim" | It is measured — and now asserted, because the whole safety of `NOT NULL DEFAULT ''` rests on it |
+| The new migration-source assertion was a tautology: the constant is defined as the thing it is asserted equal to | Asserted against the literal 28 instead, with the reason written down — every other step in the chain has the tautological form and guards only its version bump |
+| `DROPPED_BY_THE_FIXTURE`'s new entry was the bare column name, which v48's ledger table already contains — so the guard would have passed with v49 absent | The entry is the `ADD COLUMN` text, which belongs to v49 alone |
+| The M5a census gate was made to assert M5b's migration numbers, so every future milestone would edit a test named after M5a — which is how the M5a defect happened | It matches the shape of those assertions rather than their values |
+
+### What this does not do
+
+Nothing reads the epoch yet. The ledger is still uncalled: reserving a budget,
+freezing an alternative, and installing software decode against the same
+hardware encoder are M5c. This milestone is the key, and it is deliberately
+separable — a key nobody can present is the defect M5a shipped, and it is worth
+closing on its own where it can be reviewed on its own.
+
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 
 Admission decided what a session would cost from the encoder's name. A
@@ -2927,6 +3081,15 @@ lane and focused tests provide earlier feedback.
   timing-dependent in it as such. Measured above: four different failures in
   four loaded runs, 72/72 five times in isolation including on Forgejo `main`.
   A promotion gate that runs the whole workspace at once will meet this.
+- Give the playback pointer a tombstone that outlives the session it names, so
+  a reopen after a reap inherits its epoch instead of minting one. Measured
+  above: one extra budget per lease-expiry cycle for a viewer who leaves a
+  stalled player open — the case most correlated with the decode failure this
+  effort exists to fix.
+- Make the two silent producers of an empty epoch observable — the successor
+  `COALESCE` default and the cross-node serde default — before M5c chooses a
+  policy for `''`. Today a dropped budget is indistinguishable from a session
+  that never had one.
 - Wire the full `cargo test --workspace` run into a gate a task candidate
   cannot pass without. The five failures this repair closes were invisible to
   the `Effort development gate` for eight milestones, and the only thing that

@@ -134,6 +134,24 @@ pub(crate) const MEDIA_SESSION_PREPARATIONS_SCHEMA: &str =
         PRIMARY KEY (user_id, playback_id)
     ) STRICT;";
 
+/// The server-owned recovery epoch, on the session row that carries it.
+///
+/// `media_session_producer_recovery` is keyed by `(user_id, playback_id,
+/// recovery_epoch)`, and until this column exists nothing can say what a given
+/// session's epoch is — so the budget has a key nobody can present. This is
+/// that key, written where a continuation can read it: the predecessor's own
+/// row.
+///
+/// `NOT NULL DEFAULT ''` rather than nullable. Empty means what every row
+/// written before this column meant: a session that predates the epoch and
+/// therefore has none. It is not a valid epoch — `validated_epoch_key` refuses
+/// an empty one — so an empty value cannot accidentally address a budget row.
+///
+/// One statement, spelled identically for both backends, for the same reason
+/// as the two schemas below it.
+pub(crate) const MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA: &str = "ALTER TABLE media_sessions
+        ADD COLUMN recovery_epoch TEXT NOT NULL DEFAULT '';";
+
 /// The decoder-recovery budget and decision ledger, shared verbatim by both
 /// backends.
 ///

@@ -6831,6 +6831,7 @@ mod tests {
             .await
             .expect("assign route owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
+            recovery_epoch: String::new(),
             incarnation_id: generation.to_owned(),
             session_id: session_id.to_owned(),
             user_id: 7,

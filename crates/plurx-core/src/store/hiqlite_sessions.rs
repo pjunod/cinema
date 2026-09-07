@@ -197,7 +197,8 @@ pub(super) const MEDIA_SESSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS media
     media_origin_ms               INTEGER NOT NULL DEFAULT 0,
     media_sequence                INTEGER NOT NULL DEFAULT 0,
     discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,
-    updated_at_ms                 INTEGER NOT NULL
+    updated_at_ms                 INTEGER NOT NULL,
+    recovery_epoch                TEXT NOT NULL DEFAULT ''
 ) STRICT";
 
 /// Exact v10 shape used only by the v9 -> v10 migration. Later additive
@@ -289,7 +290,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
 const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason,
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms,
-    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms";
+    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch";
 
 struct RouteRow(MediaSessionRoute);
 
@@ -315,6 +316,7 @@ impl From<&mut Row<'_>> for RouteRow {
             media_sequence: row.get("media_sequence"),
             discontinuity_sequence: row.get("discontinuity_sequence"),
             updated_at_ms: row.get("updated_at_ms"),
+            recovery_epoch: row.get("recovery_epoch"),
         })
     }
 }
@@ -580,8 +582,18 @@ fn prepare_statements(
                  owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
                  response_json, produced_playable_through_ms, fetched_through_ms,
                  media_origin_ms, media_sequence, discontinuity_sequence,
-                 publication_ready_at_ms, updated_at_ms)
-             SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9, 0, 0, $10, 0, 0, $11, $12
+                 publication_ready_at_ms, updated_at_ms, recovery_epoch)
+             -- The staged successor inherits its predecessor's epoch, read
+             -- from the predecessor's own row rather than passed in: a
+             -- successor continues one playback, so minting here would grant a
+             -- second automatic recovery to a playback that already spent its
+             -- one. The predecessor placeholder is reused here rather than
+             -- added, because hiqlite refuses a statement whose placeholders
+             -- first appear out of order -- and a comment is text like any
+             -- other, so one must not name a placeholder either.
+             SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9, 0, 0, $10, 0, 0, $11, $12,
+                    COALESCE((SELECT recovery_epoch FROM media_sessions
+                               WHERE incarnation_id = $13), '')
               WHERE EXISTS (SELECT 1 FROM job_leases
                   WHERE resource = 'session:' || $1 AND owner_node_id = $6
                     AND fence = 1 AND expires_at_ms = $7 AND expires_at_ms > $12)
@@ -1368,45 +1380,50 @@ impl MediaSessionStore for HiqliteAuthStore {
                      owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
                      response_json, produced_playable_through_ms, fetched_through_ms,
                      media_origin_ms, media_sequence, discontinuity_sequence,
-                     updated_at_ms, publication_ready_at_ms)
+                     updated_at_ms, publication_ready_at_ms, recovery_epoch)
                  SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9,
-                        0, 0, $10, 0, 0, $11, $12
+                        0, 0, $10, 0, 0, $11, $12, $13
                   WHERE (SELECT COUNT(*) FROM media_sessions
                           WHERE user_id = $3 AND state IN ('starting', 'active')
                             AND lease_expires_at_ms > $11
                             AND incarnation_id != $1
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $3 AND playback_id = $4), '')) < $13
-                    AND ($14 = '' OR EXISTS (
+                               WHERE user_id = $3 AND playback_id = $4), '')) < $14
+                    AND ($15 = '' OR EXISTS (
                       SELECT 1 FROM media_session_requests
-                       WHERE user_id = $3 AND request_id = $14 AND incarnation_id = $1
+                       WHERE user_id = $3 AND request_id = $15 AND incarnation_id = $1
                          AND request_fingerprint = $5 AND playback_id = $4
                          AND owner_node_id = $6
                          AND ((state = 'starting' AND claim_expires_at_ms > $11)
                            OR (state = 'resolved' AND response_json = $9))))
                     AND EXISTS (SELECT 1 FROM job_leases
-                      WHERE resource = $15 AND owner_node_id = $6 AND fence = 1
+                      WHERE resource = $16 AND owner_node_id = $6 AND fence = 1
                         AND expires_at_ms = $7 AND expires_at_ms > $11
                         AND updated_at_ms = $11
                         AND revision < 9223372036854775807)
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $3 AND incarnation_id != $1) < $16
+                          WHERE user_id = $3 AND incarnation_id != $1) < $17
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE owner_node_id = $6 AND state = 'active'
                             AND lease_expires_at_ms > $11
                             AND incarnation_id != $1
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $3 AND playback_id = $4), '')) < $17
-                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $18)
-                    AND ($19 = '' OR NOT EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $19 AND state = 'active'
+                               WHERE user_id = $3 AND playback_id = $4), '')) < $18
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $19)
+                    AND ($20 = '' OR NOT EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $20 AND state = 'active'
                         AND publication_ready_at_ms != 0))
                     AND NOT EXISTS (
                       SELECT 1 FROM media_playback_pointers
                        WHERE user_id = $3 AND playback_id = $4
                          AND current_incarnation_id = $1)
+                 -- The epoch is written once, with the row. An idempotent
+                 -- replay refreshes the lease and the response and
+                 -- deliberately not this: a replay that re-minted the budget
+                 -- identity would hand one playback a second automatic
+                 -- recovery, which is what the ledger exists to refuse.
                  ON CONFLICT(incarnation_id) DO UPDATE SET
                     lease_expires_at_ms = excluded.lease_expires_at_ms,
                     response_json = excluded.response_json,
@@ -1430,6 +1447,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.media_origin_ms,
                     activation.now_ms,
                     activation.publication_ready_at_ms,
+                    activation.recovery_epoch.as_str(),
                     MAX_CURRENT_PER_USER,
                     request_id,
                     lease_resource.as_str(),

@@ -983,6 +983,15 @@ const MIGRATIONS: &[&str] = &[
     // request id, a new client session, or a different node cannot present
     // themselves as a fresh playback and be granted a second attempt.
     super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
+    // v49: the epoch that names a recovery budget, on the session row that
+    // owns it. v48 gave the budget a durable ledger keyed by the epoch and
+    // nothing could say what a session's epoch was, so the ledger had a key
+    // nobody could present. A deliberate new play mints one; every
+    // continuation — reopen, seek, track change, handoff — inherits its
+    // predecessor's, which is the whole point: none of them may mint a second
+    // allowance. Empty means a session that predates the column, which had no
+    // epoch and therefore no budget.
+    super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2240,7 +2249,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 48,
+            version, 49,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2969,7 +2978,8 @@ mod tests {
         for (table, columns) in [
             ("media_session_requests", 10),
             ("media_playback_pointers", 4),
-            ("media_sessions", 19),
+            // 19 columns through v35, plus v49's `recovery_epoch`.
+            ("media_sessions", 20),
         ] {
             assert_eq!(
                 conn.query_row(

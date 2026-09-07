@@ -44,6 +44,8 @@ M3C5_MERGED_HEAD = "5e0f7f1f51d4476fabee81d278c47ccad6baf1a2"
 M5A_CENSUS_TASK_BASE = M3C5_MERGED_HEAD
 M5A_CENSUS_MERGED_HEAD = "b2dcf458500e210032197b3a3c73abbbe89092b8"
 M3F_TASK_BASE = M5A_CENSUS_MERGED_HEAD
+M3F_MERGED_HEAD = "02831892f096c047d5300ac0c89cbff2ed7216a3"
+M5B_TASK_BASE = M3F_MERGED_HEAD
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -60,6 +62,9 @@ HTTP_SYSTEM = ROOT / "crates/plurxd/src/http/system.rs"
 WEB_INDEX = ROOT / "crates/plurxd/src/web/index.html"
 WEB_SETTINGS_TEST = ROOT / "tests/web/settings-sections.test.js"
 DAEMON_MAIN = ROOT / "crates/plurxd/src/main.rs"
+HTTP_HLS = ROOT / "crates/plurxd/src/http/hls.rs"
+SESSIONS_SQLITE = ROOT / "crates/plurx-core/src/store/sqlite/sessions.rs"
+SESSIONS_HIQLITE = ROOT / "crates/plurx-core/src/store/hiqlite_sessions.rs"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -217,7 +222,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"M3f task base:** effort head `{M3F_TASK_BASE}`", self.flat_status
+            f"M5b task base:** effort head `{M5B_TASK_BASE}`", self.flat_status
         )
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
@@ -228,6 +233,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(M3E_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C5_MERGED_HEAD[:8], self.status)
         self.assertIn(M5A_CENSUS_MERGED_HEAD[:8], self.status)
+        self.assertIn(M3F_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -351,8 +357,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M3f candidate; M0–M3e, M4, M5a, M3c5 and the M5a census repair "
-            "merged into the effort",
+            "M5b candidate; M0–M3f, M4, M5a and the M5a census repair merged "
+            "into the effort",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -1094,16 +1100,20 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         # The migration count, and the additive chain with the paired step
         # assertion every earlier version already has.
-        self.assertIn("version, 48,", sqlite_store)
-        self.assertIn("AUTH_SCHEMA_MIGRATION_SOURCE + 23,", hiqlite)
-        self.assertIn("every additive v5→v28 step", hiqlite)
+        # Shape, not value. These numbers belong to whichever migration
+        # shipped last, and pinning them here made every later milestone edit
+        # a test named after M5a — which is how the M5a census defect happened
+        # in the first place. What this gate owns is that the assertions exist.
+        self.assertRegex(sqlite_store, r"version, \d+,")
+        self.assertRegex(hiqlite, r"AUTH_SCHEMA_MIGRATION_SOURCE \+ \d+,")
+        self.assertRegex(hiqlite, r"every additive v5→v\d+ step")
         self.assertIn(
             "PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, REQUEST_IDENTITY_SCHEMA_VERSION",
             hiqlite,
         )
 
         # Both hand-written downgrade fixtures give the v48 table back.
-        self.assertIn("DROPPED_BY_THE_FIXTURE: [&str; 4]", dv_conversion)
+        self.assertRegex(dv_conversion, r"DROPPED_BY_THE_FIXTURE: \[&str; \d+\]")
         self.assertIn("media_session_producer_recovery", dv_conversion)
         self.assertIn(
             "DROP TABLE media_session_producer_recovery", store_contract
@@ -1262,6 +1272,95 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # And the document says what is still owed, which is the reason every
         # fleet node will be refused on day one.
         self.assertIn("no_contract_covers_this_build", self.status)
+
+    def test_m5b_a_budget_is_minted_by_a_new_play_and_inherited_by_everything_else(
+        self,
+    ) -> None:
+        """The ledger M5a shipped had a key nobody could present.
+
+        `media_session_producer_recovery` is keyed by the epoch, so until a
+        session carries one the budget is unaddressable — which is why no
+        daemon code called it. This is the key. Everything asserted here is a
+        way one playback could end up with two budgets, which is one automatic
+        retry per attempt instead of per playback: an unbounded loop against a
+        decoder that will never succeed.
+        """
+        hls = HTTP_HLS.read_text(encoding="utf-8")
+        store = CORE_STORE.read_text(encoding="utf-8")
+        sqlite_sessions = SESSIONS_SQLITE.read_text(encoding="utf-8")
+        hiqlite_sessions = SESSIONS_HIQLITE.read_text(encoding="utf-8")
+
+        # The column, spelled once and shared by both backends.
+        self.assertIn("MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA", store)
+        self.assertIn("ADD COLUMN recovery_epoch TEXT NOT NULL DEFAULT ''", store)
+        self.assertIn(
+            "super::MEDIA_SESSION_RECOVERY_EPOCH_SCHEMA",
+            SQLITE_STORE.read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 28,",
+            HIQLITE.read_text(encoding="utf-8"),
+        )
+
+        # The decision, in one named place rather than inline at the seam.
+        self.assertIn(
+            "fn recovery_epoch_for(predecessor: Option<&MediaSessionRoute>) -> String",
+            hls,
+        )
+        # Read at the point of use rather than kept in a local: the store
+        # decides the row's epoch, and `activation_route_matches` compares
+        # nothing about this field — so a local copy could be believed after
+        # the store had already ruled otherwise.
+        self.assertIn(
+            "recovery_epoch: recovery_epoch_for(activation_predecessor.as_ref()),", hls
+        )
+        self.assertNotIn("let recovery_epoch =", hls)
+        # And the claim about what the epoch buys is the one that holds.
+        self.assertIn("It does not\n/// bound a client that varies", hls)
+        self.assertIn(
+            "fn a_new_play_mints_a_budget_and_every_continuation_inherits_one", hls
+        )
+
+        # A successor reads its predecessor's epoch rather than being handed
+        # one, on both backends, so no caller can get it wrong.
+        for name, source in (
+            ("sqlite", sqlite_sessions),
+            ("hiqlite", hiqlite_sessions),
+        ):
+            with self.subTest(backend=name):
+                self.assertIn(
+                    "COALESCE((SELECT recovery_epoch FROM media_sessions", source
+                )
+                # A replay refreshes the lease and the response and never the
+                # epoch: re-minting on replay is two budgets for one playback.
+                self.assertIn("The epoch is written once, with the row", source)
+
+        # Proved through `dyn Store` on every backend rather than inferred
+        # from the SQL text above.
+        self.assertIn(
+            "async fn a_recovery_epoch_is_written_once_and_inherited_by_a_successor",
+            STORE_CONTRACT.read_text(encoding="utf-8"),
+        )
+
+        # Nothing reads it yet, and the document says so rather than implying
+        # the recovery path works.
+        self.assertIn("Nothing reads the epoch yet", self.status)
+        # The claim about what the epoch buys is the corrected one: it does not
+        # bound a client that varies `playback_id`, because the ledger key
+        # contains `playback_id`.
+        self.assertIn("It does **not** bound a client that varies", self.status)
+        # The old claim survives only where the review ledger quotes it as the
+        # thing that was wrong, which is the opposite of asserting it.
+        self.assertIn(
+            "would mint itself an unlimited supply of budgets\" was false",
+            self.flat_status,
+        )
+        # A takeover inherits by construction — there is no `INSERT INTO
+        # media_sessions` in any owner-transition path — and the reaped-pointer
+        # gap is stated rather than left to be discovered.
+        self.assertIn("A takeover inherits by construction", self.status)
+        self.assertIn("The gap is the reaped pointer, and it is real", self.status)
+        self.assertIn("Empty means three different things", self.status)
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.

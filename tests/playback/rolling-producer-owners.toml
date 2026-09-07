@@ -773,7 +773,10 @@ pattern = "publication_ready_at_ms"
 # proposed successor is still held at the blocked publication fence before
 # asking the existing actor slot to authorize its announcement. It writes no
 # fence and creates no publication authority.
-expected_occurrences = 79
+# 79 -> 80 with M5b's recovery-epoch test: one test-only `MediaSessionRoute`
+# fixture, built to exercise the mint-or-inherit decision. It stamps the fence
+# at zero like any ordinary live route and no shipped path writes one.
+expected_occurrences = 80
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -902,7 +905,10 @@ pattern = "terminal_reason"
 # 20 -> 21 after settlement review: the public post-retirement replay test
 # asserts the predecessor's durable `superseded` cause before exercising the
 # retained exact response. This is a test-only read of the existing writer.
-expected_occurrences = 21
+# 21 -> 22 with M5b's recovery-epoch test: the same one test-only route
+# fixture, which sets `terminal_reason: None` because it stands for a live
+# session. No new writer of a terminal cause.
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"

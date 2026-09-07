@@ -1251,7 +1251,7 @@ mod tests {
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
                 // history, v47's request identity, v48's producer-recovery
-                // ledger.
+                // ledger, v49's recovery epoch.
                 //
                 // Leaving a *column* behind makes the replay fail outright on
                 // an `ADD COLUMN` against a table that already has it.
@@ -1265,6 +1265,7 @@ mod tests {
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
                  DROP TABLE IF EXISTS media_session_producer_recovery;
+                 ALTER TABLE media_sessions DROP COLUMN recovery_epoch;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
@@ -1353,11 +1354,16 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 4] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 5] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
             "media_session_producer_recovery",
+            // Not the bare column name: `recovery_epoch` is also a column of
+            // v48's ledger table, so the guard's "some migration after the
+            // guard creates this" check would pass for it whether or not v49
+            // existed. The `ADD COLUMN` text belongs to v49 alone.
+            "ADD COLUMN recovery_epoch",
         ];
 
         assert!(
