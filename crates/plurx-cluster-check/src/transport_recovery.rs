@@ -1340,6 +1340,7 @@ async fn wait_for_stable_idle_resources(
             &busy_nodes,
             ceilings,
             &current,
+            previous.as_deref(),
             stable_samples,
         ));
         previous = Some(current);
@@ -1373,6 +1374,7 @@ fn describe_resource_wait(
     busy_nodes: &[u64],
     ceilings: Option<&[(u64, ProcessResourceCount)]>,
     current: &[(u64, ProcessResourceCount)],
+    previous: Option<&[(u64, ProcessResourceCount)]>,
     stable_samples: usize,
 ) -> String {
     let mut parts = Vec::new();
@@ -1393,12 +1395,62 @@ fn describe_resource_wait(
         }
     }
     if parts.is_empty() {
+        let moved = previous.map(|previous| sample_movement(previous, current));
+        let movement = match moved.as_deref() {
+            Some([]) => " (the last two samples were identical)".to_owned(),
+            Some(moved) => format!(" (since the last sample: {})", moved.join("; ")),
+            None => String::new(),
+        };
         parts.push(format!(
             "every node idle and within its baseline, with {stable_samples} of \
-             {RESOURCE_STABLE_SAMPLES} consecutive repeated samples"
+             {RESOURCE_STABLE_SAMPLES} consecutive repeated samples{movement}"
         ));
     }
     parts.join(", and ")
+}
+
+/// What moved between two consecutive samples, one resource at a time.
+///
+/// When every node is idle and inside its baseline, the only thing left is the
+/// repeat requirement, and then the whole question is whether the counts are
+/// settling towards a value or jittering forever. A slow settle wants a longer
+/// horizon; persistent jitter means exact equality is the wrong stability
+/// proxy and no horizon will fix it. Naming the deltas is the difference
+/// between those two, and it is the only thing the report still cannot say.
+fn sample_movement(
+    previous: &[(u64, ProcessResourceCount)],
+    current: &[(u64, ProcessResourceCount)],
+) -> Vec<String> {
+    if previous.len() != current.len() {
+        return vec![format!(
+            "node count changed: {} then {}",
+            previous.len(),
+            current.len()
+        )];
+    }
+    let mut moved = Vec::new();
+    for ((previous_id, before), (current_id, after)) in previous.iter().zip(current) {
+        if previous_id != current_id {
+            moved.push(format!(
+                "node order changed: {previous_id} then {current_id}"
+            ));
+            continue;
+        }
+        for (resource, before, after) in [
+            ("threads", before.threads, after.threads),
+            ("sockets", before.sockets, after.sockets),
+            (
+                "owned async tasks",
+                before.owned_async_tasks,
+                after.owned_async_tasks,
+            ),
+        ] {
+            if before != after {
+                moved.push(format!("node {previous_id} {resource} {before} -> {after}"));
+            }
+        }
+    }
+    moved
 }
 
 /// Every way `current` exceeds `limits`, named one resource at a time.
@@ -3019,7 +3071,7 @@ mod tests {
             resource_counts(1, 10, 10, 10),
             resource_counts(2, 10, 12, 10),
         ];
-        let report = describe_resource_wait(&[], Some(&baseline), &current, 0);
+        let report = describe_resource_wait(&[], Some(&baseline), &current, None, 0);
         assert!(report.contains("node 2 sockets 12 > 10"), "{report}");
         assert!(!report.contains("node 1"), "{report}");
 
@@ -3038,7 +3090,7 @@ mod tests {
             resource_counts(1, 10, 10, 10),
             resource_counts(3, 10, 10, 10),
         ];
-        let report = describe_resource_wait(&[1, 3], Some(&baseline), &baseline, 0);
+        let report = describe_resource_wait(&[1, 3], Some(&baseline), &baseline, None, 0);
         assert!(
             report.contains("node(s) 1, 3 still owning transport work"),
             "{report}"
@@ -3046,12 +3098,43 @@ mod tests {
         assert!(!report.contains("above the warmed baseline"), "{report}");
     }
 
+    /// Whether a longer horizon would help is decided by what moved, so the
+    /// report has to carry the deltas and has to say when there were none.
+    #[test]
+    fn an_unstable_resource_wait_names_what_moved_between_the_two_samples() {
+        let baseline = vec![
+            resource_counts(1, 10, 10, 10),
+            resource_counts(2, 10, 10, 10),
+        ];
+        let previous = vec![
+            resource_counts(1, 10, 9, 10),
+            resource_counts(2, 10, 10, 10),
+        ];
+        let current = vec![
+            resource_counts(1, 10, 10, 10),
+            resource_counts(2, 10, 10, 8),
+        ];
+        let report = describe_resource_wait(&[], Some(&baseline), &current, Some(&previous), 1);
+        assert!(report.contains("node 1 sockets 9 -> 10"), "{report}");
+        assert!(
+            report.contains("node 2 owned async tasks 10 -> 8"),
+            "{report}"
+        );
+        assert!(!report.contains("node 1 threads"), "{report}");
+
+        let settled = describe_resource_wait(&[], Some(&baseline), &baseline, Some(&baseline), 1);
+        assert!(
+            settled.contains("the last two samples were identical"),
+            "{settled}"
+        );
+    }
+
     /// The case a longer horizon does fix: nothing is wrong, the machine is
     /// just too loaded for two samples in a row to match.
     #[test]
     fn an_expired_resource_wait_that_is_only_unstable_says_exactly_that() {
         let baseline = vec![resource_counts(1, 10, 10, 10)];
-        let report = describe_resource_wait(&[], Some(&baseline), &baseline, 1);
+        let report = describe_resource_wait(&[], Some(&baseline), &baseline, None, 1);
         assert!(
             report.contains("every node idle and within its baseline"),
             "{report}"
