@@ -716,10 +716,21 @@ async fn exercise_role_campaign(
             .trim()
             .parse::<i64>()
             .context("parse recovery writer readiness timestamp")?;
+        let timestamp_deadline = Instant::now() + Duration::from_secs(1);
         let recovery_started_at_unix_ms = loop {
             let now = unix_ms()?;
             if now > ready_acknowledged_at_unix_ms {
                 break now;
+            }
+            if let Some(status) = writer
+                .child
+                .try_wait()
+                .context("inspect recovery writer before recovery start")?
+            {
+                bail!("recovery writer exited before recovery start with {status}");
+            }
+            if Instant::now() >= timestamp_deadline {
+                bail!("wall clock did not advance after recovery writer readiness");
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         };
