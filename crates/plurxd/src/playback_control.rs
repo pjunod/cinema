@@ -8509,12 +8509,11 @@ impl RollingControlActor {
             //   test also swept up `ExecutorLost` and the flow and install
             //   deadlines — facts about this server, not about the source —
             //   and relabelled them as a permanent property of the file.
+            let qualified_fault = latched_fault
+                .as_ref()
+                .filter(|(_, _, _, action_qualified)| *action_qualified);
             if !producer_media_published && reason.yields_to_decode_evidence() {
-                if let Some((fault, records, plan_digest, true)) = latched_fault.as_ref().map(
-                    |(fault, records, plan_digest, qualified)| {
-                        (*fault, *records, plan_digest.clone(), *qualified)
-                    },
-                ) {
+                if let Some((fault, records, plan_digest, _)) = qualified_fault {
                     tracing::warn!(
                         producer_attempt = failed_attempt,
                         decision_sequence,
