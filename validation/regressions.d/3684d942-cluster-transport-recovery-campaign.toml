@@ -16,6 +16,7 @@ commits = [
   "8d92b184",
   "af82019f",
   "8da42f73",
+  "d24e898d",
 ]
 points = [
   "cluster.auth",
