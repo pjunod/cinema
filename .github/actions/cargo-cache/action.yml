@@ -125,7 +125,23 @@ runs:
           echo "last_used=" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        runner_name=$(printf '%s' "$RUNNER_NAME" | tr -c 'A-Za-z0-9_.-' '-')
+        # Forgejo's runner does not export RUNNER_NAME -- that is a GitHub
+        # Actions variable, and under `set -u` reading it aborted the step with
+        # `RUNNER_NAME: unbound variable`. Nothing caught it because this branch
+        # had never executed on any job: the gate above sent every one of them
+        # down the hosted path instead.
+        #
+        # The fallback has to stay unique per runner INSTANCE, not per host:
+        # nynuc runs four runners and rogg16 five, and two of them sharing a
+        # Cargo cache root would have them pruning each other's target
+        # directories mid-build. Each instance already has its own runner root
+        # -- /opt/forgejo-runner, -02, -03 -- and RUNNER_TOOL_CACHE sits inside
+        # it, so the root's name is that identity.
+        runner_name=${RUNNER_NAME:-}
+        if [ -z "$runner_name" ]; then
+          runner_name="$(hostname -s)-$(basename -- "$(dirname -- "$RUNNER_TOOL_CACHE")")"
+        fi
+        runner_name=$(printf '%s' "$runner_name" | tr -c 'A-Za-z0-9_.-' '-')
         toolchain=$(rustc -Vv | sed -n 's/^release: //p')
         [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
           echo "::error::Cannot derive the pinned Rust toolchain"

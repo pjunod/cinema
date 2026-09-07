@@ -855,6 +855,131 @@ class CiCacheContractCase(unittest.TestCase):
                     )
                     self.assertEqual(skipped.returncode, 0, skipped.stderr)
 
+    @staticmethod
+    def _composite_run_block(action_path, marker):
+        """The shell of one composite step, dedented so it can be executed.
+
+        These blocks are the only place the runner-local cache path exists, and
+        until 2026-09-07 no job had ever run one — the gate above them was
+        false on every job — so `RUNNER_NAME: unbound variable` sat in both of
+        them undetected. Reading the file is not enough; the block has to run.
+        """
+        lines = (ROOT / action_path).read_text(encoding="utf-8").splitlines()
+        start = next(
+            index
+            for index, line in enumerate(lines)
+            if line.strip() == "run: |" and marker in "\n".join(lines[: index + 1])
+        )
+        indent = len(lines[start]) - len(lines[start].lstrip()) + 2
+        body = []
+        for line in lines[start + 1 :]:
+            if line.strip() and len(line) - len(line.lstrip()) < indent:
+                break
+            body.append(line[indent:] if len(line) >= indent else line)
+        return "\n".join(body)
+
+    def _runner_fixture(self, directory):
+        """A Forgejo runner instance: a runner root with a tool cache in it."""
+        fixture = Path(directory)
+        runner_root = fixture / "opt/forgejo-runner-03"
+        tool_cache = runner_root / "tool-cache"
+        tool_cache.mkdir(parents=True)
+        fake_bin = fixture / "bin"
+        fake_bin.mkdir()
+        rustc = fake_bin / "rustc"
+        rustc.write_text(
+            "#!/bin/sh\nprintf 'rustc 1.97.1\\nrelease: 1.97.1\\n'\n",
+            encoding="utf-8",
+        )
+        rustc.chmod(0o755)
+        df = fake_bin / "df"
+        df.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+            "'fixture 81788928 20971520 60817408 26%% /fixture'\n",
+            encoding="utf-8",
+        )
+        df.chmod(0o755)
+        environment = os.environ.copy()
+        environment.pop("RUNNER_NAME", None)
+        environment.update(
+            {
+                "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                "GITHUB_WORKSPACE": str(ROOT),
+                "GITHUB_ENV": str(fixture / "env"),
+                "GITHUB_OUTPUT": str(fixture / "output"),
+                "GITHUB_STEP_SUMMARY": str(fixture / "summary"),
+                "RUNNER_ENVIRONMENT": "self-hosted",
+                "RUNNER_TOOL_CACHE": str(tool_cache),
+                "RUNNER_WORKSPACE": str(fixture),
+                "CACHE_LANE": "rust-gate",
+                "CACHE_BUDGET_GB": "30",
+                "DISK_GB": "25",
+            }
+        )
+        return fixture, tool_cache, environment
+
+    def test_the_cargo_cache_path_runs_without_a_RUNNER_NAME(self):
+        block = self._composite_run_block(
+            ".github/actions/cargo-cache/action.yml", "Select and bound"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, tool_cache, environment = self._runner_fixture(directory)
+
+            result = subprocess.run(
+                ["bash", "-c", block],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("unbound variable", result.stderr)
+            outputs = dict(
+                line.split("=", 1)
+                for line in (fixture / "output").read_text().splitlines()
+                if "=" in line
+            )
+            self.assertEqual(outputs["local"], "true")
+            # Unique per runner INSTANCE, not per host: nynuc runs four runners
+            # and rogg16 five, and two sharing a Cargo root would prune each
+            # other's target directories mid-build.
+            self.assertIn("forgejo-runner-03", outputs["cache_root"])
+            self.assertTrue(outputs["cache_root"].startswith(str(tool_cache)))
+            self.assertTrue(Path(outputs["target_dir"]).is_dir())
+            written = (fixture / "env").read_text()
+            self.assertIn(f"CARGO_HOME={outputs['cache_root']}/cargo-home", written)
+            self.assertIn("CARGO_INCREMENTAL=0", written)
+
+    def test_the_buildkit_path_runs_without_a_RUNNER_NAME(self):
+        block = self._composite_run_block(
+            ".github/actions/buildx-cache/action.yml", "Select the BuildKit"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, _, environment = self._runner_fixture(directory)
+            environment["CACHE_LANE"] = "package-smoke-amd64"
+
+            result = subprocess.run(
+                ["bash", "-c", block],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("unbound variable", result.stderr)
+            outputs = dict(
+                line.split("=", 1)
+                for line in (fixture / "output").read_text().splitlines()
+                if "=" in line
+            )
+            self.assertEqual(outputs["local"], "true")
+            # Several runners on one host share one Docker daemon, so a builder
+            # name that is only the hostname would have them pruning each other.
+            self.assertTrue(outputs["builder_name"].startswith("plurx-"))
+            self.assertIn("forgejo-runner-03", outputs["builder_name"])
+
 
 if __name__ == "__main__":
     unittest.main()
