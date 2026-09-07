@@ -973,11 +973,15 @@ private fun PlayerContent(
                 }
             }
         }
-        controller.player.addListener(listener)
+        // Registered through the controller, not on the player: a committed
+        // prepared replacement swaps the ExoPlayer instance, and a listener
+        // bound directly to the one that was current here would silently stop
+        // firing at exactly the moment the screen most needs to hear from it.
+        controller.addPlayerListener(listener)
         controller.startAt(startMs, startReason, attemptOpenedAtMs)
         onDispose {
             vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
-            controller.player.removeListener(listener)
+            controller.removePlayerListener(listener)
             controller.release()
         }
     }
@@ -1155,7 +1159,14 @@ private fun PlayerContent(
                     playerView = this
                 }
             },
-            update = { playerView = it },
+            // `controller.player` is read here as well as in `factory` so a
+            // committed prepared replacement re-attaches the surface to the
+            // successor: the read makes this recompose when the instance
+            // changes, and `PlayerView.setPlayer` moves the surface across.
+            update = { view ->
+                if (view.player !== controller.player) view.player = controller.player
+                playerView = view
+            },
             modifier = Modifier.fillMaxSize(),
         )
 
