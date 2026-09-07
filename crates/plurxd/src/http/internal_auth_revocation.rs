@@ -31,6 +31,11 @@ const EXCLUSION_CLEANUP_RETRY_MAX: Duration = Duration::from_secs(2);
 const LOCAL_CLAIM_APPLY_TIMEOUT: Duration = Duration::from_millis(1_500);
 const LOCAL_CLAIM_APPLY_POLL: Duration = Duration::from_millis(10);
 const ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+/// A condition this loop cannot clear on its own — a stuck lifecycle fence, a
+/// held exclusion — is not worth one Raft transaction and one warning line
+/// every three seconds until someone notices. Back off toward this ceiling
+/// while the reason stays the same, and reset the moment it changes.
+const ACTIVATION_RETRY_MAX_INTERVAL: Duration = Duration::from_secs(60);
 
 type PeerIdentity = (String, u64, Option<String>);
 
@@ -451,9 +456,21 @@ pub(crate) async fn cache_admin_revocation_activation_loop(
     cache_admin_revocation_activation_loop_with(shutdown, move || {
         let state = state.clone();
         async move {
-            ClusterCacheRevocation::activate_if_ready(&state)
-                .await
-                .map_err(|error| format!("{error:?}"))
+            match ClusterCacheRevocation::activate_if_ready(&state).await {
+                Ok(outcome) => Ok(outcome),
+                // Name the precondition. Until an administrator can read why
+                // this never completes, its only symptom is a cluster status
+                // route answering 401 to a valid session — which reaches them
+                // as a login page, and reaches nobody as a cause.
+                Err(error) => Err(
+                    match state.membership.cache_admin_exclusion_blockers().await {
+                        Ok(blockers) if !blockers.is_empty() => {
+                            format!("{error:?}; blocked by: {}", blockers.join(", "))
+                        }
+                        _ => format!("{error:?}"),
+                    },
+                ),
+            }
         }
     })
     .await;
@@ -466,6 +483,8 @@ pub(crate) async fn cache_admin_revocation_activation_loop_with<Activate, Activa
     Activate: FnMut() -> ActivateFuture,
     ActivateFuture: std::future::Future<Output = Result<CacheAdminRevocationActivation, String>>,
 {
+    let mut delay = ACTIVATION_RETRY_INTERVAL;
+    let mut last_error: Option<String> = None;
     loop {
         let result = tokio::select! {
             biased;
@@ -474,15 +493,28 @@ pub(crate) async fn cache_admin_revocation_activation_loop_with<Activate, Activa
         };
         match result {
             Ok(CacheAdminRevocationActivation::Complete) => break,
-            Ok(CacheAdminRevocationActivation::Pending) => {}
+            Ok(CacheAdminRevocationActivation::Pending) => {
+                delay = ACTIVATION_RETRY_INTERVAL;
+                last_error = None;
+            }
             Err(error) => {
-                tracing::warn!(%error, "cache admin revocation activation attempt failed");
+                // Repeat the line only when the reason changes. A permanent
+                // condition that logs identically every three seconds buries
+                // itself: the fleet this was written for produced 28,800
+                // copies a day of one sentence that named nothing.
+                if last_error.as_deref() != Some(error.as_str()) {
+                    tracing::warn!(%error, "cache admin revocation activation attempt failed");
+                    last_error = Some(error);
+                    delay = ACTIVATION_RETRY_INTERVAL;
+                } else {
+                    delay = (delay * 2).min(ACTIVATION_RETRY_MAX_INTERVAL);
+                }
             }
         }
         tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
-            () = tokio::time::sleep(ACTIVATION_RETRY_INTERVAL) => {}
+            () = tokio::time::sleep(delay) => {}
         }
     }
 }

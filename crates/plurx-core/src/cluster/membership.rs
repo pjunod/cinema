@@ -2378,14 +2378,65 @@ fn maintenance_preserves_quorum(
         || reachable_voters.saturating_sub(usize::from(target_reachable)) >= voting_quorum
 }
 
-const ACQUIRE_CLUSTER_OPERATION_LEASE_SQL: &str = "INSERT INTO cluster_operation_leases \
+/// A membership removal that has not finished yet.
+///
+/// `cluster_node_removals` and `cluster_node_removal_attempts` are not only a
+/// removal's in-flight fence: `finalize_node_removal` deliberately leaves both
+/// rows behind as the durable tombstone, and a delete trigger protects them
+/// while the attempt row exists. A table-wide `NOT EXISTS` over either one
+/// therefore reads every removal the cluster has *ever* completed as one still
+/// in progress, and every guarded lease acquisition refuses for the remaining
+/// life of the cluster.
+///
+/// That is not hypothetical. A fleet that removed two nodes in August could
+/// never acquire the cache-admin exclusion again, so the one-time
+/// credential-revocation activation retried every three seconds and never
+/// completed; the Store-free admin proof cache therefore stayed fenced closed
+/// on every node, `/cluster/status` answered 401 to a valid administrator, and
+/// the web client — reading 401 as "your session is over" — put that
+/// administrator back on the login page on every visit to Settings.
+///
+/// In flight means what the `removals_pending` gauge already means: a removal
+/// row whose node is not yet tombstoned. `finalize_node_removal` stamps
+/// `removed_at` only after the membership change is committed, so a tombstoned
+/// node's removal is over by construction.
+fn removal_in_flight_predicate(table: &str, alias: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM {table} AS {alias} \
+           JOIN cluster_nodes AS removal_target \
+             ON removal_target.node_id = {alias}.node_id \
+          WHERE removal_target.removed_at IS NULL)"
+    )
+}
+
+fn no_removal_in_flight_predicates() -> String {
+    format!(
+        "NOT {} AND NOT {}",
+        removal_in_flight_predicate("cluster_node_removals", "removal"),
+        removal_in_flight_predicate("cluster_node_removal_attempts", "removal_attempt"),
+    )
+}
+
+/// Lifecycle work actually in progress. Counts a removal only while its node
+/// is untombstoned, for the reason in [`removal_in_flight_predicate`]: the
+/// removal rows outlive the removal.
+const LIFECYCLE_OPERATION_PENDING_SQL: &str =
+    "SELECT (SELECT COUNT(*) FROM cluster_node_removals AS removal \
+         WHERE EXISTS (SELECT 1 FROM cluster_nodes AS removal_target \
+           WHERE removal_target.node_id = removal.node_id \
+             AND removal_target.removed_at IS NULL)) \
+       + (SELECT COUNT(*) FROM cluster_node_promotions) \
+       + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count";
+
+fn acquire_cluster_operation_lease_sql() -> String {
+    format!(
+        "INSERT INTO cluster_operation_leases \
        (singleton, node_id, operation, claim_id, expires_at) \
      SELECT 1, $1, $2, $3, $4 \
      WHERE EXISTS (SELECT 1 FROM cluster_nodes node \
          WHERE node.node_id = $1 AND node.removed_at IS NULL) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts) \
+       AND {} \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
        AND NOT EXISTS (SELECT 1 FROM cluster_operation_lease_releases released_claim \
@@ -2396,7 +2447,10 @@ const ACQUIRE_CLUSTER_OPERATION_LEASE_SQL: &str = "INSERT INTO cluster_operation
      WHERE cluster_operation_leases.expires_at <= $5 \
         OR (cluster_operation_leases.node_id = $1 \
             AND cluster_operation_leases.operation = $2 \
-            AND cluster_operation_leases.claim_id = $3)";
+            AND cluster_operation_leases.claim_id = $3)",
+        no_removal_in_flight_predicates()
+    )
+}
 
 const RELEASE_CLUSTER_OPERATION_LEASE_SQL: &str = "DELETE FROM cluster_operation_leases \
      WHERE singleton = 1 AND node_id = $1 AND operation = $2 AND claim_id = $3";
@@ -2405,15 +2459,15 @@ const TOMBSTONE_CLUSTER_OPERATION_LEASE_SQL: &str =
     "INSERT INTO cluster_operation_lease_releases (claim_id) VALUES ($1) \
      ON CONFLICT(claim_id) DO NOTHING";
 
-const ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
-    "INSERT INTO cluster_cache_admin_revocation_leases \
+fn acquire_cache_admin_revocation_lease_sql() -> String {
+    format!(
+        "INSERT INTO cluster_cache_admin_revocation_leases \
        (singleton, node_id, claim_id, expires_at, retain_release_receipt) \
      SELECT 1, $1, $2, $3, $4 \
      WHERE EXISTS (SELECT 1 FROM cluster_nodes node \
          WHERE node.node_id = $1 AND node.removed_at IS NULL) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
-       AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts) \
+       AND {} \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
        AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
        AND NOT EXISTS (SELECT 1 FROM cluster_join_tokens WHERE state = 'redeeming') \
@@ -2429,7 +2483,10 @@ const ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
          cluster_cache_admin_revocation_leases.retain_release_receipt, \
          excluded.retain_release_receipt) \
      WHERE cluster_cache_admin_revocation_leases.node_id = $1 \
-       AND cluster_cache_admin_revocation_leases.claim_id = $2";
+       AND cluster_cache_admin_revocation_leases.claim_id = $2",
+        no_removal_in_flight_predicates()
+    )
+}
 
 const RELEASE_CACHE_ADMIN_REVOCATION_LEASE_SQL: &str =
     "DELETE FROM cluster_cache_admin_revocation_leases \
@@ -5108,7 +5165,7 @@ impl MembershipManager {
                         params!(lease.claim_id.as_str()),
                     ),
                     (
-                        ACQUIRE_CLUSTER_OPERATION_LEASE_SQL.to_owned(),
+                        acquire_cluster_operation_lease_sql(),
                         params!(
                             lease.node_id.as_str(),
                             lease.operation,
@@ -5173,7 +5230,7 @@ impl MembershipManager {
                         params!(lease.claim.as_str()),
                     ),
                     (
-                        ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL.to_owned(),
+                        acquire_cache_admin_revocation_lease_sql(),
                         params!(
                             lease.node_id.as_str(),
                             lease.claim.as_str(),
@@ -5649,12 +5706,7 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_consistent_map::<CountRow, _>(
-                "SELECT (SELECT COUNT(*) FROM cluster_node_removals) \
-                   + (SELECT COUNT(*) FROM cluster_node_promotions) \
-                   + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count",
-                params!(),
-            )
+            .query_consistent_map::<CountRow, _>(LIFECYCLE_OPERATION_PENDING_SQL, params!())
             .await?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
     }
@@ -5663,12 +5715,7 @@ impl MembershipManager {
         let inner = self.replicated_inner()?;
         let rows = inner
             .client
-            .query_map::<CountRow, _>(
-                "SELECT (SELECT COUNT(*) FROM cluster_node_removals) \
-                   + (SELECT COUNT(*) FROM cluster_node_promotions) \
-                   + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count",
-                params!(),
-            )
+            .query_map::<CountRow, _>(LIFECYCLE_OPERATION_PENDING_SQL, params!())
             .await?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
     }
@@ -7039,6 +7086,59 @@ impl MembershipManager {
             )
             .await?;
         Ok(rows.first().is_some_and(|row| row.count == 0))
+    }
+
+    /// Which named precondition is refusing the cache-admin exclusion.
+    ///
+    /// The acquire is a conditional `INSERT ... SELECT ... WHERE`, so a
+    /// zero-row result carries no reason at all — and its caller turns that
+    /// into one opaque 503 every three seconds, forever, which is exactly how
+    /// a fleet spent two weeks refusing its own administrator without anything
+    /// in the product naming the cause. This answers the "why" in the
+    /// operator's vocabulary, from local applied SQL so it still works while
+    /// quorum is lost.
+    pub async fn cache_admin_exclusion_blockers(
+        &self,
+    ) -> Result<Vec<&'static str>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let sql = format!(
+            "SELECT \
+               EXISTS (SELECT 1 FROM cluster_node_maintenance) AS maintenance, \
+               {removal} AS removal, \
+               {removal_attempt} AS removal_attempt, \
+               EXISTS (SELECT 1 FROM cluster_node_promotions) AS promotion, \
+               EXISTS (SELECT 1 FROM cluster_node_join_staging) AS join_staging, \
+               EXISTS (SELECT 1 FROM cluster_join_tokens WHERE state = 'redeeming') \
+                 AS join_redeeming, \
+               EXISTS (SELECT 1 FROM cluster_operation_leases) AS operation_lease, \
+               EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases) AS held_elsewhere",
+            removal = removal_in_flight_predicate("cluster_node_removals", "removal"),
+            removal_attempt =
+                removal_in_flight_predicate("cluster_node_removal_attempts", "removal_attempt"),
+        );
+        let rows = inner
+            .client
+            .query_map::<CacheAdminBlockerRow, _>(sql, params!())
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Vec::new());
+        };
+        Ok([
+            (row.maintenance, "a node is in maintenance"),
+            (row.removal, "a node removal is in flight"),
+            (row.removal_attempt, "a node removal attempt is in flight"),
+            (row.promotion, "a node promotion is in flight"),
+            (row.join_staging, "a node join is staged"),
+            (row.join_redeeming, "a join token is being redeemed"),
+            (row.operation_lease, "a planned-outage lease is held"),
+            (
+                row.held_elsewhere,
+                "another node holds the cache-admin exclusion",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(blocked, reason)| blocked.then_some(reason))
+        .collect())
     }
 
     /// Cheap quorum-backed preflight for the automatic activation attempt.
@@ -9921,6 +10021,32 @@ struct CountRow {
     count: i64,
 }
 
+struct CacheAdminBlockerRow {
+    maintenance: bool,
+    removal: bool,
+    removal_attempt: bool,
+    promotion: bool,
+    join_staging: bool,
+    join_redeeming: bool,
+    operation_lease: bool,
+    held_elsewhere: bool,
+}
+
+impl From<&mut Row<'_>> for CacheAdminBlockerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            maintenance: row.get::<i64>("maintenance") != 0,
+            removal: row.get::<i64>("removal") != 0,
+            removal_attempt: row.get::<i64>("removal_attempt") != 0,
+            promotion: row.get::<i64>("promotion") != 0,
+            join_staging: row.get::<i64>("join_staging") != 0,
+            join_redeeming: row.get::<i64>("join_redeeming") != 0,
+            operation_lease: row.get::<i64>("operation_lease") != 0,
+            held_elsewhere: row.get::<i64>("held_elsewhere") != 0,
+        }
+    }
+}
+
 struct ProtocolRangeRow {
     protocol_min: i64,
     protocol_max: i64,
@@ -11052,6 +11178,81 @@ mod tests {
         connection
     }
 
+    /// The fleet defect, as two rows.
+    ///
+    /// A completed removal leaves its `cluster_node_removals` and
+    /// `cluster_node_removal_attempts` rows behind on purpose — they are the
+    /// durable tombstone, and a trigger protects them. Both guarded
+    /// acquisitions used to read those tables table-wide, so the first node a
+    /// cluster ever removed disabled the cache-admin exclusion and the planned
+    /// outage lease permanently. Measured on a four-node fleet: two removals
+    /// in August, the one-time credential-guard activation retrying every
+    /// three seconds ever since, the Store-free admin proof cache fenced
+    /// closed on every node as a result, `/cluster/status` answering 401 to a
+    /// valid administrator, and the operator returned to the login page on
+    /// every visit to Settings.
+    ///
+    /// A removal still in flight must keep blocking both. That is the half
+    /// that must not regress while fixing the other.
+    #[test]
+    fn a_completed_removal_stops_fencing_the_exclusions_it_finished_with() {
+        let mut connection = guarded_cache_admin_lease_fixture();
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-gone', 100, 900); \
+                 INSERT INTO cluster_node_removals VALUES ('node-gone'); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-gone', 'attempt-1');",
+            )
+            .expect("a removal that finished, tombstone and all");
+        assert_eq!(
+            acquire_guarded_cache_admin_lease(&mut connection, "claim-after-removal", false),
+            1,
+            "a tombstoned node's leftover fence is not a removal in progress"
+        );
+        let mut in_flight = guarded_cache_admin_lease_fixture();
+        in_flight
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-leaving', 100, NULL); \
+                 INSERT INTO cluster_node_removals VALUES ('node-leaving'); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-leaving', 'attempt-2');",
+            )
+            .expect("a removal still under way");
+        assert_eq!(
+            acquire_guarded_cache_admin_lease(&mut in_flight, "claim-during-removal", false),
+            0,
+            "a removal in flight still excludes the cache-admin claim"
+        );
+
+        // The planned-outage lease carries the identical predicate, which is
+        // why maintenance entry, restart preparation and force election were
+        // refused on that fleet too.
+        let mut leases = guarded_operation_lease_fixture();
+        leases
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-gone', 900); \
+                 INSERT INTO cluster_node_removals VALUES ('node-gone'); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-gone', 'attempt-1');",
+            )
+            .expect("a removal that finished");
+        assert_eq!(
+            acquire_guarded_operation_lease(&mut leases, "node-a", "maintenance", "claim-1"),
+            1,
+            "a finished removal must not fence planned outages for the life of the cluster"
+        );
+        let mut fenced = guarded_operation_lease_fixture();
+        fenced
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-leaving', NULL); \
+                 INSERT INTO cluster_node_removals VALUES ('node-leaving');",
+            )
+            .expect("a removal still under way");
+        assert_eq!(
+            acquire_guarded_operation_lease(&mut fenced, "node-a", "maintenance", "claim-2"),
+            0,
+            "a removal in flight still excludes a planned outage"
+        );
+    }
+
     fn acquire_guarded_cache_admin_lease(
         connection: &mut rusqlite::Connection,
         claim_id: &str,
@@ -11076,7 +11277,7 @@ mod tests {
             .expect("authorize cache-admin acquisition");
         let changed = transaction
             .execute(
-                ACQUIRE_CACHE_ADMIN_REVOCATION_LEASE_SQL,
+                &acquire_cache_admin_revocation_lease_sql(),
                 rusqlite::params![
                     "node-a",
                     claim_id,
@@ -11190,7 +11391,7 @@ mod tests {
             .expect("authorize acquisition");
         let changed = transaction
             .execute(
-                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                &acquire_cluster_operation_lease_sql(),
                 rusqlite::params![node_id, operation, claim_id, 1_000_i64, 100_i64],
             )
             .expect("acquire guarded planned-outage claim");
@@ -12143,7 +12344,7 @@ mod tests {
                 barrier.wait();
                 connection
                     .execute(
-                        ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                        &acquire_cluster_operation_lease_sql(),
                         rusqlite::params![
                             node_id,
                             operation,
@@ -12175,7 +12376,7 @@ mod tests {
         assert_eq!(
             connection
                 .execute(
-                    ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                    &acquire_cluster_operation_lease_sql(),
                     rusqlite::params!["node-b", "maintenance", "successor", 2_000_i64, 100_i64],
                 )
                 .expect("replace expired claimant"),
@@ -12192,7 +12393,7 @@ mod tests {
         let mut connection = guarded_operation_lease_fixture();
         assert!(connection
             .execute(
-                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                &acquire_cluster_operation_lease_sql(),
                 rusqlite::params![
                     "node-a",
                     "restart",
@@ -12406,7 +12607,7 @@ mod tests {
         assert_eq!(
             connection
                 .execute(
-                    ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                    &acquire_cluster_operation_lease_sql(),
                     rusqlite::params!["node-a", "restart", "preflight", 1_000_i64, 100_i64],
                 )
                 .expect("claim planned-outage lease before preflight"),
