@@ -764,6 +764,41 @@ pub struct TranscodeExecution {
     pub software_threads: Option<u32>,
     pub pacing: Pacing,
     pub out_dir: String,
+    /// How much this attempt asks the child to say about itself.
+    ///
+    /// Execution context rather than plan: the same semantic plan run on a
+    /// node whose diagnostics are qualified and on one whose are not is the
+    /// same work and must resolve to the same artifact identity. Only the
+    /// flags differ.
+    pub diagnostics: DiagnosticLogging,
+}
+
+/// The `-loglevel` contract between the daemon and one child.
+///
+/// §7.1 requires `repeat+level+error` for a build whose grammar is qualified:
+/// `level` supplies the severity labels the contract matches on, and `repeat`
+/// stops FFmpeg compressing repeated messages into a summary whose timestamps
+/// the sliding window cannot honestly evaluate.
+///
+/// It is not the default, and that is deliberate rather than cautious. A node
+/// asks for the qualified flags only when a retained contract covers the exact
+/// binary it is about to run — so a fleet with no qualified build emits the
+/// arguments it has always emitted, and the frozen argv baselines keep
+/// describing what ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiagnosticLogging {
+    #[default]
+    Legacy,
+    Qualified,
+}
+
+impl DiagnosticLogging {
+    pub fn flags(self) -> &'static str {
+        match self {
+            Self::Legacy => "error",
+            Self::Qualified => "repeat+level+error",
+        }
+    }
 }
 
 impl TranscodeExecution {
@@ -816,7 +851,23 @@ impl TranscodeExecution {
             software_threads: options.software_threads,
             pacing,
             out_dir: out_dir.to_owned(),
+            diagnostics: DiagnosticLogging::Legacy,
         })
+    }
+
+    /// Ask this attempt's child for the diagnostics a qualified grammar reads.
+    ///
+    /// Only a caller holding a contract that covers the exact binary it is
+    /// about to run may say yes. Asking for `repeat+level+error` from a build
+    /// nobody has qualified buys nothing — there is no grammar to read the
+    /// severities it would add — and changes the arguments that ship.
+    pub fn observing_qualified_grammar(mut self, qualified: bool) -> Self {
+        self.diagnostics = if qualified {
+            DiagnosticLogging::Qualified
+        } else {
+            DiagnosticLogging::Legacy
+        };
+        self
     }
 }
 
@@ -1305,6 +1356,7 @@ pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecutio
         &execution.out_dir,
         None,
         Some(plan),
+        execution.diagnostics,
     )
 }
 
@@ -1326,6 +1378,7 @@ fn hls_args_with_compatibility(
         out_dir,
         Some(force_software_decode),
         None,
+        DiagnosticLogging::Legacy,
     )
 }
 
@@ -1339,9 +1392,14 @@ fn hls_args_inner(
     out_dir: &str,
     legacy_force_software_decode: Option<bool>,
     plan: Option<&ResolvedTranscode>,
+    diagnostics: DiagnosticLogging,
 ) -> Vec<String> {
     let source_path = source_path.to_owned();
-    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        diagnostics.flags().into(),
+    ];
 
     // Hardware device init (VAAPI/QSV) must precede the input, and so must a
     // filter device the pipeline brings of its own (Vulkan for libplacebo,

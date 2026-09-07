@@ -1,8 +1,8 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M5a candidate; M0–M4 merged into the effort · **Updated:**
+**Status:** M3b candidate; M0–M5a merged into the effort · **Updated:**
 2026-09-07 · **Integration branch:** `effort/decoder-selection-recovery` ·
-**M5a task base:** M4 candidate `f0f7aec8254ce7c09221bf4462f2f34905f172ef`
+**M3b task base:** M5a candidate `e463220448a36113cd29fae965b18e163733de91`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -19,14 +19,14 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M5a — the durable recovery budget |
-| Task branch | `codex/decoder-selection-m5a`, based on effort head `f0f7aec8` |
+| Milestone | M3b — owned observation |
+| Task branch | `codex/decoder-selection-m3b`, based on effort head `e4632204` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | This head on pinned 1.97.1: the `store_contract` reservation contracts and the 295-name `Store` method inventory through the SQLite fixtures, the schema-cap unit test, `make effort-rust-check`, `make lint` and `make validation-lint` clean, `git diff --check` clean. The replicated half of the same contracts is owed at promotion |
-| Exact receipt | M4's is `f0f7aec8`, merged. M5a's is the head this PR carries; it is a reviewed and repaired candidate, and the effort gate is what makes it a receipt |
+| Focused validation | This head on pinned 1.97.1: `decoder_health` 38/38, daemon `transcode::tests::` 223/223, `live_tv::tests::` 40/40, core `decoder_selection` 44/44 and core `transcode::` 138/138, `make effort-rust-check`, `make lint`, `make validation-lint` and `make history-check` clean, `git diff --check` clean |
+| Exact receipt | M5a's is `e4632204`, merged. M3b's is the head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
 | Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
 | Blocker | The Forgejo `Effort development gate` on this head. Per `AGENTS.md` a task PR into an effort branch defers the full suite to the `Main promotion gate`; the effort's one `make validate-full` is owed at promotion, not here |
 
@@ -37,9 +37,9 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a merged; M3b/M3c not started | [Forgejo #79](http://192.168.4.7:3000/noirr/plurx/pulls/79) fast-forwarded `de7ca4b6` into the effort after one whole-PR adversarial review, its six blockers repaired, and the Forgejo effort gate. Nothing outside its tests calls the grammar yet, by design |
+| M3 · owned observation and health receipts | M3a merged; M3b candidate; M3c not started | M3a's grammar merged as [Forgejo #79](http://192.168.4.7:3000/noirr/plurx/pulls/79). M3b owns the reading: both FFmpeg readers are joined rather than detached, every attempt settles a `ProducerHealthReceipt`, and no receipt gates anything yet |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
-| M5 · durable budget and prepublication recovery | M5a candidate; reviewed and repaired, effort gate pending; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
+| M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
 | M7 · offline, shared cache, and handoff enforcement | Not started | — |
 | M8 · fleet qualification and promotion | Not started | — |
@@ -464,6 +464,181 @@ size cap to the encoder's constant. `make effort-rust-check`, `make lint` and
 runs these same contracts against a three-voter cluster and the v28 migration
 test against an upgrading one; that run belongs to the `Main promotion gate`'s
 `make validate-full`, and no count for it is claimed here.
+
+## M3b working tree — owning the reading
+
+M3a decided what a line *means*. M3b decides who owns the reading of it, and
+what an attempt is allowed to claim afterwards.
+
+Both of a producer's readers were `tokio::spawn`ed and forgotten. That is the
+shape §7.1 refuses — "detached best-effort logging is insufficient for cache
+qualification" — and the reason is not tidiness: a reader that died looked
+exactly like a stream that was clean, and a stream that looks clean is what let
+a broken title into the cache and keep it there. Both are now `JoinHandle`s held
+by the attempt, in `ObservedDiagnostics`, and the only way to obtain an
+attempt's health is to join its reader.
+
+`settle(budget, exit_disposition)` is where an attempt becomes a
+`ProducerHealthReceipt`. Three ways of not knowing produce the same answer, and
+it is not the answer a clean stream produces:
+
+| What happened | Receipt |
+|---|---|
+| The reader reached EOF | The accumulator's verdict — `Qualified`, `Unqualified` or `Rejected` |
+| The reader did not reach EOF inside the drain budget | `observation_complete: false`, `Unqualified` — a bounded refusal to qualify rather than a hang |
+| The reader panicked, was cancelled, or never existed | The same |
+
+Both the drop path and the expiry path *abort* their readers rather than
+detaching them, and the difference is not cosmetic: dropping a tokio
+`JoinHandle` detaches its task, so a `timeout(budget, handle)` that expires
+leaks a running reader — one per expiry, each still holding the pipe and still
+writing lines nobody owns. That is precisely the reader-outlives-its-producer
+shape this milestone removes, arrived at through the tidy-looking spelling. The
+budget is one deadline for the whole settle rather than one per reader, so a
+teardown cannot spend twice what its caller was told it could.
+
+### What an unqualified build may claim, which is nothing
+
+`DiagnosticPolicy` is resolved once per process, from the FFmpeg binary this
+node is actually going to run: its version banner, the SHA-256 of the executable
+file resolved through `PATH` the way the spawn will resolve it, and the SHA-256
+of its `-buildconf`. The retained contract table is compiled into the binary
+rather than read from disk, because a contract is evidence about one build and
+the evidence a node applies has to be the evidence its own build was qualified
+with — a file beside the daemon can be edited, can go missing, and can describe
+a build nobody ran.
+
+Every failure to measure is silence rather than a refusal to start. A node that
+cannot hash its own FFmpeg loses automatic decoder actions and loses nothing
+else; turning a diagnostic capability into an availability requirement would
+trade a cache problem for an outage.
+
+An attempt whose build no contract covers still has its stderr read, bounded and
+logged. It simply has no grammar, so `HealthAccumulator::grammar_available` is
+false and `qualifies_reuse` is false with it. `HealthAccumulator::new()` starts
+with no grammar and `with_qualified_grammar()` is the only constructor that can
+produce a qualifying observation, so the grammar and the permission to certify
+are one decision rather than two that can drift. **That is the deployed fleet's
+state today**: FFmpeg 5.1.9 reports `Error while decoding stream #0:0` without
+naming a stream, no contract covers it, and a clean-looking stream from it
+certifies nothing. The alternative — treating "we could not read it" as "it was
+fine" — is the exact substitution that made #913 invisible.
+
+A contract is matched only to a plan that *names* its decoder. Guessing the
+family name is the same failure wearing a success: a hardware backend
+substitutes `<codec>_qsv` and prints that in `[dec:…]`, and a software plan with
+no measured implementation emits no `-c:v` at all so FFmpeg picks its own
+default — `av1` selects the native decoder where it would otherwise choose
+`libdav1d`. A contract found under the guessed name yields a grammar that
+matches nothing, and a grammar that matches nothing marks every stream clean.
+So the answer is no unless the backend is software *and* the plan named an
+implementation. The daemon's startup inventory names none for any codec — that
+is M1's deliberate honesty about reading `ffmpeg -decoders` — so no production
+attempt reaches a grammar today, and the same qualified inventory that unblocks
+it is M3's own remaining work.
+
+### The log flags, and why they are not the default
+
+§7.1 requires `-loglevel repeat+level+error` for a qualified grammar: `level`
+supplies the severity labels the contract matches on, and `repeat` stops FFmpeg
+compressing repeated messages into a summary whose timestamps the window cannot
+honestly evaluate. `TranscodeExecution` carries the choice, because it is
+execution context and not plan: the same semantic plan run on a node whose
+diagnostics are qualified and on one whose are not is the same work and must
+resolve to the same artifact identity. Only the flags differ, and the plan
+digest never sees them.
+
+A node asks for the qualified flags only when a retained contract covers the
+exact binary it is about to run. So a fleet with no qualified build emits the
+arguments it has always emitted, and the frozen M0 argv baselines keep
+describing what ships. `AV_LOG_FORCE_NOCOLOR` is set for every FFmpeg child:
+colouring is suppressed on a pipe today, but the grammar matches on exact
+bracketed contexts and a build or environment that decided otherwise would make
+every qualified line unreadable — silently, since an unmatched line is simply
+unrelated.
+
+### What this milestone deliberately does not do
+
+Nothing consumes a receipt yet. The offline part producer settles one and logs
+it, after its admission permits are back — the child is already reaped so the
+drain is normally instant, and holding a hardware slot through a bounded wait
+for a reader is the trade that path explicitly refuses. No cache reader, no
+publication path and no actor decision reads a receipt, and
+`artifact_namespace()` still returns `decoder-plan-v1-unqualified` for
+everything. That is M3c.
+
+A *rolling* attempt does not settle a receipt at all yet, and the teardown path
+deliberately drops its reader instead. Settling there was the first draft and it
+was wrong twice over: `terminate_exact_prepublication_child` is the ending for
+every rolling attempt including ordinary retirement of a healthy session, so any
+disposition it hardcoded would be wrong most of the time — and a receipt that
+says `failed_termination` about a clean session is worse than no receipt — while
+two of its callers hold `child_transition` across the call, whose own comment
+forbids sleeping under it because that blocks the global reaper and every
+explicit stop. The rolling receipt belongs at the exit classification, which
+already knows which of the three dispositions an ending was and holds no session
+lock. That, and the actor's two new `RollingProducerEvent` variants and sticky
+health barriers, are M3b2.
+
+Live TV keeps its bounded 2 KiB window. Replacing it with the shared line reader
+would be a regression today rather than an improvement: its `decoder_unavailable`
+latch is a setup signal that must survive a diagnostic arriving inside an
+over-long line, and the retained test writes exactly that. It also has no plan
+and therefore no codec to bind a grammar to. It joins M3b2, alongside the actor
+barriers, when there is a selected-stream grammar for it to use.
+
+### One further split, and why
+
+The plan splits M3 into three. M3b is the largest of them by surface — it
+changes the return type of both FFmpeg spawns and every caller — so it is split
+again: **M3b1** (this candidate) owns the reading and produces receipts;
+**M3b2** carries a fault to the actor, adds the sticky barriers, settles a
+healthy rolling completion, and takes the live-TV and VOD-generation surfaces.
+The same argument the plan used for splitting M3 applies: M3b1 is
+behaviour-neutral for cache identity, because nothing consumes what it produces.
+
+Focused evidence, pinned `rustc 1.97.1`:
+`cargo test -p plurxd --bin plurxd decoder_health` — 38/38, including the
+receipt matrix above, the deployed-build case, and the abort-on-expiry
+regression. Daemon `transcode::tests::` 223/223 with the three new observation
+tests; `live_tv::tests::` 40/40 unchanged; core `decoder_selection` 44/44 with
+the log-flag test; core `transcode::` 138/138 unchanged.
+`make effort-rust-check`, `make lint` and `make validation-lint` clean;
+`git diff --check` clean.
+
+The argv evidence is one explicit test rather than an unchanged count. The M0
+baselines run through `hls_args_with_compatibility`, which passes
+`DiagnosticLogging::Legacy` as a literal, so they are structurally incapable of
+moving whatever the shipped builder emits — 44/44 passing says nothing about
+`-loglevel`. `the_diagnostic_log_flags_are_execution_context_and_never_identity`
+builds the same plan twice through the shipped `hls_args` and asserts that
+exactly one token differs between the two commands, that it is the `-loglevel`
+value, and that the mode a contract is matched under is the same string the
+command emits.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate. It found five blockers, all in
+this milestone's own work; all are repaired in this head, together with six of
+its non-blocking findings.
+
+| Finding | Disposition |
+|---|---|
+| `settle` used `timeout(budget, handle)`, and dropping a tokio `JoinHandle` *detaches* its task. Every budget expiry leaked a running reader — the exact shape §7.1 refuses, reached through the code that claimed to remove it, and the comment above it asserted the opposite of what it did | Both handles are awaited by reference and aborted on expiry, under one deadline for the whole settle. `a_reader_that_never_reaches_eof_is_aborted_rather_than_detached` holds a `Drop` guard inside the reader task and fails if the task is still alive afterwards |
+| `for_plan` fell back to the codec name when the plan named no decoder, so a contract could be matched under a name the child would never print. Because a contract *was* found, `grammar_available` stayed true and a stream whose every decode failure classified as `Unrelated` settled as `Qualified` | A contract is matched only when the backend is software and the plan names an implementation. `only_a_plan_that_names_its_decoder_gets_a_grammar` covers the three ways that can be false |
+| Every rolling attempt settled as `FailedTermination`, including ordinary retirement, because the disposition was a literal in the one teardown path | The rolling settle is removed; see above |
+| That settle was awaited while `child_transition` was held, whose own comment forbids sleeping under it — up to two drain budgets per teardown, in a loop | Removed with it |
+| A producer SIGKILLed mid-line had its truncated tail returned as a whole line and its observation reported complete, so a decode record straddling the kill was dropped while the receipt said the stream was clean. §7.2: a truncated stream disallows a qualified receipt | `BoundedDiagnosticReader::finish` marks the observation incomplete for any non-empty partial line; a stream that ended on a newline is unaffected, and both cases are asserted |
+
+Also repaired from the non-blocking set: the offline part settles after its
+admission permits are released rather than before; `MeasuredBuild` checks the
+executable bit the way `execvp` does, refuses a non-zero exit instead of hashing
+an error message into `buildconf_sha256`, and streams the binary through the
+hasher instead of reading a hundred megabytes into memory; `HealthAccumulator`
+defaults to having no grammar; a copy attempt's receipt is named after its
+session rather than by an empty digest; and the orphaned doc comment left
+sitting above `ffmpeg_version` is back where it belongs.
+
 
 ### A correction to the plan's own command list
 

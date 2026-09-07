@@ -103,7 +103,7 @@ const PRIMARY_MESSAGE: &str = "Error submitting packet to decoder:";
 const SUBORDINATE_MESSAGE: &str = "No frame decoded?";
 
 /// What went wrong, at the granularity a recovery decision needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecodeFaultKind {
     /// The selected video stream failed to decode often enough, close enough
@@ -245,6 +245,15 @@ struct DiagnosticContractFile {
     #[serde(default)]
     contracts: Vec<DiagnosticContract>,
 }
+
+/// The contract table this build was tested against, compiled in.
+///
+/// Embedded rather than read from disk on purpose. A contract is evidence
+/// about one binary, and the evidence a node applies has to be the evidence
+/// its own build was qualified with — a file beside the daemon can be edited,
+/// can go missing, and can describe a build nobody ran.
+pub const RETAINED_DIAGNOSTIC_CONTRACTS: &str =
+    include_str!("../../../tests/playback/decoder-health/diagnostic-contracts.toml");
 
 /// The only table version this build understands.
 pub const DIAGNOSTIC_CONTRACT_VERSION: u32 = 1;
@@ -588,6 +597,10 @@ pub struct HealthAccumulator {
     /// read. An incomplete observation can never qualify an artifact, whatever
     /// it did or did not see.
     observation_complete: bool,
+    /// Cleared when no contract covered the build that produced this stream.
+    /// The lines are still read and still logged; none of them is evidence,
+    /// so the attempt cannot certify its own output.
+    grammar_available: bool,
     previous: RepeatProvenance,
 }
 
@@ -602,6 +615,10 @@ impl Default for HealthAccumulator {
 }
 
 impl HealthAccumulator {
+    /// A reader with no grammar. The safe default, because it is the answer
+    /// for every build nobody has qualified — and because a caller that
+    /// forgets to say otherwise must not be handed an accumulator willing to
+    /// certify a stream it could not read.
     pub fn new() -> Self {
         Self {
             window: VecDeque::new(),
@@ -617,7 +634,20 @@ impl HealthAccumulator {
             oversized_lines: 0,
             invalid_utf8_lines: 0,
             observation_complete: true,
+            grammar_available: false,
             previous: RepeatProvenance::Ambiguous,
+        }
+    }
+
+    /// An accumulator reading a stream a versioned contract covers.
+    ///
+    /// The only constructor that can produce a qualifying observation, so the
+    /// grammar and the permission to certify are one decision rather than two
+    /// that can drift.
+    pub fn with_qualified_grammar() -> Self {
+        Self {
+            grammar_available: true,
+            ..Self::new()
         }
     }
 
@@ -766,6 +796,16 @@ impl HealthAccumulator {
         self.observation_complete = false;
     }
 
+    /// Whether a contract covered the build this stream came from.
+    ///
+    /// Distinct from an incomplete observation: the stream may have been read
+    /// perfectly. What is missing is the grammar that would make any of it
+    /// mean something, and an attempt whose output nobody could read cannot
+    /// certify that output as clean.
+    pub fn grammar_available(&self) -> bool {
+        self.grammar_available
+    }
+
     /// A line whose tail was discarded. The retained head may still classify,
     /// but the attempt no longer saw everything the child said, so it can
     /// neither qualify an artifact nor drive an action.
@@ -816,8 +856,14 @@ impl HealthAccumulator {
     /// reading it as silence is how a broken title got cached for months. No
     /// structural record and no fault, because §7.3 is explicit that isolated
     /// errors below the threshold still make the output unqualified.
+    /// A build no contract covers is the last clause, and it is the one that
+    /// keeps this honest on the fleet as it is deployed today: FFmpeg 5.1.9
+    /// prints its decode failures without naming a stream, so a title that
+    /// fails on it produces a clean-looking stream and must still not be
+    /// certified from it.
     pub fn qualifies_reuse(&self) -> bool {
         self.observation_complete
+            && self.grammar_available
             && !self.compressed_log()
             && self.fault.is_none()
             && self.primary_error_records == 0
@@ -873,10 +919,19 @@ impl BoundedDiagnosticReader {
     }
 
     /// Whatever was left when the stream ended without a final newline.
+    ///
+    /// A partial trailing line is a *truncated* stream, not a short one: the
+    /// child was killed mid-write, and the record that was being written is
+    /// gone. A producer preempted or deadlined mid-line is the ordinary case,
+    /// and §7.2 is explicit that a truncated diagnostic stream disallows a
+    /// qualified receipt — otherwise an `Error submitting packet to decoder:`
+    /// straddling the kill is silently dropped and the receipt says the stream
+    /// was clean.
     pub fn finish(&mut self, accumulator: &mut HealthAccumulator) -> Option<String> {
         if self.line.is_empty() && !self.discarding {
             return None;
         }
+        accumulator.mark_observation_incomplete();
         Some(self.take_line(accumulator))
     }
 
@@ -897,12 +952,627 @@ impl BoundedDiagnosticReader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M3b — owned observation
+//
+// Everything above decides what a *line* means. Everything below decides who
+// owns the reading of it, and what an attempt is allowed to claim afterwards.
+// ---------------------------------------------------------------------------
+
+/// How this attempt's process ended, as far as observation can tell.
+///
+/// Separate from the exit status because the two disagree in the case this
+/// whole effort exists for: a producer that failed to decode and exited zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitDisposition {
+    /// Ran to the end of its input and stopped.
+    CleanEnd,
+    /// Stopped early because the caller asked it to — a yield to offline
+    /// production, a preemption. Not a failure, and not end-of-input either:
+    /// §6.2 requires the receipt to say which of the two it was.
+    IntentionalYield,
+    /// Terminated by failure, signal, or a deadline the caller enforced.
+    FailedTermination,
+}
+
+impl ExitDisposition {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::CleanEnd => "clean_end",
+            Self::IntentionalYield => "intentional_yield",
+            Self::FailedTermination => "failed_termination",
+        }
+    }
+}
+
+/// What the attempt's output may be used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Qualification {
+    /// Complete observation, no selected-video decode record, no fault. The
+    /// bytes may be retained and served as a cache artifact.
+    Qualified,
+    /// Nothing was proved wrong, but something was not observed — a truncated
+    /// stream, an unqualified build, an incomplete drain. The bytes may still
+    /// be served to the viewer who is waiting for them; they may not become a
+    /// durable artifact.
+    Unqualified,
+    /// Something was proved wrong. A decode fault was observed on the selected
+    /// video stream.
+    Rejected,
+}
+
+impl Qualification {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Qualified => "qualified",
+            Self::Unqualified => "unqualified",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    /// Whether this attempt's bytes may be kept as a reusable artifact.
+    pub fn permits_reuse(self) -> bool {
+        matches!(self, Self::Qualified)
+    }
+}
+
+/// The version of the receipt schema. A reader that does not recognize it
+/// refuses the artifact rather than guessing at the fields it can see.
+pub const PRODUCER_HEALTH_RECEIPT_VERSION: u32 = 1;
+
+/// What one producer attempt's observation concluded.
+///
+/// §6.2's field list, and the thing a cache reader has to authenticate before
+/// calling anything reusable. It is deliberately small and flat: it is stored
+/// beside media objects, read on a hot path, and has to survive a build that
+/// predates whatever writes it next.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProducerHealthReceipt {
+    pub receipt_version: u32,
+    /// Which plan produced these bytes. A receipt that does not name this
+    /// attempt's plan is evidence about some other work.
+    pub plan_digest: String,
+    /// The contract id whose grammar read this stream, when one covered the
+    /// build. `None` means the build was not qualified, which is an
+    /// observation-only attempt however clean its output looked.
+    pub diagnostic_contract: Option<String>,
+    pub observation_complete: bool,
+    /// Structural primary records on the selected video stream. §7.3: isolated
+    /// errors below the fault threshold still make the output unqualified.
+    pub video_decode_error_records: u64,
+    /// The subset of those that also carried the build receipt.
+    pub contract_qualified_error_records: u64,
+    pub terminal_fault: Option<DecodeFaultKind>,
+    pub exit_disposition: ExitDisposition,
+    pub qualification: Qualification,
+}
+
+impl ProducerHealthReceipt {
+    /// Build a receipt from a settled accumulator.
+    ///
+    /// The qualification is derived here and nowhere else, so a caller cannot
+    /// assemble a receipt that says `Qualified` about an attempt whose
+    /// accumulator says otherwise.
+    fn settle(
+        plan_digest: String,
+        diagnostic_contract: Option<String>,
+        accumulator: &HealthAccumulator,
+        exit_disposition: ExitDisposition,
+    ) -> Self {
+        let qualification = if accumulator.fault().is_some() {
+            Qualification::Rejected
+        } else if exit_disposition == ExitDisposition::FailedTermination
+            || !accumulator.qualifies_reuse()
+        {
+            Qualification::Unqualified
+        } else {
+            Qualification::Qualified
+        };
+        Self {
+            receipt_version: PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest,
+            diagnostic_contract,
+            observation_complete: accumulator.observation_complete(),
+            video_decode_error_records: accumulator.primary_error_records(),
+            contract_qualified_error_records: accumulator.contract_qualified_records(),
+            terminal_fault: accumulator.fault(),
+            exit_disposition,
+            qualification,
+        }
+    }
+
+    /// A receipt for work this daemon did not observe at all.
+    ///
+    /// Used where a process exists but no diagnostic stream was owned — the
+    /// paths M3b has not reached yet. It is `Unqualified` by construction, so
+    /// a missing observer can never be mistaken for a clean one.
+    pub fn unobserved(plan_digest: String, exit_disposition: ExitDisposition) -> Self {
+        Self {
+            receipt_version: PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest,
+            diagnostic_contract: None,
+            observation_complete: false,
+            video_decode_error_records: 0,
+            contract_qualified_error_records: 0,
+            terminal_fault: None,
+            exit_disposition,
+            qualification: Qualification::Unqualified,
+        }
+    }
+
+    pub fn permits_reuse(&self) -> bool {
+        self.receipt_version == PRODUCER_HEALTH_RECEIPT_VERSION
+            && self.qualification.permits_reuse()
+    }
+}
+
+/// The facts about the FFmpeg binary that is actually going to run.
+///
+/// Measured, not configured. A contract is evidence about one binary, and the
+/// version string alone does not identify one — distributions patch FFmpeg,
+/// and a patched build can change both the wording of a diagnostic and the
+/// attribution it carries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MeasuredBuild {
+    pub ffmpeg_version: String,
+    pub binary_sha256: String,
+    pub buildconf_sha256: String,
+}
+
+impl MeasuredBuild {
+    /// Hash the bytes that will be executed and the build configuration they
+    /// report.
+    ///
+    /// Every failure is `None` rather than an error: a node that cannot
+    /// measure its own FFmpeg has an unqualified grammar, which costs it
+    /// automatic decoder actions and costs it nothing else. Refusing to start
+    /// would turn a diagnostic capability into a availability requirement.
+    pub async fn measure(bin: &str) -> Option<Self> {
+        let version = Self::first_banner_line(&Self::run(bin, &["-version"]).await?)?;
+        let buildconf = Self::run(bin, &["-buildconf"]).await?;
+        Some(Self {
+            ffmpeg_version: version,
+            binary_sha256: Self::file_digest(&Self::resolve(bin).await?).await?,
+            buildconf_sha256: hex_digest(&buildconf),
+        })
+    }
+
+    /// Hash a file without holding it in memory.
+    ///
+    /// A static FFmpeg is a hundred megabytes, and this runs on the startup
+    /// path.
+    async fn file_digest(path: &std::path::Path) -> Option<String> {
+        use sha2::Digest;
+        use tokio::io::AsyncReadExt;
+
+        let mut file = tokio::fs::File::open(path).await.ok()?;
+        let mut hasher = sha2::Sha256::new();
+        let mut chunk = vec![0_u8; 64 * 1024];
+        loop {
+            match file.read(&mut chunk).await.ok()? {
+                0 => break,
+                read => hasher.update(&chunk[..read]),
+            }
+        }
+        Some(hex::encode(hasher.finalize()))
+    }
+
+    async fn run(bin: &str, args: &[&str]) -> Option<Vec<u8>> {
+        let output = tokio::process::Command::new(bin)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .ok()?;
+        // A build that does not understand `-buildconf` exits non-zero and
+        // prints an error. Hashing that error text would give
+        // `buildconf_sha256` a value that is not a build configuration, and a
+        // field that lies is worse than a node with no measured build at all.
+        if !output.status.success() {
+            return None;
+        }
+        // FFmpeg writes the banner to stdout and older builds to stderr; take
+        // whichever is non-empty rather than assuming.
+        if output.stdout.is_empty() {
+            Some(output.stderr)
+        } else {
+            Some(output.stdout)
+        }
+    }
+
+    /// The path whose bytes will actually be executed.
+    ///
+    /// A bare name is resolved through `PATH` the same way the spawn will
+    /// resolve it, because hashing the wrong file is worse than hashing none:
+    /// it produces a confident identity for a binary that is not running.
+    async fn resolve(bin: &str) -> Option<std::path::PathBuf> {
+        let candidate = std::path::Path::new(bin);
+        if candidate.components().count() > 1 {
+            return Some(candidate.to_path_buf());
+        }
+        for directory in std::env::split_paths(&std::env::var_os("PATH")?) {
+            let path = directory.join(bin);
+            // `execvp` skips a non-executable entry and keeps searching, so a
+            // stale unexecutable `ffmpeg` earlier in PATH is not the binary
+            // that will run — and hashing it would give a confident identity
+            // for a file nobody executes.
+            if Self::is_executable_file(&path).await {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    async fn is_executable_file(path: &std::path::Path) -> bool {
+        let Ok(meta) = tokio::fs::metadata(path).await else {
+            return false;
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    }
+
+    fn first_banner_line(stdout: &[u8]) -> Option<String> {
+        String::from_utf8_lossy(stdout)
+            .lines()
+            .next()
+            .map(|line| line.trim().to_owned())
+            .filter(|line| !line.is_empty())
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// What this node knows about reading its own FFmpeg's diagnostics.
+///
+/// Held once, resolved at startup, consulted per attempt. A node with no
+/// measured build, or with a build no retained contract covers, still reads
+/// stderr — it just reads it without a grammar, which produces observations
+/// and no actions.
+#[derive(Debug, Clone, Default)]
+pub struct DiagnosticPolicy {
+    build: Option<MeasuredBuild>,
+    contracts: Vec<DiagnosticContract>,
+}
+
+impl DiagnosticPolicy {
+    pub fn new(build: Option<MeasuredBuild>, contracts: Vec<DiagnosticContract>) -> Self {
+        Self { build, contracts }
+    }
+
+    pub fn measured_build(&self) -> Option<&MeasuredBuild> {
+        self.build.as_ref()
+    }
+
+    /// The contract covering this node's build for one codec and decoder, if
+    /// there is exactly one.
+    ///
+    /// The log flags matter as much as the codec: a contract qualified under
+    /// `repeat+level+error` says nothing about a producer launched with
+    /// `error`, because without `level` there are no severity labels to match
+    /// and without `repeat` the log is compressed. So the *intended* flags are
+    /// an input here, and the caller uses the answer to decide which flags to
+    /// emit — a build with no contract keeps the flags it has always had.
+    pub fn contract_for(
+        &self,
+        input_codec: &str,
+        decoder: &str,
+        stderr_mode: &str,
+    ) -> Option<&DiagnosticContract> {
+        let build = self.build.as_ref()?;
+        let observed = ObservedBuild {
+            ffmpeg_version: &build.ffmpeg_version,
+            binary_sha256: &build.binary_sha256,
+            buildconf_sha256: &build.buildconf_sha256,
+            stderr_mode,
+            input_codec,
+            decoder,
+        };
+        let mut covering = self
+            .contracts
+            .iter()
+            .filter(|contract| contract.covers_build(&observed));
+        let first = covering.next()?;
+        // Two contracts covering one build with different rules is a coin
+        // flip about whether a session lives. `load` refuses duplicate ids;
+        // this refuses duplicate *coverage*, which is the property that
+        // actually matters here.
+        covering.next().is_none().then_some(first)
+    }
+}
+
+/// The policy this process resolved for its own FFmpeg, installed once.
+///
+/// Process-scoped because that is what it describes: one daemon runs one
+/// FFmpeg binary, and which contract covers it is a property of that binary
+/// rather than of any session. Threading it through every manager, runner and
+/// session constructor would say otherwise, and would say it about a dozen
+/// call sites that have no opinion on the matter.
+static INSTALLED_POLICY: std::sync::OnceLock<DiagnosticPolicy> = std::sync::OnceLock::new();
+
+/// What a node has before it has measured anything: no build, no contracts,
+/// therefore no grammar and no automatic actions.
+static UNQUALIFIED_POLICY: DiagnosticPolicy = DiagnosticPolicy {
+    build: None,
+    contracts: Vec::new(),
+};
+
+/// Install the measured policy. Returns `false` if one is already installed,
+/// which a second daemon start inside one process would be.
+pub fn install_diagnostic_policy(policy: DiagnosticPolicy) -> bool {
+    INSTALLED_POLICY.set(policy).is_ok()
+}
+
+/// The installed policy, or the unqualified one. Never `None`: a node that has
+/// not measured its build still reads stderr, it just reads it without a
+/// grammar.
+pub fn diagnostic_policy() -> &'static DiagnosticPolicy {
+    INSTALLED_POLICY.get().unwrap_or(&UNQUALIFIED_POLICY)
+}
+
+/// The log flags a qualified grammar requires, per §7.1.
+///
+/// `repeat` stops FFmpeg compressing repeated messages into a summary whose
+/// timestamps the window cannot evaluate; `level` supplies the severity labels
+/// the contract matches on.
+pub const QUALIFIED_STDERR_MODE: &str = "repeat+level+error";
+
+/// What every unqualified build has always used, and keeps using.
+pub const LEGACY_STDERR_MODE: &str = "error";
+
+/// One attempt's diagnostic stream, owned rather than detached.
+///
+/// §7.1: "Reader task failure must be observable; detached best-effort logging
+/// is insufficient for cache qualification." The producer holds this handle,
+/// and until it is settled the attempt has no receipt — which is the whole
+/// point, because an attempt with no receipt cannot qualify an artifact.
+pub struct ObservedDiagnostics {
+    plan_digest: String,
+    contract_id: Option<String>,
+    /// The reader task. `None` once settled, or if the child was spawned
+    /// without a stderr pipe at all — which is itself an incomplete
+    /// observation rather than a clean one.
+    reader: Option<tokio::task::JoinHandle<HealthAccumulator>>,
+    /// The progress reader, owned for the same reason: a progress task that
+    /// died is a session whose telemetry silently stopped, and joining it is
+    /// how that becomes visible.
+    progress: Option<tokio::task::JoinHandle<()>>,
+    /// Set when there was never a reader to join.
+    unobserved: bool,
+}
+
+impl std::fmt::Debug for ObservedDiagnostics {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ObservedDiagnostics")
+            .field("plan_digest", &self.plan_digest)
+            .field("contract_id", &self.contract_id)
+            .field("settled", &self.reader.is_none())
+            .finish()
+    }
+}
+
+impl ObservedDiagnostics {
+    pub(crate) fn new(
+        plan_digest: String,
+        contract_id: Option<String>,
+        reader: Option<tokio::task::JoinHandle<HealthAccumulator>>,
+        progress: Option<tokio::task::JoinHandle<()>>,
+    ) -> Self {
+        Self {
+            plan_digest,
+            contract_id,
+            unobserved: reader.is_none(),
+            reader,
+            progress,
+        }
+    }
+
+    pub fn plan_digest(&self) -> &str {
+        &self.plan_digest
+    }
+
+    pub fn diagnostic_contract(&self) -> Option<&str> {
+        self.contract_id.as_deref()
+    }
+
+    /// Wait for the diagnostic stream to reach EOF, bounded, and produce the
+    /// attempt's receipt.
+    ///
+    /// The budget is what stops a reader that never finishes from holding a
+    /// publication open forever. What expiry produces is an *incomplete*
+    /// observation — a refusal to qualify — rather than a hang or a guess.
+    /// A reader that panicked produces the same answer for the same reason:
+    /// §7.1 requires reader failure to be observable, and the observable form
+    /// of it is an attempt that cannot claim its output is clean.
+    pub async fn settle(
+        mut self,
+        budget: std::time::Duration,
+        exit_disposition: ExitDisposition,
+    ) -> ProducerHealthReceipt {
+        // One deadline for the whole settle, not one per reader. Two sequential
+        // budgets would let a teardown spend twice what the caller was told it
+        // could, and the caller is holding a publication open behind this.
+        let deadline = tokio::time::Instant::now() + budget;
+        if let Some(mut progress) = self.progress.take() {
+            // The progress reader ends when the pipe closes, which the child's
+            // exit already guaranteed. Awaited by reference so that expiry can
+            // *abort* it: dropping a `JoinHandle` detaches its task, which is
+            // precisely the reader-outlives-its-producer shape this milestone
+            // exists to remove.
+            if tokio::time::timeout_at(deadline, &mut progress)
+                .await
+                .is_err()
+            {
+                tracing::warn!("producer progress reader did not finish inside the drain budget");
+                progress.abort();
+            }
+        }
+        let Some(mut reader) = self.reader.take() else {
+            return ProducerHealthReceipt::unobserved(self.plan_digest.clone(), exit_disposition);
+        };
+        let accumulator = match tokio::time::timeout_at(deadline, &mut reader).await {
+            Ok(Ok(accumulator)) => accumulator,
+            Ok(Err(error)) => {
+                // Panicked or cancelled. There is no accumulator to read, and
+                // the honest receipt is one that says nothing was observed.
+                tracing::warn!("producer diagnostic reader failed: {error}");
+                return ProducerHealthReceipt::unobserved(
+                    self.plan_digest.clone(),
+                    exit_disposition,
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    budget_ms = budget.as_millis(),
+                    "producer diagnostics did not reach EOF inside the drain budget"
+                );
+                reader.abort();
+                return ProducerHealthReceipt::unobserved(
+                    self.plan_digest.clone(),
+                    exit_disposition,
+                );
+            }
+        };
+        ProducerHealthReceipt::settle(
+            self.plan_digest.clone(),
+            self.contract_id.clone(),
+            &accumulator,
+            exit_disposition,
+        )
+    }
+
+    /// Whether this attempt ever had a diagnostic stream to read.
+    pub fn is_unobserved(&self) -> bool {
+        self.unobserved
+    }
+}
+
+impl Drop for ObservedDiagnostics {
+    fn drop(&mut self) {
+        // A handle dropped without settling means its producer was torn down
+        // before classification. Abort rather than detach: a reader that
+        // outlives the thing that owns it is exactly the "detached
+        // best-effort logging" §7.1 refuses, and nobody is left to read what
+        // it would find.
+        if let Some(reader) = self.reader.take() {
+            reader.abort();
+        }
+        if let Some(progress) = self.progress.take() {
+            progress.abort();
+        }
+    }
+}
+
+/// Read one child's stderr to EOF, classifying as it goes and logging what it
+/// reads.
+///
+/// This is the body of the owned reader task. It returns the accumulator
+/// rather than mutating a shared one, so the only way to obtain an attempt's
+/// health is to join its reader — which is what makes "the reader died" and
+/// "the stream was clean" different answers instead of the same silence.
+pub(crate) async fn read_diagnostics<R>(
+    stream: R,
+    grammar: Option<DiagnosticGrammar>,
+    mut log: impl FnMut(&str),
+    mut progress: impl FnMut(&str) -> bool,
+) -> HealthAccumulator
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    // Decided once, before anything is read, and by the same value that
+    // decides whether any line is classified: without a contract this attempt
+    // has no grammar, so nothing it prints is evidence and its output cannot
+    // become a durable artifact however clean it looks.
+    let mut accumulator = if grammar.is_some() {
+        HealthAccumulator::with_qualified_grammar()
+    } else {
+        HealthAccumulator::new()
+    };
+    let mut reader = BoundedDiagnosticReader::new();
+    let mut stream = stream;
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = match stream.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => {
+                // The stream ended in a way that is not EOF. Whatever the
+                // child said after this point is unknown, so the attempt is
+                // not fully observed.
+                tracing::warn!("reading producer diagnostics: {error}");
+                accumulator.mark_observation_incomplete();
+                break;
+            }
+        };
+        for line in reader.push(&chunk[..read], &mut accumulator) {
+            observe_line(
+                &line,
+                grammar.as_ref(),
+                &mut accumulator,
+                &mut log,
+                &mut progress,
+            );
+        }
+    }
+    if let Some(line) = reader.finish(&mut accumulator) {
+        observe_line(
+            &line,
+            grammar.as_ref(),
+            &mut accumulator,
+            &mut log,
+            &mut progress,
+        );
+    }
+    accumulator
+}
+
+fn observe_line(
+    line: &str,
+    grammar: Option<&DiagnosticGrammar>,
+    accumulator: &mut HealthAccumulator,
+    log: &mut impl FnMut(&str),
+    progress: &mut impl FnMut(&str) -> bool,
+) {
+    // A `-progress` block on this stream is telemetry, not a diagnostic. It is
+    // sorted out before classification so a key=value line can never become a
+    // decode record, and before logging so the log is not drowned in it.
+    if progress(line) {
+        return;
+    }
+    if let Some(grammar) = grammar {
+        let record = grammar.classify(line);
+        accumulator.observe(std::time::Instant::now(), &record);
+    }
+    // Without a grammar the line is still read, still bounded and still
+    // logged; it is simply not evidence. `mark_grammar_unavailable` said so
+    // once, before the first read.
+    log(line);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const CONTRACTS: &str =
-        include_str!("../../../tests/playback/decoder-health/diagnostic-contracts.toml");
+    const CONTRACTS: &str = RETAINED_DIAGNOSTIC_CONTRACTS;
     const QUALIFIED_FFMPEG_8: &str =
         include_str!("../../../tests/playback/decoder-health/qualified-ffmpeg-8.stderr");
     const UNQUALIFIED_FFMPEG_5: &str =
@@ -919,7 +1589,7 @@ mod tests {
     /// would make these tests slow and flaky and would prove nothing extra.
     fn replay(fixture: &str, grammar: &DiagnosticGrammar) -> HealthAccumulator {
         let base = Instant::now();
-        let mut accumulator = HealthAccumulator::new();
+        let mut accumulator = HealthAccumulator::with_qualified_grammar();
         for line in fixture.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -1365,6 +2035,19 @@ mod tests {
             Some("[fatal] the last thing it said")
         );
         assert_eq!(reader.finish(&mut accumulator), None);
+        assert!(
+            !accumulator.observation_complete(),
+            "a stream that ended mid-line was cut, and the record being written is gone"
+        );
+        assert!(!accumulator.qualifies_reuse());
+
+        // A stream that ended *on* a newline was not cut.
+        let mut whole = HealthAccumulator::with_qualified_grammar();
+        let mut reader = BoundedDiagnosticReader::new();
+        assert_eq!(reader.push(b"[info] done\n", &mut whole).len(), 1);
+        assert_eq!(reader.finish(&mut whole), None);
+        assert!(whole.observation_complete());
+        assert!(whole.qualifies_reuse());
     }
 
     /// One barrier per attempt, however loud the failure is.
@@ -1396,10 +2079,10 @@ mod tests {
     /// An incomplete observation cannot qualify anything, whatever it saw.
     #[test]
     fn an_unfinished_reader_cannot_qualify_an_artifact() {
-        let mut accumulator = HealthAccumulator::new();
+        let mut accumulator = HealthAccumulator::with_qualified_grammar();
         assert!(
             accumulator.qualifies_reuse(),
-            "a clean complete read qualifies"
+            "a clean complete read of a qualified build qualifies"
         );
         accumulator.mark_observation_incomplete();
         assert!(!accumulator.qualifies_reuse());
@@ -1413,8 +2096,15 @@ mod tests {
     fn the_default_accumulator_is_the_one_new_returns() {
         let defaulted = HealthAccumulator::default();
         assert!(defaulted.observation_complete());
-        assert!(defaulted.qualifies_reuse());
         assert_eq!(defaulted.primary_error_records(), 0);
+        assert!(
+            !defaulted.grammar_available(),
+            "a caller that says nothing about a grammar has not got one"
+        );
+        assert!(
+            !defaulted.qualifies_reuse(),
+            "and an accumulator nobody gave a grammar certifies nothing"
+        );
     }
 
     /// The real thing: output this exact build actually produced, replayed at
@@ -1598,6 +2288,499 @@ mod tests {
             DiagnosticRecord::PrimarySelectedVideoError {
                 contract_qualified: true
             }
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M3b — owned observation
+    // -----------------------------------------------------------------------
+
+    fn qualified_policy() -> DiagnosticPolicy {
+        let contract = contract("h264", "corrupt input packet");
+        DiagnosticPolicy::new(
+            Some(MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        )
+    }
+
+    /// The policy answers for one exact build, one codec, one decoder, and one
+    /// set of log flags — and says no to everything else.
+    #[test]
+    fn a_policy_covers_the_build_it_measured_and_nothing_else() {
+        let policy = qualified_policy();
+        assert!(policy
+            .contract_for("h264", "h264", QUALIFIED_STDERR_MODE)
+            .is_some());
+        assert!(
+            policy
+                .contract_for("h264", "h264", LEGACY_STDERR_MODE)
+                .is_none(),
+            "a contract qualified under repeat+level+error says nothing about a \
+             child launched without severity labels"
+        );
+        assert!(policy
+            .contract_for("hevc", "hevc", QUALIFIED_STDERR_MODE)
+            .is_none());
+        assert!(
+            policy
+                .contract_for("h264", "h264_qsv", QUALIFIED_STDERR_MODE)
+                .is_none(),
+            "the decoder this effort swaps in is not the decoder that was qualified"
+        );
+        assert!(
+            DiagnosticPolicy::default()
+                .contract_for("h264", "h264", QUALIFIED_STDERR_MODE)
+                .is_none(),
+            "a node that measured nothing covers nothing"
+        );
+    }
+
+    /// Two contracts covering one build is a coin flip about whether a session
+    /// lives. It answers no rather than picking one.
+    #[test]
+    fn two_contracts_covering_one_build_answer_neither() {
+        let one = contract("h264", "corrupt input packet");
+        let mut two = one.clone();
+        two.id = "second".to_owned();
+        two.error_detail = "something else entirely".to_owned();
+        let policy = DiagnosticPolicy::new(
+            Some(MeasuredBuild {
+                ffmpeg_version: one.ffmpeg_version.clone(),
+                binary_sha256: one.binary_sha256.clone(),
+                buildconf_sha256: one.buildconf_sha256.clone(),
+            }),
+            vec![one, two],
+        );
+        assert!(policy
+            .contract_for("h264", "h264", QUALIFIED_STDERR_MODE)
+            .is_none());
+    }
+
+    /// The whole point of the receipt: a producer that exits zero having
+    /// failed to decode cannot qualify its own output.
+    #[tokio::test]
+    async fn a_producer_that_failed_to_decode_and_exited_zero_is_rejected() {
+        let grammar = h264();
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let handle = tokio::spawn(crate::decoder_health::read_diagnostics(
+            reader,
+            Some(grammar),
+            |_| {},
+            |_| false,
+        ));
+        for _ in 0..VIDEO_DECODE_ERROR_LIMIT {
+            use tokio::io::AsyncWriteExt;
+            writer
+                .write_all(format!("{H264_PRIMARY}\n").as_bytes())
+                .await
+                .expect("write a primary record");
+        }
+        drop(writer);
+        let diagnostics = ObservedDiagnostics::new(
+            "plan-digest".to_owned(),
+            Some("id".to_owned()),
+            Some(handle),
+            None,
+        );
+        // A clean end: the process said it finished, and it is the receipt
+        // that disagrees.
+        let receipt = diagnostics
+            .settle(DIAGNOSTIC_DRAIN_BUDGET, ExitDisposition::CleanEnd)
+            .await;
+        assert_eq!(receipt.qualification, Qualification::Rejected);
+        assert!(!receipt.permits_reuse());
+        assert_eq!(
+            receipt.terminal_fault,
+            Some(DecodeFaultKind::VideoDecodeFailure)
+        );
+        assert_eq!(receipt.video_decode_error_records, 5);
+        assert_eq!(receipt.contract_qualified_error_records, 5);
+        assert_eq!(receipt.plan_digest, "plan-digest");
+    }
+
+    /// A clean stream from a qualified build is the one case that may become a
+    /// durable artifact.
+    #[tokio::test]
+    async fn a_clean_observation_from_a_qualified_build_qualifies() {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let handle = tokio::spawn(crate::decoder_health::read_diagnostics(
+            reader,
+            Some(h264()),
+            |_| {},
+            |_| false,
+        ));
+        {
+            use tokio::io::AsyncWriteExt;
+            writer
+                .write_all(b"[info] frame= 120 fps=24\n[aist#0:1/aac @ 0x1] [dec:aac @ 0x2] [error] Error submitting packet to decoder: invalid data\n")
+                .await
+                .expect("write unrelated lines");
+        }
+        drop(writer);
+        let receipt =
+            ObservedDiagnostics::new("d".to_owned(), Some("id".to_owned()), Some(handle), None)
+                .settle(DIAGNOSTIC_DRAIN_BUDGET, ExitDisposition::CleanEnd)
+                .await;
+        assert_eq!(receipt.qualification, Qualification::Qualified);
+        assert!(receipt.permits_reuse());
+        assert_eq!(receipt.video_decode_error_records, 0);
+    }
+
+    /// A stream this node has no grammar for is read, bounded and logged — and
+    /// certifies nothing. This is the deployed fleet's state, and the reason
+    /// "it looked clean" is not an answer.
+    #[tokio::test]
+    async fn a_build_no_contract_covers_reads_without_qualifying() {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let handle = tokio::spawn(async move {
+            let mut lines = Vec::new();
+            let accumulator = crate::decoder_health::read_diagnostics(
+                reader,
+                None,
+                |line| lines.push(line.to_owned()),
+                |_| false,
+            )
+            .await;
+            (accumulator, lines)
+        });
+        {
+            use tokio::io::AsyncWriteExt;
+            writer
+                .write_all(b"[error] Error while decoding stream #0:0: Invalid data found when processing input\n")
+                .await
+                .expect("write the deployed build's spelling");
+        }
+        drop(writer);
+        let (accumulator, logged) = handle.await.expect("join");
+        assert_eq!(logged.len(), 1, "the line is still read and still logged");
+        assert!(!accumulator.grammar_available());
+        assert!(
+            !accumulator.qualifies_reuse(),
+            "a stream nobody could read is not a stream that was clean"
+        );
+        assert_eq!(accumulator.primary_error_records(), 0);
+    }
+
+    /// §7.1: reader failure must be observable. The observable form of it is
+    /// an attempt that cannot claim its output is clean.
+    #[tokio::test]
+    async fn a_reader_that_never_reaches_eof_is_aborted_rather_than_detached() {
+        /// Fires when the reader task is dropped — which, if the budget path
+        /// detaches instead of aborting, never happens.
+        struct Cancelled(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Cancelled {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        // A duplex whose writer is never dropped: the reader cannot reach EOF.
+        let (_writer, reader) = tokio::io::duplex(64);
+        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = Cancelled(std::sync::Arc::clone(&gone));
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            crate::decoder_health::read_diagnostics(reader, Some(h264()), |_| {}, |_| false).await
+        });
+        let receipt = ObservedDiagnostics::new("d".to_owned(), None, Some(handle), None)
+            .settle(Duration::from_millis(50), ExitDisposition::CleanEnd)
+            .await;
+        assert_eq!(receipt.qualification, Qualification::Unqualified);
+        assert!(!receipt.observation_complete);
+        assert!(!receipt.permits_reuse());
+
+        // Aborting is not instantaneous, but it is bounded: yield until the
+        // runtime has dropped the task, and fail rather than hang.
+        for _ in 0..1_000 {
+            if gone.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "the reader outlived the attempt that owned it — dropping a JoinHandle \
+             detaches its task, which is the shape §7.1 refuses"
+        );
+    }
+
+    /// A reader that panicked is the same answer for the same reason — and it
+    /// must not be the same answer as a clean stream.
+    #[tokio::test]
+    async fn a_reader_that_panicked_settles_as_unobserved() {
+        let handle = tokio::spawn(async { panic!("the reader died") });
+        let receipt = ObservedDiagnostics::new("d".to_owned(), None, Some(handle), None)
+            .settle(DIAGNOSTIC_DRAIN_BUDGET, ExitDisposition::CleanEnd)
+            .await;
+        assert_eq!(receipt.qualification, Qualification::Unqualified);
+        assert!(!receipt.observation_complete);
+    }
+
+    /// An attempt with no diagnostic stream at all is unqualified, never
+    /// silently clean.
+    #[tokio::test]
+    async fn an_attempt_with_no_reader_is_unqualified() {
+        let diagnostics = ObservedDiagnostics::new("d".to_owned(), None, None, None);
+        assert!(diagnostics.is_unobserved());
+        let receipt = diagnostics
+            .settle(DIAGNOSTIC_DRAIN_BUDGET, ExitDisposition::CleanEnd)
+            .await;
+        assert_eq!(receipt.qualification, Qualification::Unqualified);
+    }
+
+    /// A failed termination never qualifies, however clean the stream was: the
+    /// bytes it produced are a fragment of work that did not finish.
+    #[tokio::test]
+    async fn a_failed_termination_is_never_qualified() {
+        let (writer, reader) = tokio::io::duplex(64);
+        drop(writer);
+        let handle = tokio::spawn(crate::decoder_health::read_diagnostics(
+            reader,
+            Some(h264()),
+            |_| {},
+            |_| false,
+        ));
+        let receipt =
+            ObservedDiagnostics::new("d".to_owned(), Some("id".to_owned()), Some(handle), None)
+                .settle(DIAGNOSTIC_DRAIN_BUDGET, ExitDisposition::FailedTermination)
+                .await;
+        assert_eq!(receipt.qualification, Qualification::Unqualified);
+        assert!(
+            receipt.observation_complete,
+            "the stream was read to its end"
+        );
+    }
+
+    /// A yield is not a failure and not an end of input, and the receipt says
+    /// which — §6.2 keeps the segments a yielded part finished.
+    #[tokio::test]
+    async fn a_yield_is_recorded_as_a_yield() {
+        let (writer, reader) = tokio::io::duplex(64);
+        drop(writer);
+        let handle = tokio::spawn(crate::decoder_health::read_diagnostics(
+            reader,
+            Some(h264()),
+            |_| {},
+            |_| false,
+        ));
+        let receipt =
+            ObservedDiagnostics::new("d".to_owned(), Some("id".to_owned()), Some(handle), None)
+                .settle(DIAGNOSTIC_DRAIN_BUDGET, ExitDisposition::IntentionalYield)
+                .await;
+        assert_eq!(receipt.exit_disposition, ExitDisposition::IntentionalYield);
+        assert_eq!(
+            receipt.qualification,
+            Qualification::Qualified,
+            "a clean yield may still be reused; the receipt records why it stopped"
+        );
+    }
+
+    /// Progress blocks share the copy session's stderr with the log. A
+    /// `key=value` line must never reach classification, and must not drown
+    /// the log either.
+    #[tokio::test]
+    async fn progress_blocks_are_sorted_out_before_classification() {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let handle = tokio::spawn(async move {
+            let mut progress = Vec::new();
+            let mut logged = Vec::new();
+            let accumulator = crate::decoder_health::read_diagnostics(
+                reader,
+                Some(h264()),
+                |line| logged.push(line.to_owned()),
+                |line| {
+                    if line.starts_with("out_time_ms=") || line.starts_with("progress=") {
+                        progress.push(line.to_owned());
+                        true
+                    } else {
+                        false
+                    }
+                },
+            )
+            .await;
+            (accumulator, progress, logged)
+        });
+        {
+            use tokio::io::AsyncWriteExt;
+            // The third line is a telemetry line the *grammar* would also have
+            // an opinion about: as a diagnostic it is a malformed repeat
+            // marker. It is claimed by the progress filter, so the accumulator
+            // must never see it — which is what "sorted out *before*
+            // classification" means, and what moving the filter after
+            // `classify` would break.
+            writer
+                .write_all(
+                    format!(
+                        "out_time_ms=1000\nprogress=continue\nprogress=Last message repeated x times\n{H264_PRIMARY}\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write a mixed stream");
+        }
+        drop(writer);
+        let (accumulator, progress, logged) = handle.await.expect("join");
+        assert_eq!(progress.len(), 3);
+        assert_eq!(logged.len(), 1, "telemetry does not drown the log");
+        assert_eq!(accumulator.primary_error_records(), 1);
+        assert_eq!(
+            accumulator.malformed_lines(),
+            0,
+            "a telemetry line never reaches the grammar"
+        );
+        assert!(accumulator.observation_complete());
+    }
+
+    /// Memory is a function of the parser, not of what the child printed, and
+    /// a stream that overran the bound says so in its receipt.
+    #[tokio::test]
+    async fn a_flooding_line_is_bounded_and_costs_the_attempt_its_receipt() {
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let handle = tokio::spawn(crate::decoder_health::read_diagnostics(
+            reader,
+            Some(h264()),
+            |_| {},
+            |_| false,
+        ));
+        let flood = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let chunk = vec![b'x'; 4096];
+            for _ in 0..8 {
+                if writer.write_all(&chunk).await.is_err() {
+                    return;
+                }
+            }
+            let _ = writer.write_all(b"\n").await;
+        });
+        flood.await.expect("flood");
+        // The bound itself, not only the flag: 32 KiB written, 16 KiB kept.
+        let mut retained = HealthAccumulator::with_qualified_grammar();
+        let mut bounded = BoundedDiagnosticReader::new();
+        let mut wide = vec![b'x'; MAX_DIAGNOSTIC_LINE_BYTES * 2];
+        wide.push(b'\n');
+        let lines = bounded.push(&wide, &mut retained);
+        assert_eq!(lines[0].len(), MAX_DIAGNOSTIC_LINE_BYTES);
+        let receipt =
+            ObservedDiagnostics::new("d".to_owned(), Some("id".to_owned()), Some(handle), None)
+                .settle(DIAGNOSTIC_DRAIN_BUDGET, ExitDisposition::CleanEnd)
+                .await;
+        assert_eq!(receipt.qualification, Qualification::Unqualified);
+        assert!(!receipt.observation_complete);
+    }
+
+    /// The receipt round-trips, and a version this build does not know is not
+    /// a reusable artifact — §6.2's readers reject an unsupported receipt
+    /// rather than reading the fields they happen to recognize.
+    #[test]
+    fn a_receipt_of_an_unknown_version_permits_nothing() {
+        let receipt = ProducerHealthReceipt {
+            receipt_version: PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest: "d".to_owned(),
+            diagnostic_contract: Some("id".to_owned()),
+            observation_complete: true,
+            video_decode_error_records: 0,
+            contract_qualified_error_records: 0,
+            terminal_fault: None,
+            exit_disposition: ExitDisposition::CleanEnd,
+            qualification: Qualification::Qualified,
+        };
+        let encoded = serde_json::to_string(&receipt).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<ProducerHealthReceipt>(&encoded).expect("round trip"),
+            receipt
+        );
+        assert!(receipt.permits_reuse());
+
+        let future = ProducerHealthReceipt {
+            receipt_version: PRODUCER_HEALTH_RECEIPT_VERSION + 1,
+            ..receipt
+        };
+        assert!(
+            !future.permits_reuse(),
+            "a receipt whose schema this build cannot read is not evidence it can act on"
+        );
+    }
+
+    /// The unobserved receipt is unqualified by construction. Nothing can
+    /// assemble one that says otherwise.
+    #[test]
+    fn an_unobserved_receipt_cannot_be_made_to_qualify() {
+        let receipt = ProducerHealthReceipt::unobserved("d".to_owned(), ExitDisposition::CleanEnd);
+        assert_eq!(receipt.qualification, Qualification::Unqualified);
+        assert!(!receipt.observation_complete);
+        assert!(!receipt.permits_reuse());
+        assert!(receipt.diagnostic_contract.is_none());
+    }
+
+    /// What the measurement reads, and what it refuses to read.
+    ///
+    /// `execvp` skips a non-executable entry and keeps searching, so hashing
+    /// one would give a confident identity for a file nobody executes; and a
+    /// build that does not understand `-buildconf` exits non-zero, so hashing
+    /// its error text would put something that is not a build configuration
+    /// into a field named after one.
+    #[tokio::test]
+    async fn the_measurement_reads_the_binary_that_will_actually_run() {
+        let root = tempfile::tempdir().expect("temp root");
+        let unexecutable = root.path().join("ffmpeg");
+        tokio::fs::write(&unexecutable, b"not a program")
+            .await
+            .expect("write");
+        assert!(
+            !MeasuredBuild::is_executable_file(&unexecutable).await,
+            "a file without an executable bit is not what PATH resolution finds"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&unexecutable, std::fs::Permissions::from_mode(0o755))
+                .await
+                .expect("chmod");
+            assert!(MeasuredBuild::is_executable_file(&unexecutable).await);
+        }
+        assert!(
+            !MeasuredBuild::is_executable_file(root.path()).await,
+            "a directory on PATH is not the binary either"
+        );
+
+        // The digest is of the file's bytes, streamed rather than slurped.
+        let digest = MeasuredBuild::file_digest(&unexecutable)
+            .await
+            .expect("digest");
+        assert_eq!(digest, hex_digest(b"not a program"));
+
+        // A command that fails is not a measurement.
+        assert!(
+            MeasuredBuild::run("plurxd-no-such-binary-anywhere", &["-version"])
+                .await
+                .is_none()
+        );
+        assert!(
+            MeasuredBuild::run("false", &[]).await.is_none(),
+            "a non-zero exit is a refusal, not a value to hash"
+        );
+        assert_eq!(
+            MeasuredBuild::first_banner_line(b"ffmpeg version 8.0.1\nbuilt with\n").as_deref(),
+            Some("ffmpeg version 8.0.1")
+        );
+        assert_eq!(MeasuredBuild::first_banner_line(b"   \n").as_deref(), None);
+    }
+
+    /// The unqualified policy is what a node has before it has measured
+    /// anything, and it is what `diagnostic_policy()` answers with.
+    #[test]
+    fn a_node_that_measured_nothing_still_has_a_policy() {
+        let policy = diagnostic_policy();
+        assert!(
+            policy
+                .contract_for("h264", "h264", QUALIFIED_STDERR_MODE)
+                .is_none()
+                || policy.measured_build().is_some(),
+            "either nothing was installed for this test process, or whatever \
+             was installed measured a build"
         );
     }
 }

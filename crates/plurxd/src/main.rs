@@ -1864,6 +1864,13 @@ async fn probe_system(
     // a few seconds on a box with a GPU worth testing and nothing at all on one
     // without.
     let tone_map = pipeprobe::probe(transcode_dir, encoder_caps.choose(&probe_pref)).await;
+    // Measure this node's own FFmpeg once, and decide from it whether any
+    // retained contract covers the binary that is about to run. A node with no
+    // covering contract still reads every child's stderr; it simply reads it
+    // without a grammar, which is the honest state for a build nobody has
+    // qualified — and it is the state the deployed fleet is in today, because
+    // FFmpeg 5.1.9 reports decode failures without naming a stream.
+    install_decoder_diagnostic_policy(&ffmpeg).await;
     let measured = Measured {
         ffmpeg_version: ffmpeg_version(&ffmpeg).await,
         ffprobe_build_digest: decode_probe_identity
@@ -2797,6 +2804,40 @@ fn truncate_to_bytes(value: &str, budget: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+/// Resolve and install this process's diagnostic policy.
+///
+/// Every failure is silence rather than a refusal to start: a node that cannot
+/// hash its own FFmpeg loses automatic decoder actions and loses nothing else,
+/// and turning a diagnostic capability into an availability requirement would
+/// trade a cache problem for an outage.
+async fn install_decoder_diagnostic_policy(ffmpeg: &str) {
+    let contracts = match crate::decoder_health::DiagnosticContract::load(
+        crate::decoder_health::RETAINED_DIAGNOSTIC_CONTRACTS,
+    ) {
+        Ok(contracts) => contracts,
+        Err(error) => {
+            tracing::warn!("retained diagnostic contracts are unreadable: {error}");
+            Vec::new()
+        }
+    };
+    let build = crate::decoder_health::MeasuredBuild::measure(ffmpeg).await;
+    if build.is_none() {
+        tracing::info!(
+            "ffmpeg build identity could not be measured; diagnostics are observation only"
+        );
+    }
+    let policy = crate::decoder_health::DiagnosticPolicy::new(build, contracts);
+    let qualified = policy.measured_build().is_some();
+    if !crate::decoder_health::install_diagnostic_policy(policy) {
+        tracing::warn!("a decoder diagnostic policy was already installed for this process");
+        return;
+    }
+    tracing::info!(
+        measured_build = qualified,
+        "decoder diagnostic policy installed"
+    );
 }
 
 /// First line of `ffmpeg -version` (e.g. "ffmpeg version 6.1.1 …"), if the

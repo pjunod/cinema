@@ -1519,6 +1519,129 @@ impl FfmpegProgressObserver {
     }
 }
 
+/// What one attempt asks its child's stderr to be read as.
+///
+/// `grammar` is `Some` only when a retained contract covers the exact binary
+/// about to run *and* this attempt asked for the log flags that contract was
+/// qualified under. Everything else reads the stream, bounds it, and logs it
+/// without claiming any of it is evidence.
+#[derive(Clone, Default)]
+struct DiagnosticObservation {
+    plan_digest: String,
+    contract_id: Option<String>,
+    grammar: Option<crate::decoder_health::DiagnosticGrammar>,
+}
+
+impl DiagnosticObservation {
+    /// The observation this plan's attempt is entitled to.
+    ///
+    /// A grammar only when the installed policy has a contract covering the
+    /// exact binary about to run, for this codec and the decoder the command
+    /// will actually name. Everything else is read, bounded and logged without
+    /// being evidence — which is the honest state on a fleet whose FFmpeg
+    /// prints its decode failures without naming a stream.
+    fn for_plan(plan: &ResolvedTranscode) -> Self {
+        Self::resolve(
+            crate::decoder_health::diagnostic_policy(),
+            plan.plan_digest(),
+            plan.decode().input_codec(),
+            plan.decode().backend(),
+            plan.decode().software_decoder(),
+            plan.decode().input_video_stream(),
+        )
+    }
+
+    /// The same decision from the plan facts it actually uses, against an
+    /// explicit policy — so the rule can be tested without a process-wide
+    /// policy and without assembling a plan.
+    fn resolve(
+        policy: &crate::decoder_health::DiagnosticPolicy,
+        plan_digest: String,
+        codec: Option<&str>,
+        backend: plurx_core::transcode::DecodeBackend,
+        named_decoder: Option<&str>,
+        input_video_stream: u32,
+    ) -> Self {
+        let unqualified = Self {
+            plan_digest: plan_digest.clone(),
+            ..Self::default()
+        };
+        let Some(codec) = codec else {
+            return unqualified;
+        };
+        // Only a plan that *names* its decoder may be matched to a contract.
+        //
+        // Guessing the family name here was a real defect: a hardware backend
+        // substitutes `<codec>_qsv` and prints that in `[dec:…]`, and a
+        // software plan with no measured implementation emits no `-c:v` at all
+        // so FFmpeg picks its own default — `av1` selects the native decoder
+        // where it would otherwise choose `libdav1d`. A contract found under
+        // the guessed name yields a grammar that matches nothing, and a
+        // grammar that matches nothing certifies every stream as clean. That
+        // is the exact substitution this milestone exists to remove, so the
+        // answer is no unless the command says the decoder out loud.
+        if backend != plurx_core::transcode::DecodeBackend::Software {
+            return unqualified;
+        }
+        let Some(decoder) = named_decoder else {
+            return unqualified;
+        };
+        let Some(contract) =
+            policy.contract_for(codec, decoder, crate::decoder_health::QUALIFIED_STDERR_MODE)
+        else {
+            return unqualified;
+        };
+        Self {
+            plan_digest,
+            contract_id: Some(contract.id.clone()),
+            // Input file 0: every movie command builds the video input first,
+            // and a subtitle input that follows it is a later index.
+            grammar: Some(crate::decoder_health::DiagnosticGrammar::new(
+                contract.clone(),
+                0,
+                input_video_stream,
+            )),
+        }
+    }
+
+    /// Whether this attempt may ask its child for the qualified log flags.
+    ///
+    /// Asking without a grammar buys nothing and changes the arguments that
+    /// ship, so the answer is the same question as "is there a grammar".
+    fn qualified_logging(&self) -> bool {
+        self.grammar.is_some()
+    }
+
+    /// An attempt with no semantic plan behind it — a stream copy. It is still
+    /// read and still bounded; there is simply no decode to attribute.
+    ///
+    /// It is named by the session it belongs to rather than by a plan digest,
+    /// because an empty digest names nothing and is indistinguishable across
+    /// attempts — and a receipt that names nothing is evidence about nothing.
+    fn copy(session_id: &str) -> Self {
+        Self {
+            plan_digest: format!("copy:{}", session_log_id(session_id)),
+            ..Self::default()
+        }
+    }
+}
+
+/// A running child and the observation that belongs to it.
+///
+/// §7.1: "The session/producer remains the owner of that handle." The two
+/// travel together from the spawn to the install so that a producer cannot
+/// exist without the reader that decides whether its output is trustworthy.
+struct ObservedFfmpeg {
+    child: Child,
+    diagnostics: crate::decoder_health::ObservedDiagnostics,
+}
+
+impl ObservedFfmpeg {
+    fn into_parts(self) -> (Child, crate::decoder_health::ObservedDiagnostics) {
+        (self.child, self.diagnostics)
+    }
+}
+
 fn spawn_ffmpeg(
     args: &[String],
     encoder_label: &'static str,
@@ -1526,7 +1649,8 @@ fn spawn_ffmpeg(
     progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
     descriptors: FfmpegDescriptors,
-) -> Result<Child, String> {
+    observation: DiagnosticObservation,
+) -> Result<ObservedFfmpeg, String> {
     // `-progress pipe:1` is a global option, so it can lead the vector; the
     // HLS muxer writes to files, which leaves stdout free to carry it.
     let mut full: Vec<String> = vec!["-progress".into(), "pipe:1".into()];
@@ -1585,24 +1709,32 @@ fn spawn_ffmpeg(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("spawning ffmpeg: {e}"))?;
-    if let Some(stdout) = child.stdout.take() {
+    // Both readers are owned. They used to be detached `tokio::spawn`s, which
+    // is why a reader that died looked exactly like a stream that was clean —
+    // and a stream that looked clean is what let a broken title into the
+    // cache. §7.1: detached best-effort logging is insufficient for cache
+    // qualification.
+    let progress = child.stdout.take().map(|stdout| {
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 progress_observer.apply_line(&line);
             }
-        });
-    }
-    if let Some(stderr) = child.stderr.take() {
+        })
+    });
+    let reader = child.stderr.take().map(|stderr| {
         let sid = session_id.to_owned();
         let started = Instant::now();
+        let grammar = observation.grammar.clone();
         tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                log_ffmpeg_stderr(&sid, encoder_label, &line);
-            }
+            let accumulator = crate::decoder_health::read_diagnostics(
+                stderr,
+                grammar,
+                |line| log_ffmpeg_stderr(&sid, encoder_label, line),
+                |_| false,
+            )
+            .await;
             // Stderr closing means the process ended. Logging it (with how long
             // it ran) distinguishes "ffmpeg died early" from "ffmpeg is still
             // running but produced nothing".
@@ -1611,9 +1743,18 @@ fn spawn_ffmpeg(
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
-        });
-    }
-    Ok(child)
+            accumulator
+        })
+    });
+    Ok(ObservedFfmpeg {
+        child,
+        diagnostics: crate::decoder_health::ObservedDiagnostics::new(
+            observation.plan_digest,
+            observation.contract_id,
+            reader,
+            progress,
+        ),
+    })
 }
 
 /// Spawn a copy-session ffmpeg whose **stdout is the media**, not telemetry.
@@ -1631,7 +1772,8 @@ fn spawn_ffmpeg_pipe(
     session_id: &str,
     progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
-) -> Result<(Child, tokio::process::ChildStdout), String> {
+    observation: DiagnosticObservation,
+) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String> {
     let mut full: Vec<String> = vec!["-progress".into(), "pipe:2".into()];
     full.extend_from_slice(args);
     let mut command = tokio::process::Command::new(ffmpeg_bin());
@@ -1648,27 +1790,48 @@ fn spawn_ffmpeg_pipe(
         .stdout
         .take()
         .ok_or_else(|| "ffmpeg started without a stdout pipe".to_owned())?;
-    if let Some(stderr) = child.stderr.take() {
+    let reader = child.stderr.take().map(|stderr| {
         let sid = session_id.to_owned();
         let started = Instant::now();
+        let grammar = observation.grammar.clone();
         tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if is_progress_line(&line) {
-                    progress_observer.apply_line(&line);
-                } else {
-                    log_ffmpeg_stderr(&sid, "copy", &line);
-                }
-            }
+            // Progress blocks share this stream with the log, so they are
+            // sorted out before classification: a `key=value` line can never
+            // become a decode record, and the log is not drowned in telemetry.
+            let accumulator = crate::decoder_health::read_diagnostics(
+                stderr,
+                grammar,
+                |line| log_ffmpeg_stderr(&sid, "copy", line),
+                |line| {
+                    if is_progress_line(line) {
+                        progress_observer.apply_line(line);
+                        true
+                    } else {
+                        false
+                    }
+                },
+            )
+            .await;
             tracing::warn!(
                 session = %session_log_id(&sid), encoder = "copy",
                 elapsed_s = started.elapsed().as_secs(),
                 "transcode ffmpeg process ended"
             );
-        });
-    }
-    Ok((child, stdout))
+            accumulator
+        })
+    });
+    Ok((
+        ObservedFfmpeg {
+            child,
+            diagnostics: crate::decoder_health::ObservedDiagnostics::new(
+                observation.plan_digest,
+                observation.contract_id,
+                reader,
+                None,
+            ),
+        },
+        stdout,
+    ))
 }
 
 /// Give libraries loaded by ffmpeg a cache owned by plurxd.
@@ -1687,6 +1850,11 @@ pub(crate) fn configure_ffmpeg_runtime(
     runtime_cache: &std::path::Path,
 ) {
     command.env("XDG_CACHE_HOME", runtime_cache);
+    // §7.1: disable terminal colouring for the child. FFmpeg suppresses it on
+    // a pipe today, but the grammar matches on exact bracketed contexts and a
+    // build or environment that decided otherwise would make every qualified
+    // line unreadable — silently, since an unmatched line is simply unrelated.
+    command.env("AV_LOG_FORCE_NOCOLOR", "1");
 }
 
 /// Is this stderr line one of ffmpeg's `-progress` blocks rather than a log
@@ -1785,6 +1953,11 @@ struct PrepublicationTranscodeRetry {
     software_budget: usize,
     software_pool: crate::admission::SwPool,
     runtime_cache: PathBuf,
+    /// Frozen with the rest of the recipe, for the same reason: the grammar
+    /// that will read this attempt is a property of the plan it was resolved
+    /// from, and resolving it again at execution time could answer differently
+    /// from the resolution the actor validated.
+    observation: DiagnosticObservation,
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -1954,9 +2127,11 @@ impl PrepublicationTranscodeRetry {
         {
             return Err("one-step retry plan disagrees with its prepared encode route".to_owned());
         }
+        let observation = DiagnosticObservation::for_plan(plan);
         let execution =
             TranscodeExecution::from_options(file, &retry_opts, pacing, &dir.to_string_lossy())
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+                .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(plan, &execution);
         let fingerprint_body = serde_json::json!({
             "version": 2,
@@ -2005,6 +2180,7 @@ impl PrepublicationTranscodeRetry {
             software_budget,
             software_pool,
             runtime_cache,
+            observation,
         })
     }
 }
@@ -2076,8 +2252,60 @@ async fn terminate_exact_prepublication_child(
             "producer attempt {producer_attempt} termination returned before confirmed reap"
         ));
     }
+    // Taken and dropped, which aborts the reader. Deliberately *not* settled
+    // here, for two reasons that are easy to get wrong.
+    //
+    // This function is the teardown path for every ending an attempt can have,
+    // including ordinary retirement of a healthy session — so any disposition
+    // it hardcoded would be wrong most of the time, and a receipt that says
+    // `failed_termination` about a clean session is worse than no receipt. And
+    // two of its callers hold `child_transition` across the call, whose own
+    // comment forbids sleeping under it because that blocks the global reaper
+    // and every explicit stop; settling here would sleep up to the whole drain
+    // budget with it held.
+    //
+    // The rolling receipt lands in M3b2, at the exit classification that
+    // already knows which of the three dispositions this ending was, and which
+    // holds no session lock.
+    drop(child.take_diagnostics());
     *slot = None;
     Ok(())
+}
+
+/// Log what one attempt's observation concluded.
+///
+/// M3b owns the reading; M3b2 is what carries the fault to the actor and M3c
+/// is what lets a receipt refuse a cache artifact. Until then this is the
+/// visible half: an operator can see that a producer which exited cleanly was
+/// failing to decode the whole time, which before this could not be seen at
+/// all.
+fn report_producer_health(attempt: &str, receipt: &crate::decoder_health::ProducerHealthReceipt) {
+    let fault = receipt
+        .terminal_fault
+        .map(crate::decoder_health::DecodeFaultKind::name);
+    if fault.is_some() || receipt.video_decode_error_records > 0 {
+        tracing::warn!(
+            attempt,
+            plan = %receipt.plan_digest,
+            qualification = receipt.qualification.name(),
+            exit = receipt.exit_disposition.name(),
+            decode_errors = receipt.video_decode_error_records,
+            contract_qualified_errors = receipt.contract_qualified_error_records,
+            fault = fault.unwrap_or("none"),
+            contract = receipt.diagnostic_contract.as_deref().unwrap_or("none"),
+            "producer decode diagnostics"
+        );
+        return;
+    }
+    tracing::debug!(
+        attempt,
+        plan = %receipt.plan_digest,
+        qualification = receipt.qualification.name(),
+        exit = receipt.exit_disposition.name(),
+        observation_complete = receipt.observation_complete,
+        contract = receipt.diagnostic_contract.as_deref().unwrap_or("none"),
+        "producer decode diagnostics"
+    );
 }
 
 async fn terminate_current_prepublication_child(session: &Session) -> Result<(), String> {
@@ -3184,6 +3412,7 @@ async fn execute_prepublication_transcode_retry(
                             .map(std::os::fd::AsRawFd::as_raw_fd),
                         ..FfmpegDescriptors::default()
                     },
+                    retry.observation.clone(),
                 )
                 .map_err(|error| format!("spawning immutable fallback recipe: {error}"))
             })
@@ -3298,6 +3527,7 @@ async fn execute_prepublication_copy_retry(
                     ),
                     &retry.runtime_cache,
                     FfmpegDescriptors::default(),
+                    DiagnosticObservation::copy(sid),
                 )
                 .map_err(|error| format!("spawning immutable copy fallback: {error}"))
             })
@@ -4104,6 +4334,13 @@ impl LifecycleTestPause {
 struct AttemptChild {
     producer_attempt: u64,
     pid: Option<u32>,
+    /// The reader that decides whether this attempt's output can be trusted.
+    ///
+    /// It lives with the child rather than with the session because it is
+    /// scoped to one attempt: a successor gets its own counters, and a
+    /// predecessor's fault must not follow the attempt that replaced it.
+    /// Taken exactly once, at classification.
+    diagnostics: std::sync::Mutex<Option<crate::decoder_health::ObservedDiagnostics>>,
     terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
     terminal_notify: Arc<tokio::sync::Notify>,
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
@@ -4143,12 +4380,35 @@ impl AttemptChildTerminal {
 }
 
 impl AttemptChild {
+    /// Attach this attempt's diagnostic reader.
+    ///
+    /// Separate from `new` so every existing construction — the lifecycle
+    /// fixtures especially — keeps meaning "a child with no observation",
+    /// which is exactly what those tests are about.
+    fn observing(self, diagnostics: crate::decoder_health::ObservedDiagnostics) -> Self {
+        *self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(diagnostics);
+        self
+    }
+
+    /// Take the reader, once. A second caller gets nothing rather than a
+    /// second receipt for one attempt.
+    fn take_diagnostics(&self) -> Option<crate::decoder_health::ObservedDiagnostics> {
+        self.diagnostics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
     fn new(
         producer_attempt: u64,
         mut child: Child,
         control: crate::playback_control::RollingControlHandle,
     ) -> Self {
         let pid = child.id();
+        let diagnostics = std::sync::Mutex::new(None);
         let terminal = Arc::new(std::sync::Mutex::new(None));
         let terminal_notify = Arc::new(tokio::sync::Notify::new());
         let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -4311,6 +4571,7 @@ impl AttemptChild {
         Self {
             producer_attempt,
             pid,
+            diagnostics,
             terminal,
             terminal_notify,
             commands,
@@ -5706,7 +5967,7 @@ impl Session {
         spawn: F,
     ) -> Result<(), String>
     where
-        F: FnOnce() -> Result<Child, String>,
+        F: FnOnce() -> Result<ObservedFfmpeg, String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -5715,12 +5976,11 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let candidate = spawn()?;
-        *slot = Some(AttemptChild::new(
-            producer_attempt,
-            candidate,
-            self.control.clone(),
-        ));
+        let (candidate, diagnostics) = spawn()?.into_parts();
+        *slot = Some(
+            AttemptChild::new(producer_attempt, candidate, self.control.clone())
+                .observing(diagnostics),
+        );
         drop(slot);
 
         let install_authorization = match self
@@ -5786,7 +6046,7 @@ impl Session {
         spawn: F,
     ) -> Result<tokio::process::ChildStdout, String>
     where
-        F: FnOnce() -> Result<(Child, tokio::process::ChildStdout), String>,
+        F: FnOnce() -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String>,
     {
         let mut slot = self.child.lock().await;
         if let Some(child) = slot.as_ref() {
@@ -5795,12 +6055,12 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let (candidate, stdout) = spawn()?;
-        *slot = Some(AttemptChild::new(
-            producer_attempt,
-            candidate,
-            self.control.clone(),
-        ));
+        let (observed, stdout) = spawn()?;
+        let (candidate, diagnostics) = observed.into_parts();
+        *slot = Some(
+            AttemptChild::new(producer_attempt, candidate, self.control.clone())
+                .observing(diagnostics),
+        );
         drop(slot);
 
         let install_authorization = match self
@@ -8378,6 +8638,22 @@ enum PartEnd {
     /// This producer run is out of time.
     Deadline,
     Failed(String),
+}
+
+/// What a part's ending was, in the receipt's vocabulary.
+///
+/// §6.2 asks the receipt to distinguish "ran to the end of its input" from
+/// "stopped because we asked it to". Preemption and the producer deadline are
+/// both the second: a yielded part may still retain the segments it finished,
+/// and calling that a failure would throw away work that is complete.
+fn part_exit_disposition(ended: &PartEnd) -> crate::decoder_health::ExitDisposition {
+    match ended {
+        PartEnd::Finished => crate::decoder_health::ExitDisposition::CleanEnd,
+        PartEnd::Preempted | PartEnd::Deadline => {
+            crate::decoder_health::ExitDisposition::IntentionalYield
+        }
+        PartEnd::Failed(_) => crate::decoder_health::ExitDisposition::FailedTermination,
+    }
 }
 
 /// The owner-aware permits a foreground encoder keeps for its whole lifetime.
@@ -13582,6 +13858,8 @@ impl TranscodeManager {
                 &output_directory,
             )
             .map_err(|error| error.to_string())?;
+            let observation = DiagnosticObservation::for_plan(plan);
+            let execution = execution.observing_qualified_grammar(observation.qualified_logging());
             let args = transcode::hls_args(plan, &execution);
             tracing::info!(
                 recipe = %hash, part = parts.len(), from_s = part_opts.start_seconds,
@@ -13589,7 +13867,7 @@ impl TranscodeManager {
             );
             let progress = Arc::new(Progress::new());
             let generation = progress.begin_attempt();
-            let mut child = spawn_ffmpeg(
+            let (mut child, diagnostics) = spawn_ffmpeg(
                 &args,
                 encoder.label(),
                 hash,
@@ -13600,7 +13878,9 @@ impl TranscodeManager {
                     output: Some(temp.raw_fd()),
                     subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
                 },
-            )?;
+                observation.clone(),
+            )?
+            .into_parts();
 
             let ended = self
                 .run_part(&mut child, deadline, yield_to_offline, cancelled)
@@ -13608,6 +13888,18 @@ impl TranscodeManager {
             drop(source_offset_permit);
             drop(slot); // before anything else: a viewer is probably waiting on it
             drop(sw_hold); // and the pool share with it
+                           // The part's own observation, settled after the permits are back:
+                           // the child is already reaped, so the drain is normally instant,
+                           // and holding a hardware slot through a bounded wait for a reader
+                           // is exactly the trade the comment above refuses. M3b records the
+                           // receipt; M3c is what makes it refuse a part.
+            let receipt = diagnostics
+                .settle(
+                    crate::decoder_health::DIAGNOSTIC_DRAIN_BUDGET,
+                    part_exit_disposition(&ended),
+                )
+                .await;
+            report_producer_health(&format!("{hash} part {}", parts.len()), &receipt);
             let part = read_part(&part_dir).await;
             let produced = !part.is_empty();
             if produced {
@@ -15912,9 +16204,11 @@ impl TranscodeManager {
         let typeless_sliding = self
             .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
             .await;
+        let observation = DiagnosticObservation::for_plan(&plan);
         let execution =
             TranscodeExecution::from_options(&file, &opts, pacing, &dir.to_string_lossy())
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+                .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(&plan, &execution);
         // Log the exact command — the single most useful diagnostic. It reveals
         // the decode/filter/encode pipeline actually used (e.g. whether heavy
@@ -16203,6 +16497,7 @@ impl TranscodeManager {
                             .map(std::os::fd::AsRawFd::as_raw_fd),
                         ..FfmpegDescriptors::default()
                     },
+                    observation.clone(),
                 )
             })
             .await
@@ -16694,6 +16989,7 @@ impl TranscodeManager {
                             session.control.clone(),
                         ),
                         &self.runtime_cache,
+                        DiagnosticObservation::copy(&session_id),
                     )
                 })
                 .await
@@ -16723,6 +17019,7 @@ impl TranscodeManager {
                         ),
                         &self.runtime_cache,
                         FfmpegDescriptors::default(),
+                        DiagnosticObservation::copy(&session_id),
                     )
                 })
                 .await
@@ -36766,5 +37063,134 @@ pub(crate) mod tests {
             Some(720)
         );
         drop(claim);
+    }
+
+    /// Which decoder the command will *name* is the only thing that may be
+    /// matched to a contract.
+    ///
+    /// A grammar built on a guessed decoder name matches nothing, and a
+    /// grammar that matches nothing certifies every stream as clean — the
+    /// exact substitution this milestone exists to remove. So the answer is no
+    /// unless the plan says the decoder out loud.
+    #[test]
+    fn only_a_plan_that_names_its_decoder_gets_a_grammar() {
+        use plurx_core::transcode::DecodeBackend;
+
+        let contract = crate::decoder_health::DiagnosticContract {
+            id: "fixture".to_owned(),
+            host: "test".to_owned(),
+            ffmpeg_version: "8.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+            stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
+            input_codec: "h264".to_owned(),
+            decoder: "h264".to_owned(),
+            require_context_addresses: true,
+            error_detail: "corrupt input packet".to_owned(),
+            fixture: "f".to_owned(),
+            fixture_sha256: "d".repeat(64),
+            scope: "test".to_owned(),
+            backend_fault_detail: None,
+        };
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let resolve = |backend, decoder| {
+            DiagnosticObservation::resolve(
+                &policy,
+                "digest".to_owned(),
+                Some("h264"),
+                backend,
+                decoder,
+                0,
+            )
+        };
+
+        let named = resolve(DecodeBackend::Software, Some("h264"));
+        assert!(
+            named.grammar.is_some(),
+            "the command names h264, and h264 is qualified"
+        );
+        assert!(named.qualified_logging());
+        assert_eq!(named.contract_id.as_deref(), Some("fixture"));
+
+        for (label, observation) in [
+            // The daemon's startup inventory names no implementation, so this
+            // is every software plan in production today: the command emits no
+            // `-c:v` and FFmpeg picks its own default.
+            (
+                "software, no implementation measured",
+                resolve(DecodeBackend::Software, None),
+            ),
+            // A hardware backend substitutes `<codec>_qsv` and prints that.
+            (
+                "hardware backend",
+                resolve(DecodeBackend::Qsv, Some("h264")),
+            ),
+            // A named implementation no contract covers.
+            (
+                "an implementation nobody qualified",
+                resolve(DecodeBackend::Software, Some("libdav1d_h264")),
+            ),
+        ] {
+            assert!(observation.grammar.is_none(), "{label}");
+            assert!(
+                !observation.qualified_logging(),
+                "{label}: and it does not ask for flags it has no grammar for"
+            );
+            assert!(observation.contract_id.is_none(), "{label}");
+            assert_eq!(observation.plan_digest, "digest", "{label}");
+        }
+    }
+
+    /// The flags a child is launched with are the flags the contract was
+    /// selected under. One decision, read twice, and nothing that can drift.
+    #[test]
+    fn the_flags_asked_for_are_the_flags_the_contract_was_matched_under() {
+        assert_eq!(
+            crate::decoder_health::QUALIFIED_STDERR_MODE,
+            plurx_core::transcode::DiagnosticLogging::Qualified.flags(),
+            "the mode a contract is matched under and the token the command \
+             emits are one string, or a qualified node reads a stream that \
+             carries no severity labels"
+        );
+        assert_eq!(
+            crate::decoder_health::LEGACY_STDERR_MODE,
+            plurx_core::transcode::DiagnosticLogging::Legacy.flags()
+        );
+        let unqualified = DiagnosticObservation::default();
+        assert!(!unqualified.qualified_logging());
+        assert!(DiagnosticObservation::copy("session-abc")
+            .plan_digest
+            .starts_with("copy:"));
+    }
+
+    /// A part that ran to the end, one that yielded, and one that failed are
+    /// three different receipts. Collapsing them loses the distinction §6.2
+    /// keeps a yielded part's finished segments on.
+    #[test]
+    fn a_parts_ending_maps_to_its_own_disposition() {
+        use crate::decoder_health::ExitDisposition;
+        assert_eq!(
+            part_exit_disposition(&PartEnd::Finished),
+            ExitDisposition::CleanEnd
+        );
+        assert_eq!(
+            part_exit_disposition(&PartEnd::Preempted),
+            ExitDisposition::IntentionalYield
+        );
+        assert_eq!(
+            part_exit_disposition(&PartEnd::Deadline),
+            ExitDisposition::IntentionalYield
+        );
+        assert_eq!(
+            part_exit_disposition(&PartEnd::Failed("boom".to_owned())),
+            ExitDisposition::FailedTermination
+        );
     }
 }

@@ -3,11 +3,11 @@ use plurx_core::transcode::{
     hls_args, resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend,
     DecodeCacheIdentity, DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity,
     DecodeCatalogMetadata, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
-    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, EffectiveRateControl, Encoder,
-    FrameDomain, FrameRateProvenance, OutputGrade, Pacing, Pipeline, PipelineDigest, PlanError,
-    PlanSourceBinding, Recipe, SoftwareDecoder, StreamSelectionProvenance, SubtitleBurn,
-    SubtitleRendering, ToneMap, TranscodeExecution, TranscodeMediaOptions, TranscodeOptions,
-    TranscodeRequest,
+    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, DiagnosticLogging,
+    EffectiveRateControl, Encoder, FrameDomain, FrameRateProvenance, OutputGrade, Pacing, Pipeline,
+    PipelineDigest, PlanError, PlanSourceBinding, Recipe, SoftwareDecoder,
+    StreamSelectionProvenance, SubtitleBurn, SubtitleRendering, ToneMap, TranscodeExecution,
+    TranscodeMediaOptions, TranscodeOptions, TranscodeRequest,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -2232,4 +2232,79 @@ fn the_software_implementation_changes_the_plan_digest_and_the_evidence_class_do
         qualified.plan_digest(),
         "the same decoder produces the same bytes however well we know it"
     );
+}
+
+/// Diagnostic log flags are execution context, never identity.
+///
+/// The same plan resolved on a node whose diagnostics are qualified and on one
+/// whose are not is the same work: one artifact name, one plan digest, and
+/// exactly one token of difference in the command. If the flags reached the
+/// plan, a fleet mid-upgrade would name the same title two different things
+/// and cache it twice.
+#[test]
+fn the_diagnostic_log_flags_are_execution_context_and_never_identity() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let plan = resolve_transcode(
+        &TranscodeRequest::new(Encoder::Software, options(Pipeline::Cpu)),
+        &input,
+        &software_capabilities("h264", "libdav1d_h264_fixture"),
+        &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        &AttemptRestrictions::none(),
+    )
+    .expect("software plan");
+    let file = execution_file("/fixture/source.mkv");
+    let execution =
+        TranscodeExecution::from_options(&file, &execution_options(), Pacing::unpaced(), "/out")
+            .expect("valid execution");
+    assert_eq!(
+        execution.diagnostics,
+        DiagnosticLogging::Legacy,
+        "a node says nothing about its diagnostics until it has measured a build"
+    );
+
+    let legacy = hls_args(&plan, &execution);
+    let qualified = hls_args(
+        &plan,
+        &TranscodeExecution::from_options(&file, &execution_options(), Pacing::unpaced(), "/out")
+            .expect("valid execution")
+            .observing_qualified_grammar(true),
+    );
+    assert!(
+        legacy.windows(2).any(|pair| pair == ["-loglevel", "error"]),
+        "{legacy:?}"
+    );
+    assert!(
+        qualified
+            .windows(2)
+            .any(|pair| pair == ["-loglevel", "repeat+level+error"]),
+        "{qualified:?}"
+    );
+
+    // One token, and nothing else, separates the two commands.
+    assert_eq!(legacy.len(), qualified.len());
+    let differences: Vec<_> = legacy
+        .iter()
+        .zip(qualified.iter())
+        .filter(|(left, right)| left != right)
+        .collect();
+    assert_eq!(
+        differences,
+        vec![(&"error".to_owned(), &"repeat+level+error".to_owned())],
+        "asking a child to say more about itself is not a different encode"
+    );
+
+    // And the plan the two commands were built from is one plan: the flags
+    // live on the execution, so there is nowhere for them to reach identity
+    // from.
+    assert_eq!(execution.diagnostics, DiagnosticLogging::Legacy);
 }

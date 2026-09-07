@@ -274,7 +274,12 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "legacy-child-transition"
 pattern = "child_transition"
-expected_occurrences = 32
+# 32 -> 33 with M3b's comment in `terminate_exact_prepublication_child`
+# explaining why the diagnostic receipt is *not* settled there: two of its
+# callers hold `child_transition` across the call and its own comment forbids
+# sleeping under it. The symbol count sees prose as well as code, and the
+# reason this teardown may not sleep is exactly the reason worth writing down.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -1234,7 +1239,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # remains authoritative but no longer runs inside the collection task. The
 # probe tree restores the shared offset and releases its permit immediately
 # after reap; only the final fstat owner can remain detached.
-expected_occurrences = 427
+# 427 -> 437 with M3b's owned observation. Two are shipped and are the point of
+# the milestone: both FFmpeg readers become `tokio::spawn` handles the attempt
+# *holds*, where before they were spawned and forgotten — the same construct,
+# now with an owner that joins it. The other eight are in the `decoder_health`
+# suite, each awaited or aborted by the test that made it, several of them
+# proving precisely that a reader is not left running.
+expected_occurrences = 437
 
 [[module_structures]]
 id = "method-spawn"
@@ -1421,7 +1432,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # two occurrences `all-async-sleeps` above counts. Both are bounded waits for
 # CPU the pipeline is about to spend, on the existing admission cadence, and
 # both decline rather than detach when their deadline expires.
-expected_occurrences = 649
+# 649 -> 651 with M3b's drain bound: two `tokio::time::timeout_at` calls in
+# `ObservedDiagnostics::settle`, sharing one deadline so a teardown cannot spend
+# twice the budget its caller was told. Neither owns a producer; each bounds a
+# wait for a reader whose child is already reaped, and expiry aborts the reader
+# and settles an incomplete observation rather than waiting.
+expected_occurrences = 651
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1472,7 +1488,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # 73 -> 74 after parser-closure review: one Linux-only native-launcher fixture
 # proves Landlock refuses its attempted second exec. The synchronous status is
 # collected before return; this test-only child owns no rolling producer.
-expected_occurrences = 74
+# 74 -> 75 with M3b's build measurement: one `Command::new` in
+# `MeasuredBuild::run`, an informational `-version`/`-buildconf` invocation on
+# the startup path with null stdin, awaited to completion, producing no media
+# and owning no session.
+expected_occurrences = 75
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1567,7 +1587,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # command chains now share one `command.spawn()` in the blocking launch owner.
 # Both callers still receive and reap their own child; this is a syntax-count
 # decrease, not removal of a process owner.
-expected_occurrences = 241
+# 241 -> 242 for the same call: `.output()` on that informational invocation.
+# It is the only launch this milestone adds; both FFmpeg spawns keep the ones
+# they had.
+expected_occurrences = 242
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

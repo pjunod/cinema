@@ -1636,6 +1636,14 @@ impl PresentationContract {
 pub struct ResolvedDecode {
     backend: DecodeBackend,
     software_decoder: Option<String>,
+    /// The codec of the stream this plan decodes, as the facts reported it.
+    ///
+    /// Carried for the diagnostic grammar, which has to know which codec name
+    /// FFmpeg will print inside `vist#<file>:<stream>/<codec>` before it can
+    /// attribute a failure to this decode. It is *not* fed to the plan digest:
+    /// the facts digest already binds it, and adding it again would change
+    /// every artifact name without changing any artifact.
+    input_codec: Option<String>,
     input_video_stream: u32,
     surface: DecodeSurfaceContract,
     reason: DecodeReason,
@@ -1650,6 +1658,10 @@ impl ResolvedDecode {
 
     pub fn software_decoder(&self) -> Option<&str> {
         self.software_decoder.as_deref()
+    }
+
+    pub fn input_codec(&self) -> Option<&str> {
+        self.input_codec.as_deref()
     }
 
     pub fn input_video_stream(&self) -> u32 {
@@ -2228,6 +2240,7 @@ pub fn resolve_transcode(
         decode: ResolvedDecode {
             backend,
             software_decoder,
+            input_codec: facts.codec().map(str::to_owned),
             input_video_stream: facts.input_video_stream,
             surface,
             reason,
