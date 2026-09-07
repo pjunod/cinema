@@ -1999,10 +1999,13 @@ lane receipt. A successful receipt verifies that the artifact's `build_sha`
 equals the tested commit and binds the artifact's SHA-256 and byte count, so a
 different or replaced JSON file is not qualification evidence. Both that
 successful lane receipt and the final qualification receipt require workflow
-run attempt `1`. A failed cycle therefore remains disqualifying for that exact
-candidate: do not use **Re-run jobs** to make the unchanged campaign produce a
-green artifact. Preserve its failure receipt, fix the cause, and qualify a new
-commit instead.
+run attempt `1`. A failed cycle therefore remains disqualifying inside that
+workflow execution: do not use **Re-run jobs** to make it produce a green
+artifact. Preserve its failure receipt, fix the cause, and qualify a new commit
+instead. Forgejo assigns a fresh attempt `1` to a different workflow run,
+including one created by closing and reopening the pull request; this receipt
+does not provide a repository-wide failed-SHA ledger, so inspect earlier
+receipts before accepting a repeated candidate SHA.
 Other CI lanes may still retain successful rerun receipts because they do not
 replace this campaign's failure evidence. The campaign removes any prior output
 before starting, then syncs a temporary complete JSON file and atomically

@@ -560,8 +560,10 @@ M5 replacement work includes the earlier CI receipt and exact-test
 count corrections plus the later zero-resource-growth, early archive-identity,
 and cumulative-attempt corrections. It also refuses successful recovery or
 final qualification receipts from rerun attempts, so a failed 40-cycle
-campaign requires a new source candidate rather than a green rerun; it must be
-rebased after M4 review closes.
+campaign cannot become green through **Re-run jobs** in the same workflow
+execution. Forgejo starts a separate workflow at attempt `1`, so this is not a
+durable failed-SHA ledger; operators must compare any replacement run with the
+earlier receipt. The branch is rebased after M4 review closed.
 No work is being done in the user's existing checkout.
 
 **How to read this page:** “pass” means the named command completed against the
