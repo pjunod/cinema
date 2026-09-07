@@ -225,10 +225,23 @@ fixture defect on the same day.**
   done (`waitpool.rs` `retire_session`, wired at `vodserve.rs:2825`), and both
   caps with typed refusal classes are done. Still open, and each for a stated
   reason:
-  - *Fair service at the global limit.* Admission is first-come-first-served
-    under a per-session ceiling. `waitpool.rs`'s own
-    `the_two_caps_bound_a_viewer_and_the_node_but_do_not_share_fairly` says so
-    by name rather than implying otherwise.
+  - *Fair service at the global limit.* **DONE, as a reservation.** A session
+    holding no waits may draw on the whole node cap; a session that already
+    has a foothold stops at `general_admission` — an eighth of the cap, at
+    least one slot, is reachable only by a viewer holding nothing.
+
+    The old behaviour was pure arrival order below the per-session ceiling,
+    which is worse than it sounds: a struggling client retries, so the viewers
+    doing worst competed hardest for slots and crowded out the ones who would
+    have been fine. A viewer forty minutes into a film lost to whoever asked
+    first.
+
+    A reservation rather than round-robin, by decision. Round-robin is fairer
+    in principle and needs ordering, per-waiter bookkeeping and a starvation
+    rule; the pathology worth fixing is narrower — a session with slots taking
+    the last slot from a session with none — and one comparison fixes exactly
+    that with no state that can go stale. The test that used to pin the gap by
+    name now pins the fix, and removing the reservation fails it.
   - *Total GET admission.* **Visible, still uncapped.** The pool admits
     **blocked** GETs only; a GET served from materialized bytes is admitted
     against nothing, and until now was also *counted* by nothing — a node
@@ -238,11 +251,14 @@ fixture defect on the same day.**
     rather than only on success
     (`a_served_get_is_counted_and_bounded_by_nothing`).
 
-    Deliberately a gauge and not a cap, and this is the open decision:
-    refusing a viewer a segment that is already on disk is a choice about what
-    that viewer loses, and nobody has made it. The gauge is the number such a
-    choice would have to be set from. Whoever adds a ceiling fails that test
-    and must say in its replacement what happens to the viewer who hits it.
+    **Decided: no cap, and this is the record of that.** Refusing a viewer a
+    segment already on disk is a choice about what that viewer loses, and a
+    cache hit is the cheapest thing the server does — a read of bytes it
+    already holds. The gauge runs first; if the number ever justifies a
+    ceiling, bound *bytes in flight* rather than request count, because that is
+    the resource actually contended. Whoever adds one fails
+    `a_full_cache_admits_another_rendition` and must say in its replacement
+    what happens to the viewer who hits it.
   - *Bounded `NoRoom`.* **DONE.** The decision was taken as a bound on `Hold`
     itself rather than a new action or a capacity variant of
     `ProducerDecisionReason` — node capacity is not a producer decision, and
@@ -256,7 +272,13 @@ fixture defect on the same day.**
     designed. Additive on the existing action, so clients predating the field
     hold exactly as they did; both ports read it
     (`a_hold_says_when_to_ask_again_and_no_room_says_later`).
-- **OPEN, and currently the opposite.** VOD owner loss is classified
+- **OPEN — decided in principle, deferred deliberately.** When this is built
+  it is a **local rebuild**, not peer hydration: hydration means a new
+  protocol, a transfer path, a trust boundary and a partial-transfer failure
+  mode, all to avoid re-deriving something from a source the node already has.
+  It stays deferred until §4, because the prepared transaction changes what a
+  takeover means and building recovery against the current shape risks
+  building it twice. VOD owner loss is classified
   `Unrecoverable` by design (`media_sessions.rs:2580-2605`), pinned by
   `a_route_the_takeover_path_can_never_accept_is_unrecoverable`. The only
   hydration machinery that exists is for fragment-index blobs, not for

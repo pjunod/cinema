@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = ["c0725954"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "core.media",
+  "identity.access",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "The complete cluster/WAL lane proves the producer's serialized fallback stall boundary, mixed-version daemon and browser projection, freshness-bounded completion precedence, cache-admin revocation across every supported committed member with bounded fanout concurrency, and a three-voter claim-bound atomic promotion transaction including forced second-statement rollback. Backend-neutral Store and persistent operations inventories exercise every new boundary."

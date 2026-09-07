@@ -3967,9 +3967,9 @@ function authShell(title, sub, fields, btn, onsubmit){
 }
 // The first account, and the one place a typo is unrecoverable from inside the
 // product: there is no other admin to reset it and no email to recover to. A
-// mistyped password here locks the owner out of their own server, and the only
-// way back is `plurxd reset-password` on the console — which someone who just
-// installed this has no reason to know exists. Hence the confirm field, and
+// mistyped password here locks the owner out of their own server; the legacy
+// direct-store console reset is deliberately refused because it cannot revoke
+// daemon-local recovery proofs. Hence the confirm field, and
 // hence the length check running here rather than only at the server: the
 // server's "at least 8 characters" arrives as a red line under a form whose
 // contents are already gone.
@@ -12785,7 +12785,9 @@ const SETTINGS_ENDPOINTS={
   // Stamped here rather than where the value is painted: loadSettingsKey serves
   // a cached aggregate without a request, and stamping that would let a tab
   // switch every ten seconds starve the refresh indefinitely.
-  clusterOps:()=>api("/cluster/status").then(ops=>{ clusterOpsStamp(); return ops; }),
+  clusterOps:()=>api("/cluster/status").then(ops=>{
+    clusterOpsStamp(); return clusterOpsReceived(ops);
+  }),
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status","dvConversions"],secondary:[]},
@@ -12810,7 +12812,7 @@ function cacheTrakt(value){
 function settingsCurrent(generation,tab){
   return generation===PAGE_RENDER_GENERATION&&isSettingsRoute(location.hash)&&settingsTab()===tab;
 }
-function loadSettingsKey(key,generation){
+function loadSettingsKey(key,generation,cacheResult=true){
   if(SETTINGS_LOADED.has(key)) return Promise.resolve(SETTINGS_DATA[key]);
   const active=SETTINGS_LOADS.get(key);
   let transport=active&&active.promise;
@@ -12823,7 +12825,7 @@ function loadSettingsKey(key,generation){
     }).catch(()=>{});
   }
   return transport.then(value=>{
-    if(generation!==PAGE_RENDER_GENERATION) return value;
+    if(generation!==PAGE_RENDER_GENERATION||!cacheResult) return value;
     SETTINGS_DATA[key]=value; SETTINGS_LOADED.add(key);
     if(key==="dvConversions") DV_SETTINGS_POLL_AT=Date.now()+DV_PROGRESS_POLL_MS;
     if(key==="settings") cacheSettings(value);
@@ -12861,7 +12863,7 @@ function settingsTabAside(id,d){
 function settingsShell(tab){
   return `<div class="setlayout"><nav class="settabs" aria-label="Settings sections">${settingsTabsHtml(tab)}</nav><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div></div>`;
 }
-function patchSettingsSecondary(tab,key){
+function patchSettingsSecondary(tab,key,value){
   if(tab==="metadata"&&key==="libs"){
     const mount=document.getElementById("metadata-libraries");
     if(mount) mount.innerHTML=keyBackfillHtml(SETTINGS_DATA.libs||[]);
@@ -12871,7 +12873,16 @@ function patchSettingsSecondary(tab,key){
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
   if(tab==="cluster"&&key==="clusterOps"){
-    renderSettings();
+    // The roster is already interactive while this secondary request is in
+    // flight. Hold a result that arrives under an election decision rather
+    // than storing data the page did not paint; the next gated collection will
+    // pay the update after the dialog closes.
+    if(clusterRepaintDeferred()){
+      patchClusterReadingAge();
+      return;
+    }
+    SETTINGS_DATA.clusterOps=value; SETTINGS_LOADED.add("clusterOps");
+    repaintClusterPreserving(renderSettings);
   }
 }
 function patchSettingsSecondaryError(tab,key,error){
@@ -12905,15 +12916,21 @@ async function loadSettingsTab(generation,tab){
   if(!settingsCurrent(generation,tab)) return false;
   renderSettings();
   setPageFailure(route,generation,null); setPagePhase(route,generation,"content");
-  const secondary=manifest.secondary.map(key=>loadSettingsKey(key,generation).then(()=>{
-    if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key);
-  }).catch(error=>{
-    if(error&&error.status===401) throw error;
-    if(settingsCurrent(generation,tab)){
-      patchSettingsSecondaryError(tab,key,error);
-      setPageFailure(route,generation,`${key}_error`);
-    }
-  }));
+  const secondary=manifest.secondary.map(key=>{
+    // Cluster status owns an atomic store-and-paint boundary because the
+    // already-rendered roster can open a decision dialog before this secondary
+    // response arrives. Other secondary data can keep the ordinary eager cache.
+    const staged=tab==="cluster"&&key==="clusterOps";
+    return loadSettingsKey(key,generation,!staged).then(value=>{
+      if(settingsCurrent(generation,tab)) patchSettingsSecondary(tab,key,value);
+    }).catch(error=>{
+      if(error&&error.status===401) throw error;
+      if(settingsCurrent(generation,tab)){
+        patchSettingsSecondaryError(tab,key,error);
+        setPageFailure(route,generation,`${key}_error`);
+      }
+    });
+  });
   if(tab==="system") secondary.push(refreshLogs());
   if(tab==="cluster") secondary.push(refreshClusterLogs());
   await Promise.allSettled(secondary);
@@ -13694,6 +13711,13 @@ document.addEventListener("visibilitychange",()=>{
 // on its own tells an operator nothing about whether turning it on will cost
 // them a stream.
 function developerPanel(settings){
+  const transportRecovery=setCard(`${cardHead("Enable cluster transport recovery","The corrected transport is compiled in and activates automatically on clustered nodes; there is no hidden production feature flag.",`<span class="pill" style="color:var(--good);border-color:var(--good)">automatic</span>`)}
+      <div class="hint"><b>Safe enablement means deployment qualification, not flipping a code gate.</b> Keep a ready voter majority, deploy one node at a time, and leave the cluster API listener reachable only on the trusted cluster network. Cache-only recovery authorization stays disabled until every current committed node has heartbeat-proven the cache revocation capability and the automatic guarded activation has cleared cached proofs cluster-wide; a rollback closes it again.</div>
+      <h2 class="section">What must be true first</h2>
+      <div class="tog"><span>Recovery budgets fit the deployment<small>Keep chunk, whole-transfer, final-install, startup, and container health allowances aligned. The defaults are 30 s, 1,200 s, and 120 s; the rollout may use a longer final-install allowance when measured state size requires it.</small></span></div>
+      <div class="tog"><span>Authenticated diagnostics are reachable<small>Every node must advertise its private Hiqlite API address, share the cluster API credential, and keep <code>/cluster/transport/sqlite</code> off the public Internet. Port 32400 may remain closed while a learner catches up.</small></span></div>
+      <div class="tog"><span>The recovery receipt passes<small>Require the real-TLS 3 MiB transport matrix, acknowledged-write verification, and twenty learner plus twenty voter recovery cycles on the supported Linux path before fleet rollout.</small></span></div>
+      <div class="hint"><b>Enable path after those checks pass:</b> use the supported one-node-at-a-time cluster deployment. The recovery code and read-only status route are always present; failed readiness remains fail-closed.</div>`);
   const preview=setCard(`${cardHead("Playback control protocol","The additive control endpoint clients use to report what they are playing and ask for changes. Off by default until every client has a passive reporter.")}
       ${togRow("pcpv1",`Advertise playback control protocol v1 <span class="pill">preview</span>`,"New sessions advertise the control endpoint. Passive on its own: the server measures what a quality change would cost, and takes no automatic action.",settings.playback_control_protocol_v1)}
       <div class="err" id="dverr"></div>
@@ -13709,7 +13733,7 @@ function developerPanel(settings){
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback, and none of it is a different binary: these are runtime settings; no special build is needed.")}${liveTvSettingsCard(settings)}${preview}${prepared}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${preview}${prepared}${experimental}`;
 }
 function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
@@ -14017,6 +14041,10 @@ let CLUSTER_LOADED=false;
 // fresh without a timer of its own. Every path that stores a new aggregate
 // stamps this; the tick reads it. See clusterOpsInterval().
 let CLUSTER_OPS_FETCHED_AT=0;
+// Receipt age is browser-local and monotonic. The daemon's aggregate timestamp
+// belongs to another wall clock, while adding a client timestamp to the JSON
+// object would leak UI-only metadata into projections and support exports.
+const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
 // The last removal refusal, held so its sentence stays readable. A toast is
 // 2.2 seconds and these answers are paragraphs.
 let CLUSTER_REFUSAL=null;
@@ -14052,6 +14080,15 @@ function clenv(){ return {esc,fmtAgo,fmtBytes}; }
 function clusterOpsInterval(){ return 15000; }
 function clusterOpsStamp(){ CLUSTER_OPS_FETCHED_AT=Date.now(); }
 function clusterOpsDue(){ return Date.now()-CLUSTER_OPS_FETCHED_AT>=clusterOpsInterval(); }
+function clusterOpsReceived(ops){
+  if(ops&&typeof ops==="object") CLUSTER_OPS_RECEIVED_AT.set(ops,performance.now());
+  return ops;
+}
+function clusterOpsElapsed(ops){
+  if(!ops||typeof ops!=="object") return 0;
+  const receivedAt=CLUSTER_OPS_RECEIVED_AT.get(ops);
+  return receivedAt===undefined?0:Math.max(0,performance.now()-receivedAt);
+}
 // A modal is a decision in progress. renderSettings() rewrites the tab, and the
 // force-election dialog lives in that markup, so repainting under it would close
 // it mid-sentence.
@@ -14145,10 +14182,17 @@ function clusterNodeOperationsHtml(n,ops){
   if(ops.unavailable) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
     <div class="clnodeunknown" style="color:var(--bad)">Direct status is unavailable. Keep every available voter running and retry status above.</div></section>`;
   const row=PlurxClusterPanel.clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
+  const transport=PlurxClusterPanel.clusterTransportExplanation(
+    ops,n.raft_id,n.bounded_read_ready,clusterOpsElapsed(ops));
+  const transportObservation=transport.observation;
+  const transportText=transportObservation
+    ? `${esc(transport.text)} · observer ${esc(String(transportObservation.observing_node_id))} · ${esc(PlurxClusterPanel.clusterOperationAge(transportObservation.sample_age_ms))}`
+    : `<span class="muted">${esc(transport.text)}</span>`;
   if(!row||row.observation!=="answered"||!s){
     const why=PlurxClusterPanel.clusterObservationReason(row&&(row.error_class||row.observation)||"not_observed");
     return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
-      <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div></section>`;
+      <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div>
+      <div class="clnodeopmeta"><div><span>Transport</span>${transportText}</div></div></section>`;
   }
   const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
   const process=s.process&&s.process.live
@@ -14176,7 +14220,8 @@ function clusterNodeOperationsHtml(n,ops){
   return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
     <div class="clnodeopmeta"><div><span>Process</span>${process}</div><div><span>Serving</span>${serving}</div>
       <div><span>Raft</span>${raftText}</div><div><span>WAL</span>${walText}</div>
-      <div><span>Snapshot</span>${snapshotText}</div><div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span></div></div>
+      <div><span>Snapshot</span>${snapshotText}</div><div><span>Transport</span>${transportText}</div>
+      <div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span></div></div>
     <details class="clnodedetail"><summary>WAL, snapshot, and protocol details</summary>
       <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
         <dt>Protocol range</dt><dd>${s.protocol_min===undefined?"unknown":esc(String(s.protocol_min))}–${s.protocol_max===undefined?"unknown":esc(String(s.protocol_max))}</dd>
@@ -14188,6 +14233,7 @@ function clusterNodeOperationsHtml(n,ops){
         <dt>Last WAL error</dt><dd>${esc(lastError)}</dd><dt>Last recovery</dt><dd>${esc(recovery)}</dd>
         <dt>Snapshot outcomes</dt><dd>build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error</dd>
         <dt>Last snapshot install</dt><dd>${snap.last_install_outcome?`${esc(snap.last_install_outcome)} ${snap.last_install_unix_ms?esc(fmtAgo(Math.floor(snap.last_install_unix_ms/1000))):"at unknown time"}`:"none observed"}</dd>
+        <dt>Bounded-read recovery evidence</dt><dd>${transportText}</dd>
         <dt>Direct play</dt><dd>Unknown here — drain proxy connections separately.</dd></dl></details>
   </section>`;
 }
@@ -14231,11 +14277,15 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
   const direct=PlurxClusterPanel.clusterDirectMaintenanceStatus(context.operations,n.node_id);
   const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(n.active_media_sessions||0);
   const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
+  const transportProgress=PlurxClusterPanel.clusterTransportExplanation(
+    context.operations,n.raft_id,n.bounded_read_ready,clusterOpsElapsed(context.operations));
   const note=n.maintenance
     ? directReady
       ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
       : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
-    : "Maintenance is reversible and does not remove this node from membership.";
+    : !n.bounded_read_ready&&n.role==="learner"
+      ? `Bounded-read permit remains off: ${transportProgress.text}. Transport progress never grants serving authority.`
+      : "Maintenance is reversible and does not remove this node from membership.";
   return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()" onclick="clusterNodeFoldLater(this)">
     <summary><div class="clnodesummary"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
       ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div class="clnodesummaryright">${role}${clusterNodeOperationsBadge(n,context.operations)}</div></div></summary>
@@ -14405,10 +14455,9 @@ function clusterOperationsCard(ops){
       <div class="clopsfact"><span class="muted">Owned media</span><b>${sessions} active session${sessions===1?"":"s"}</b></div>
       <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(PlurxClusterPanel.clusterOperationAge(oldest))}</b></div></div></div>`;
 }
-// The manual refresh has no deferral, deliberately: the election dialog is
-// modal, so the button that reaches this code cannot be clicked while one is
-// open. It still obeys the invariant the other three paths obey — it paints
-// exactly what it stores.
+// An election dialog blocks a new click, but it can open after this request has
+// started. The response stays staged until the await completes so a late
+// success or failure cannot repaint over that newer decision.
 async function refreshClusterOperations(btn){
   const generation=PAGE_RENDER_GENERATION;
   if(btn) btn.disabled=true;
@@ -14416,13 +14465,25 @@ async function refreshClusterOperations(btn){
   const mount=document.getElementById("cluster-operations");
   if(mount) mount.innerHTML=clusterOperationsCard(null);
   try{
-    const ops=await loadSettingsKey("clusterOps",generation);
+    // The request may outlive the click that started it. Keep its response
+    // staged until we know an election dialog has not opened in the meantime.
+    const ops=await loadSettingsKey("clusterOps",generation,false);
     if(settingsCurrent(generation,"cluster")){
+      if(clusterRepaintDeferred()){
+        patchClusterReadingAge();
+        return;
+      }
       SETTINGS_DATA.clusterOps=ops;
+      SETTINGS_LOADED.add("clusterOps");
       repaintClusterPreserving(renderSettings);
     }
   }catch(error){
     if(settingsCurrent(generation,"cluster")){
+      // The retained node evidence has a client-local clock of its own. Repaint
+      // it before mounting the request failure so a manual refresh cannot leave
+      // an expired install rendered as active until the next 15-second gate.
+      if(clusterRepaintDeferred()) patchClusterReadingAge();
+      else repaintClusterPreserving(renderSettings);
       const current=document.getElementById("cluster-operations");
       if(current) current.innerHTML=clusterOperationsUnavailable(esc(error&&error.message||"request failed"));
     }
@@ -14453,7 +14514,7 @@ async function pollLocalRestart(nodeId,generation){
     await new Promise(resolve=>setTimeout(resolve,2000));
     if(!settingsCurrent(generation,"cluster")) return;
     try{
-      const ops=await api("/cluster/status");
+      const ops=clusterOpsReceived(await api("/cluster/status"));
       if(!settingsCurrent(generation,"cluster")) return;
       // The restart poll owns freshness while it runs, so it stamps the same
       // clock the tick reads: the two never probe the fan-out at once. It
@@ -15065,7 +15126,7 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         clusterOpsStamp();
         try{
           const previous=SETTINGS_DATA.clusterOps;
-          const ops=await api("/cluster/status");
+          const ops=clusterOpsReceived(await api("/cluster/status"));
           if(!settingsCurrent(generation,tab)) return;
           const changed=PlurxClusterPanel.clusterOpsProjection(previous)
             !==PlurxClusterPanel.clusterOpsProjection(ops);
@@ -15082,7 +15143,13 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         }catch(error){
           if(error&&error.status===401) throw error;
           if(!settingsCurrent(generation,tab)) return;
-          patchClusterReadingAge();
+          // Retained transport evidence advances locally even when the refresh
+          // fails: active work crosses its deadline into Stalled and eventually
+          // expires. Re-render that projection unless an open decision dialog
+          // owns the current DOM; in that case only the independent age cell is
+          // safe to patch and the next tick will try the preserving repaint.
+          if(clusterRepaintDeferred()) patchClusterReadingAge();
+          else repaintClusterPreserving(renderSettings);
         }
       }
     }

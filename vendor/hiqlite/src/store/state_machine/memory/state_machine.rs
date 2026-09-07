@@ -956,7 +956,10 @@ mod tests {
         );
 
         // building a snapshot keeps it in memory and still must not write to disk
-        let built = sm.build_snapshot().await.expect("snapshot build to succeed");
+        let built = sm
+            .build_snapshot()
+            .await
+            .expect("snapshot build to succeed");
         assert!(
             !base_dir.exists(),
             "building a snapshot must not create the data_dir in memory-only mode"

@@ -359,7 +359,10 @@ impl WalFile {
 
     #[inline]
     pub fn clone_from_no_mmap(&mut self, other: &Self) {
-        assert_eq!(self.path, other.path, "WAL path changed within one incarnation");
+        assert_eq!(
+            self.path, other.path,
+            "WAL path changed within one incarnation"
+        );
         assert_eq!(
             self.incarnation, other.incarnation,
             "WAL incarnation changed on the append-only refresh path"
@@ -430,9 +433,10 @@ impl WalFile {
         {
             // we can use the memoized last log as our start position
             // `data_end` is inclusive
-            idx = memo.data_end.checked_add(1).ok_or_else(|| {
-                Error::Integrity("LogReadMemo byte offset overflow".into())
-            })?;
+            idx = memo
+                .data_end
+                .checked_add(1)
+                .ok_or_else(|| Error::Integrity("LogReadMemo byte offset overflow".into()))?;
             debug!("LogReadMemo match, shifting start idx to: {}", idx);
         }
         let mut next_memo = None;
@@ -574,15 +578,13 @@ impl WalFile {
         if let Some(mmap) = &self.mmap {
             mmap.get(range).ok_or_else(|| {
                 Error::Integrity(
-                    format!("WAL byte range {from}..{until} is outside the mmap\n{self:?}")
-                        .into(),
+                    format!("WAL byte range {from}..{until} is outside the mmap\n{self:?}").into(),
                 )
             })
         } else if let Some(mmap) = &self.mmap_mut {
             mmap.get(range).ok_or_else(|| {
                 Error::Integrity(
-                    format!("WAL byte range {from}..{until} is outside the mmap\n{self:?}")
-                        .into(),
+                    format!("WAL byte range {from}..{until} is outside the mmap\n{self:?}").into(),
                 )
             })
         } else {
@@ -1708,7 +1710,8 @@ mod tests {
     }
 
     #[test]
-    fn refresh_rebuilds_in_writer_order_when_only_the_front_identity_changes() -> Result<(), Error> {
+    fn refresh_rebuilds_in_writer_order_when_only_the_front_identity_changes() -> Result<(), Error>
+    {
         let base_path = format!("{}/refresh_partial_identity", PATH);
         let mut old_front = WalFile::new(1, &base_path, 1, 10, MB2)?;
         old_front.data_start = Some(32);
@@ -1776,9 +1779,7 @@ mod tests {
         reader.active().mmap()?;
         let old_incarnation = reader.active().incarnation;
         let mut memo = None;
-        reader
-            .active()
-            .read_logs(1, 2, &mut memo, &mut records)?;
+        reader.active().read_logs(1, 2, &mut memo, &mut records)?;
         assert_eq!(records.len(), 2);
         assert!(reader.active().mmap.is_some());
 
@@ -1867,8 +1868,7 @@ mod tests {
         let length_offset = wal.data_start.unwrap() as usize + 8 + 4;
         header.clear();
         u32_to_bin(u32::MAX, &mut header)?;
-        wal.mmap_mut.as_mut().unwrap()[length_offset..length_offset + 4]
-            .copy_from_slice(&header);
+        wal.mmap_mut.as_mut().unwrap()[length_offset..length_offset + 4].copy_from_slice(&header);
 
         let mut memo = None;
         let mut records = Vec::with_capacity(1);
@@ -1883,8 +1883,8 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_outer_log_id_is_rejected_even_when_the_record_count_matches(
-    ) -> Result<(), Error> {
+    fn duplicate_outer_log_id_is_rejected_even_when_the_record_count_matches() -> Result<(), Error>
+    {
         let base_path = format!("{}/duplicate_outer_log_id", PATH);
         let _ = fs::remove_dir_all(&base_path);
         fs::create_dir_all(&base_path)?;
@@ -1906,8 +1906,7 @@ mod tests {
         // the header claims is id 2. A count-only check accepted [1, 1].
         header.clear();
         u64_to_bin(1, &mut header)?;
-        wal.mmap_mut.as_mut().unwrap()[second_start..second_start + 8]
-            .copy_from_slice(&header);
+        wal.mmap_mut.as_mut().unwrap()[second_start..second_start + 8].copy_from_slice(&header);
 
         let mut memo = None;
         let mut records = Vec::with_capacity(2);
@@ -1939,20 +1938,16 @@ mod tests {
         reader.active().mmap()?;
         let mut memo = None;
         let mut records = Vec::with_capacity(1);
-        reader
-            .active()
-            .read_logs(2, 2, &mut memo, &mut records)?;
+        reader.active().read_logs(2, 2, &mut memo, &mut records)?;
         let old_incarnation = reader.active().incarnation;
 
         header.clear();
         records.clear();
         writer.shift_delete_logs(2, u64::MAX, MB2, &mut header, &mut records)?;
         header.clear();
-        writer.active().append_log(
-            2,
-            b"replacement-two-is-deliberately-longer",
-            &mut header,
-        )?;
+        writer
+            .active()
+            .append_log(2, b"replacement-two-is-deliberately-longer", &mut header)?;
         header.clear();
         writer.active().append_log(3, b"three", &mut header)?;
 
@@ -1960,9 +1955,7 @@ mod tests {
         assert_ne!(reader.active().incarnation, old_incarnation);
         reader.active().mmap()?;
         records.clear();
-        reader
-            .active()
-            .read_logs(3, 3, &mut memo, &mut records)?;
+        reader.active().read_logs(3, 3, &mut memo, &mut records)?;
         assert_eq!(records, vec![(3, b"three".to_vec())]);
 
         drop(reader);

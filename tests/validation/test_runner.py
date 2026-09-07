@@ -214,7 +214,6 @@ class CatalogCase(unittest.TestCase):
                 self.assertTrue(page_read["cluster_auth"])
 
         for web_only_path in (
-            "Makefile",
             "crates/plurxd/src/web/index.html",
             "tests/web/page-read-budget.test.js",
         ):
@@ -222,11 +221,23 @@ class CatalogCase(unittest.TestCase):
                 web_only = scope_for_paths(catalog, (web_only_path,))
                 self.assertFalse(web_only["cluster_auth"])
 
+        # The Makefile defines the persistent vendored-Hiqlite Clippy lane.
+        # Any edit to it must fail open into the cluster job that executes the
+        # lane, even when the changed target is not statically recoverable.
+        self.assertTrue(scope_for_paths(catalog, ("Makefile",))["cluster_auth"])
+
         cluster = scope_for_paths(
             catalog, ("crates/plurx-core/src/store/hiqlite.rs",)
         )
         self.assertFalse(cluster["hiqlite_spike"])
         self.assertTrue(cluster["cluster_auth"])
+
+        # This wrapper turns an exact-filter typo into a hard failure for the
+        # WAL/transport lane. A change to the guard must run the lane it guards,
+        # not only the static catalog and Makefile-shape assertions.
+        test_count_guard = scope_for_paths(catalog, ("scripts/require-test-count",))
+        self.assertTrue(test_count_guard["rust"])
+        self.assertTrue(test_count_guard["cluster_auth"])
 
         for store_shard_path in (
             "Dockerfile.store-shard",
@@ -369,6 +380,7 @@ class CatalogCase(unittest.TestCase):
         self.assertFalse(scope["docs_only"])
 
         for scheduler_path in (
+            "Makefile",
             ".github/workflows/ci.yml",
             ".github/workflows/effort-ci.yml",
             ".github/workflows/lint.yml",
@@ -624,12 +636,18 @@ command = "make cluster-check"
 profiles = ["ci", "full"]
 timeout_seconds = {cluster_check_timeout}
 
+[[checks]]
+id = "hiqlite-vendor-clippy"
+title = "Vendored Hiqlite denied-warning Clippy"
+command = "{vendor_clippy_command}"
+profiles = ["commit", "ci", "full"]
+
 [[points]]
 id = "cluster.auth"
 title = "Replicated durable state"
 contract = "{cluster_auth_contract}"
 paths = [{cluster_auth_paths}]
-checks = ["rust-gate", "cluster-auth"]
+checks = ["rust-gate", "cluster-auth", "hiqlite-vendor-clippy"]
 
 [[points]]
 id = "cluster.membership"
@@ -662,6 +680,7 @@ def routing_catalog(
     ),
     cluster_auth_contract: str = "Three voters agree on the replicated Store.",
     cluster_check_timeout: int = 1800,
+    vendor_clippy_command: str = "make hiqlite-vendor-clippy",
     web_paths: tuple[str, ...] = ("crates/plurxd/src/web/app.js",),
     web_contract: str = "The browser renders every library.",
 ) -> str:
@@ -674,6 +693,7 @@ def routing_catalog(
         cluster_auth_paths=literal(cluster_auth_paths),
         cluster_auth_contract=cluster_auth_contract,
         cluster_check_timeout=cluster_check_timeout,
+        vendor_clippy_command=vendor_clippy_command,
         web_paths=literal(web_paths),
         web_contract=web_contract,
     )
@@ -828,6 +848,22 @@ class CatalogRoutingScopeCase(unittest.TestCase):
 
         self.assertTrue(scope["cluster_auth"])
 
+    def test_a_field_of_the_vendor_clippy_check_runs_the_store_lane(self):
+        # The excluded vendored crate has no protection in root Clippy. If its
+        # dedicated command changes, the same topology job that executes and
+        # records it must run on the candidate instead of trusting the edit.
+        with self.diff_against_base(
+            routing_catalog(),
+            {
+                "validation/points.toml": routing_catalog(
+                    vendor_clippy_command="make disabled-vendor-clippy"
+                )
+            },
+        ) as (root, base):
+            scope, _ = self.scope(root, base)
+
+        self.assertTrue(scope["cluster_auth"])
+
     def test_any_other_routing_path_alongside_the_catalog_runs_the_store_lane(self):
         # The narrowing is only consulted when the catalog is the sole routing
         # path in the diff. A workflow edit changes the job graph, which is not
@@ -937,13 +973,24 @@ class CatalogRoutingScopeCase(unittest.TestCase):
         self.assertTrue(
             set(ci_scope.CLUSTER_LANE_POINTS) <= set(catalog.point_map)
         )
-        self.assertIn(ci_scope.CLUSTER_LANE_CHECK, catalog.check_map)
+        self.assertEqual(
+            set(ci_scope.CLUSTER_LANE_CHECKS),
+            {"cluster-auth", "hiqlite-vendor-clippy"},
+        )
+        self.assertTrue(
+            set(ci_scope.CLUSTER_LANE_CHECKS) <= set(catalog.check_map)
+        )
         self.assertIn(ci_scope.CATALOG_ROUTING_PATH, CI_ROUTING_PATHS)
         for point_id in ci_scope.CLUSTER_LANE_POINTS:
             with self.subTest(point_id=point_id):
                 self.assertIn(
-                    ci_scope.CLUSTER_LANE_CHECK, catalog.point_map[point_id].checks
+                    "cluster-auth", catalog.point_map[point_id].checks
                 )
+        self.assertIn(
+            "hiqlite-vendor-clippy",
+            catalog.point_map["cluster.auth"].checks,
+        )
+        self.assertTrue(scope_for_paths(catalog, ("Makefile",))["cluster_auth"])
 
 
 if __name__ == "__main__":

@@ -182,12 +182,16 @@ mod tests {
         assert_eq!(after.install_ok.count, before.install_ok.count);
         assert_eq!(after.last_build.map(|outcome| outcome.ok), Some(true));
         assert_eq!(after.last_install.map(|outcome| outcome.ok), Some(false));
-        assert!(after
-            .last_build
-            .is_some_and(|outcome| outcome.observed_at_unix_ms > 0));
-        assert!(after
-            .last_install
-            .is_some_and(|outcome| outcome.observed_at_unix_ms > 0));
+        assert!(
+            after
+                .last_build
+                .is_some_and(|outcome| outcome.observed_at_unix_ms > 0)
+        );
+        assert!(
+            after
+                .last_install
+                .is_some_and(|outcome| outcome.observed_at_unix_ms > 0)
+        );
     }
 
     #[test]

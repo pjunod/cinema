@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["43be34af"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "resource-bounds"]
+reason = "Wait-pool admission below the per-session ceiling was pure arrival order, so a session already holding slots could take the last of the node cap from a session holding none. A struggling client retries, which means the viewers doing worst competed hardest and crowded out the ones who would have been fine. general_admission now holds an eighth of the cap, at least one slot, reachable only by a session with zero current waits; incumbents stop below it. Chosen over round-robin by the user after the trade-off was put to them, because round-robin needs ordering, per-waiter bookkeeping and a starvation rule while the pathology worth fixing is one comparison wide. two_caps_bound_a_viewer_and_the_node_and_the_last_slot_waits_for_a_newcomer replaces the test that pinned the gap by name and inverts its final assertion; it also proves a reservation is not extra capacity, since a newcomer is still refused once the node is genuinely full. the_reserve_is_a_slice_of_the_cap_with_room_left_for_incumbents pins the scaling and the floor. Removing the reservation fails both."

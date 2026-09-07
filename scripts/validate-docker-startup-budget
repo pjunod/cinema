@@ -20,7 +20,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
-SNAPSHOT_ENV = "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"
+CHUNK_ENV = "PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS"
+TRANSFER_ENV = "PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS"
+INSTALL_ENV = "PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS"
 CONFIG_ENV = "PLURX_CONFIG"
 HEALTH_ENV = "PLURX_HEALTH_START_PERIOD"
 COMPOSE_FILE = DEPLOY / "docker-compose.yml"
@@ -52,9 +54,15 @@ class BudgetError(ValueError):
 
 @dataclass(frozen=True)
 class SourceLimits:
-    default_snapshot_seconds: int
-    minimum_snapshot_seconds: int
-    maximum_snapshot_seconds: int
+    default_chunk_seconds: int
+    minimum_chunk_seconds: int
+    maximum_chunk_seconds: int
+    default_transfer_seconds: int
+    minimum_transfer_seconds: int
+    maximum_transfer_seconds: int
+    default_install_seconds: int
+    minimum_install_seconds: int
+    maximum_install_seconds: int
     phase_seconds: tuple[tuple[str, int], ...]
 
     @property
@@ -65,13 +73,21 @@ class SourceLimits:
 @dataclass(frozen=True)
 class Budget:
     health_seconds: Decimal
-    snapshot_seconds: int
+    chunk_seconds: int
+    transfer_seconds: int
+    install_seconds: int
     startup_allowance_seconds: int
-    snapshot_source: str
+    chunk_source: str
+    transfer_source: str
+    install_source: str
 
     @property
     def required_seconds(self) -> int:
-        return self.snapshot_seconds + self.startup_allowance_seconds
+        return (
+            self.transfer_seconds
+            + self.install_seconds
+            + self.startup_allowance_seconds
+        )
 
 
 def source_integer(source: str, name: str) -> int:
@@ -97,13 +113,31 @@ def load_source_limits(root: Path = ROOT) -> SourceLimits:
         encoding="utf-8"
     )
     return SourceLimits(
-        default_snapshot_seconds=source_integer(
+        default_chunk_seconds=source_integer(
+            config, "DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS"
+        ),
+        minimum_chunk_seconds=source_integer(
+            config, "MIN_SNAPSHOT_CHUNK_TIMEOUT_SECS"
+        ),
+        maximum_chunk_seconds=source_integer(
+            config, "MAX_SNAPSHOT_CHUNK_TIMEOUT_SECS"
+        ),
+        default_transfer_seconds=source_integer(
+            config, "DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS"
+        ),
+        minimum_transfer_seconds=source_integer(
+            config, "MIN_SNAPSHOT_TRANSFER_TIMEOUT_SECS"
+        ),
+        maximum_transfer_seconds=source_integer(
+            config, "MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS"
+        ),
+        default_install_seconds=source_integer(
             config, "DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS"
         ),
-        minimum_snapshot_seconds=source_integer(
+        minimum_install_seconds=source_integer(
             config, "MIN_INSTALL_SNAPSHOT_TIMEOUT_SECS"
         ),
-        maximum_snapshot_seconds=source_integer(
+        maximum_install_seconds=source_integer(
             config, "MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS"
         ),
         phase_seconds=tuple(
@@ -232,24 +266,32 @@ def mapped_config_file(
     return None, False
 
 
-def parse_snapshot_value(value: object, limits: SourceLimits, source: str) -> int:
+def parse_snapshot_value(
+    value: object,
+    *,
+    label: str,
+    minimum: int,
+    maximum: int,
+    source: str,
+) -> int:
     if isinstance(value, bool):
-        raise BudgetError(f"snapshot timeout from {source} must be an integer")
+        raise BudgetError(f"{label} from {source} must be an integer")
     if isinstance(value, int):
         parsed = value
     elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
         parsed = int(value)
     else:
-        raise BudgetError(f"snapshot timeout from {source} must be an integer")
-    if not limits.minimum_snapshot_seconds <= parsed <= limits.maximum_snapshot_seconds:
+        raise BudgetError(f"{label} from {source} must be an integer")
+    if not minimum <= parsed <= maximum:
         raise BudgetError(
-            f"snapshot timeout from {source} must be between "
-            f"{limits.minimum_snapshot_seconds}s and {limits.maximum_snapshot_seconds}s"
+            f"{label} from {source} must be between {minimum}s and {maximum}s"
         )
     return parsed
 
 
-def timeout_from_toml(path: Path, limits: SourceLimits) -> tuple[int, str]:
+def timeouts_from_toml(
+    path: Path, limits: SourceLimits
+) -> tuple[tuple[int, str], tuple[int, str], tuple[int, str]]:
     try:
         with path.open("rb") as handle:
             document = tomllib.load(handle)
@@ -258,23 +300,103 @@ def timeout_from_toml(path: Path, limits: SourceLimits) -> tuple[int, str]:
     cluster = document.get("cluster", {})
     if not isinstance(cluster, dict):
         raise BudgetError(f"production config {path} has a non-table [cluster]")
-    if "install_snapshot_timeout_secs" not in cluster:
-        return limits.default_snapshot_seconds, f"{path} (built-in default)"
-    return (
-        parse_snapshot_value(
-            cluster["install_snapshot_timeout_secs"], limits, str(path)
-        ),
-        str(path),
+    default_source = f"{path} (built-in default)"
+    chunk = (
+        (
+            parse_snapshot_value(
+                cluster["snapshot_chunk_timeout_secs"],
+                label="snapshot chunk timeout",
+                minimum=limits.minimum_chunk_seconds,
+                maximum=limits.maximum_chunk_seconds,
+                source=str(path),
+            ),
+            str(path),
+        )
+        if "snapshot_chunk_timeout_secs" in cluster
+        else (limits.default_chunk_seconds, default_source)
     )
+    transfer = (
+        (
+            parse_snapshot_value(
+                cluster["snapshot_transfer_timeout_secs"],
+                label="snapshot transfer timeout",
+                minimum=limits.minimum_transfer_seconds,
+                maximum=limits.maximum_transfer_seconds,
+                source=str(path),
+            ),
+            str(path),
+        )
+        if "snapshot_transfer_timeout_secs" in cluster
+        else (limits.default_transfer_seconds, default_source)
+    )
+    install = (
+        (
+            parse_snapshot_value(
+                cluster["install_snapshot_timeout_secs"],
+                label="snapshot install timeout",
+                minimum=limits.minimum_install_seconds,
+                maximum=limits.maximum_install_seconds,
+                source=str(path),
+            ),
+            str(path),
+        )
+        if "install_snapshot_timeout_secs" in cluster
+        else (limits.default_install_seconds, default_source)
+    )
+    return chunk, transfer, install
 
 
-def effective_snapshot_timeout(
+def effective_snapshot_timeouts(
     document: dict[str, Any], service: dict[str, Any], limits: SourceLimits
-) -> tuple[int, str]:
+) -> tuple[tuple[int, str], tuple[int, str], tuple[int, str]]:
     environment = service_environment(service)
-    override = environment.get(SNAPSHOT_ENV, "")
-    if override:
-        return parse_snapshot_value(override, limits, SNAPSHOT_ENV), SNAPSHOT_ENV
+    chunk_override = environment.get(CHUNK_ENV, "")
+    transfer_override = environment.get(TRANSFER_ENV, "")
+    install_override = environment.get(INSTALL_ENV, "")
+    chunk = (
+        (
+            parse_snapshot_value(
+                chunk_override,
+                label="snapshot chunk timeout",
+                minimum=limits.minimum_chunk_seconds,
+                maximum=limits.maximum_chunk_seconds,
+                source=CHUNK_ENV,
+            ),
+            CHUNK_ENV,
+        )
+        if chunk_override
+        else None
+    )
+    transfer = (
+        (
+            parse_snapshot_value(
+                transfer_override,
+                label="snapshot transfer timeout",
+                minimum=limits.minimum_transfer_seconds,
+                maximum=limits.maximum_transfer_seconds,
+                source=TRANSFER_ENV,
+            ),
+            TRANSFER_ENV,
+        )
+        if transfer_override
+        else None
+    )
+    install = (
+        (
+            parse_snapshot_value(
+                install_override,
+                label="snapshot install timeout",
+                minimum=limits.minimum_install_seconds,
+                maximum=limits.maximum_install_seconds,
+                source=INSTALL_ENV,
+            ),
+            INSTALL_ENV,
+        )
+        if install_override
+        else None
+    )
+    if chunk is not None and transfer is not None and install is not None:
+        return chunk, transfer, install
 
     working_directory = str(service.get("working_dir") or "/")
     cli_config = service_config_argument(service)
@@ -287,7 +409,14 @@ def effective_snapshot_timeout(
         mapped, opaque = mapped_config_file(document, service, wanted)
         if mapped is not None:
             if mapped.is_file():
-                return timeout_from_toml(mapped, limits)
+                toml_chunk, toml_transfer, toml_install = timeouts_from_toml(
+                    mapped, limits
+                )
+                return (
+                    chunk or toml_chunk,
+                    transfer or toml_transfer,
+                    install or toml_install,
+                )
             if explicit:
                 raise BudgetError(
                     f"{explicit_source}={name!r} maps to missing host file {mapped}"
@@ -298,16 +427,36 @@ def effective_snapshot_timeout(
         elif explicit:
             raise BudgetError(
                 f"{explicit_source}={name!r} is not backed by a Compose bind or file config; "
-                f"set {SNAPSHOT_ENV} explicitly so the preflight can prove the budget"
+                f"set {CHUNK_ENV}, {TRANSFER_ENV}, and {INSTALL_ENV} explicitly "
+                "so the preflight can prove the budget"
             )
 
     if opaque_paths:
         paths = ", ".join(opaque_paths)
+        source = f"opaque config mount at {paths} (maximum assumed)"
         return (
-            limits.maximum_snapshot_seconds,
-            f"opaque config mount at {paths} (maximum assumed)",
+            chunk or (limits.maximum_chunk_seconds, source),
+            transfer or (limits.maximum_transfer_seconds, source),
+            install or (limits.maximum_install_seconds, source),
         )
-    return limits.default_snapshot_seconds, "built-in default"
+    return (
+        chunk or (limits.default_chunk_seconds, "built-in default"),
+        transfer or (limits.default_transfer_seconds, "built-in default"),
+        install or (limits.default_install_seconds, "built-in default"),
+    )
+
+
+def validate_snapshot_combination(
+    chunk_seconds: int,
+    chunk_source: str,
+    transfer_seconds: int,
+    transfer_source: str,
+) -> None:
+    if chunk_seconds > transfer_seconds:
+        raise BudgetError(
+            f"snapshot chunk timeout {chunk_seconds}s from {chunk_source} exceeds "
+            f"snapshot transfer timeout {transfer_seconds}s from {transfer_source}"
+        )
 
 
 def plurxd_service(document: dict[str, Any]) -> dict[str, Any]:
@@ -368,10 +517,17 @@ def start_period_for_deployment(
     limits = limits or load_source_limits()
     service = plurxd_service(document)
     resolved = resolved_health_seconds(service)
-    snapshot_seconds, snapshot_source = effective_snapshot_timeout(
-        document, service, limits
+    (
+        (chunk_seconds, chunk_source),
+        (transfer_seconds, transfer_source),
+        (install_seconds, install_source),
+    ) = effective_snapshot_timeouts(document, service, limits)
+    validate_snapshot_combination(
+        chunk_seconds, chunk_source, transfer_seconds, transfer_source
     )
-    required = snapshot_seconds + limits.startup_allowance_seconds
+    required = (
+        transfer_seconds + install_seconds + limits.startup_allowance_seconds
+    )
     rendered = f"{display_seconds(resolved)}s"
     if resolved >= required:
         return rendered, f"{rendered} resolved by Compose, which covers the budget"
@@ -383,8 +539,9 @@ def start_period_for_deployment(
         )
     return (
         f"{required}s",
-        f"{required}s derived from snapshot timeout {snapshot_seconds}s "
-        f"({snapshot_source}) plus the named startup phases "
+        f"{required}s derived from snapshot transfer timeout {transfer_seconds}s "
+        f"({transfer_source}), install timeout {install_seconds}s "
+        f"({install_source}), plus the named startup phases "
         f"{limits.startup_allowance_seconds}s",
     )
 
@@ -395,19 +552,29 @@ def validate_document(
     limits = limits or load_source_limits()
     service = plurxd_service(document)
     health_seconds = resolved_health_seconds(service)
-    snapshot_seconds, snapshot_source = effective_snapshot_timeout(
-        document, service, limits
+    (
+        (chunk_seconds, chunk_source),
+        (transfer_seconds, transfer_source),
+        (install_seconds, install_source),
+    ) = effective_snapshot_timeouts(document, service, limits)
+    validate_snapshot_combination(
+        chunk_seconds, chunk_source, transfer_seconds, transfer_source
     )
     budget = Budget(
         health_seconds=health_seconds,
-        snapshot_seconds=snapshot_seconds,
+        chunk_seconds=chunk_seconds,
+        transfer_seconds=transfer_seconds,
+        install_seconds=install_seconds,
         startup_allowance_seconds=limits.startup_allowance_seconds,
-        snapshot_source=snapshot_source,
+        chunk_source=chunk_source,
+        transfer_source=transfer_source,
+        install_source=install_source,
     )
     if budget.health_seconds < budget.required_seconds:
         raise BudgetError(
-            f"plurxd health start period is {budget.health_seconds}s, but snapshot timeout "
-            f"{budget.snapshot_seconds}s from {budget.snapshot_source} plus the named startup "
+            f"plurxd health start period is {budget.health_seconds}s, but snapshot transfer "
+            f"timeout {budget.transfer_seconds}s from {budget.transfer_source}, install timeout "
+            f"{budget.install_seconds}s from {budget.install_source}, plus the named startup "
             f"phases {budget.startup_allowance_seconds}s requires at least "
             f"{budget.required_seconds}s"
         )
@@ -487,7 +654,9 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "docker startup budget ok: "
         f"health={display_seconds(budget.health_seconds)}s, "
-        f"snapshot={budget.snapshot_seconds}s ({budget.snapshot_source}), "
+        f"snapshot-chunk={budget.chunk_seconds}s ({budget.chunk_source}), "
+        f"snapshot-transfer={budget.transfer_seconds}s ({budget.transfer_source}), "
+        f"snapshot-install={budget.install_seconds}s ({budget.install_source}), "
         f"startup-phases={budget.startup_allowance_seconds}s, "
         f"required={budget.required_seconds}s"
     )

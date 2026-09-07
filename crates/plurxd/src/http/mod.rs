@@ -16,9 +16,11 @@ mod dto;
 mod dv_disk;
 mod error;
 mod extract;
+pub(crate) use extract::CacheOnlyAdminProofCache;
 mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
+pub(crate) mod internal_auth_revocation;
 pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
@@ -438,6 +440,12 @@ pub fn router(state: AppState) -> Router {
             get(cluster_operations::local),
         )
         .route(
+            internal_auth_revocation::PATH,
+            post(internal_auth_revocation::receive).layer(DefaultBodyLimit::max(
+                internal_auth_revocation::MAX_REQUEST_BYTES,
+            )),
+        )
+        .route(
             crate::media_pool::SNAPSHOT_PATH,
             get(internal_media::snapshot),
         )
@@ -588,6 +596,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
     if method == Method::POST && matches!(path, "/api/v1/auth/login" | "/api/v1/auth/logout") {
         return true;
     }
+    if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
     if method == Method::POST && path == "/api/v1/cluster/election" {
         return true;
     }
@@ -679,6 +690,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     if method == Method::POST && path == "/api/v1/cluster/leave" {
         // The body is bound to this backend's node id; this is the only
         // membership mutation a learner may originate locally.
+        return true;
+    }
+    if method == Method::POST && path == internal_auth_revocation::PATH {
         return true;
     }
     // The content-addressed fragment-index read. `fragment_index_cluster`
@@ -1095,6 +1109,7 @@ mod tests {
             // segment of media owned by another node goes through it.
             (Method::POST, crate::media_sessions::RELAY_PATH),
             (Method::POST, crate::shared_cache::CANARY_PATH),
+            (Method::POST, internal_auth_revocation::PATH),
             // Peer hydration of a fragment index. `media_peers()` names
             // learners, so refusing this at the route matrix made the
             // directory point at a closed door.
@@ -1128,6 +1143,7 @@ mod tests {
             (Method::GET, "/api/v1/cluster/status"),
             (Method::GET, "/api/v1/cluster/support-bundle"),
             (Method::GET, cluster_operations::INTERNAL_PATH),
+            (Method::POST, internal_auth_revocation::PATH),
             (Method::POST, "/api/v1/auth/login"),
             (Method::POST, "/api/v1/auth/logout"),
             (Method::POST, "/api/v1/cluster/election"),

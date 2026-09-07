@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["09b9c044"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The cluster/WAL fast lane permanently executes the exact paused-time delayed-peer regression that proves independently sampled transport attempt ages normalize from their own process-local monotonic receipts."

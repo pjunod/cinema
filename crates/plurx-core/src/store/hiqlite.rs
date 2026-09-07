@@ -18,15 +18,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use hiqlite::macros::params;
-use hiqlite::{Client, Row};
+use hiqlite::{Client, Params, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::replicated::ReplicatedSql;
 use super::telemetry::NodeLocalTelemetry;
 use super::{
-    keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence, MetricsStore,
-    NetworkPriorStore, PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, UserStore,
+    keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence, CacheAdminMutationClaim,
+    MetricsStore, NetworkPriorStore, PlaybackTelemetryStore, PrometheusStoreSnapshot,
+    SettingsStore, UserStore,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -142,6 +143,10 @@ const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
 const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
+const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
+    "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
+const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =
+    "DELETE FROM cluster_credential_mutation_intents WHERE singleton = 1";
 
 const AUTH_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS cluster_meta (
@@ -172,6 +177,19 @@ CREATE TABLE IF NOT EXISTS tokens (
     device       TEXT,
     created_at   INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL
+) STRICT;
+
+-- Present in the authentication schema as well as the membership schema so
+-- current Store transactions can carry their proof before the first cluster
+-- heartbeat. The row exists only inside one replicated transaction.
+CREATE TABLE IF NOT EXISTS cluster_credential_mutation_intents (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
+) STRICT;
+
+-- Permanent only after the exact committed roster concurrently proves the
+-- credential-revocation protocol. Membership owns publication of this row.
+CREATE TABLE IF NOT EXISTS cluster_credential_guard_activation (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -1196,6 +1214,37 @@ pub(super) fn disconnected_test_client() -> TimedClient {
 impl HiqliteAuthStore {
     pub(super) fn client(&self) -> &TimedClient {
         &self.client
+    }
+
+    /// Carry a transaction-local proof around credential mutations. Replicated
+    /// triggers start enforcing this after a guarded full-roster activation,
+    /// so a rolled-back binary cannot race another node's readiness refresh
+    /// and mutate authority with legacy SQL.
+    async fn credential_mutation(
+        &self,
+        statements: Vec<(&'static str, Params)>,
+    ) -> Result<Vec<usize>, StoreError> {
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let statement_count = statements.len();
+        let mut transaction = Vec::with_capacity(statement_count + 2);
+        transaction.push((CREDENTIAL_MUTATION_INTENT_BEGIN_SQL, params!()));
+        transaction.extend(statements);
+        transaction.push((CREDENTIAL_MUTATION_INTENT_END_SQL, params!()));
+        let results = self
+            .client()
+            .txn(transaction)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if results.len() != statement_count + 2 {
+            return Err(StoreError::Database(
+                "credential mutation transaction returned the wrong result count".into(),
+            ));
+        }
+        Ok(results[1..=statement_count].to_vec())
     }
 
     /// Reset attempted client-call accounting before a validation workload.
@@ -2353,9 +2402,11 @@ impl HiqliteAuthStore {
             ("DELETE FROM files".to_owned(), params!()),
             ("DELETE FROM items".to_owned(), params!()),
             ("DELETE FROM libraries".to_owned(), params!()),
+            (CREDENTIAL_MUTATION_INTENT_BEGIN_SQL.to_owned(), params!()),
             ("DELETE FROM tokens".to_owned(), params!()),
             ("DELETE FROM api_keys".to_owned(), params!()),
             ("DELETE FROM users".to_owned(), params!()),
+            (CREDENTIAL_MUTATION_INTENT_END_SQL.to_owned(), params!()),
             (
                 "DELETE FROM settings WHERE key <> $1 \
                    AND key NOT GLOB 'internal.cluster_job_owner_removed.*'"
@@ -3263,9 +3314,42 @@ impl UserStore for HiqliteAuthStore {
 
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError> {
         Ok(self
-            .execute("DELETE FROM users WHERE id = $1", params!(id))
-            .await?
+            .credential_mutation(vec![("DELETE FROM users WHERE id = $1", params!(id))])
+            .await?[0]
             > 0)
+    }
+
+    async fn delete_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let statement = match claim {
+            Some(claim) => (
+                "DELETE FROM users
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))
+                       AND EXISTS (
+                         SELECT 1 FROM cluster_cache_admin_revocation_leases
+                         WHERE claim_id = $2
+                       )",
+                params!(id, claim.as_str()),
+            ),
+            None => (
+                "DELETE FROM users
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))",
+                params!(id),
+            ),
+        };
+        let changed = self.credential_mutation(vec![statement]).await?[0];
+        Ok(changed > 0)
     }
 
     async fn count_admins(&self) -> Result<i64, StoreError> {
@@ -3283,28 +3367,160 @@ impl UserStore for HiqliteAuthStore {
         // parameter whose index follows first appearance. Keep `$1` first in
         // the SQL even when the SET clause precedes the predicate.
         Ok(self
-            .execute(
+            .credential_mutation(vec![(
                 "UPDATE users SET password_hash = $1 WHERE id = $2",
                 params!(password_hash, id),
-            )
-            .await?
+            )])
+            .await?[0]
             > 0)
+    }
+
+    async fn reset_password_and_revoke_tokens(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let results = match claim {
+            Some(claim) => {
+                self.credential_mutation(vec![
+                    (
+                        "UPDATE users SET password_hash = $1
+                             WHERE id = $2 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $3
+                             )",
+                        params!(password_hash, id, claim.as_str()),
+                    ),
+                    (
+                        "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $2
+                             )",
+                        params!(id, claim.as_str()),
+                    ),
+                ])
+                .await?
+            }
+            None => {
+                self.credential_mutation(vec![
+                    (
+                        "UPDATE users SET password_hash = $1 WHERE id = $2",
+                        params!(password_hash, id),
+                    ),
+                    ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
+                ])
+                .await?
+            }
+        };
+        let mut results = results.into_iter();
+        let changed = results.next().ok_or_else(|| {
+            StoreError::Database("password transaction returned no result".into())
+        })?;
+        results
+            .next()
+            .ok_or_else(|| StoreError::Database("token transaction returned no result".into()))?;
+        Ok(changed > 0)
+    }
+
+    async fn promote_user_and_reset_password(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let results = match claim {
+            Some(claim) => {
+                self.credential_mutation(vec![
+                    (
+                        "UPDATE users SET password_hash = $1, is_admin = 1
+                             WHERE id = $2 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $3
+                             )",
+                        params!(password_hash, id, claim.as_str()),
+                    ),
+                    (
+                        "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $2
+                             )",
+                        params!(id, claim.as_str()),
+                    ),
+                ])
+                .await?
+            }
+            None => {
+                self.credential_mutation(vec![
+                    (
+                        "UPDATE users SET password_hash = $1, is_admin = 1 WHERE id = $2",
+                        params!(password_hash, id),
+                    ),
+                    ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
+                ])
+                .await?
+            }
+        };
+        let mut results = results.into_iter();
+        let changed = results.next().ok_or_else(|| {
+            StoreError::Database("promotion transaction returned no result".into())
+        })?;
+        results
+            .next()
+            .ok_or_else(|| StoreError::Database("token transaction returned no result".into()))?;
+        Ok(changed > 0)
     }
 
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError> {
         Ok(self
-            .execute(
+            .credential_mutation(vec![(
                 "UPDATE users SET is_admin = $1 WHERE id = $2",
                 params!(is_admin, id),
-            )
-            .await?
+            )])
+            .await?[0]
             > 0)
+    }
+
+    async fn demote_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let statement = match claim {
+            Some(claim) => (
+                "UPDATE users SET is_admin = 0
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))
+                       AND EXISTS (
+                         SELECT 1 FROM cluster_cache_admin_revocation_leases
+                         WHERE claim_id = $2
+                       )",
+                params!(id, claim.as_str()),
+            ),
+            None => (
+                "UPDATE users SET is_admin = 0
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))",
+                params!(id),
+            ),
+        };
+        let changed = self.credential_mutation(vec![statement]).await?[0];
+        Ok(changed > 0)
     }
 
     async fn delete_tokens_for_user(&self, user_id: i64) -> Result<u64, StoreError> {
         Ok(self
-            .execute("DELETE FROM tokens WHERE user_id = $1", params!(user_id))
-            .await? as u64)
+            .credential_mutation(vec![(
+                "DELETE FROM tokens WHERE user_id = $1",
+                params!(user_id),
+            )])
+            .await?[0] as u64)
     }
 
     async fn create_token(
@@ -3314,14 +3530,34 @@ impl UserStore for HiqliteAuthStore {
         device: Option<&str>,
     ) -> Result<(), StoreError> {
         let now = self.now()?;
-        self.execute(
+        self.credential_mutation(vec![(
             "INSERT INTO tokens \
              (token_hash, user_id, device, created_at, last_seen_at) \
              VALUES ($1, $2, $3, $4, $4)",
             params!(token_hash, user_id, device, now),
-        )
+        )])
         .await?;
         Ok(())
+    }
+
+    async fn create_token_if_password_matches(
+        &self,
+        token_hash: &str,
+        user_id: i64,
+        device: Option<&str>,
+        expected_password_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let now = self.now()?;
+        Ok(self
+            .credential_mutation(vec![(
+                "INSERT INTO tokens \
+                 (token_hash, user_id, device, created_at, last_seen_at) \
+                 SELECT $1, id, $2, $3, $3 FROM users \
+                 WHERE id = $4 AND password_hash = $5",
+                params!(token_hash, device, now, user_id, expected_password_hash),
+            )])
+            .await?[0]
+            > 0)
     }
 
     async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
@@ -3345,12 +3581,34 @@ impl UserStore for HiqliteAuthStore {
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {
         Ok(self
-            .execute(
+            .credential_mutation(vec![(
                 "DELETE FROM tokens WHERE token_hash = $1",
                 params!(token_hash),
-            )
-            .await?
+            )])
+            .await?[0]
             > 0)
+    }
+
+    async fn delete_token_with_cache_admin_claim(
+        &self,
+        token_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let statement = match claim {
+            Some(claim) => (
+                "DELETE FROM tokens WHERE token_hash = $1 AND EXISTS (
+                       SELECT 1 FROM cluster_cache_admin_revocation_leases
+                       WHERE claim_id = $2
+                     )",
+                params!(token_hash, claim.as_str()),
+            ),
+            None => (
+                "DELETE FROM tokens WHERE token_hash = $1",
+                params!(token_hash),
+            ),
+        };
+        let changed = self.credential_mutation(vec![statement]).await?[0];
+        Ok(changed > 0)
     }
 }
 

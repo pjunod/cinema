@@ -105,6 +105,15 @@ missing = "fail"
 timeout_seconds = 1800
 
 [[checks]]
+id = "hiqlite-vendor-clippy"
+title = "Vendored Hiqlite production snapshot transport denied-warning Clippy"
+command = "make hiqlite-vendor-clippy"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 1800
+
+[[checks]]
 id = "web-static"
 title = "Embedded JavaScript and theme contrast"
 command = "make web-check"
@@ -249,6 +258,16 @@ platforms = ["darwin", "linux"]
 requires = ["cargo", "make"]
 missing = "fail"
 timeout_seconds = 1800
+
+[[checks]]
+id = "cluster-transport-recovery"
+title = "Supervised twenty-cycle learner and voter TLS snapshot recovery campaign"
+command = "make cluster-transport-recovery-check"
+profiles = ["full", "nightly"]
+platforms = ["linux"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 7200
 
 [[checks]]
 id = "offline-contract"
@@ -420,6 +439,7 @@ paths = [
   "benchmarks/cluster-instrumentation-campaign.schema.json",
   "benchmarks/cluster-topology-campaign.schema.json",
   "benchmarks/cluster-topology.schema.json",
+  "benchmarks/cluster-transport-recovery.schema.json",
   "crates/plurx-cluster-check/**",
   "crates/plurx-core/src/cluster/coordination.rs",
   "crates/plurx-core/src/metadata/**",
@@ -450,13 +470,14 @@ paths = [
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "scripts/cluster-named-runner",
+  "scripts/require-test-count",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "vendor/hiqlite/**",
   "vendor/hiqlite-wal/**",
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+checks = ["rust-gate", "rust-gate-ci", "hiqlite-vendor-clippy", "cluster-auth", "cluster-transport-recovery"]
 depends_on = ["core.media", "identity.access"]
 
 [[points]]
@@ -474,7 +495,7 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/transcode.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
 
 [[points]]
@@ -485,7 +506,7 @@ paths = [
   "crates/plurxd/src/http/cluster_operations.rs",
   "crates/plurxd/src/wal_cli.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "web-membership", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries", "web-membership", "operations-contract"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 
 [[points]]
@@ -597,13 +618,14 @@ depends_on = ["core.media", "server.api", "library.catalog"]
 [[points]]
 id = "identity.access"
 title = "Accounts, tokens, and authorization boundaries"
-contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate."
+contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate; cache-only recovery authorization is published only from a current Store-backed admin read, is invalidated around credential mutations, and fails closed on every committed peer until its signed begin/end revocation fence is acknowledged or expires at the proof TTL."
 paths = [
   "crates/plurx-core/src/auth.rs",
   "crates/plurx-core/src/secrets.rs",
   "crates/plurx-core/src/store/sqlite/{apikeys,users}.rs",
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurxd/src/http/{auth,keys,users}.rs",
+  "crates/plurxd/src/http/internal_auth_revocation.rs",
   "docs/SECURITY.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "credential-encryption"]
@@ -843,6 +865,7 @@ paths = [
   "scripts/history-audit",
   "scripts/prove-fix",
   "scripts/prove-tombstone-offline-fence",
+  "scripts/require-test-count",
   "scripts/validate",
   "tests/client-fixes.toml",
   "tests/validation/**",

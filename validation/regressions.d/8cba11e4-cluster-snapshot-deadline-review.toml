@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8cba11e4"]
+points = ["core.media", "cluster.auth", "operations.packaging", "validation.framework"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "operations-contract", "catalog-contract"]
+reason = "The focused Rust and operations contracts pin final-mismatch restoration, simultaneous timer and phase transitions, checked standalone durations, both production snapshot wrappers, receiver admission under the configured chunk budget, Docker startup timing, and persistent exact-test mapping."
