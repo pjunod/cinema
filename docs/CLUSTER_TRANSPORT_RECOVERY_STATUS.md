@@ -30,8 +30,8 @@ change.
 | M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | [!66](http://192.168.4.7:3000/noirr/plurx/pulls/66) | final clean candidate `98ca24fc` passed the complete focused lane, exact pinned workspace check and denied-warning Clippy, static/operations/web preflight, and three exact-candidate adversarial reviews after both rationale findings were corrected; replacement effort gate is next | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
-| M5 · recovery campaign | `codex/cluster-transport-m5-final` | not opened | the reviewed campaign implementation has been rebuilt in an independent clone on the latest M4 line and passes pinned workspace check and denied-warning Clippy; it will move to the replacement M4 commit before qualification | Actual TLS transport matrix · 20 learner and 20 voter cycles |
+| M4 · transport status | `codex/cluster-transport-m4` | [!66](http://192.168.4.7:3000/noirr/plurx/pulls/66) | merged into the effort at `abe2ad9a` after the final clean candidate passed the complete focused lane, exact pinned workspace check and denied-warning Clippy, static/operations/web preflight, three exact-candidate adversarial reviews, and the green replacement effort gate | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
+| M5 · recovery campaign | `codex/cluster-transport-m5-final-v2` | not opened | campaign implementation and its persistent regression mapping are rebased in an independent clone onto merged M4 effort tip `abe2ad9a`; exact-tree compile, focused regression, Linux campaign qualification, and fresh adversarial review are next | Actual TLS transport matrix · 20 learner and 20 voter cycles |
 | Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
@@ -560,8 +560,10 @@ M5 replacement work includes the earlier CI receipt and exact-test
 count corrections plus the later zero-resource-growth, early archive-identity,
 and cumulative-attempt corrections. It also refuses successful recovery or
 final qualification receipts from rerun attempts, so a failed 40-cycle
-campaign requires a new source candidate rather than a green rerun; it must be
-rebased after M4 review closes.
+campaign cannot become green through **Re-run jobs** in the same workflow
+execution. Forgejo starts a separate workflow at attempt `1`, so this is not a
+durable failed-SHA ledger; operators must compare any replacement run with the
+earlier receipt. The branch is rebased after M4 review closed.
 No work is being done in the user's existing checkout.
 
 **How to read this page:** “pass” means the named command completed against the

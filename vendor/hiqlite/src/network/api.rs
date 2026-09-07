@@ -449,7 +449,9 @@ pub async fn stream(
         }
     }
 
+    let task_status = state.snapshot_transport.clone();
     tokio::task::spawn(async move {
+        let _task_guard = task_status.owned_async_task();
         if let Err(err) = handle_socket_concurrent(state, socket).await {
             error!("Error in websocket connection: {}", err);
         }
@@ -576,17 +578,24 @@ async fn handle_socket_concurrent(
     let (tx_connection_closed, mut rx_connection_closed) = watch::channel(false);
     let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
     let writer_connection_closed = tx_connection_closed.clone();
-    let handle_write = task::spawn(api_response_writer(
-        write,
-        rx_write,
-        writer_connection_closed,
-        tx_writer_finished,
-    ));
+    let writer_task_status = state.snapshot_transport.clone();
+    let handle_write = task::spawn(async move {
+        let _task_guard = writer_task_status.owned_async_task();
+        api_response_writer(
+            write,
+            rx_write,
+            writer_connection_closed,
+            tx_writer_finished,
+        )
+        .await;
+    });
 
     let (tx_read, rx_read) = flume::bounded(1);
     let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
     let reader_connection_closed = tx_connection_closed.clone();
+    let reader_task_status = state.snapshot_transport.clone();
     let handle_read = task::spawn(async move {
+        let _task_guard = reader_task_status.owned_async_task();
         let outcome = loop {
             let frame = match read
                 .read_frame(&mut |frame| async move {
@@ -660,9 +669,11 @@ async fn handle_socket_concurrent(
 
         let state = state.clone();
         let tx_write = tx_write.clone();
+        let request_task_status = state.snapshot_transport.clone();
         #[cfg(feature = "sqlite")]
         let old_watermark_marker_rejected = old_watermark_marker_rejected.clone();
         task::spawn(async move {
+            let _task_guard = request_task_status.owned_async_task();
             let request_id = req.request_id;
 
             let res = match req.payload {

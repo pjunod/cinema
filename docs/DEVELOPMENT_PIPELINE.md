@@ -150,6 +150,15 @@ compile-only task lane again. When the tree settles, run one new complete
 qualification. Do not use a green job from an older candidate as proof for the
 new tree; [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) defines the
 content-fingerprint work required before selective result reuse can be trusted.
+The transport-recovery campaign is stricter: its successful lane receipt and
+the aggregate qualification receipt accept only workflow run attempt `1`.
+Failure receipts remain available for diagnosis, but **Re-run jobs** cannot
+turn that workflow execution's failed 40-cycle campaign into promotion
+evidence. Fix the cause and create a new candidate commit before qualifying
+again. This is a same-run guarantee, not a repository-wide ledger: closing and
+reopening a pull request creates a different workflow run whose attempt number
+starts at `1`, so operators must still inspect earlier receipts for the same
+candidate SHA.
 
 Main pushes still run the exhaustive workflow in the background. A newer main
 push cancels an older main run because the newer tree contains it; tags and

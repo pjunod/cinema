@@ -415,6 +415,68 @@ jobs:
         if: always() && steps.topology_contracts.outcome != 'success'
         run: exit 1
 
+  cluster_transport_recovery:
+    name: cluster transport recovery campaign
+    needs: [scope, preflight]
+    if: needs.scope.outputs.cluster_auth == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, ci-topology]
+    timeout-minutes: 120
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: cluster-transport-recovery
+          execution-mode: ${{ needs.scope.outputs.execution_mode }}
+          persistent-eligible: "true"
+      - name: Run 20 learner and 20 voter snapshot recovery cycles
+        id: transport_recovery
+        continue-on-error: true
+        shell: bash
+        env:
+          PLURX_BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/validation
+          make cluster-transport-recovery-check \
+            2>&1 | tee target/validation/cluster-transport-recovery.log
+      - name: Record the transport recovery lane result
+        if: always()
+        env:
+          LANE_RESULT: ${{ steps.transport_recovery.outcome }}
+          EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check
+        run: >-
+          python3 -m validation.ci_lane_receipt
+          --output target/validation/cluster-transport-recovery-receipt.json
+          --log target/validation/cluster-transport-recovery.log
+          --evidence target/validation/cluster-transport-recovery.json
+          --evidence-validator "$EVIDENCE_VALIDATOR"
+          --lane cluster-transport-recovery
+          --result "$LANE_RESULT"
+          --command "make cluster-transport-recovery-check"
+      - name: Retain transport recovery log, receipt, and evidence
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: cluster-transport-recovery
+          path: |
+            target/validation/cluster-transport-recovery.log
+            target/validation/cluster-transport-recovery-receipt.json
+            target/validation/cluster-transport-recovery.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Propagate the transport recovery result
+        if: always() && steps.transport_recovery.outcome != 'success'
+        run: exit 1
+
   cluster_wal:
     name: replicated WAL recovery contracts
     needs: [scope, preflight]
@@ -1031,6 +1093,7 @@ jobs:
       - check
       - cluster_store
       - cluster_topology
+      - cluster_transport_recovery
       - cluster_wal
       - cluster_daemon
       - web_layout
@@ -1056,6 +1119,7 @@ jobs:
           CHECK_RESULT: ${{ needs.check.result }}
           CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}
           CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}
+          CLUSTER_TRANSPORT_RECOVERY_RESULT: ${{ needs.cluster_transport_recovery.result }}
           CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}
           CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}
           WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
@@ -1069,7 +1133,8 @@ jobs:
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
             "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
             "$CLUSTER_STORE_RESULT" "$CLUSTER_TOPOLOGY_RESULT" \
-            "$CLUSTER_WAL_RESULT" "$CLUSTER_DAEMON_RESULT" \
+            "$CLUSTER_TRANSPORT_RECOVERY_RESULT" "$CLUSTER_WAL_RESULT" \
+            "$CLUSTER_DAEMON_RESULT" \
             "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
             "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
             "$PACKAGE_SMOKE_RESULT"; do
@@ -1110,6 +1175,7 @@ jobs:
       - check
       - cluster_store
       - cluster_topology
+      - cluster_transport_recovery
       - cluster_wal
       - cluster_daemon
       - web_layout
@@ -1129,6 +1195,7 @@ jobs:
           CHECK_RESULT: ${{ needs.check.result }}
           CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}
           CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}
+          CLUSTER_TRANSPORT_RECOVERY_RESULT: ${{ needs.cluster_transport_recovery.result }}
           CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}
           CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}
           WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
@@ -1142,7 +1209,7 @@ jobs:
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
             "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
             "$CLUSTER_STORE_RESULT" "$CLUSTER_TOPOLOGY_RESULT" \
-            "$CLUSTER_WAL_RESULT" \
+            "$CLUSTER_TRANSPORT_RECOVERY_RESULT" "$CLUSTER_WAL_RESULT" \
             "$CLUSTER_DAEMON_RESULT" \
             "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
             "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
@@ -1163,7 +1230,7 @@ jobs:
           PLURX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PLURX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PLURX_QUALIFICATION_RESULTS: >-
-            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
+            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
         run: >-
           python3 -m validation.qualification
           --output target/validation/qualification-receipt.json

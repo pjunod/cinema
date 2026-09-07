@@ -1923,6 +1923,101 @@ installing, retrying, or stalled transport never grants reads. While port
 32400 is still closed, the daemon also emits one bounded startup-wait record
 every ten seconds with target/applied indexes when known.
 
+### Qualify transport recovery before fleet enablement
+
+Run the recovery campaign on a Linux validation host before declaring the
+bounded transport safe for a fleet. It is a qualification workload, not a
+production toggle:
+
+```bash
+PLURX_BUILD_SHA=<40-character-candidate-sha> make cluster-transport-recovery-check
+```
+
+Set `PLURX_BUILD_SHA` to the exact commit used to create the source archive.
+The campaign validates this identity before it creates a cluster or starts the
+first recovery cycle; an archive without `.git` fails immediately when the
+identity is missing or malformed.
+
+The command creates fresh separate-process clusters and uses the production
+TLS Raft snapshot path. A second process keeps committing acknowledged writes
+through the production TLS API WebSocket while node 4 is rebuilt from an empty
+data directory. It runs 20 recoveries with node 4 admitted as a learner using
+the current membership token protocol, then 20 with node 4 as a voter. The
+learner image carries at least 88,559,616 bytes and the voter image at least
+177,119,232 bytes. Any failed cycle fails the command; there is no partial-pass
+result. Each cycle requires a readiness acknowledgement followed by at least
+two uniquely keyed acknowledgements during recovery, separated by the fixed
+writer cadence. If an API execute result is ambiguous, the writer performs one
+or more bounded consistent reads of that identifier and accepts only the exact
+value; it never replays the write blindly.
+
+The controller owns the writer process throughout the recovery window. An
+unexpected exit fails the cycle immediately, and a 35-second interval without
+a new acknowledgement is a stalled workload, not evidence of continuing
+load. The artifact requires every adjacent acknowledgement gap and the tail
+from the last acknowledgement to recovery completion to stay within that same
+35-second bound. Node readiness, target installation, and source completion
+share one absolute 1,500-second recovery deadline; moving between phases never
+renews it.
+
+The campaign's 256-log snapshot trigger exists only in the cluster validation
+launch payload. It is absent from `plurxd`, TOML, environment variables, and
+the Settings UI, so it cannot change production snapshot frequency. The
+transport correction itself remains compiled and active without a feature
+gate.
+
+Successful runs write
+`target/validation/cluster-transport-recovery.json`. The closed-schema artifact
+binds the exact Git SHA and records, per cycle, the source and installed
+snapshot ID/size/SHA-256, snapshot/purge/applied indexes, transferred bytes,
+source-leader outbound attempt/reconnect/retry counts, and target-local inbound
+byte and installation evidence. Attempt, final acknowledgement, local receive,
+and install times are explicit. The source attempt clock begins with the first
+full-snapshot attempt in one recovery series and survives failed replacement
+attempts, so the role's worst transfer duration includes their reconnect and
+retry time rather than measuring only the final successful transfer. Missing
+or zero large-image durations fail the artifact instead of becoming zero-valued
+evidence. The artifact also records
+the readiness acknowledgement, every in-recovery acknowledgement, their
+target-local digest, the recovered SQLite content digest, and baseline plus
+post-quiescence OS-thread, socket, and Hiqlite-owned async-task counts for
+persistent voters 1–3 and restarted node 4. Before taking the fixed baseline,
+the target must apply and hash the seeded image exactly, then complete one
+unmeasured recovery warmup cycle so lazy transport and database resources are
+already present. Baseline and post-cycle counts are each accepted only after
+two identical idle samples separated by a three-second sample interval; active
+snapshot work resets that proof. Every post-cycle sample must return to the
+fixed warmed baseline within one absolute 60-second cleanup horizon.
+The summary records the worst recovery, transfer, and install duration for each
+role. Do not accept an artifact if its build SHA differs from the candidate,
+either role has fewer than 20 cycles, recovery exceeds 1,500 seconds, the
+source and installed snapshot hashes differ, an acknowledged-write digest
+differs, any required timestamp is absent, or any node retains even one
+additional OS thread, socket, or owned async task after quiescence. Stable
+samples above the established baseline are a leak, not cleanup evidence.
+
+Main-bound cluster changes run this command in the dedicated
+`cluster_transport_recovery` CI job and retain the evidence, log, and exact
+lane receipt. A successful receipt verifies that the artifact's `build_sha`
+equals the tested commit and binds the artifact's SHA-256 and byte count, so a
+different or replaced JSON file is not qualification evidence. Both that
+successful lane receipt and the final qualification receipt require workflow
+run attempt `1`. A failed cycle therefore remains disqualifying inside that
+workflow execution: do not use **Re-run jobs** to make it produce a green
+artifact. Preserve its failure receipt, fix the cause, and qualify a new commit
+instead. Forgejo assigns a fresh attempt `1` to a different workflow run,
+including one created by closing and reopening the pull request; this receipt
+does not provide a repository-wide failed-SHA ledger, so inspect earlier
+receipts before accepting a repeated candidate SHA.
+Other CI lanes may still retain successful rerun receipts because they do not
+replace this campaign's failure evidence. The campaign removes any prior output
+before starting, then syncs a temporary complete JSON file and atomically
+publishes it. A failed lane always records a log-only receipt, including on a
+later workflow attempt, and does not parse a stale or interrupted evidence
+file. An effort is not qualified when that selected job is skipped or fails.
+Ordinary effort task PRs retain their compile-only development gate; the
+40-cycle campaign belongs to the final effort-to-main qualification.
+
 Set the variable only to choose a grace deliberately. Whether anybody chose is
 answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
 that is anything other than the interpolation default in

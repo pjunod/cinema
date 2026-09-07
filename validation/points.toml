@@ -260,6 +260,16 @@ missing = "fail"
 timeout_seconds = 1800
 
 [[checks]]
+id = "cluster-transport-recovery"
+title = "Supervised twenty-cycle learner and voter TLS snapshot recovery campaign"
+command = "make cluster-transport-recovery-check"
+profiles = ["full", "nightly"]
+platforms = ["linux"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 7200
+
+[[checks]]
 id = "offline-contract"
 title = "Offline package persistence, ownership, lease, and media boundary"
 command = "cargo test -p plurx-core store::sqlite::offline -- --nocapture && cargo test -p plurx-core v14_offline -- --nocapture && cargo test -p plurxd offline -- --nocapture"
@@ -388,6 +398,7 @@ paths = [
   "benchmarks/cluster-instrumentation-campaign.schema.json",
   "benchmarks/cluster-topology-campaign.schema.json",
   "benchmarks/cluster-topology.schema.json",
+  "benchmarks/cluster-transport-recovery.schema.json",
   "crates/plurx-cluster-check/**",
   "crates/plurx-core/src/cluster/coordination.rs",
   "crates/plurx-core/src/metadata/**",
@@ -425,7 +436,7 @@ paths = [
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "hiqlite-vendor-clippy", "cluster-auth"]
+checks = ["rust-gate", "rust-gate-ci", "hiqlite-vendor-clippy", "cluster-auth", "cluster-transport-recovery"]
 depends_on = ["core.media", "identity.access"]
 
 [[points]]
@@ -443,7 +454,7 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/transcode.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
 
 [[points]]
@@ -454,7 +465,7 @@ paths = [
   "crates/plurxd/src/http/cluster_operations.rs",
   "crates/plurxd/src/wal_cli.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "web-membership", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries", "web-membership", "operations-contract"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 
 [[points]]

@@ -1040,6 +1040,15 @@ cluster-store-check: ## Run the Store contracts against SQLite and three voters
 
 .PHONY: cluster-harness-check
 cluster-harness-check: ## Run replicated growth and topology harness contracts
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  tests::a_legacy_launch_retains_the_production_snapshot_policy \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  tests::a_snapshot_threshold_round_trips_and_reaches_the_launched_voter_config \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  tests::an_invalid_snapshot_threshold_is_rejected_without_changing_production \
+	  --lib -- --exact
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  --test harness compacted_growth_gate -- --nocapture
 	$(CARGO) test --locked -p plurx-cluster-check \
@@ -1054,6 +1063,55 @@ cluster-harness-check: ## Run replicated growth and topology harness contracts
 	$(CARGO) run --locked -p plurx-cluster-check -- check
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  topology target/validation/cluster-topology-semantic.json 3,4
+
+.PHONY: cluster-transport-recovery-check
+cluster-transport-recovery-check: ## Run Linux 20+20 learner/voter snapshot recovery qualification
+	test "$$(uname -s)" = Linux
+	PLURX_EXPECT_TEST_COUNT=27 scripts/require-test-count $(CARGO) test --locked \
+	  -p plurx-cluster-check transport_recovery::tests --lib
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::writer_exit_after_readiness_fails_the_recovery_promptly \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::two_early_acknowledgements_cannot_hide_a_long_recovery_gap \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::writer_must_cover_the_end_of_recovery \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::whole_recovery_duration_cannot_exceed_the_absolute_deadline \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::worst_transfer_duration_covers_the_complete_source_series \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked -p plurx-cluster-check \
+	  transport_recovery::tests::owned_async_task_growth_has_no_resource_slack \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  transport_status::tests::owned_async_task_guard_tracks_abort_safe_lifetime \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  transport_status::tests::recovery_series_preserves_failed_retry_and_resets_after_completion \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,cache,macros,sqlite \
+	  transport_status::tests::outbound_retry_counts_only_when_openraft_issues_the_next_chunk \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  transport_status::tests::recovery_series_counts_every_replacement_client_connection_attempt \
+	  --lib -- --exact
+	scripts/require-test-count $(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
+	  --no-default-features --features auto-heal,macros,sqlite \
+	  network::snapshot_executor::tests::production_snapshot_executor_worker_is_counted_until_joined \
+	  --lib -- --exact
+	$(CARGO) run --locked -p plurx-cluster-check -- \
+	  transport-recovery target/validation/cluster-transport-recovery.json
 
 .PHONY: cluster-daemon-check
 cluster-daemon-check: ## Run real-daemon activation and activity contracts

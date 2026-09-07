@@ -108,6 +108,11 @@ pub struct SnapshotTransportObservation {
     pub active_deadline_remaining_ms: Option<u64>,
     pub sample_age_ms: u64,
     pub phase: SnapshotTransportPhase,
+    /// Snapshot starts plus retry starts represented by this observation.
+    /// Outbound replacements after failure remain in one logical recovery
+    /// series; the first outbound snapshot after completion starts a new one.
+    #[serde(default)]
+    pub attempt_count: u64,
     pub reconnect_count: u64,
     pub retry_count: u64,
     pub last_error_category: Option<String>,
@@ -119,6 +124,8 @@ pub struct SnapshotTransportStatus {
     pub schema_version: u32,
     pub observing_node_id: u64,
     pub observed_at_unix_ms: u64,
+    #[serde(default)]
+    pub owned_async_tasks: u64,
     pub observations: Vec<SnapshotTransportObservation>,
     /// Process-local receipt time assigned by an authenticated collector.
     ///
@@ -222,8 +229,10 @@ struct Observation {
     deadline: Option<Instant>,
     last_update: Instant,
     phase: SnapshotTransportPhase,
+    attempt_count: u64,
     connection_attempt_count: u64,
     retry_count: u64,
+    outbound_retry_pending: bool,
     last_error_category: Option<&'static str>,
     operation_owns_work: bool,
     outbound_connection_id: Option<u64>,
@@ -244,7 +253,24 @@ struct Inner {
     boot_id: String,
     next_outbound_attempt: AtomicU64,
     next_outbound_connection: AtomicU64,
+    owned_async_tasks: AtomicU64,
     state: Mutex<State>,
+}
+
+/// Lifetime token for an async transport task owned by this node.
+///
+/// The counter is deliberately process-local diagnostic state. Dropping the
+/// future that owns this token decrements the count even when the task is
+/// aborted, which lets validation distinguish a terminated task from one
+/// that merely stopped holding a socket.
+pub(crate) struct OwnedAsyncTaskGuard {
+    inner: Arc<Inner>,
+}
+
+impl Drop for OwnedAsyncTaskGuard {
+    fn drop(&mut self) {
+        self.inner.owned_async_tasks.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Cloneable handle for one node's in-memory snapshot transport state.
@@ -265,6 +291,7 @@ impl LocalSnapshotTransportStatus {
                 boot_id: format!("{observing_node_id}-{boot_nanos}"),
                 next_outbound_attempt: AtomicU64::new(0),
                 next_outbound_connection: AtomicU64::new(0),
+                owned_async_tasks: AtomicU64::new(0),
                 state: Mutex::new(State {
                     next_inbound_attempt: 0,
                     next_inbound_socket_epoch: 0,
@@ -349,6 +376,20 @@ impl LocalSnapshotTransportStatus {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.next_inbound_socket_epoch = state.next_inbound_socket_epoch.saturating_add(1);
         state.next_inbound_socket_epoch
+    }
+
+    /// Number of currently alive Raft/API transport and snapshot-executor
+    /// tasks owned by this embedded node.
+    #[must_use]
+    pub fn owned_async_task_count(&self) -> u64 {
+        self.inner.owned_async_tasks.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn owned_async_task(&self) -> OwnedAsyncTaskGuard {
+        self.inner.owned_async_tasks.fetch_add(1, Ordering::AcqRel);
+        OwnedAsyncTaskGuard {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     #[must_use]
@@ -438,6 +479,7 @@ impl LocalSnapshotTransportStatus {
                         .map(|deadline| duration_ms(deadline.saturating_duration_since(now))),
                     sample_age_ms: duration_ms(sample_age),
                     phase: observation.phase,
+                    attempt_count: observation.attempt_count,
                     reconnect_count: observation.connection_attempt_count.saturating_sub(1),
                     retry_count: observation.retry_count,
                     last_error_category: observation.last_error_category.map(str::to_owned),
@@ -449,6 +491,7 @@ impl LocalSnapshotTransportStatus {
             schema_version: 1,
             observing_node_id: self.inner.observing_node_id,
             observed_at_unix_ms,
+            owned_async_tasks: self.owned_async_task_count(),
             observations,
             local_request_started_at: None,
             local_receipt_at: None,
@@ -532,6 +575,32 @@ impl LocalSnapshotTransportStatus {
                 if observation.attempt_id > attempt.attempt_id {
                     return;
                 }
+                if observation.attempt_id < attempt.attempt_id {
+                    let starts_new_series = observation.attempt_id == 0
+                        || observation.phase == SnapshotTransportPhase::Complete;
+                    if starts_new_series {
+                        observation.attempt_count = 1;
+                        observation.connection_attempt_count =
+                            u64::from(socket.connected || attempt.connection_attempt_sequence > 0);
+                        observation.retry_count = 0;
+                        observation.attempt_started = Some(now);
+                    } else {
+                        observation.attempt_count = observation.attempt_count.saturating_add(1);
+                        let additional_connections =
+                            if observation.outbound_connection_id == Some(attempt.connection_id) {
+                                attempt.connection_attempt_sequence.saturating_sub(
+                                    observation.outbound_connection_attempt_sequence,
+                                )
+                            } else {
+                                attempt
+                                    .connection_attempt_sequence
+                                    .max(u64::from(socket.connected))
+                            };
+                        observation.connection_attempt_count = observation
+                            .connection_attempt_count
+                            .saturating_add(additional_connections);
+                    }
+                }
                 observation.attempt_id = attempt.attempt_id;
                 observation.snapshot_id = Some(retained_snapshot_id(snapshot_id));
                 observation.snapshot_identity_fingerprint =
@@ -541,7 +610,11 @@ impl LocalSnapshotTransportStatus {
                 observation.acknowledged_offset = None;
                 observation.locally_received_bytes = None;
                 observation.total_bytes = None;
-                observation.attempt_started = Some(now);
+                // A terminal full-snapshot attempt can be replaced while the
+                // node is still in the same recovery. Keep the first start so
+                // elapsed status and qualification evidence cover the whole
+                // series rather than only the final successful attempt.
+                observation.attempt_started.get_or_insert(now);
                 observation.last_acknowledgement = None;
                 observation.last_local_receive = None;
                 observation.deadline = Some(deadline);
@@ -550,10 +623,8 @@ impl LocalSnapshotTransportStatus {
                 } else {
                     SnapshotTransportPhase::Connecting
                 };
-                observation.connection_attempt_count =
-                    u64::from(socket.connected || attempt.connection_attempt_sequence > 0);
-                observation.retry_count = 0;
                 observation.last_error_category = None;
+                observation.outbound_retry_pending = false;
                 observation.operation_owns_work = true;
                 observation.outbound_connection_id = Some(attempt.connection_id);
                 observation.outbound_connection_attempt_sequence =
@@ -572,6 +643,14 @@ impl LocalSnapshotTransportStatus {
         deadline: Instant,
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
+            // A failed RPC only makes a retry eligible. Count it when
+            // OpenRaft actually issues the next chunk: the final failure in
+            // its bounded retry loop has no following call and must not
+            // manufacture an attempt that never happened.
+            if std::mem::take(&mut observation.outbound_retry_pending) {
+                observation.attempt_count = observation.attempt_count.saturating_add(1);
+                observation.retry_count = observation.retry_count.saturating_add(1);
+            }
             let end_offset = offset.saturating_add(len as u64);
             let attempted_offset = observation
                 .attempted_offset
@@ -615,6 +694,7 @@ impl LocalSnapshotTransportStatus {
             };
             observation.operation_owns_work = !done;
             observation.last_error_category = None;
+            observation.outbound_retry_pending = false;
             observation.last_update = now;
         });
     }
@@ -626,7 +706,7 @@ impl LocalSnapshotTransportStatus {
         deadline: Option<Instant>,
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
-            observation.retry_count = observation.retry_count.saturating_add(1);
+            observation.outbound_retry_pending = true;
             observation.phase = SnapshotTransportPhase::Retrying;
             observation.deadline = deadline;
             observation.last_error_category = Some(category);
@@ -641,6 +721,7 @@ impl LocalSnapshotTransportStatus {
         category: &'static str,
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
+            observation.outbound_retry_pending = false;
             observation.phase = SnapshotTransportPhase::Failed;
             observation.deadline = None;
             if category != "snapshot_attempt_ended" || observation.last_error_category.is_none() {
@@ -955,6 +1036,7 @@ impl LocalSnapshotTransportStatus {
                         observation.last_error_category = None;
                     }
                     InboundSnapshotDisposition::Retrying(category) => {
+                        observation.attempt_count = observation.attempt_count.saturating_add(1);
                         observation.phase = SnapshotTransportPhase::Retrying;
                         observation.deadline = (!done).then_some(next_chunk_deadline).flatten();
                         observation.last_error_category = Some(category);
@@ -992,6 +1074,7 @@ impl LocalSnapshotTransportStatus {
                 match disposition {
                     InboundSnapshotDisposition::Succeeded => {}
                     InboundSnapshotDisposition::Retrying(category) => {
+                        observation.attempt_count = observation.attempt_count.saturating_add(1);
                         observation.phase = SnapshotTransportPhase::Retrying;
                         observation.deadline = next_chunk_deadline;
                         observation.last_error_category = Some(category);
@@ -1267,8 +1350,10 @@ fn empty_observation(now: Instant) -> Observation {
         deadline: None,
         last_update: now,
         phase: SnapshotTransportPhase::Connecting,
+        attempt_count: 0,
         connection_attempt_count: 0,
         retry_count: 0,
+        outbound_retry_pending: false,
         last_error_category: None,
         operation_owns_work: false,
         outbound_connection_id: None,
@@ -1282,7 +1367,9 @@ fn reset_from_inbound_attempt(
     status_attempt_id: u64,
     now: Instant,
 ) {
+    let attempt_count = observation.attempt_count.saturating_add(1);
     *observation = empty_observation(now);
+    observation.attempt_count = attempt_count;
     observation.attempt_id = status_attempt_id;
     observation.snapshot_id = Some(attempt.snapshot_id.clone());
     observation.snapshot_identity_fingerprint = Some(attempt.snapshot_identity_fingerprint);
@@ -1402,6 +1489,21 @@ mod tests {
             Membership::new(vec![voters], nodes),
         ));
         metrics
+    }
+
+    #[test]
+    fn owned_async_task_guard_tracks_abort_safe_lifetime() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        assert_eq!(status.owned_async_task_count(), 0);
+        let first = status.owned_async_task();
+        assert_eq!(status.owned_async_task_count(), 1);
+        {
+            let _second = status.owned_async_task();
+            assert_eq!(status.owned_async_task_count(), 2);
+        }
+        assert_eq!(status.owned_async_task_count(), 1);
+        drop(first);
+        assert_eq!(status.owned_async_task_count(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1985,6 +2087,160 @@ mod tests {
             observation.last_error_category.as_deref(),
             Some("snapshot_mismatch")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_series_preserves_failed_retry_and_resets_after_completion() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let connection_id = status.next_outbound_connection_id();
+        let mut first = status.next_outbound_attempt("sqlite", 2, connection_id);
+        first.connection_attempt_sequence = 1;
+        status.begin_owned_outbound_attempt(
+            &first,
+            "snapshot-a",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        status.outbound_acknowledged_owned(&first, 64, true, None);
+        let completed = &status.snapshot().observations[0];
+        assert_eq!(completed.attempt_count, 1);
+        assert_eq!(completed.retry_count, 0);
+        assert_eq!(completed.reconnect_count, 0);
+
+        let mut failed = status.next_outbound_attempt("sqlite", 2, connection_id);
+        failed.connection_attempt_sequence = 1;
+        status.begin_owned_outbound_attempt(
+            &failed,
+            "snapshot-b",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        status.connecting_owned("sqlite", 2, connection_id, 2, 2);
+        status.outbound_retry_owned(&failed, "snapshot_mismatch", Some(deadline));
+        status.outbound_chunk_owned(&failed, 0, 64, true, deadline);
+        status.outbound_failed_owned(&failed, "snapshot_attempt_ended");
+        tokio::time::advance(Duration::from_secs(9)).await;
+
+        let mut replacement = status.next_outbound_attempt("sqlite", 2, connection_id);
+        replacement.connection_attempt_sequence = 2;
+        status.begin_owned_outbound_attempt(
+            &replacement,
+            "snapshot-c",
+            OutboundSnapshotSocket {
+                epoch: 2,
+                connected: true,
+            },
+            deadline,
+        );
+        status.outbound_acknowledged_owned(&replacement, 64, true, None);
+
+        let recovered = &status.snapshot().observations[0];
+        assert_eq!(recovered.attempt_count, 3);
+        assert_eq!(recovered.retry_count, 1);
+        assert_eq!(recovered.reconnect_count, 1);
+        assert_eq!(recovered.attempt_age_ms, Some(9_000));
+
+        let mut next_recovery = status.next_outbound_attempt("sqlite", 2, connection_id);
+        next_recovery.connection_attempt_sequence = 2;
+        status.begin_owned_outbound_attempt(
+            &next_recovery,
+            "snapshot-d",
+            OutboundSnapshotSocket {
+                epoch: 2,
+                connected: true,
+            },
+            deadline,
+        );
+        let reset = &status.snapshot().observations[0];
+        assert_eq!(reset.attempt_count, 1);
+        assert_eq!(reset.retry_count, 0);
+        assert_eq!(reset.reconnect_count, 0);
+        assert_eq!(reset.attempt_age_ms, Some(0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn outbound_retry_counts_only_when_openraft_issues_the_next_chunk() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let attempt = status.begin_outbound_attempt(
+            "sqlite",
+            2,
+            7,
+            "snapshot",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+
+        status.outbound_chunk_owned(&attempt, 0, 64, false, deadline);
+        status.outbound_retry_owned(&attempt, "transport_unavailable", Some(deadline));
+        let eligible = &status.snapshot().observations[0];
+        assert_eq!(eligible.phase, SnapshotTransportPhase::Retrying);
+        assert_eq!(eligible.attempt_count, 1);
+        assert_eq!(eligible.retry_count, 0);
+
+        status.connecting_owned("sqlite", 2, 1, 2, 2);
+        assert_eq!(
+            status.snapshot().observations[0].phase,
+            SnapshotTransportPhase::Connecting
+        );
+        status.outbound_chunk_owned(&attempt, 0, 64, false, deadline);
+        let issued = &status.snapshot().observations[0];
+        assert_eq!(issued.attempt_count, 2);
+        assert_eq!(issued.retry_count, 1);
+
+        status.outbound_retry_owned(&attempt, "transport_unavailable", Some(deadline));
+        status.outbound_failed_owned(&attempt, "snapshot_attempt_ended");
+        let exhausted = &status.snapshot().observations[0];
+        assert_eq!(exhausted.phase, SnapshotTransportPhase::Failed);
+        assert_eq!(exhausted.attempt_count, 2);
+        assert_eq!(exhausted.retry_count, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_series_counts_every_replacement_client_connection_attempt() {
+        let status = LocalSnapshotTransportStatus::new(1, BTreeSet::from([2]));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let first_connection = status.next_outbound_connection_id();
+        let mut failed = status.next_outbound_attempt("sqlite", 2, first_connection);
+        failed.connection_attempt_sequence = 1;
+        status.begin_owned_outbound_attempt(
+            &failed,
+            "snapshot-a",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        status.outbound_failed_owned(&failed, "transport_unavailable");
+
+        let replacement_connection = status.next_outbound_connection_id();
+        let mut replacement = status.next_outbound_attempt("sqlite", 2, replacement_connection);
+        replacement.connection_attempt_sequence = 3;
+        status.begin_owned_outbound_attempt(
+            &replacement,
+            "snapshot-b",
+            OutboundSnapshotSocket {
+                epoch: 1,
+                connected: true,
+            },
+            deadline,
+        );
+        status.outbound_acknowledged_owned(&replacement, 64, true, None);
+
+        let recovered = &status.snapshot().observations[0];
+        assert_eq!(recovered.attempt_count, 2);
+        assert_eq!(recovered.reconnect_count, 3);
     }
 
     #[tokio::test(start_paused = true)]

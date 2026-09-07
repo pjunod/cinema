@@ -1550,6 +1550,22 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn("make cluster-harness-check", jobs["cluster_topology"])
         self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
+        harness_commands = make_dry_run_commands("cluster-harness-check")
+        snapshot_launch_tests = (
+            "a_legacy_launch_retains_the_production_snapshot_policy",
+            "a_snapshot_threshold_round_trips_and_reaches_the_launched_voter_config",
+            "an_invalid_snapshot_threshold_is_rejected_without_changing_production",
+        )
+        for test_name in snapshot_launch_tests:
+            command = next(
+                (command for command in harness_commands if test_name in command),
+                None,
+            )
+            self.assertIsNotNone(
+                command,
+                f"cluster-harness-check does not run {test_name}",
+            )
+            self.assertIn("scripts/require-test-count", command)
         self.assertIn("run: make cluster-wal-check", workflow)
         wal_commands = make_dry_run_commands("cluster-wal-check")
         self.assertTrue(
@@ -2365,6 +2381,108 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn("if-no-files-found: error", topology)
 
+    def test_transport_recovery_campaign_is_a_persistent_affected_linux_gate(self):
+        workflow = read(".github/workflows/ci.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        recovery = jobs["cluster_transport_recovery"]
+        make_commands = make_dry_run_commands("cluster-transport-recovery-check")
+
+        self.assertEqual(len(make_commands), 15)
+        self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=27", make_commands[1])
+        self.assertIn("scripts/require-test-count", make_commands[1])
+        self.assertIn("transport_recovery::tests --lib", make_commands[1])
+        exact_regressions = (
+            "writer_exit_after_readiness_fails_the_recovery_promptly",
+            "two_early_acknowledgements_cannot_hide_a_long_recovery_gap",
+            "writer_must_cover_the_end_of_recovery",
+            "whole_recovery_duration_cannot_exceed_the_absolute_deadline",
+            "worst_transfer_duration_covers_the_complete_source_series",
+            "artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result",
+            "owned_async_task_growth_has_no_resource_slack",
+            "owned_async_task_guard_tracks_abort_safe_lifetime",
+            "recovery_series_preserves_failed_retry_and_resets_after_completion",
+            "outbound_retry_counts_only_when_openraft_issues_the_next_chunk",
+            "recovery_series_counts_every_replacement_client_connection_attempt",
+            "production_snapshot_executor_worker_is_counted_until_joined",
+        )
+        for offset, regression in enumerate(exact_regressions, start=2):
+            self.assertIn(regression, make_commands[offset])
+            self.assertIn("scripts/require-test-count", make_commands[offset])
+            self.assertIn("--lib -- --exact", make_commands[offset])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[9])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[10])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[11])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[12])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[13])
+        self.assertIn(
+            "transport-recovery target/validation/cluster-transport-recovery.json",
+            make_commands[14],
+        )
+
+        self.assertIn("needs.scope.outputs.cluster_auth == 'true'", recovery)
+        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-topology]", recovery)
+        self.assertIn("rust-toolchain@1.97.1", recovery)
+        self.assertIn("lane: cluster-transport-recovery", recovery)
+        self.assertIn('persistent-eligible: "true"', recovery)
+        self.assertIn("make cluster-transport-recovery-check", recovery)
+        self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", recovery)
+        self.assertIn("cluster-transport-recovery-receipt.json", recovery)
+        self.assertIn("target/validation/cluster-transport-recovery.json", recovery)
+        self.assertIn(
+            "--evidence target/validation/cluster-transport-recovery.json", recovery
+        )
+        self.assertIn(
+            "EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check",
+            recovery,
+        )
+        self.assertIn('--evidence-validator "$EVIDENCE_VALIDATOR"', recovery)
+        self.assertIn("if-no-files-found: error", recovery)
+        self.assertIn(
+            "steps.transport_recovery.outcome != 'success'", recovery
+        )
+        receipt_contract = runpy.run_path(
+            str(ROOT / "validation/ci_lane_receipt.py")
+        )
+        self.assertIn(
+            "cluster-transport-recovery",
+            receipt_contract["LANES"],
+        )
+        self.assertEqual(
+            receipt_contract["FIRST_WORKFLOW_RUN_ATTEMPT"],
+            "1",
+        )
+
+        for aggregate_name in ("publish_main", "pr_gate"):
+            aggregate = jobs[aggregate_name]
+            self.assertIn(
+                "cluster_transport_recovery", workflow_job_needs(aggregate)
+            )
+            self.assertIn("CLUSTER_TRANSPORT_RECOVERY_RESULT", aggregate)
+        self.assertIn(
+            '"cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}"',
+            jobs["pr_gate"],
+        )
+        qualification_contract = runpy.run_path(
+            str(ROOT / "validation/qualification.py")
+        )
+        self.assertEqual(
+            qualification_contract["FIRST_WORKFLOW_RUN_ATTEMPT"],
+            "1",
+        )
+
+        with (ROOT / "validation/points.toml").open("rb") as handle:
+            catalog = tomllib.load(handle)
+        checks = {entry["id"]: entry for entry in catalog["checks"]}
+        campaign = checks["cluster-transport-recovery"]
+        self.assertEqual(campaign["command"], "make cluster-transport-recovery-check")
+        self.assertEqual(campaign["profiles"], ["full", "nightly"])
+        self.assertEqual(campaign["platforms"], ["linux"])
+        self.assertEqual(campaign["timeout_seconds"], 7200)
+        points = {entry["id"]: entry for entry in catalog["points"]}
+        for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
+            self.assertIn("cluster-transport-recovery", points[point]["checks"])
+
         # Hosted smoke keeps scoped GHA state; an eligible self-hosted smoke
         # uses the one named host builder and enforces its postcondition.
         package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
@@ -2640,7 +2758,10 @@ for (const startupDelay of [0, 1600, 7000]) {
                     and name == "cluster-store-backstop"
                 ):
                     expected = ci_store
-                elif path == ".github/workflows/ci.yml" and name == "cluster_topology":
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "cluster_topology",
+                    "cluster_transport_recovery",
+                }:
                     expected = ci_topology
                 elif path == ".github/workflows/ci.yml" and name == "check":
                     expected = high_cpu_ffmpeg6

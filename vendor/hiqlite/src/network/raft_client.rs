@@ -107,7 +107,8 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
         let snapshot_attempt = Arc::new(StdMutex::new(None));
         let transport_connection_id = self.snapshot_transport.next_outbound_connection_id();
 
-        let task = tokio::task::spawn(Box::pin(Self::ws_handler(
+        let task_status = self.snapshot_transport.clone();
+        let handler = Self::ws_handler(
             self.node_id,
             self.raft_type.clone(),
             node.clone(),
@@ -122,7 +123,11 @@ impl RaftNetworkFactory<TypeConfigKV> for NetworkStreaming {
             self.snapshot_transport.clone(),
             "cache",
             transport_connection_id,
-        )));
+        );
+        let task = tokio::task::spawn(Box::pin(async move {
+            let _task_guard = task_status.owned_async_task();
+            handler.await;
+        }));
 
         NetworkConnectionStreaming {
             node: node.clone(),
@@ -155,7 +160,8 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
         let snapshot_attempt = Arc::new(StdMutex::new(None));
         let transport_connection_id = self.snapshot_transport.next_outbound_connection_id();
 
-        let task = tokio::task::spawn(Box::pin(Self::ws_handler(
+        let task_status = self.snapshot_transport.clone();
+        let handler = Self::ws_handler(
             self.node_id,
             self.raft_type.clone(),
             node.clone(),
@@ -170,7 +176,11 @@ impl RaftNetworkFactory<TypeConfigSqlite> for NetworkStreaming {
             self.snapshot_transport.clone(),
             "sqlite",
             transport_connection_id,
-        )));
+        );
+        let task = tokio::task::spawn(Box::pin(async move {
+            let _task_guard = task_status.owned_async_task();
+            handler.await;
+        }));
 
         NetworkConnectionStreaming {
             node: node.clone(),
@@ -712,16 +722,18 @@ impl NetworkStreaming {
             let read = FragmentCollectorRead::new(read);
 
             let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
+            let reader_task_status = snapshot_transport.clone();
             let handle_read = task::spawn(Box::pin(async move {
+                let _task_guard = reader_task_status.owned_async_task();
                 let outcome = Self::stream_reader(read, tx_read).await;
                 let _ = tx_reader_finished.send(outcome);
             }));
             let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
-            let handle_write = task::spawn(Box::pin(Self::stream_writer(
-                write,
-                rx_write,
-                tx_writer_finished,
-            )));
+            let writer_task_status = snapshot_transport.clone();
+            let handle_write = task::spawn(Box::pin(async move {
+                let _task_guard = writer_task_status.owned_async_task();
+                Self::stream_writer(write, rx_write, tx_writer_finished).await;
+            }));
 
             let mut forced_reset = false;
             'connected: loop {
@@ -3315,6 +3327,8 @@ mod tests {
         );
         let observation = transport.snapshot().observations.remove(0);
         assert_eq!(observation.phase, crate::SnapshotTransportPhase::Retrying);
+        assert_eq!(observation.attempt_count, 1);
+        assert_eq!(observation.retry_count, 0);
         assert_eq!(observation.active_deadline_remaining_ms, Some(60_000));
         assert_eq!(
             observation.last_error_category.as_deref(),

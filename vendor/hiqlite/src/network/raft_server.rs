@@ -170,7 +170,9 @@ pub async fn stream_cache(
     tracing::info!("WebSocket cache stream request accepted");
 
     let (response, socket) = ws.upgrade()?;
+    let task_status = state.snapshot_transport.clone();
     tokio::task::spawn(Box::pin(async move {
+        let _task_guard = task_status.owned_async_task();
         if let Err(err) = handle_socket(state, socket).await {
             debug!("Cache WebSocket stream closed: {}", err);
         }
@@ -200,7 +202,9 @@ pub async fn stream_sqlite(
     tracing::info!("WebSocket sqlite stream request accepted");
 
     let (response, socket) = ws.upgrade()?;
+    let task_status = state.snapshot_transport.clone();
     tokio::task::spawn(Box::pin(async move {
+        let _task_guard = task_status.owned_async_task();
         if let Err(err) = handle_socket(state, socket).await {
             debug!("SQLite WebSocket stream closed: {}", err);
         }
@@ -235,19 +239,26 @@ async fn handle_socket(
     let (tx_connection_closed, mut rx_connection_closed) = watch::channel(false);
     let (tx_writer_finished, mut rx_writer_finished) = oneshot::channel();
     let writer_connection_closed = tx_connection_closed.clone();
-    let handle_write = task::spawn(raft_response_writer(
-        write,
-        rx_write,
-        writer_connection_closed,
-        tx_writer_finished,
-    ));
+    let writer_task_status = state.snapshot_transport.clone();
+    let handle_write = task::spawn(async move {
+        let _task_guard = writer_task_status.owned_async_task();
+        raft_response_writer(
+            write,
+            rx_write,
+            writer_connection_closed,
+            tx_writer_finished,
+        )
+        .await;
+    });
 
     let (tx_read, rx_read) = flume::bounded(1);
     let (tx_reader_finished, mut rx_reader_finished) = oneshot::channel();
     let reader_connection_closed = tx_connection_closed.clone();
     let reader_snapshot_transport = state.snapshot_transport.clone();
     let reader_admission_budgets = SnapshotAdmissionBudgets::from_state(&state);
+    let reader_task_status = state.snapshot_transport.clone();
     let handle_read = task::spawn(async move {
+        let _task_guard = reader_task_status.owned_async_task();
         let outcome = loop {
             let frame = match read
                 .read_frame(&mut |frame| async move {

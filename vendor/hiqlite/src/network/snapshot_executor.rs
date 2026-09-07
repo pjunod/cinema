@@ -164,8 +164,33 @@ where
     Req: Send + 'static,
     Resp: Send + 'static,
 {
+    #[cfg(test)]
     pub(crate) fn start<Execute, ExecuteFuture>(
         admission_timeout: Duration,
+        execute: Execute,
+    ) -> Self
+    where
+        Execute: FnMut(Req) -> ExecuteFuture + Send + 'static,
+        ExecuteFuture: Future<Output = Resp> + Send + 'static,
+    {
+        Self::start_inner(admission_timeout, None, execute)
+    }
+
+    fn start_tracked<Execute, ExecuteFuture>(
+        admission_timeout: Duration,
+        task_status: crate::LocalSnapshotTransportStatus,
+        execute: Execute,
+    ) -> Self
+    where
+        Execute: FnMut(Req) -> ExecuteFuture + Send + 'static,
+        ExecuteFuture: Future<Output = Resp> + Send + 'static,
+    {
+        Self::start_inner(admission_timeout, Some(task_status), execute)
+    }
+
+    fn start_inner<Execute, ExecuteFuture>(
+        admission_timeout: Duration,
+        task_status: Option<crate::LocalSnapshotTransportStatus>,
         mut execute: Execute,
     ) -> Self
     where
@@ -175,6 +200,7 @@ where
         let (tx, rx) = flume::bounded::<Job<Req, Resp>>(1);
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(async move {
+            let _task_guard = task_status.map(|status| status.owned_async_task());
             loop {
                 let job = tokio::select! {
                     biased;
@@ -390,41 +416,45 @@ where
     Install: FnMut(InstallSnapshotRequest<C>) -> InstallFuture + Send + 'static,
     InstallFuture: Future<Output = SnapshotResult<C>> + Send + 'static,
 {
-    NodeOwnedExecutor::start(admission_timeout, move |job: SnapshotExecutorRequest<C>| {
-        let snapshot_transport = snapshot_transport.clone();
-        let request_vote = job.request.vote;
-        let done = job.request.done;
-        let acknowledged_offset = job
-            .request
-            .offset
-            .saturating_add(job.request.data.len() as u64);
-        let install = install(job.request);
-        async move {
-            if let Some(status_attempt) = job.status_attempt.as_ref() {
-                snapshot_transport.inbound_admitted(
-                    status_attempt,
+    NodeOwnedExecutor::start_tracked(
+        admission_timeout,
+        snapshot_transport.clone(),
+        move |job: SnapshotExecutorRequest<C>| {
+            let snapshot_transport = snapshot_transport.clone();
+            let request_vote = job.request.vote;
+            let done = job.request.done;
+            let acknowledged_offset = job
+                .request
+                .offset
+                .saturating_add(job.request.data.len() as u64);
+            let install = install(job.request);
+            async move {
+                if let Some(status_attempt) = job.status_attempt.as_ref() {
+                    snapshot_transport.inbound_admitted(
+                        status_attempt,
+                        done,
+                        time::Instant::now()
+                            + if done {
+                                install_timeout
+                            } else {
+                                admission_timeout
+                            },
+                    );
+                }
+                let result = install.await;
+                record_inbound_snapshot_result::<C>(
+                    &snapshot_transport,
+                    job.status_attempt.as_ref(),
+                    acknowledged_offset,
                     done,
-                    time::Instant::now()
-                        + if done {
-                            install_timeout
-                        } else {
-                            admission_timeout
-                        },
+                    (!done).then(|| time::Instant::now() + admission_timeout),
+                    request_vote,
+                    &result,
                 );
+                result
             }
-            let result = install.await;
-            record_inbound_snapshot_result::<C>(
-                &snapshot_transport,
-                job.status_attempt.as_ref(),
-                acknowledged_offset,
-                done,
-                (!done).then(|| time::Instant::now() + admission_timeout),
-                request_vote,
-                &result,
-            );
-            result
-        }
-    })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -435,6 +465,23 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use tokio::sync::{Notify, Semaphore};
+
+    #[tokio::test]
+    async fn production_snapshot_executor_worker_is_counted_until_joined() {
+        let status =
+            crate::LocalSnapshotTransportStatus::new(2, std::collections::BTreeSet::from([1]));
+        let executor = NodeOwnedExecutor::start_tracked(
+            Duration::from_secs(1),
+            status.clone(),
+            |request: usize| async move { request },
+        );
+        while status.owned_async_task_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(status.owned_async_task_count(), 1);
+        assert!(executor.wait_for_shutdown(Duration::from_secs(1)).await);
+        assert_eq!(status.owned_async_task_count(), 0);
+    }
 
     #[cfg(feature = "sqlite")]
     #[tokio::test]
