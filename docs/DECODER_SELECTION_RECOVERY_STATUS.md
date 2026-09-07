@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3c5 candidate; M0–M3e, M4 and M5a merged into the effort ·
-**Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M3c5 task base:** effort head
-`c54fb05276c31a5a39e91157f35f1bdb6b049a01`
+**Status:** M5a census repair candidate; M0–M3e, M4, M5a and M3c5 merged into
+the effort · **Updated:** 2026-09-07 · **Integration branch:**
+`effort/decoder-selection-recovery` · **M5a census repair task base:** effort
+head `5e0f7f1f51d4476fabee81d278c47ccad6baf1a2`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,14 +20,15 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3c5 — every path that produces under the identity files its receipt |
-| Task branch | `codex/decoder-selection-m3c5`, based on effort head `c54fb052` |
-| Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
+| Milestone | M5a census repair — five gates M5a tripped and nobody read |
+| Task branch | `codex/decoder-selection-m5a-census`, based on effort head `5e0f7f1f` |
+| Task PR | Open against the effort branch. One whole-PR adversarial review has run against this candidate; it raised one claimed blocker that was not a defect and eight documentation and comment findings that were, and all are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | This head on pinned 1.97.1: daemon `transcode::tests::` 249/249 including two new, daemon `decoder_health`/`offline`/`cachekeep` 120/120, core `store_contract` 96/96 including one new run through both backends and both fenced arms, `plurx-cluster-check` 79/79, `make lint`, `make validation-lint` and `make history-check` clean, `git diff --check` clean, `tests.operations.test_decoder_diagnostic_qualification` + `tests.validation.test_decoder_recovery_status` 43/43. Core `--lib` is 747 passed and **2 failed**, both inherited — see the row below |
-| Inherited failure | `cargo test -p plurx-core --lib` fails two census tests on the effort head itself, not on this candidate: `every_sqlite_transaction_site_is_classified` (`sessions.rs` has 20 rusqlite transactions, the census says 18) and `v6_rebuild_preserves_everything` (48 migrations, the list says 47). Bisected to `e4632204` — M5a's durable ledger, which shipped `media_session_producer_recovery` and its two session transactions without bumping either deliberate-bump gate. Forgejo `main` at `4a6a0268` passes both. Neither is caused by or repaired in M3c5; both are repaired in their own task PR before promotion, because a census bumped inside an unrelated milestone is exactly the surprise these two tests exist to refuse |
+| Focused validation | This head on pinned 1.97.1: `plurx-core`'s lib target under `cargo test --workspace` is 992 passed, **0 failed**. That number is the point: a bare `cargo test -p plurx-core --lib` reports 749, because workspace feature unification turns on the cluster and hiqlite populations that carry three of the five inherited failures. A focused run cannot see them |
+| Full validation | On this exact head, pinned 1.97.1: `cargo test --workspace` all green — `plurxd` 1871 passed 0 failed 3 ignored, `plurx-core` lib 992/0, `plurx-core` `store_contract` 96/96, `plurx-cluster-check` 79/79. `make lint`, `make validation-lint` and `make history-check` clean; `cargo fmt --all --check` and `git diff --check` clean; `tests.operations.test_decoder_diagnostic_qualification` + `tests.validation.test_decoder_recovery_status` 43/43 |
+| Repairs | The five inherited failures described in *M5a census repair* below are green on this head: the two sqlite transaction censuses, the migration count, the hiqlite additive-chain assertion, and the downgrade-fixture guard |
 | Exact receipt | The head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
 | Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
 | Blocker | The Forgejo `Effort development gate` on this head. Per `AGENTS.md` a task PR into an effort branch defers the full suite to the `Main promotion gate`; the effort's one `make validate-full` is owed at promotion, not here |
@@ -39,9 +40,9 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a–M3e merged; M3c5 candidate; M3f not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. Nothing selects it in production yet; the operator control and its `Settings > Developer` enable section are M3f |
+| M3 · owned observation and health receipts | M3a–M3e and M3c5 merged; M3f not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. Nothing selects it in production yet; the operator control and its `Settings > Developer` enable section are M3f |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
-| M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
+| M5 · durable budget and prepublication recovery | M5a merged and its census repair is this candidate; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change. M5a left five inherited test failures invisible to the effort gate; the repair candidate closes them |
 | M6 · postpublication replacement and client intent | Not started | — |
 | M7 · offline, shared cache, and handoff enforcement | Not started | — |
 | M8 · fleet qualification and promotion | Not started | — |
@@ -1829,6 +1830,89 @@ The operator setting, the node effective-mode intersection and the
 `Settings > Developer` enable section are M3f, immediately after this. Every
 path behind that control now works, which was the condition M3c4 set for it.
 
+## M5a census repair working tree — five gates M5a tripped and nobody read
+
+Running `cargo test --workspace -p plurx-core --lib` in full for the first time
+— eight milestones in — turned up five failures on the effort head that no
+milestone caused. Forgejo `main` at `4a6a0268` passes all five. Bisected to
+`e4632204`, M5a's durable decoder-recovery ledger.
+
+M5a's *product* is correct. `media_session_producer_recovery` is spelled
+identically on both backends, the migration is appended, the hiqlite additive
+step and its migration arm exist, and the reservation contract runs against
+each. What it did not do is answer the five gates that exist precisely to
+notice a new table:
+
+| Gate | What it said | Why it exists |
+|---|---|---|
+| `every_sqlite_transaction_site_is_classified` | `sessions.rs` holds 20 rusqlite transaction boundaries; the inventory names 18 | The inventory is the replicated port's work list. A boundary nobody classified is a boundary nobody ported |
+| `every_sqlite_transaction_is_named_once` | 68 named methods; the count says 66 | The same inventory, counted rather than described |
+| `v6_rebuild_preserves_everything` | 48 migrations; the list says 47 | "A new migration must be a deliberate bump, not a surprise" |
+| `daemon_schema_gate_accepts_the_complete_supported_chain` | the additive chain is v5→v28; the assertion says v5→v27 | A cluster refuses a schema it cannot prove it can reach |
+| `the_downgrade_fixture_undoes_every_migration_after_the_guard` | one more migration than the two hand-written downgrade fixtures undo | A fixture that keeps a v48 table is not a v43 or a v14 database, and the replayed migration meets its own leftovers |
+
+Each of those messages says what to do. The last one goes furthest: its text
+names both hand-written fixtures and the twenty-minute `cluster-store-check`
+lane that would otherwise have been the first thing to notice the second of
+them — which matters, because only the `dv_conversion.rs` fixture has
+arithmetic guarding it. The `store_contract.rs` v14 fixture is covered by being
+*named in that message*, not by a count of its own.
+
+Nothing here is a judgement call, and that is the point: these are gates whose
+whole design is that tripping one is cheap and ignoring one is not.
+
+### What the repair is
+
+The two new transaction sites are classified with a new shape,
+`WriteReadBack`, because none of the existing five describes them. Both
+`reserve_producer_recovery` and `settle_producer_recovery` write conditionally
+and then *read the row back inside the same transaction*, discarding the
+affected-row count on purpose — the row already there may belong to an earlier,
+different decision that the caller has to be told about rather than handed.
+Calling that `BranchOnRowsAffected` would have recorded the opposite of what
+the code does, and this inventory's only job is to be true. It is also the shape the replicated twin cannot
+hold, and M5a already said so at the site: `txn` cannot carry the read because
+it returns affected rows, so hiqlite issues the conditional write and the
+read-back as two independently committed operations. The race that opens is
+benign only because the write is a primary-key `ON CONFLICT DO NOTHING`. That
+is a real atomicity difference between the backends, and the shape is now the
+place it is written down.
+
+The rest is the arithmetic the gates asked for: the migration count, the
+additive chain length with the paired step assertion every earlier version
+already has, and a `media_session_producer_recovery` drop in both downgrade
+fixtures with the table added to `DROPPED_BY_THE_FIXTURE`.
+
+### Why this is its own PR
+
+A census bumped quietly inside an unrelated milestone is exactly the surprise
+these gates exist to refuse. Folding it into M3c5 would have made one review
+cover two unrelated risks and buried the repair in a diff about manifests.
+
+### What this changes about the routine
+
+The `Effort development gate` compiles and runs a subset, so it cannot see any
+of this: all five would have surfaced at the `Main promotion gate` with eight
+milestones stacked on top of them. The per-milestone routine I follow now runs
+`cargo test --workspace` in full rather than the focused filters that had been
+standing in for it since M3a. That is a practice, not a gate: nothing in this
+PR makes the next candidate do it, and wiring it into one is recorded below as
+owed.
+
+One observation kept for whoever meets it next, because it was measured rather
+than assumed. `cluster::migration`'s tests failed intermittently during
+heavily loaded full runs — four different tests across four runs
+(`a_learner_refuses_a_behind_schema_that_a_voter_migrates`,
+`activation_refuses_a_voter_whose_running_binary_is_unproven`,
+`a_post_start_initialization_failure_leaves_no_crash_sentinel`,
+`a_deployed_binary_widens_no_range_until_activation_is_asked_for`), never the
+same one twice. In isolation the suite passed 72/72 five times: three on this
+head, once on the effort head, once on Forgejo `main` at `4a6a0268`. The code
+under them is untouched by this effort. They are timing-sensitive under load,
+not broken, and chasing them is not this repair's job — but a suite that fails
+a different test each time it is run under load is a gate nobody can read, so
+it is recorded as owed below.
+
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 
 Admission decided what a session would cost from the encoder's name. A
@@ -2671,11 +2755,18 @@ lane and focused tests provide earlier feedback.
 
 ## Remaining evidence before release
 
-- Repair the two inherited census failures from M5a (`e4632204`): the
-  `sessions.rs` transaction census and the sqlite migration count. They are
-  invisible to the `Effort development gate` and fail only under
-  `cargo test -p plurx-core --lib`, which no task candidate before M3c5 ran in
-  full — the milestone routine now does.
+- Make `cluster::migration` deterministic under load, or mark what is
+  timing-dependent in it as such. Measured above: four different failures in
+  four loaded runs, 72/72 five times in isolation including on Forgejo `main`.
+  A promotion gate that runs the whole workspace at once will meet this.
+- Wire the full `cargo test --workspace` run into a gate a task candidate
+  cannot pass without. The five failures this repair closes were invisible to
+  the `Effort development gate` for eight milestones, and the only thing that
+  found them was choosing to run the whole suite once.
+- Give `populated_v14_import_fixture` in `tests/store_contract.rs` arithmetic
+  of its own, the way `DROPPED_BY_THE_FIXTURE` guards the v43 fixture. Today
+  it is protected by being named in another test's failure message, which
+  works only for a reader who reaches that message.
 - Original #913 media on an Apple VideoToolbox node, compared with software
   decode while retaining the hardware encoder.
 - Qualified FFmpeg diagnostic output from each supported build/backend class.

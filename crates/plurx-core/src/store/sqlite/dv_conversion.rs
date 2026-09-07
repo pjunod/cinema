@@ -1250,11 +1250,21 @@ mod tests {
                 // Everything v44 and later built has to go, or the replayed
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
-                // history. Leaving any of them makes the replay fail on a
-                // column or table that is already there.
+                // history, v47's request identity, v48's producer-recovery
+                // ledger.
+                //
+                // Leaving a *column* behind makes the replay fail outright on
+                // an `ADD COLUMN` against a table that already has it.
+                // Leaving a *table* behind is silent, because these steps are
+                // `CREATE TABLE IF NOT EXISTS`: the fixture would keep a v48
+                // table while calling itself v43 and nothing would say so. The
+                // count assertion below is the only thing that catches that,
+                // which is why it is maintained by hand and why forgetting it
+                // is what this whole repair exists to answer.
                 "DROP INDEX dv_conversions_recovery_guard;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
+                 DROP TABLE IF EXISTS media_session_producer_recovery;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
@@ -1343,10 +1353,11 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 3] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 4] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
+            "media_session_producer_recovery",
         ];
 
         assert!(

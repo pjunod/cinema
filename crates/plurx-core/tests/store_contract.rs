@@ -13436,8 +13436,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v45's negative fragment index, then v44's permanent
-             -- recovery-guard ledger, then v43's conversion ledger.
+             -- v48's durable decoder-recovery ledger, then v45's negative
+             -- fragment index, then v44's permanent recovery-guard ledger,
+             -- then v43's conversion ledger.
+             DROP TABLE media_session_producer_recovery;
              DROP TABLE fragment_index_outcomes;
              DROP TABLE dv_recovery_guards;
              DROP TABLE dv_conversions;

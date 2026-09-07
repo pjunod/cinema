@@ -40,6 +40,8 @@ M3D_MERGED_HEAD = "a8403e104f8be8a31dba09d184bfa7da983d73da"
 M3E_TASK_BASE = M3D_MERGED_HEAD
 M3E_MERGED_HEAD = "c54fb05276c31a5a39e91157f35f1bdb6b049a01"
 M3C5_TASK_BASE = M3E_MERGED_HEAD
+M3C5_MERGED_HEAD = "5e0f7f1f51d4476fabee81d278c47ccad6baf1a2"
+M5A_CENSUS_TASK_BASE = M3C5_MERGED_HEAD
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -48,6 +50,10 @@ SQLITE_FENCED = ROOT / "crates/plurx-core/src/store/sqlite/publication.rs"
 HIQLITE_FENCED = ROOT / "crates/plurx-core/src/store/hiqlite_publication.rs"
 STORE_PUBLICATION = ROOT / "crates/plurx-core/src/store/publication.rs"
 STORE_CONTRACT = ROOT / "crates/plurx-core/tests/store_contract.rs"
+REPLICATED = ROOT / "crates/plurx-core/src/store/replicated.rs"
+HIQLITE = ROOT / "crates/plurx-core/src/store/hiqlite.rs"
+DV_CONVERSION = ROOT / "crates/plurx-core/src/store/sqlite/dv_conversion.rs"
+SQLITE_STORE = ROOT / "crates/plurx-core/src/store/sqlite/mod.rs"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -205,7 +211,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"M3c5 task base:** effort head `{M3C5_TASK_BASE}`", self.flat_status
+            f"M5a census repair task base:** effort head `{M5A_CENSUS_TASK_BASE}`",
+            self.flat_status,
         )
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
@@ -214,6 +221,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(M3C4_MERGED_HEAD[:8], self.status)
         self.assertIn(M3D_MERGED_HEAD[:8], self.status)
         self.assertIn(M3E_MERGED_HEAD[:8], self.status)
+        self.assertIn(M3C5_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -337,7 +345,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M3c5 candidate; M0–M3e, M4 and M5a merged into the effort", self.status
+            "M5a census repair candidate; M0–M3e, M4, M5a and M3c5 merged into "
+            "the effort",
+            self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
@@ -1029,6 +1039,81 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                     arguments[position] if len(arguments) > position else "??"
                 )
         return found
+
+    def test_m5a_census_repair_answers_every_gate_and_says_what_it_cannot(self) -> None:
+        """Five gates, and the two things that still have no gate at all.
+
+        M5a shipped a correct table and answered none of the five assertions
+        that exist to notice one. Repairing them is arithmetic; the part worth
+        pinning is what the repair refuses to claim — that the practice which
+        found them is now enforced, and that the second downgrade fixture is
+        guarded by anything but a sentence in another test's failure message.
+        """
+        replicated = REPLICATED.read_text(encoding="utf-8")
+        hiqlite = HIQLITE.read_text(encoding="utf-8")
+        dv_conversion = DV_CONVERSION.read_text(encoding="utf-8")
+        sqlite_store = SQLITE_STORE.read_text(encoding="utf-8")
+        store_contract = STORE_CONTRACT.read_text(encoding="utf-8")
+
+        # Both new boundaries are classified, and the third store method is
+        # not — because it opens none, which the source says at the site.
+        for method in ("reserve_producer_recovery", "settle_producer_recovery"):
+            with self.subTest(method=method):
+                self.assertIn(f'method: "{method}"', replicated)
+        self.assertNotIn('method: "producer_recovery_for_epoch"', replicated)
+        self.assertIn(
+            "// A read, so no transaction: the connection mutex already",
+            (ROOT / "crates/plurx-core/src/store/sqlite/sessions.rs").read_text(
+                encoding="utf-8"
+            ),
+        )
+        self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 2)
+        self.assertIn("assert_eq!(methods.len(), 68);", replicated)
+
+        # The shape records a real difference between the backends rather than
+        # a promise about future work: the replicated twin cannot hold it, and
+        # M5a already said why at its own call site.
+        self.assertIn("The replicated twin cannot hold this shape", replicated)
+        self.assertIn(
+            "txn` cannot carry the read",
+            (ROOT / "crates/plurx-core/src/store/hiqlite_sessions.rs").read_text(
+                encoding="utf-8"
+            ),
+        )
+
+        # The migration count, and the additive chain with the paired step
+        # assertion every earlier version already has.
+        self.assertIn("version, 48,", sqlite_store)
+        self.assertIn("AUTH_SCHEMA_MIGRATION_SOURCE + 23,", hiqlite)
+        self.assertIn("every additive v5→v28 step", hiqlite)
+        self.assertIn(
+            "PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, REQUEST_IDENTITY_SCHEMA_VERSION",
+            hiqlite,
+        )
+
+        # Both hand-written downgrade fixtures give the v48 table back.
+        self.assertIn("DROPPED_BY_THE_FIXTURE: [&str; 4]", dv_conversion)
+        self.assertIn("media_session_producer_recovery", dv_conversion)
+        self.assertIn(
+            "DROP TABLE media_session_producer_recovery", store_contract
+        )
+        # A table drop is silent if forgotten, because the migration is
+        # `CREATE TABLE IF NOT EXISTS`. Saying the replay would catch it is the
+        # comment that lets the next author skip the count.
+        self.assertIn("Leaving a *table* behind is silent", dv_conversion)
+
+        # What the repair does not claim.
+        self.assertIn("That is a practice, not a gate", self.status)
+        self.assertIn(
+            "Wire the full `cargo test --workspace` run into a gate", self.status
+        )
+        self.assertIn(
+            "Give `populated_v14_import_fixture` in `tests/store_contract.rs` "
+            "arithmetic of its own",
+            self.flat_status,
+        )
+        self.assertIn("five gates M5a tripped and nobody read", self.status)
+        self.assertNotIn("four gates M5a tripped", self.status)
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.

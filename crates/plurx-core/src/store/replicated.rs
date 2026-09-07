@@ -98,6 +98,24 @@ pub enum TransactionShape {
     ReadBranchWrite,
     ReadExpandWrite,
     VerbatimBatch,
+    /// A conditional write, then a read of the row it may or may not have
+    /// written, returned to the caller — inside one transaction.
+    ///
+    /// Deliberately not [`Self::BranchOnRowsAffected`], and the difference is
+    /// why these sites are written this way: the affected-row count says only
+    /// whether *this* statement wrote. The row already there may belong to an
+    /// earlier, different decision that the caller has to be told about rather
+    /// than handed, so the count is discarded and the row is read.
+    ///
+    /// The replicated twin cannot hold this shape, and does not pretend to.
+    /// `hiqlite_sessions.rs` says so at the site: `txn` cannot carry the read,
+    /// because it returns affected rows — so the port issues the conditional
+    /// write and the read-back as two independently committed operations. The
+    /// race that opens is benign only because the write is a primary-key
+    /// `ON CONFLICT DO NOTHING` and the read is of the winning row either way.
+    /// That is a real difference in atomicity between the backends, recorded
+    /// here rather than left to be rediscovered.
+    WriteReadBack,
     WriteUntilStable,
 }
 
@@ -441,6 +459,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "reserve_producer_recovery",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "settle_producer_recovery",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
     },
     SqliteTransactionSite {
         module: "sessions.rs",
@@ -850,10 +882,16 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 66 since `put_settings_if_generation`: the generation-fenced
-        // settings write opens its own boundary, classified beside the others
-        // in SQLITE_TRANSACTION_SITES rather than counted into this number.
-        assert_eq!(methods.len(), 66);
+        // 68 since `reserve_producer_recovery` and `settle_producer_recovery`.
+        // The durable decoder-recovery ledger has three store methods and two
+        // boundaries: `producer_recovery_for_epoch` is a read and deliberately
+        // opens none, because the connection mutex already serializes it
+        // against every write in the store. Before them, 66 since
+        // `put_settings_if_generation`:
+        // the generation-fenced settings write opens its own boundary,
+        // classified beside the others in SQLITE_TRANSACTION_SITES rather than
+        // counted into this number.
+        assert_eq!(methods.len(), 68);
     }
 
     #[test]

@@ -5349,9 +5349,18 @@ mod tests {
             "v26 must advance exactly one step to the request-identity schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 22,
+            PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, REQUEST_IDENTITY_SCHEMA_VERSION,
+            "the producer-recovery migration must start from the exact v27 shape"
+        );
+        assert_eq!(
+            PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE + 1,
+            PRODUCER_RECOVERY_SCHEMA_VERSION,
+            "v27 must advance exactly one step to the producer-recovery schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 23,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v27 step"
+            "this implementation contains every additive v5→v28 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
