@@ -823,7 +823,14 @@ mod tests {
             )
             .await
         });
-        let pid_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        // Generous on purpose. This bounds how long the test waits for a
+        // fixture process to appear, not how quickly the product must do
+        // anything — no product behaviour is faster or slower for the number
+        // being 1 or 30. A one-second bound made it a load test of whatever
+        // else the runner happened to be building, and it failed on CI while
+        // passing on every developer machine, which is the worst of both:
+        // no signal, and a red build that teaches people to re-run.
+        let pid_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let pid = loop {
             if let Ok(value) = std::fs::read_to_string(&pid_file) {
                 break value.trim().to_owned();
