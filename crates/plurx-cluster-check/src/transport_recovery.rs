@@ -43,6 +43,7 @@ const IMAGE_PADDING_BYTES: u64 = 8 * 1024 * 1024;
 const IMAGE_ROW_BYTES: u64 = 4 * 1024 * 1024;
 const WRITER_INTERVAL_MILLIS: u64 = 1_000;
 const WRITER_MAX_OPERATIONS: u64 = 4_096;
+const WRITER_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY: usize = 2;
 const WRITER_MAX_ACK_GAP: Duration = Duration::from_secs(35);
 const WRITER_PROGRESS_POLL: Duration = Duration::from_millis(100);
@@ -742,7 +743,7 @@ async fn exercise_role_campaign(
         let prefix = format!("cluster.transport-recovery.{}.{cycle:02}.", role.label());
         let (mut writer, writer_config) =
             spawn_writer(executable, cluster_root, specs, &prefix).await?;
-        wait_for_path(&writer_config.ready_path, Duration::from_secs(30)).await?;
+        wait_for_writer_ready(&mut writer, &writer_config.ready_path, WRITER_READY_TIMEOUT).await?;
         let ready_acknowledged_at_unix_ms = std::fs::read_to_string(&writer_config.ready_path)
             .context("read recovery writer readiness timestamp")?
             .trim()
@@ -1486,6 +1487,33 @@ async fn wait_for_path(path: &Path, timeout: Duration) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     Ok(())
+}
+
+async fn wait_for_writer_ready(
+    writer: &mut RecoveryWriter,
+    path: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.is_file() {
+            return Ok(());
+        }
+        if let Some(status) = writer
+            .child
+            .try_wait()
+            .context("inspect recovery writer while waiting for readiness")?
+        {
+            bail!("recovery writer exited before publishing readiness with {status}");
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out waiting for recovery writer readiness at {}",
+                path.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn wait_for_write_digest(
@@ -2782,6 +2810,31 @@ mod tests {
             .post_quiescence
             .owned_async_tasks += 1;
         assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    #[tokio::test]
+    async fn writer_exit_before_readiness_fails_promptly() {
+        let root = tempfile::tempdir().expect("writer readiness root");
+        let child = Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", "transport_recovery_no_such_test"])
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn short-lived writer stand-in");
+        let mut writer = RecoveryWriter {
+            child,
+            stdout: None,
+        };
+
+        let error = wait_for_writer_ready(
+            &mut writer,
+            &root.path().join("never-ready"),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("writer exit must fail readiness");
+        assert!(error
+            .to_string()
+            .contains("exited before publishing readiness"));
     }
 
     #[tokio::test]
