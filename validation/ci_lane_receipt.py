@@ -183,8 +183,10 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_evidence(path: Path) -> tuple[str, int, str]:
-    """Hash and inspect the same bytes from one retained JSON artifact."""
+def read_evidence(
+    path: Path, validator: Path | None = None
+) -> tuple[str, int, str]:
+    """Validate, hash, and inspect one immutable read of retained evidence."""
 
     try:
         contents = path.read_bytes()
@@ -193,6 +195,23 @@ def read_evidence(path: Path) -> tuple[str, int, str]:
         raise LaneReceiptError(f"evidence is not valid JSON: {path}") from exc
     if not isinstance(evidence, dict):
         raise LaneReceiptError(f"evidence must be a JSON object: {path}")
+    if validator is not None:
+        if not validator.is_file():
+            raise LaneReceiptError(f"evidence validator does not exist: {validator}")
+        try:
+            subprocess.run(
+                [str(validator), "validate-transport-recovery-stdin"],
+                input=contents,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except subprocess.CalledProcessError as exc:
+            detail = exc.stderr.decode("utf-8", errors="replace").strip()
+            raise LaneReceiptError(
+                "transport recovery evidence failed closed-schema and semantic "
+                f"validation: {detail or path}"
+            ) from exc
     build_sha = evidence.get("build_sha")
     if not isinstance(build_sha, str) or not build_sha:
         raise LaneReceiptError(f"evidence build_sha is missing: {path}")
@@ -207,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--log", required=True, type=Path)
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--evidence-validator", type=Path)
     parser.add_argument("--lane", required=True)
     parser.add_argument("--result", required=True)
     parser.add_argument("--command", action="append", dest="commands", default=[])
@@ -221,7 +241,19 @@ def main(argv: list[str] | None = None) -> int:
             evidence_path = args.evidence
         if args.result == "success" and args.evidence and evidence_path is None:
             raise LaneReceiptError(f"lane evidence does not exist: {args.evidence}")
-        evidence_metadata = read_evidence(evidence_path) if evidence_path else None
+        if (
+            args.result == "success"
+            and args.lane == "cluster-transport-recovery"
+            and args.evidence_validator is None
+        ):
+            raise LaneReceiptError(
+                "successful cluster transport recovery requires its Rust evidence validator"
+            )
+        evidence_metadata = (
+            read_evidence(evidence_path, args.evidence_validator)
+            if evidence_path
+            else None
+        )
         receipt = build_receipt(
             os.environ,
             args.lane,

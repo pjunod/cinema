@@ -450,6 +450,7 @@ jobs:
           --output target/validation/cluster-transport-recovery-receipt.json
           --log target/validation/cluster-transport-recovery.log
           --evidence target/validation/cluster-transport-recovery.json
+          --evidence-validator target/debug/plurx-cluster-check
           --lane cluster-transport-recovery
           --result "$LANE_RESULT"
           --command "make cluster-transport-recovery-check"

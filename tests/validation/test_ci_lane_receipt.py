@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -165,7 +167,7 @@ class CiLaneReceiptCase(unittest.TestCase):
         self.assertNotIn("evidence", receipt)
         self.assertEqual(receipt["run_attempt"], "2")
 
-    def test_cli_binds_successful_evidence_and_accepts_absent_failure_evidence(self):
+    def test_cli_validates_exact_success_bytes_and_accepts_absent_failure_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             log = root / "cluster-transport-recovery.log"
@@ -183,6 +185,8 @@ class CiLaneReceiptCase(unittest.TestCase):
                 str(log),
                 "--evidence",
                 str(evidence),
+                "--evidence-validator",
+                sys.executable,
                 "--lane",
                 "cluster-transport-recovery",
                 "--command",
@@ -197,8 +201,16 @@ class CiLaneReceiptCase(unittest.TestCase):
                         "a" * 40 if revision == "HEAD^{commit}" else "c" * 40
                     ),
                 ),
+                patch("validation.ci_lane_receipt.subprocess.run") as validator,
             ):
                 self.assertEqual(main([*common, "--result", "success"]), 0)
+                validator.assert_called_once_with(
+                    [sys.executable, "validate-transport-recovery-stdin"],
+                    input=evidence_contents,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
                 receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
                 self.assertEqual(
                     receipt["evidence"],
@@ -219,6 +231,58 @@ class CiLaneReceiptCase(unittest.TestCase):
                 self.assertEqual(main([*common, "--result", "failure"]), 0)
                 receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
                 self.assertNotIn("evidence", receipt)
+
+    def test_cli_refuses_campaign_bytes_rejected_by_the_rust_validator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "cluster-transport-recovery.log"
+            evidence = root / "cluster-transport-recovery.json"
+            receipt_path = root / "receipt.json"
+            log.write_bytes(b"campaign output\n")
+            evidence_contents = json.dumps(
+                {"build_sha": "a" * 40, "cycles": []}, sort_keys=True
+            ).encode("utf-8")
+            evidence.write_bytes(evidence_contents)
+
+            with (
+                patch.dict(os.environ, self.environment(), clear=True),
+                patch(
+                    "validation.ci_lane_receipt.git_object",
+                    side_effect=lambda _repository, revision: (
+                        "a" * 40 if revision == "HEAD^{commit}" else "c" * 40
+                    ),
+                ),
+                patch(
+                    "validation.ci_lane_receipt.subprocess.run",
+                    side_effect=subprocess.CalledProcessError(
+                        1,
+                        [sys.executable, "validate-transport-recovery-stdin"],
+                        stderr=b"closed schema rejected partial campaign",
+                    ),
+                ),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "--output",
+                            str(receipt_path),
+                            "--log",
+                            str(log),
+                            "--evidence",
+                            str(evidence),
+                            "--evidence-validator",
+                            sys.executable,
+                            "--lane",
+                            "cluster-transport-recovery",
+                            "--result",
+                            "success",
+                            "--command",
+                            "make cluster-transport-recovery-check",
+                        ]
+                    ),
+                    1,
+                )
+                self.assertFalse(receipt_path.exists())
 
     def test_receipt_refuses_unknown_lanes_results_or_empty_commands(self):
         for overrides in (

@@ -14,7 +14,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -114,14 +114,14 @@ pub use topology::{
     TOPOLOGY_ARTIFACT_SCHEMA_VERSION, TOPOLOGY_WRITE_OPERATIONS,
 };
 pub use transport_recovery::{
-    validate_transport_recovery_artifact, AcknowledgedRecoveryWrite,
-    ClusterTransportRecoveryArtifact, ProcessResourceCount, RecoveryCycleEvidence,
-    RecoveryImageEvidence, RecoveryNodeResourceEvidence, RecoveryResourceNodeKind, RecoveryRole,
-    RecoveryRoleCampaign, RecoveryRuntimeStatus, RecoveryWriteDigest, SnapshotFileEvidence,
-    SourceOutboundTransportEvidence, TargetInboundTransportEvidence,
-    TransportRecoveryWorstDurations, TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION,
-    TRANSPORT_RECOVERY_CYCLES_PER_ROLE, TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
-    TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
+    validate_transport_recovery_artifact, validate_transport_recovery_bytes,
+    AcknowledgedRecoveryWrite, ClusterTransportRecoveryArtifact, ProcessResourceCount,
+    RecoveryCycleEvidence, RecoveryImageEvidence, RecoveryNodeResourceEvidence,
+    RecoveryResourceNodeKind, RecoveryRole, RecoveryRoleCampaign, RecoveryRuntimeStatus,
+    RecoveryWriteDigest, SnapshotFileEvidence, SourceOutboundTransportEvidence,
+    TargetInboundTransportEvidence, TransportRecoveryWorstDurations,
+    TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION, TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+    TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
 };
 
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
@@ -335,6 +335,16 @@ pub async fn run(args: Vec<String>) -> Result<()> {
                 PathBuf::from("target/validation/cluster-transport-recovery.json")
             });
             transport_recovery::run_transport_recovery_campaign(&output).await
+        }
+        Some("validate-transport-recovery-stdin") => {
+            if args.get(2).is_some() {
+                bail!("validate-transport-recovery-stdin accepts no arguments");
+            }
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut bytes)
+                .context("read transport-recovery evidence from stdin")?;
+            transport_recovery::validate_transport_recovery_bytes(&bytes)
         }
         Some("transport-recovery-writer") => {
             let config = args
