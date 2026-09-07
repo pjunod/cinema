@@ -461,16 +461,54 @@ a settled contract instead of three guesses.
      pointer predicate, alongside `expired_media_sessions` and
      `claim_media_session_takeover`).
 
-  **What the design has to be instead: the owner ends the predecessor
-  explicitly, and the lease machinery is not touched at all.** The node that
-  performed the commit schedules the end — `end_media_session_if_owner` with
-  cause `superseded`, whose pointer delete is already guarded on the exact
-  incarnation so it cannot take the successor's pointer. That writes the right
-  cause, stops the worker through the ordinary path, leaves renewal,
-  `owned_media_sessions` and the reap classifier untouched, and needs no new
-  column. If the owner dies first, renewal stops on its own, the lease lapses,
-  and the existing sweep is the backstop — which is what the paragraph below
-  wanted the sweep to be, reached honestly.
+  **What the design has to be instead: the drain is durable state that the
+  owner acts on, and the lease machinery is not touched at all.**
+
+  The failure common to all three attempts is that "this session is draining"
+  was *inferred* — from the pointer, through the lease. Inference is what broke:
+  the pointer is deleted by an ordinary user action, and the lease already
+  means something else to the loop that owns it. Write the fact down instead.
+
+  - **Schema.** One nullable column, `media_sessions.drain_deadline_ms`
+    (SQLite 49 → 50, replicated AUTH 29 → 30). Null means "not draining", which
+    is every row that exists today, so the migration is additive and an old
+    binary reading the table is unaffected.
+  - **Commit.** Stop ending the predecessor. Stop deleting its pins. Stop
+    collapsing its `job_leases`. Set `drain_deadline_ms = now + DRAIN_MS` and
+    change nothing else. State, cause, publication readiness and lease are
+    untouched, so `owned_media_sessions`, `renew_media_sessions` and the reap
+    classifier all keep working exactly as they do now — which is the whole
+    point, because every attempt that touched them broke something.
+  - **The owner ends it, on the tick it already runs.** The lease loop already
+    walks `owned_media_sessions` every three seconds. Any owned row whose
+    `drain_deadline_ms` has passed gets `end_media_session_if_owner` with cause
+    `superseded` — the right cause, the ordinary teardown, the pointer delete
+    already guarded on the exact incarnation so it cannot take the successor's.
+    No new timer, no spawned task to lose across a restart.
+  - **`Switched` ends it early.** Step 2 calls the same function from the
+    acknowledgement instead of waiting for the deadline. That is the only
+    difference between the two steps, which is why they are one piece of work.
+  - **The sweep is the cross-node backstop.** `maintain_media_sessions` ends
+    any row whose `drain_deadline_ms` has passed, whoever owns it, so a node
+    that dies mid-drain cannot leave one behind. Its five-minute tick is a
+    backstop interval, not the bound; the owner's own three-second tick is the
+    bound, and it survives a restart because the deadline is on the row rather
+    than in a task.
+  - **Takeover excludes a non-null `drain_deadline_ms`.** Durable, so it holds
+    when the pointer is gone — which is exactly the case that defeated the
+    pointer-based exclusion.
+
+  Check against the three failures above: (1) nothing about renewal changes, so
+  no refusal is read as lease loss; (2) nothing is dropped from the renewal
+  batch early, so the worker lives the whole window; (3) the drain does not
+  depend on a pointer row existing, so deleting the pointer changes nothing.
+
+  **Two things this design must still be held to.** The drain window has to be
+  shorter than the `cache_consumer_pins` TTL, because a draining predecessor's
+  pins are renewed by no statement that survives the commit. And a `Switched`
+  that arrives after the deadline has already ended the row must be idempotent,
+  not an error — `end_media_session_if_owner`'s CAS answers that, but the
+  acknowledgement path has to treat "already ended" as success.
 
   Step 2 then replaces "after the window" with "when `Switched` arrives, or the
   window lapses", which is the same call at a different trigger. **Land step 1
