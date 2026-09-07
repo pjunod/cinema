@@ -22,6 +22,13 @@ function shippedSource(name) {
   const ends = TERMINATORS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
   return (ends.length ? rest.slice(0, Math.min(...ends)) : rest).trimEnd();
 }
+// A shipped top-level constant, so a scope built out of source cannot drift
+// from the value the page actually uses.
+function shippedConst(name) {
+  const match = SHIPPED_UI.match(new RegExp(`\\nconst ${name}=([\\s\\S]*?);\\n`));
+  assert.ok(match, `index.html no longer declares const ${name}`);
+  return match[0];
+}
 
 // Run the real full-open and menu code with a controllable decision boundary.
 // Media/server facilities are replaced; intent capture and replacement are not.
@@ -637,6 +644,10 @@ async function main() {
     "PLAY_CAPS", "screen", "window", "playQuality", "selectedAudioIndex",
     "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC", "Hls",
     [
+      // `preparedHandoffEnabled` reads storage this scope does not have, and
+      // answers "off" when it cannot — which is what a private window does too.
+      shippedSource("preparedHandoffEnabled"),
+      shippedSource("pendingPlaybackControlAcknowledgement"),
       shippedSource("playbackControlCapabilities"),
       shippedSource("playbackControlSelection"),
       shippedSource("playbackControlBufferedRange"),
@@ -977,6 +988,14 @@ async function main() {
       "class Hls{static Events={MANIFEST_PARSED:'manifest',ERROR:'error',LEVEL_LOADED:'level',BUFFER_FLUSHING:'flush',FRAG_CHANGED:'frag',BUFFER_APPENDED:'append'}; static isSupported(){return true;} constructor(){this.events={};instances.push(this);} on(e,f){this.events[e]=f;} loadSource(){} attachMedia(){} destroy(){}}",
       "const PlaybackPolicy={bandwidthSeedBps:()=>null}; function preferNativeHls(){return native;} function bufferTargets(){return {fwd:20,back:10};} function vodClientContract(){return {};}",
       "function clearStreamFailure(){} function refreshSegTimes(){} function tok(url){return url;} function clearStreamFailureFor(){} function retuneBuffer(){throw Error('stale retune');} function markEvent(){throw Error('stale telemetry');}",
+      // Teardown now settles a staged successor before it destroys the
+      // incumbent, so the scope carries that path rather than a stub of it.
+      "function clientLog(){} function playbackContext(){return {};} function notifyPlaybackControl(){}",
+      shippedConst("PREPARED_TERMINAL_STATES"),
+      shippedSource("preparedVideoElement"), shippedSource("preparedState"),
+      shippedSource("queuePlaybackControlAcknowledgement"),
+      shippedSource("destroyHlsInstance"),
+      shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),
@@ -1996,6 +2015,15 @@ async function main() {
         shippedSource("armedPlaybackControlVerdict"),
         shippedSource("playbackControlObservationOverride"),
         shippedSource("notifyPlaybackControl"),
+        // The reporter settles a carried acknowledgement on every exchange and
+        // frees a staged successor when it stops, so both paths are real here
+        // rather than stubbed.
+        shippedConst("PREPARED_TERMINAL_STATES"),
+        shippedSource("preparedVideoElement"), shippedSource("preparedState"),
+        shippedSource("queuePlaybackControlAcknowledgement"),
+        shippedSource("settlePlaybackControlAcknowledgement"),
+        shippedSource("destroyHlsInstance"),
+        shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         shippedSource("askPlaybackControl"),
         shippedSource("settlePlaybackControlWaiters"),
         shippedSource("clearPlaybackControlWaiters"),
@@ -2651,6 +2679,15 @@ async function main() {
         shippedSource("holdReasonText"),
         shippedSource("playbackControlObservationOverride"),
         shippedSource("notifyPlaybackControl"),
+        // The reporter settles a carried acknowledgement on every exchange and
+        // frees a staged successor when it stops, so both paths are real here
+        // rather than stubbed.
+        shippedConst("PREPARED_TERMINAL_STATES"),
+        shippedSource("preparedVideoElement"), shippedSource("preparedState"),
+        shippedSource("queuePlaybackControlAcknowledgement"),
+        shippedSource("settlePlaybackControlAcknowledgement"),
+        shippedSource("destroyHlsInstance"),
+        shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
         shippedSource("askPlaybackControl"),
         shippedSource("settlePlaybackControlWaiters"),
         shippedSource("clearPlaybackControlWaiters"),
@@ -2945,6 +2982,396 @@ async function main() {
       globalThis.setTimeout = realSetTimeout;
       globalThis.clearTimeout = realClearTimeout;
     }
+  }
+
+
+  // ---- the second pipeline, the alignment, and the switch ------------------
+  //
+  // `PLAYER.hls` is a scalar and `attachHls` opens by destroying, so a prepared
+  // handoff is the first thing in this file that needs two live pipelines. The
+  // harness below is deliberately built out of the SHIPPED functions: a stub of
+  // the preparation state machine would prove the fixture, not the page.
+  function preparedHarness(options = {}) {
+    const notifies = [];
+    const logs = [];
+    const timers = new Map();
+    let nextTimer = 1;
+    const element = (id) => ({
+      id, muted: id !== "video", volume: 1, paused: true, currentTime: 0,
+      style: { display: id === "video" ? "" : "none" },
+      attributes: {}, listeners: {}, src: null, loads: 0,
+      ranges: [],
+      buffered: {
+        get length() { return this.owner.ranges.length; },
+        start(i) { return this.owner.ranges[i][0]; },
+        end(i) { return this.owner.ranges[i][1]; },
+      },
+      play() { this.paused = false; return Promise.resolve(); },
+      pause() { this.paused = true; },
+      load() { this.loads += 1; },
+      removeAttribute(name) { if (name === "src") this.src = null; delete this.attributes[name]; },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      addEventListener(name, fn) { (this.listeners[name] = this.listeners[name] || []).push(fn); },
+      removeEventListener(name, fn) {
+        this.listeners[name] = (this.listeners[name] || []).filter((f) => f !== fn);
+      },
+      emit(name) { for (const fn of (this.listeners[name] || []).slice()) fn(); },
+    });
+    const live = element("video");
+    const spare = element("video-prepared");
+    live.buffered.owner = live;
+    spare.buffered.owner = spare;
+    if (options.videoFrameCallback !== false) {
+      spare.requestVideoFrameCallback = (fn) => { spare.frameCallback = fn; };
+      live.requestVideoFrameCallback = (fn) => { live.frameCallback = fn; };
+    }
+    const scope = new Function(
+      "document", "window", "Hls", "PlaybackPolicy", "PlurxPlaybackControl",
+      "TOKEN", "setTimeout", "clearTimeout", "notifyPlaybackControl", "clientLog",
+      "nativeHls",
+      [
+        "let PLAYER=null;",
+        "function playbackContext(){return {};}",
+        "function tok(url){return url;}",
+        "function preferNativeHls(){return nativeHls;}",
+        "function bufferTargets(){return {fwd:20,back:10,budgeted:false};}",
+        "function vodClientContract(){return {fragLoadPolicy:{}};}",
+        shippedConst("PREPARED_HANDOFF_KEY"),
+        shippedConst("PREPARED_BUFFER_LEAD_MS"),
+        shippedConst("PREPARED_ALIGN_SLACK_MS"),
+        shippedConst("PREPARED_FIRST_FRAME_MS"),
+        shippedConst("PREPARED_TERMINAL_STATES"),
+        shippedSource("preparedHandoffEnabled"), shippedSource("setPreparedHandoffEnabled"),
+        shippedSource("sessionMediaOriginMs"), shippedSource("realMediaPositionMs"),
+        shippedSource("preparedLocalPositionMs"), shippedSource("playbackFilmPositionMs"),
+        shippedSource("pendingPlaybackControlAcknowledgement"),
+        shippedSource("queuePlaybackControlAcknowledgement"),
+        shippedSource("settlePlaybackControlAcknowledgement"),
+        shippedSource("preparedVideoElement"), shippedSource("preparedState"),
+        shippedSource("handlePreparedReplacementAction"),
+        shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
+        shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
+        shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
+        shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
+        shippedSource("preparedFirstFrame"), shippedSource("failPreparedReplacement"),
+        shippedSource("abandonPreparedReplacement"), shippedSource("freePreparedReplacement"),
+        shippedSource("destroyHlsInstance"),
+        shippedSource("resetPlaybackTransportEvents"), shippedSource("playbackTransportEvents"),
+        shippedSource("beginPlaybackMediaAttachment"),
+        shippedSource("hasPendingPlaybackOpen"), shippedSource("playbackOwnsAttachedMedia"),
+        shippedSource("rememberPlaybackTransportIntent"),
+        shippedSource("pausePlaybackInternally"),
+        shippedSource("teardownHls"),
+        "return {set(p){PLAYER=p;return p;},current:()=>PLAYER,",
+        " handle(action){return handlePreparedReplacementAction(PLAYER,action);},",
+        " abandon(state,reason){return abandonPreparedReplacement(PLAYER,state,reason);},",
+        " teardown(){return teardownHls();},",
+        " pending(demand){return pendingPlaybackControlAcknowledgement(PLAYER,demand);},",
+        " settle(request){return settlePlaybackControlAcknowledgement(PLAYER,request);},",
+        " origin:sessionMediaOriginMs, film:realMediaPositionMs, local:preparedLocalPositionMs};",
+      ].join("\n"),
+    );
+    const instances = [];
+    class FakeHls {
+      static Events = { MANIFEST_PARSED: "manifest", ERROR: "error",
+        BUFFER_APPENDED: "append", LEVEL_LOADED: "level" };
+      static isSupported() { return true; }
+      constructor(config) {
+        this.config = config; this.events = {}; this.destroyed = false;
+        this.bandwidthEstimate = 9_000_000; instances.push(this);
+      }
+      on(event, fn) { this.events[event] = fn; }
+      loadSource(url) { this.source = url; }
+      attachMedia(media) { this.media = media; }
+      destroy() { this.destroyed = true; }
+    }
+    const document = {
+      getElementById: (id) => [live, spare].find((node) => node.id === id) || null,
+    };
+    const api = scope(
+      document, { Hls: FakeHls, PlurxPlaybackControl: control }, FakeHls,
+      { bandwidthSeedBps: () => null }, control, null,
+      (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
+      (id) => { timers.delete(id); },
+      () => { notifies.push(api.current() && api.current().controlAcknowledgement); },
+      (entry) => { logs.push(entry); },
+      !!options.native,
+    );
+    return Object.assign(api, {
+      live, spare, instances, notifies, logs,
+      elements: () => ({ live, spare }),
+      fire(id) { const t = timers.get(id); if (t) { timers.delete(id); t.fn(); } },
+      fireAll() { for (const [id] of [...timers]) this.fire(id); },
+    });
+  }
+
+  const PREPARE_ORIGIN_MS = 600_000;
+  const prepareAction = (overrides = {}) => Object.assign({}, PREPARE_FIXTURE, overrides);
+  const preparedPlayer = (overrides = {}) => Object.assign({
+    offset: 0, vod: true, hls: null, prepared: null, priorKbps: 0,
+    controlAcknowledgement: null, pendingMediaChange: null, wantsPlayback: true,
+  }, overrides);
+
+  // §4 — the alignment functions, as pure functions, with no player at all.
+  {
+    const h = preparedHarness();
+    assert.equal(h.origin({ vod: true, media_origin_ms: 900_000, start_seconds: 60 }), 0,
+      "a VOD playlist is the whole title, so its zero is the source's zero");
+    assert.equal(h.origin({ vod: false, media_origin_ms: 900_000, start_seconds: 60 }), 900_000,
+      "media_origin_ms is the server saying where this session's zero lands");
+    assert.equal(h.origin({ vod: false, start_seconds: 60 }), 60_000,
+      "start_seconds is the older field that says the same thing");
+    assert.equal(h.origin({ vod: false, media_origin_ms: -5 }), 0, "an origin is never negative");
+    assert.equal(h.origin(null), 0);
+    assert.equal(h.film(10_000, 900_000, false), 910_000, "film time is origin plus local time");
+    assert.equal(h.film(10_000, 900_000, true), 10_000, "a VOD session's local time IS film time");
+    assert.equal(h.film(Number.NaN, 900_000, false), 0);
+    assert.equal(h.local(910_000, 900_000), 10_000, "and the inverse puts the successor there");
+    assert.equal(h.local(10_000, 900_000), 0, "a successor never starts before its own zero");
+  }
+
+  // Building the second pipeline: one instance, on the hidden element, and the
+  // incumbent is not touched. `attachHls` opens by DESTROYING the incumbent
+  // (index.html's teardown-first rule), which is why this path exists beside it
+  // rather than through it.
+  {
+    const h = preparedHarness();
+    const incumbent = { bandwidthEstimate: 5_000_000, destroyed: false, destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent, vod: false, offset: 600 }));
+    h.live.currentTime = 300;                       // film 900 s
+    const state = h.handle(prepareAction({ media_origin_ms: PREPARE_ORIGIN_MS }));
+    assert.ok(state, "a valid preparation builds");
+    assert.equal(h.instances.length, 1, "exactly one prepared pipeline");
+    assert.equal(h.instances[0].media, h.spare, "…attached to the hidden element");
+    assert.equal(h.instances[0].source, PREPARE_FIXTURE.playlist_url);
+    assert.equal(p.hls, incumbent, "the incumbent instance is untouched");
+    assert.equal(incumbent.destroyed, false, "…and specifically not destroyed");
+    assert.equal(h.spare.muted, true, "the successor is muted until the switch");
+    assert.equal(h.spare.style.display, "none", "…and invisible until the switch");
+    // §C6 — the successor's local zero is `media_origin_ms` in film time, so a
+    // successor primed for film 900 s whose zero is 600 s starts at 300 s.
+    assert.equal(h.instances[0].config.startPosition, 300,
+      "the successor is primed at the incumbent's film position on its own timeline");
+    assert.equal(p.controlAcknowledgement, null, "nothing is acknowledged before the manifest");
+
+    // §C12.7 — a repeated action_id is the SAME preparation. The server
+    // replays it byte-identically on every exchange until it settles.
+    const again = h.handle(prepareAction({ media_origin_ms: PREPARE_ORIGIN_MS }));
+    assert.equal(again, state, "a repeated action_id is the same preparation");
+    assert.equal(h.instances.length, 1, "…and does not build a second pipeline");
+
+    h.instances[0].events.manifest();
+    assert.deepEqual(p.controlAcknowledgement,
+      { action_id: PREPARE_FIXTURE.action_id, state: "metadata_ready" });
+    assert.equal(h.spare.paused, false, "the successor primes with its clock running");
+
+    // Buffered short of the lead is not ready…
+    h.spare.currentTime = 300;
+    h.spare.ranges = [[300, 302]];
+    h.instances[0].events.append();
+    assert.equal(p.controlAcknowledgement.state, "metadata_ready",
+      "buffered to the playhead is not buffered past the switch point");
+    // …and buffered past it is, in FILM time.
+    h.spare.ranges = [[300, 320]];
+    h.instances[0].events.append();
+    const buffered = h.notifies.find((ack) => ack && ack.state === "buffer_ready");
+    assert.ok(buffered, "buffer_ready is reported on its own exchange");
+    assert.equal(buffered.buffered_through_ms, PREPARE_ORIGIN_MS + 320_000,
+      "buffered_through_ms is film time, not the successor's local time");
+
+    // The switch itself — which readiness leads straight into, because the
+    // client decides when to switch and the server never orders it.
+    assert.equal(p.hls, h.instances[0], "the prepared instance is now authoritative");
+    assert.equal(incumbent.destroyed, true, "the predecessor is retired through the same teardown");
+    assert.equal(p.sessionId, PREPARE_FIXTURE.session_id);
+    assert.equal(p.offset, PREPARE_ORIGIN_MS / 1000, "the player's origin follows the session");
+    assert.equal(h.spare.id, "video", "the successor is the element the page addresses");
+    assert.equal(h.live.id, "video-prepared", "and the predecessor is the spare");
+    assert.equal(h.spare.muted, false, "the successor is audible only after the switch");
+    assert.equal(h.spare.style.display, "", "…and visible only after the switch");
+    assert.equal(h.live.style.display, "none");
+    assert.equal(h.live.muted, true);
+    assert.equal(p.prepared, null, "the slot is free once the switch is made");
+    assert.equal(p.controlAcknowledgement.state, "buffer_ready",
+      "and the commit waits for a frame rather than being claimed at the swap");
+    h.spare.frameCallback();
+    assert.equal(p.controlAcknowledgement.state, "committed");
+    assert.ok(p.controlAcknowledgement.first_frame_unix_ms > 0);
+  }
+
+  // The commit is sent only after a frame renders. It is a claim that the
+  // switch already happened, and the CAS behind it moves the playback pointer.
+  {
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
+    h.handle(prepareAction());
+    h.instances[0].events.manifest();
+    h.spare.ranges = [[0, 30]];
+    h.instances[0].events.append();
+    assert.equal(p.controlAcknowledgement.state, "buffer_ready",
+      "no commit before a frame — requestVideoFrameCallback has not fired");
+    assert.equal(p.hls, h.instances[0], "…even though the switch itself has happened");
+    h.spare.frameCallback();
+    assert.equal(p.controlAcknowledgement.state, "committed");
+    assert.ok(p.controlAcknowledgement.first_frame_unix_ms > 1_600_000_000_000,
+      "committed carries the wall clock of the first qualifying frame");
+  }
+
+  // A switch that renders nothing is a failed preparation, not a silent one.
+  // Leaving it to the 330-second deadline costs the session its only slot.
+  {
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
+    h.handle(prepareAction());
+    h.instances[0].events.manifest();
+    h.spare.ranges = [[0, 30]];
+    h.instances[0].events.append();
+    h.fireAll();
+    assert.equal(p.controlAcknowledgement.state, "failed",
+      "the first-frame watchdog settles the staging rather than leaving it to the deadline");
+  }
+
+  // §C12.6 — an abandoned preparation is settled, and the instance is freed.
+  for (const [label, drive] of [
+    ["a new attach on the authoritative element", (h) => h.teardown()],
+    ["an explicit abandon", (h) => h.abandon("aborted", "the viewer seeked")],
+  ]) {
+    const h = preparedHarness();
+    const incumbent = { bandwidthEstimate: 5_000_000, destroyed: false, destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    const prepared = h.instances[0];
+    drive(h);
+    assert.equal(p.controlAcknowledgement.state, "aborted", `${label} reports an abort`);
+    assert.equal(p.controlAcknowledgement.action_id, PREPARE_FIXTURE.action_id);
+    assert.equal(prepared.destroyed, true, `${label} destroys the prepared instance`);
+    assert.equal(p.prepared, null, `${label} frees the slot`);
+    assert.equal(h.spare.muted, true);
+    assert.equal(h.spare.style.display, "none");
+  }
+  {
+    // …and an abandon does not touch the incumbent, which is the whole reason
+    // this path exists beside `attachHls` instead of inside it.
+    const h = preparedHarness();
+    const incumbent = { bandwidthEstimate: 5_000_000, destroyed: false, destroy() { this.destroyed = true; } };
+    const p = h.set(preparedPlayer({ hls: incumbent }));
+    h.handle(prepareAction());
+    h.abandon("aborted", "the viewer changed quality");
+    assert.equal(p.hls, incumbent, "PLAYER.hls was never touched");
+    assert.equal(incumbent.destroyed, false);
+  }
+
+  // A pipeline that will not build says so.
+  {
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
+    h.handle(prepareAction());
+    h.instances[0].events.error(null, { fatal: true, details: "manifestLoadError" });
+    assert.equal(p.controlAcknowledgement.state, "failed");
+    assert.equal(p.prepared, null, "a failed preparation frees its slot too");
+    h.instances[0].events.error(null, { fatal: false, details: "bufferStalledError" });
+    assert.equal(p.controlAcknowledgement.state, "failed", "a non-fatal error settles nothing");
+  }
+
+  // A second staging while one is live aborts the first. The server allows one
+  // preparation per session; dropping the first silently would hold its slot.
+  {
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer({ hls: { bandwidthEstimate: 1, destroy() {} } }));
+    h.handle(prepareAction());
+    const first = h.instances[0];
+    const second = "77777777-7777-4777-8777-777777777777";
+    h.handle(prepareAction({ action_id: second }));
+    assert.equal(first.destroyed, true, "the superseded preparation is torn down");
+    assert.equal(h.instances.length, 2);
+    assert.equal(p.prepared.actionId, second);
+    const aborted = h.notifies.find((ack) => ack && ack.state === "aborted");
+    assert.equal(aborted.action_id, PREPARE_FIXTURE.action_id,
+      "the abort names the staging it settles, not the one that replaced it");
+  }
+
+  // A preparation this client refuses never reaches the player at all.
+  {
+    const h = preparedHarness();
+    h.set(preparedPlayer());
+    assert.equal(h.handle(prepareAction({ playlist_url: "https://attacker.example/x.m3u8" })), null);
+    assert.equal(h.instances.length, 0, "no pipeline is built for a refused preparation");
+    assert.equal(h.handle(prepareAction({ type: "prepare_replacement" })), null,
+      "the declared name is not a wire tag");
+    assert.equal(h.instances.length, 0);
+  }
+
+  // The commit waits for its own exchange rather than riding the one that ends
+  // the session, and an acknowledgement the server accepted is spent.
+  {
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer());
+    p.controlAcknowledgement = { action_id: PREPARE_FIXTURE.action_id, state: "committed",
+      first_frame_unix_ms: 1_757_000_000_000 };
+    assert.equal(h.pending("end"), null, "a commit never rides the end");
+    assert.ok(h.pending("active"), "…and is carried on the next ordinary exchange");
+    h.settle({ acknowledgement: { action_id: PREPARE_FIXTURE.action_id, state: "committed" } });
+    assert.equal(p.controlAcknowledgement, null, "an accepted acknowledgement is spent");
+    p.controlAcknowledgement = { action_id: PREPARE_FIXTURE.action_id, state: "buffer_ready",
+      buffered_through_ms: 1 };
+    h.settle({ acknowledgement: { action_id: PREPARE_FIXTURE.action_id, state: "metadata_ready" } });
+    assert.ok(p.controlAcknowledgement, "an older state does not settle a newer one");
+  }
+
+  // The native-HLS path builds no hls.js instance and primes the same element.
+  {
+    const h = preparedHarness({ native: true });
+    const p = h.set(preparedPlayer({ vod: false, offset: 600 }));
+    h.live.currentTime = 300;
+    h.handle(prepareAction({ media_origin_ms: PREPARE_ORIGIN_MS }));
+    assert.equal(h.instances.length, 0, "native HLS needs no second hls.js instance");
+    assert.equal(h.spare.src, PREPARE_FIXTURE.playlist_url);
+    h.spare.emit("loadedmetadata");
+    assert.equal(h.spare.currentTime, 300, "the native successor is seeked onto film time");
+    assert.equal(p.controlAcknowledgement.state, "metadata_ready");
+  }
+
+  // Gate A is a switch this browser owns, and it is what the server reads.
+  {
+    const capabilities = new Function("localStorage", "PLAY_CAPS", "screen", "window", [
+      shippedConst("PREPARED_HANDOFF_KEY"),
+      shippedSource("preparedHandoffEnabled"),
+      shippedSource("setPreparedHandoffEnabled"),
+      shippedSource("playbackControlCapabilities"),
+      "return {capabilities:playbackControlCapabilities,enable:setPreparedHandoffEnabled,"
+        + "enabled:preparedHandoffEnabled};",
+    ].join("\n"))(
+      (() => {
+        const store = new Map();
+        return { getItem: (key) => (store.has(key) ? store.get(key) : null),
+          setItem: (key, value) => store.set(key, String(value)) };
+      })(),
+      { vcodec: "h264", maxheight: 1080 }, { height: 1080 },
+      { innerHeight: 1080, devicePixelRatio: 1 },
+    );
+    assert.equal(capabilities.capabilities().dual_player_preparation, false,
+      "off until an operator turns it on: the server stages nothing for a false");
+    capabilities.enable(true);
+    assert.equal(capabilities.enabled(), true);
+    assert.equal(capabilities.capabilities().dual_player_preparation, true,
+      "and the switch is what reaches the wire — there is no separate code gate");
+    capabilities.enable(false);
+    assert.equal(capabilities.capabilities().dual_player_preparation, false);
+  }
+
+  // §C12.8 — `observed_download_bps` is populated wherever the platform can
+  // measure it. A client that reports no throughput can never be offered a
+  // preparation, whatever its capability says, so this is load-bearing rather
+  // than telemetry.
+  {
+    const measured = adapter.playbackControlSnapshot(video,
+      Object.assign({}, player, { hls: { bandwidthEstimate: 12_345_678 } }));
+    assert.equal(JSON.parse(JSON.stringify(measured)).observed_download_bps, 12_345_678,
+      "the serialized body carries this client's own throughput estimate");
+    const unmeasured = adapter.playbackControlSnapshot(video,
+      Object.assign({}, player, { hls: null }));
+    assert.equal(unmeasured.observed_download_bps, null,
+      "…and null before hls.js has an estimate, rather than an invented number");
   }
 
   process.stdout.write("PASS passive web playback-control reporter\n");
