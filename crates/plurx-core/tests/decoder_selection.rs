@@ -1,13 +1,16 @@
-use plurx_core::domain::DolbyVisionFacts;
+use plurx_core::domain::{AudioStream, DolbyVisionFacts, MediaFile};
 use plurx_core::transcode::{
-    resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCapabilities,
-    DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence,
-    DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
-    DecodeSurfaceContract, EffectiveRateControl, Encoder, FrameDomain, FrameRateProvenance,
-    OutputGrade, Pipeline, PlanError, SoftwareDecoder, StreamSelectionProvenance,
-    SubtitleRendering, ToneMap, TranscodeMediaOptions, TranscodeRequest,
+    hls_args, resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend,
+    DecodeCacheIdentity, DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity,
+    DecodeCatalogMetadata, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
+    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, EffectiveRateControl, Encoder,
+    FrameDomain, FrameRateProvenance, OutputGrade, Pacing, Pipeline, PipelineDigest, PlanError,
+    PlanSourceBinding, Recipe, SoftwareDecoder, StreamSelectionProvenance, SubtitleBurn,
+    SubtitleRendering, ToneMap, TranscodeExecution, TranscodeMediaOptions, TranscodeOptions,
+    TranscodeRequest,
 };
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 fn identity(byte: char) -> DecodeSourceIdentity {
     DecodeSourceIdentity::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
@@ -56,9 +59,13 @@ fn options(pipeline: Pipeline) -> TranscodeMediaOptions {
         audio_bitrate_kbps: 160,
         audio_index: None,
         audio_offset_ms: 0,
+        input_has_audio: true,
         tone_map: ToneMap::Zscale,
         pipeline,
         subtitle_burn: None,
+        cache_identity: DecodeCacheIdentity::from_media_file(&execution_file(
+            "/fixture/source.mkv",
+        )),
     }
 }
 
@@ -198,13 +205,85 @@ fn resolve(
     capabilities: &DecodeCapabilities,
     policy: DecodePolicySnapshot,
 ) -> Result<plurx_core::transcode::ResolvedTranscode, PlanError> {
+    resolve_with_options(encoder, options(pipeline), facts, capabilities, policy)
+}
+
+fn resolve_with_options(
+    encoder: Encoder,
+    media: TranscodeMediaOptions,
+    facts: &DecodeFacts,
+    capabilities: &DecodeCapabilities,
+    policy: DecodePolicySnapshot,
+) -> Result<plurx_core::transcode::ResolvedTranscode, PlanError> {
     resolve_transcode(
-        &TranscodeRequest::new(encoder, options(pipeline)),
+        &TranscodeRequest::new(encoder, media),
         facts,
         capabilities,
         &policy,
         &AttemptRestrictions::none(),
     )
+}
+
+fn execution_file(path: &str) -> MediaFile {
+    MediaFile {
+        id: 7,
+        item_id: 11,
+        path: PathBuf::from(path),
+        size: 12_345,
+        mtime: 67_890,
+        duration_ms: Some(120_000),
+        container: Some("mkv".to_owned()),
+        video_codec: Some("h264".to_owned()),
+        video_profile: Some("high".to_owned()),
+        width: Some(1920),
+        height: Some(1080),
+        bit_depth: Some(8),
+        hdr: None,
+        hdr_format: None,
+        dolby_vision: DolbyVisionFacts::default(),
+        bitrate: Some(8_000_000),
+        audio_streams: vec![AudioStream {
+            index: 0,
+            codec: "aac".to_owned(),
+            channels: Some(2),
+            ..AudioStream::default()
+        }],
+        subtitle_streams: vec![],
+        scanned_at: 1,
+        audio_offset_ms: 0,
+        probed: true,
+    }
+}
+
+fn execution_options() -> TranscodeOptions {
+    TranscodeOptions {
+        target_height: 1080,
+        video_bitrate_kbps: 8_000,
+        effective_rate_control: EffectiveRateControl::Vbr,
+        audio_channels: 2,
+        audio_bitrate_kbps: 160,
+        audio_index: None,
+        start_seconds: 0.0,
+        start_number: 0,
+        tone_map: ToneMap::Zscale,
+        pipeline: Pipeline::Cpu,
+        subtitle_burn: None,
+        subtitle_file: None,
+        force_idr: false,
+        software_threads: None,
+    }
+}
+
+fn software_capabilities(codec: &str, implementation: &str) -> DecodeCapabilities {
+    DecodeCapabilities::new(
+        snapshot_identity(),
+        vec![],
+        vec![SoftwareDecoder {
+            codec: codec.to_owned(),
+            implementation: implementation.to_owned(),
+        }],
+    )
+    .expect("valid software decoder inventory")
 }
 
 #[test]
@@ -632,8 +711,12 @@ fn continuation_restriction_cannot_be_bypassed_by_a_new_hardware_preference() {
     assert_eq!(plan.encoder(), Encoder::Nvenc);
 }
 
+/// The facts digest describes the stream that was measured, and nothing about
+/// how the measurement reached it. Which stream was selected is part of the
+/// output and must change the digest; the descriptor fingerprint is not, and
+/// must not — see the sibling test for why that distinction is load-bearing.
 #[test]
-fn source_identity_and_selected_stream_are_bound_into_the_facts_digest() {
+fn the_selected_stream_binds_into_the_facts_digest_and_the_descriptor_does_not() {
     let json = json!({"streams": [
         video(2, Some("h264"), Some("high"), 1920, 1080, Some("yuv420p"), "24/1", "24/1", None),
         video(5, Some("h264"), Some("high"), 1920, 1080, Some("yuv420p"), "24/1", "24/1", None)
@@ -641,9 +724,130 @@ fn source_identity_and_selected_stream_are_bound_into_the_facts_digest() {
     let first = DecodeFacts::from_ffprobe_json_at(&json, identity('c'), 2).expect("first");
     let other_stream = DecodeFacts::from_ffprobe_json_at(&json, identity('c'), 5).expect("other");
     let other_source =
-        DecodeFacts::from_ffprobe_json_at(&json, identity('d'), 2).expect("changed source");
+        DecodeFacts::from_ffprobe_json_at(&json, identity('d'), 2).expect("changed descriptor");
     assert_ne!(first.facts_digest(), other_stream.facts_digest());
-    assert_ne!(first.facts_digest(), other_source.facts_digest());
+    assert_eq!(first.facts_digest(), other_source.facts_digest());
+}
+
+/// The failure this guards against does not look like a bug. Two producers
+/// reach the same film by different routes — one holds a descriptor, one reads
+/// the catalog row — and fingerprint it differently. If that fingerprint names
+/// the artifact, the two routes get disjoint key spaces: the producer fills the
+/// cache forever and the player never hits it, which is indistinguishable from
+/// a cache that is merely cold. One film, one name.
+#[test]
+fn the_same_source_measured_two_ways_names_one_artifact() {
+    let stream = video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    );
+    let json = json!({"streams": [stream]});
+    let descriptor_bound = DecodeFacts::from_ffprobe_json_at(&json, identity('c'), 0)
+        .expect("facts read through a held descriptor")
+        .descriptor_bound();
+    let from_catalog_row = DecodeFacts::from_ffprobe_json_at(&json, identity('d'), 0)
+        .expect("facts from stored probe");
+    assert_ne!(
+        descriptor_bound.source_identity().as_str(),
+        from_catalog_row.source_identity().as_str(),
+        "the two routes really do fingerprint the source differently"
+    );
+
+    let capabilities = software_capabilities("h264", "h264");
+    let plan_of = |facts: &DecodeFacts| {
+        resolve_with_options(
+            Encoder::Software,
+            options(Pipeline::Cpu),
+            facts,
+            &capabilities,
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("plan")
+    };
+    let bound_plan = plan_of(&descriptor_bound);
+    let stored_plan = plan_of(&from_catalog_row);
+
+    assert_eq!(bound_plan.plan_digest(), stored_plan.plan_digest());
+    let pipeline = PipelineDigest {
+        ffmpeg_build: "ffmpeg fixture".to_owned(),
+    };
+    assert_eq!(
+        Recipe::new(&pipeline, &bound_plan, false).hash(),
+        Recipe::new(&pipeline, &stored_plan, false).hash()
+    );
+
+    // Identical names, and still an honest record of what each one proved.
+    assert_eq!(
+        bound_plan.source_binding(),
+        PlanSourceBinding::DescriptorBound
+    );
+    assert_eq!(stored_plan.source_binding(), PlanSourceBinding::CatalogRow);
+    assert_ne!(
+        bound_plan.observed_source_identity().as_str(),
+        stored_plan.observed_source_identity().as_str()
+    );
+}
+
+/// The other half of the same rule: one name per source means two sources must
+/// not share one. Identity is the catalog row — id, size, mtime — so a file
+/// that is replaced stops matching, while a file that merely moves does not.
+#[test]
+fn different_sources_have_different_artifact_names() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let capabilities = software_capabilities("h264", "h264");
+    let pipeline = PipelineDigest {
+        ffmpeg_build: "ffmpeg fixture".to_owned(),
+    };
+    let name_for = |file: &MediaFile| {
+        let mut media = options(Pipeline::Cpu);
+        media.cache_identity = DecodeCacheIdentity::from_media_file(file);
+        let plan = resolve_with_options(
+            Encoder::Software,
+            media,
+            &input,
+            &capabilities,
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        )
+        .expect("plan");
+        Recipe::new(&pipeline, &plan, false).hash()
+    };
+
+    let original = execution_file("/library/film.mkv");
+    let mut replaced = original.clone();
+    replaced.size += 1;
+    let mut retimed = original.clone();
+    retimed.mtime += 1;
+    let mut another_row = original.clone();
+    another_row.id += 1;
+    let mut moved = original.clone();
+    moved.path = PathBuf::from("/library/archive/film.mkv");
+
+    let baseline = name_for(&original);
+    assert_ne!(baseline, name_for(&replaced));
+    assert_ne!(baseline, name_for(&retimed));
+    assert_ne!(baseline, name_for(&another_row));
+    assert_eq!(
+        baseline,
+        name_for(&moved),
+        "a path is where the bytes live, not which bytes they are"
+    );
 }
 
 #[test]
@@ -1647,4 +1851,253 @@ fn surface_contracts_name_vendor_subtitle_vulkan_and_opencl_transitions() {
     assert_eq!(opencl.renderer_domain(), FrameDomain::OpenCl);
     assert_eq!(opencl.renderer_upload_format(), Some("p010le"));
     assert_eq!(opencl.renderer_download_format(), Some("nv12"));
+}
+
+#[test]
+fn planned_command_uses_actual_decoder_and_absolute_video_stream() {
+    let input = facts(video(
+        3,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let mut media = options(Pipeline::Cpu);
+    media.subtitle_burn = Some(SubtitleBurn {
+        subtitle_index: 1,
+        bitmap: true,
+    });
+    let plan = resolve_transcode(
+        &TranscodeRequest::new(Encoder::Software, media),
+        &input,
+        &software_capabilities("h264", "libdav1d_h264_fixture"),
+        &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        &AttemptRestrictions::none(),
+    )
+    .expect("software plan");
+    let mut options = execution_options();
+    options.subtitle_burn = plan.options().subtitle_burn.clone();
+    let file = execution_file("/fixture/source.mkv");
+    let execution =
+        TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), "/fixture/out")
+            .expect("valid execution");
+    let args = hls_args(&plan, &execution);
+    let input_position = args.iter().position(|arg| arg == "-i").expect("input");
+    let decoder_position = args
+        .windows(2)
+        .position(|pair| pair == ["-c:v", "libdav1d_h264_fixture"])
+        .expect("actual decoder implementation");
+    let encoder_position = args
+        .windows(2)
+        .position(|pair| pair == ["-c:v", "libx264"])
+        .expect("output encoder");
+    assert!(decoder_position < input_position);
+    assert!(encoder_position > input_position);
+    assert!(args.windows(2).any(|pair| pair == ["-map", "[vout]"]));
+    let complex = args
+        .windows(2)
+        .find(|pair| pair[0] == "-filter_complex")
+        .map(|pair| pair[1].as_str())
+        .expect("bitmap complex filter");
+    assert!(complex.starts_with("[0:3]"), "{complex}");
+}
+
+#[test]
+fn plan_digest_and_command_are_stable_after_environment_mutation() {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ENV_LOCK.lock().expect("environment lock");
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let snapshot = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+    let plan = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &software_capabilities("h264", "h264"),
+        snapshot,
+    )
+    .expect("resolved before mutation");
+    let file = execution_file("/fixture/source.mkv");
+    let execution = TranscodeExecution::from_options(
+        &file,
+        &execution_options(),
+        Pacing::unpaced(),
+        "/fixture/out",
+    )
+    .expect("valid execution");
+    let before_args = hls_args(&plan, &execution);
+    let before_digest = plan.plan_digest();
+    let pipeline = PipelineDigest {
+        ffmpeg_build: "ffmpeg fixture".to_owned(),
+    };
+    let before_recipe = Recipe::new(&pipeline, &plan, false).hash();
+    let previous = std::env::var_os("PLURX_HWDECODE");
+    // SAFETY: this test serializes its mutation and restores the process
+    // environment before releasing the lock.
+    unsafe { std::env::set_var("PLURX_HWDECODE", "off") };
+    let after_args = hls_args(&plan, &execution);
+    let after_recipe = Recipe::new(&pipeline, &plan, false).hash();
+    match previous {
+        Some(value) => unsafe { std::env::set_var("PLURX_HWDECODE", value) },
+        None => unsafe { std::env::remove_var("PLURX_HWDECODE") },
+    }
+    assert_eq!(after_args, before_args);
+    assert_eq!(plan.plan_digest(), before_digest);
+    assert_eq!(after_recipe, before_recipe);
+}
+
+#[test]
+fn execution_changes_do_not_change_plan_or_recipe_identity() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let plan = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("plan");
+    let first_file = execution_file("/fixture/first-source.mkv");
+    let mut second_file = first_file.clone();
+    second_file.path = PathBuf::from("/dev/fd/3");
+    let first_options = execution_options();
+    let mut second_options = first_options.clone();
+    second_options.start_seconds = 42.25;
+    second_options.start_number = 21;
+    second_options.subtitle_file = Some(PathBuf::from("/dev/fd/5"));
+    second_options.force_idr = true;
+    second_options.software_threads = Some(3);
+    let first = TranscodeExecution::from_options(
+        &first_file,
+        &first_options,
+        Pacing::unpaced(),
+        "/fixture/one",
+    )
+    .expect("first execution");
+    let second = TranscodeExecution::from_options(
+        &second_file,
+        &second_options,
+        Pacing {
+            readrate: Some(1.25),
+            initial_burst: Some(10.0),
+            legacy_re: false,
+        },
+        "/fixture/two",
+    )
+    .expect("second execution");
+    assert_ne!(hls_args(&plan, &first), hls_args(&plan, &second));
+    let pipeline = PipelineDigest {
+        ffmpeg_build: "ffmpeg fixture".to_owned(),
+    };
+    assert_eq!(
+        Recipe::new(&pipeline, &plan, false).hash(),
+        Recipe::new(&pipeline, &plan, false).hash()
+    );
+}
+
+#[test]
+fn reason_text_does_not_change_plan_digest() {
+    let input = facts(video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    let caps = capabilities(vec![]);
+    let request = TranscodeRequest::new(Encoder::Qsv, options(Pipeline::Cpu));
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+    let preferred = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("preferred plan");
+    let continuation = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::requiring(DecodeBackend::Qsv),
+    )
+    .expect("same route required by continuation");
+    assert_ne!(preferred.decode().reason(), continuation.decode().reason());
+    assert_eq!(preferred.plan_digest(), continuation.plan_digest());
+}
+
+#[test]
+fn qualification_or_software_implementation_changes_plan_digest() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let legacy = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("legacy software");
+    let alternate = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &software_capabilities("h264", "libopenh264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("alternate implementation");
+    let qualified_caps = capabilities_with_qualified_software(
+        &input,
+        Pipeline::Cpu,
+        Encoder::Software,
+        SubtitleRendering::None,
+        vec![],
+    );
+    let qualified = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &qualified_caps,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
+    )
+    .expect("qualified software");
+    assert_ne!(legacy.plan_digest(), alternate.plan_digest());
+    assert_ne!(legacy.plan_digest(), qualified.plan_digest());
 }

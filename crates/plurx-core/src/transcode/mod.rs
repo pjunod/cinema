@@ -20,13 +20,14 @@ mod pipeline;
 mod recipe;
 
 pub use decode::{
-    resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCapabilities,
-    DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence,
-    DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
-    DecodeSurfaceContract, DynamicRangeClass, FrameDomain, FrameRate, FrameRateProvenance,
-    OutputWidthRule, PlanError, PresentationContract, Rational, ResolvedDecode, ResolvedTranscode,
-    SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering, TranscodeMediaOptions,
-    TranscodeRequest,
+    resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCacheIdentity,
+    DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata,
+    DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason,
+    DecodeSourceIdentity, DecodeSurfaceContract, DynamicRangeClass, FrameDomain, FrameRate,
+    FrameRateProvenance, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
+    Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
+    SubtitleRendering, TranscodeMediaOptions, TranscodeRequest, RESOLVED_TRANSCODE_PLAN_VERSION,
+    UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
     detect_encoders, detect_video_decoders, validate_quality_rate_control,
@@ -34,7 +35,7 @@ pub use encoder::{
     OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
 };
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
-pub use recipe::{PipelineDigest, Recipe};
+pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 
 use crate::domain::MediaFile;
 use std::path::PathBuf;
@@ -743,6 +744,82 @@ pub struct TranscodeOptions {
     pub software_threads: Option<u32>,
 }
 
+/// Attempt-local values consumed by the HLS command builder after semantic
+/// planning is complete. Construction copies only execution fields from the
+/// legacy aggregate; decoder, renderer, encoder, tracks, and output grade come
+/// exclusively from [`ResolvedTranscode`].
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum TranscodeExecutionError {
+    #[error("invalid transcode execution: {0}")]
+    Invalid(&'static str),
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscodeExecution {
+    pub source_path: PathBuf,
+    pub start_seconds: f64,
+    pub start_number: i64,
+    pub subtitle_file: Option<PathBuf>,
+    pub force_idr: bool,
+    pub software_threads: Option<u32>,
+    pub pacing: Pacing,
+    pub out_dir: String,
+}
+
+impl TranscodeExecution {
+    pub fn from_options(
+        source: &MediaFile,
+        options: &TranscodeOptions,
+        pacing: Pacing,
+        out_dir: &str,
+    ) -> Result<Self, TranscodeExecutionError> {
+        if source.path.as_os_str().is_empty() {
+            return Err(TranscodeExecutionError::Invalid("source path is empty"));
+        }
+        if out_dir.is_empty() {
+            return Err(TranscodeExecutionError::Invalid(
+                "output directory is empty",
+            ));
+        }
+        if !options.start_seconds.is_finite() || options.start_seconds < 0.0 {
+            return Err(TranscodeExecutionError::Invalid(
+                "start offset must be finite and nonnegative",
+            ));
+        }
+        if options.start_number < 0 {
+            return Err(TranscodeExecutionError::Invalid(
+                "HLS start number must be nonnegative",
+            ));
+        }
+        if options.software_threads == Some(0) {
+            return Err(TranscodeExecutionError::Invalid(
+                "software thread budget must be positive",
+            ));
+        }
+        if pacing
+            .readrate
+            .is_some_and(|rate| !rate.is_finite() || rate <= 0.0)
+            || pacing
+                .initial_burst
+                .is_some_and(|burst| !burst.is_finite() || burst <= 0.0)
+        {
+            return Err(TranscodeExecutionError::Invalid(
+                "pacing values must be finite and positive",
+            ));
+        }
+        Ok(Self {
+            source_path: source.path.clone(),
+            start_seconds: options.start_seconds,
+            start_number: options.start_number,
+            subtitle_file: options.subtitle_file.clone(),
+            force_idr: options.force_idr,
+            software_threads: options.software_threads,
+            pacing,
+            out_dir: out_dir.to_owned(),
+        })
+    }
+}
+
 /// The AAC bitrate every HLS transcode uses unless asked otherwise — public
 /// because the quality ladder's advertised totals must include the audio a
 /// session will actually carry, from the same constant rather than a copy.
@@ -805,8 +882,15 @@ pub fn output_size(source: &MediaFile, target_height: i64) -> Option<(i64, i64)>
 /// output frame first puts it back where it was authored, whichever way the
 /// two sizes differ.
 fn bitmap_overlay(source: &MediaFile, opts: &TranscodeOptions) -> Option<String> {
+    bitmap_overlay_for_size(output_size(source, opts.target_height), opts)
+}
+
+fn bitmap_overlay_for_size(
+    output_size: Option<(i64, i64)>,
+    opts: &TranscodeOptions,
+) -> Option<String> {
     let burn = opts.subtitle_burn.as_ref().filter(|b| b.bitmap)?;
-    let (w, h) = output_size(source, opts.target_height)?;
+    let (w, h) = output_size?;
     Some(format!(
         "[0:s:{idx}]scale={w}:{h}[sburn]",
         idx = burn.subtitle_index
@@ -817,6 +901,24 @@ fn bitmap_overlay(source: &MediaFile, opts: &TranscodeOptions) -> Option<String>
 /// source is HDR) → subtitle burn-in. Returns `None` when no filtering is
 /// needed (rare for transcode, but keeps the caller simple).
 fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str) -> String {
+    video_filters_for_contract(
+        output_size(source, opts.target_height),
+        source.hdr.as_deref(),
+        source.hdr.is_some(),
+        routing_hdr(source),
+        opts,
+        source_path,
+    )
+}
+
+fn video_filters_for_contract(
+    output_size: Option<(i64, i64)>,
+    input_dynamic_range: Option<&str>,
+    input_is_hdr: bool,
+    routing_dynamic_range: Option<&str>,
+    opts: &TranscodeOptions,
+    source_path: &str,
+) -> String {
     let mut chain: Vec<String> = Vec::new();
 
     // A GPU pipeline owns scale and tone-map together: they are one pass on
@@ -832,11 +934,11 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
     let text_burn = opts.subtitle_burn.as_ref().is_some_and(|b| !b.bitmap);
     // Always give GPU scalers the same explicit even, no-upscale dimensions
     // the CPU path promises. `w=-1` can resolve to an odd NV12 width.
-    let gpu_size = output_size(source, opts.target_height);
+    let gpu_size = output_size;
     if let Some(gpu) = opts.pipeline.filters(
         gpu_size.map(|(w, _)| w),
         gpu_size.map_or(opts.target_height, |(_, h)| h),
-        source.hdr.as_deref(),
+        input_dynamic_range,
     ) {
         if (bitmap_burn || text_burn)
             && matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi)
@@ -855,7 +957,7 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
     chain.push(format!("scale=-2:'min({h},ih)'", h = opts.target_height));
 
     // HDR → SDR tone-map when the source carries HDR.
-    if source.hdr.is_some() && opts.tone_map != ToneMap::None {
+    if input_is_hdr && opts.tone_map != ToneMap::None {
         match opts.tone_map {
             ToneMap::None => {} // guarded out above; format normalize happens below
             ToneMap::Libplacebo => chain.push(
@@ -875,7 +977,7 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
                 // hwdownload, so an inferred `t=linear` mis-maps the PQ signal to
                 // a flat gray picture — the exact 4K-HDR/DV symptom. HDR is
                 // BT.2020; PQ (HDR10/HDR10+/DV) vs HLG differ only in transfer.
-                let tin = if routing_hdr(source) == Some("hlg") {
+                let tin = if routing_dynamic_range == Some("hlg") {
                     "arib-std-b67"
                 } else {
                     "smpte2084"
@@ -1071,12 +1173,9 @@ pub fn heavy_source(source: &MediaFile) -> bool {
     ) && (source.hdr.is_some() || source.height.unwrap_or(0) >= 2160)
 }
 
+#[cfg(test)]
 fn compatibility_value_forces_software_decode(value: Option<&str>) -> bool {
     matches!(value, Some("off" | "0" | "false" | "no"))
-}
-
-fn compatibility_forces_software_decode() -> bool {
-    compatibility_value_forces_software_decode(std::env::var("PLURX_HWDECODE").ok().as_deref())
 }
 
 fn decode_setup_with_compatibility(
@@ -1159,23 +1258,57 @@ pub fn audio_offset_filter(offset_ms: i64) -> Option<String> {
 
 /// Build the full ffmpeg argument vector to transcode `source` into HLS in
 /// `out_dir` (which must exist). Produces `index.m3u8` + `seg%05d.ts`.
-pub fn hls_args(
+#[cfg(test)]
+fn hls_args(
     source: &MediaFile,
     encoder: Encoder,
     opts: &TranscodeOptions,
     pacing: Pacing,
     out_dir: &str,
 ) -> Vec<String> {
-    hls_args_with_compatibility(
-        source,
-        encoder,
-        opts,
-        pacing,
-        out_dir,
-        compatibility_forces_software_decode(),
+    hls_args_with_compatibility(source, encoder, opts, pacing, out_dir, false)
+}
+
+/// Build a movie HLS command exclusively from one validated semantic plan and
+/// its attempt-local execution context.
+#[cfg(not(test))]
+pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
+    hls_args_for_plan(plan, execution)
+}
+
+/// Explicit name retained so core unit tests can exercise the plan builder
+/// while their baseline-only helper keeps freezing the pre-M2 token vectors.
+pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
+    let media = plan.options();
+    let options = TranscodeOptions {
+        target_height: media.target_height,
+        video_bitrate_kbps: media.video_bitrate_kbps,
+        effective_rate_control: media.effective_rate_control,
+        audio_channels: media.audio_channels,
+        audio_bitrate_kbps: media.audio_bitrate_kbps,
+        audio_index: media.audio_index,
+        start_seconds: execution.start_seconds,
+        start_number: execution.start_number,
+        tone_map: media.tone_map,
+        pipeline: media.pipeline,
+        subtitle_burn: media.subtitle_burn.clone(),
+        subtitle_file: execution.subtitle_file.clone(),
+        force_idr: execution.force_idr,
+        software_threads: execution.software_threads,
+    };
+    hls_args_inner(
+        None,
+        &execution.source_path.to_string_lossy(),
+        plan.encoder(),
+        &options,
+        execution.pacing,
+        &execution.out_dir,
+        None,
+        Some(plan),
     )
 }
 
+#[cfg(test)]
 fn hls_args_with_compatibility(
     source: &MediaFile,
     encoder: Encoder,
@@ -1184,7 +1317,30 @@ fn hls_args_with_compatibility(
     out_dir: &str,
     force_software_decode: bool,
 ) -> Vec<String> {
-    let source_path = source.path.to_string_lossy().into_owned();
+    hls_args_inner(
+        Some(source),
+        &source.path.to_string_lossy(),
+        encoder,
+        opts,
+        pacing,
+        out_dir,
+        Some(force_software_decode),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hls_args_inner(
+    legacy_source: Option<&MediaFile>,
+    source_path: &str,
+    encoder: Encoder,
+    opts: &TranscodeOptions,
+    pacing: Pacing,
+    out_dir: &str,
+    legacy_force_software_decode: Option<bool>,
+    plan: Option<&ResolvedTranscode>,
+) -> Vec<String> {
+    let source_path = source_path.to_owned();
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
 
     // Hardware device init (VAAPI/QSV) must precede the input, and so must a
@@ -1209,10 +1365,48 @@ fn hls_args_with_compatibility(
     // the `PLURX_HWDECODE=off` escape hatch for Dolby Vision profiles that
     // hardware-decode to garbage).
     let pipeline_decode = opts.pipeline.decode_args();
-    let (decode_args, hwdownload) = if opts.pipeline.requires_software_decode() {
+    let (decode_args, hwdownload) = if let Some(plan) = plan {
+        let decode = plan.decode();
+        let args = match decode.backend() {
+            DecodeBackend::Software => vec![
+                "-hwaccel".to_owned(),
+                "none".to_owned(),
+                "-c:v".to_owned(),
+                decode
+                    .software_decoder()
+                    .expect("validated software plan has a decoder")
+                    .to_owned(),
+            ],
+            DecodeBackend::VideoToolbox => {
+                vec!["-hwaccel".to_owned(), "videotoolbox".to_owned()]
+            }
+            DecodeBackend::Cuda => vec!["-hwaccel".to_owned(), "cuda".to_owned()],
+            DecodeBackend::Qsv => vec![
+                "-hwaccel".to_owned(),
+                "qsv".to_owned(),
+                "-hwaccel_output_format".to_owned(),
+                "qsv".to_owned(),
+            ],
+            DecodeBackend::Vaapi => vec![
+                "-hwaccel".to_owned(),
+                "vaapi".to_owned(),
+                "-hwaccel_output_format".to_owned(),
+                "vaapi".to_owned(),
+            ],
+        };
+        let download = decode
+            .surface()
+            .decoder_download_format()
+            .map(|format| format!("hwdownload,format={format}"));
+        (args, download)
+    } else if opts.pipeline.requires_software_decode() {
         (Vec::new(), None)
     } else if pipeline_decode.is_empty() {
-        decode_setup_with_compatibility(encoder, source, force_software_decode)
+        decode_setup_with_compatibility(
+            encoder,
+            legacy_source.expect("legacy argument construction has source metadata"),
+            legacy_force_software_decode.unwrap_or(false),
+        )
     } else {
         (pipeline_decode, None)
     };
@@ -1231,11 +1425,20 @@ fn hls_args_with_compatibility(
     // source again for nothing but its audio (review §3.4). Guarded on the
     // file actually having audio: a simple `-af` with no audio stream to
     // attach to is a hard ffmpeg error, where the old optional map was inert.
-    let audio_offset = if source.audio_streams.is_empty() {
-        None
-    } else {
-        audio_offset_filter(source.audio_offset_ms)
-    };
+    let audio_offset = plan.map_or_else(
+        || {
+            let source = legacy_source.expect("legacy argument construction has source metadata");
+            (!source.audio_streams.is_empty())
+                .then(|| audio_offset_filter(source.audio_offset_ms))
+                .flatten()
+        },
+        |plan| {
+            plan.options()
+                .input_has_audio
+                .then(|| audio_offset_filter(plan.options().audio_offset_ms))
+                .flatten()
+        },
+    );
 
     // Video filter chain: [hwdownload for GPU-decoded frames →] scale / tonemap /
     // subs [→ GPU upload suffix for VAAPI/QSV] → encoder.
@@ -1258,18 +1461,55 @@ fn hls_args_with_compatibility(
         vf.push_str(prefix);
         vf.push(',');
     }
-    vf.push_str(&video_filters(source, opts, &source_path));
+    let planned_output_size = plan.and_then(|plan| {
+        Some((
+            i64::from(plan.output_contract().effective_width()?),
+            i64::from(plan.output_contract().effective_height()?),
+        ))
+    });
+    let filters = plan.map_or_else(
+        || {
+            video_filters(
+                legacy_source.expect("legacy argument construction has source metadata"),
+                opts,
+                &source_path,
+            )
+        },
+        |plan| {
+            video_filters_for_contract(
+                planned_output_size,
+                plan.input_dynamic_range_name(),
+                plan.input_is_hdr(),
+                plan.routing_dynamic_range(),
+                opts,
+                &source_path,
+            )
+        },
+    );
+    vf.push_str(&filters);
 
     // A bitmap subtitle is a picture, so burning one is a *composite* — two
     // streams into one filter — and that needs `-filter_complex` and a mapped
     // output label rather than the single-stream `-vf`. Everything above stays
     // the chain it was; this only wraps it.
-    let overlay = bitmap_overlay(source, opts);
+    let overlay = plan.map_or_else(
+        || {
+            bitmap_overlay(
+                legacy_source.expect("legacy argument construction has source metadata"),
+                opts,
+            )
+        },
+        |_| bitmap_overlay_for_size(planned_output_size, opts),
+    );
     // Map the chosen (or default) audio, and video from wherever it now comes.
     args.push("-map".into());
+    let selected_video = plan.map_or_else(
+        || "0:v:0".to_owned(),
+        |plan| format!("0:{}", plan.decode().input_video_stream()),
+    );
     args.push(match &overlay {
         Some(_) => BURNED_VIDEO_LABEL.to_owned(),
-        None => "0:v:0".to_owned(),
+        None => selected_video.clone(),
     });
     args.push("-map".into());
     match opts.audio_index {
@@ -1297,8 +1537,12 @@ fn hls_args_with_compatibility(
                 OutputGrade::Hdr10 => ":format=yuv420p10",
                 OutputGrade::Sdr => "",
             };
+            let filter_input = plan.map_or_else(
+                || "0:v".to_owned(),
+                |plan| format!("0:{}", plan.decode().input_video_stream()),
+            );
             let complex = format!(
-                "[0:v]{vf}[vburn];{sub};\
+                "[{filter_input}]{vf}[vburn];{sub};\
                  [vburn][sburn]overlay=eof_action=pass{overlay_format}{up}{BURNED_VIDEO_LABEL}"
             );
             assert_no_pq_at_8_bit(&complex);

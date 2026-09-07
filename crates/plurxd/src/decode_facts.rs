@@ -3247,6 +3247,9 @@ async fn collect(
             }
         }
     }
+    // Read through the descriptor held across the whole measurement, so these
+    // facts are evidence about the bytes on disk and not merely about a row.
+    .map(DecodeFacts::descriptor_bound)
     .map_err(|error| DecodeFactError::InvalidFacts(error.to_string()))
 }
 

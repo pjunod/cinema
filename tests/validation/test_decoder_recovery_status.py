@@ -15,8 +15,14 @@ CONTRACTS = ROOT / "tests/playback/decoder-health/diagnostic-contracts.toml"
 FLEET = ROOT / "tests/playback/decoder-health/fleet-ffmpeg-2026-09-05.toml"
 MEDIA = ROOT / "tests/playback/decoder-media-baseline-2026-09-05.toml"
 HARNESS = ROOT / "scripts/decoder-diagnostic-qualification"
+CORE_DECODE = ROOT / "crates/plurx-core/src/transcode/decode.rs"
+CORE_TRANSCODE = ROOT / "crates/plurx-core/src/transcode/mod.rs"
+CORE_RECIPE = ROOT / "crates/plurx-core/src/transcode/recipe.rs"
+DAEMON_TRANSCODE = ROOT / "crates/plurxd/src/transcode.rs"
+LIVE_TV = ROOT / "crates/plurxd/src/live_tv.rs"
 FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M1_EFFORT_BASE = "a8bbe574"
+M2_TASK_BASE = "f7f98b013ffe9dcc5414e25e0b2e505df3e7beb7"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -43,6 +49,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         with MEDIA.open("rb") as document:
             cls.media = tomllib.load(document)
         cls.harness = HARNESS.read_text(encoding="utf-8")
+        cls.core_decode = CORE_DECODE.read_text(encoding="utf-8")
+        cls.core_transcode = CORE_TRANSCODE.read_text(encoding="utf-8")
+        cls.core_recipe = CORE_RECIPE.read_text(encoding="utf-8")
+        cls.daemon_transcode = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        cls.live_tv = LIVE_TV.read_text(encoding="utf-8")
 
     def test_frozen_inventory_and_argument_claims_match_retained_artifacts(self) -> None:
         surfaces = self.inventory["surfaces"]
@@ -157,14 +168,17 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"M1 task PR base:** effort head `{M1_EFFORT_BASE}`", self.flat_status
+            f"M2 task base:** M1 candidate `{M2_TASK_BASE}`", self.flat_status
         )
-        self.assertIn("Historical pre-rebase head `01368ce1`", self.status)
-        self.assertIn(M0_FORGEJO_PR, self.status)
+        self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
-            f"Exact code head `{M0_QUALIFIED_HEAD}` passed `make validate-full`: "
-            "23 passed, 0 failed, 2 declared skips",
+            "| Pre-rebase `01368ce1` | `make validate-full`", self.status
+        )
+        self.assertIn(M0_FORGEJO_PR, self.status)
+        self.assertRegex(
             self.status,
+            rf"(?m)^\| `{M0_QUALIFIED_HEAD}` \| .*make validate-full.* \| "
+            r"Pass · 23 passed, 0 failed, 2 declared skips;",
         )
         self.assertNotIn("has not yet run its final suite", self.status)
         self.assertNotIn("repair head pending push", self.status)
@@ -196,7 +210,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "`81d46577` retains the exact 3,600-second outer ceiling",
             self.status,
         )
-        self.assertIn("prove recorded live identities disappeared", self.status)
+        self.assertIn("proves recorded live identities disappeared", self.status)
         self.assertIn("reaps only its owned shell", self.status)
         self.assertIn(
             "Validation checks may not daemonize, double-fork, or deliberately "
@@ -208,23 +222,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertIn("sealed, self-contained Linux FFprobe artifact", self.status)
         self.assertIn("path and second-memfd exec", self.status)
-        self.assertIn("pidfd-before-reap", self.status)
+        self.assertIn("final kill use exact pidfd signals", self.status)
         self.assertIn("macOS collector 20/20", self.status)
-        self.assertIn("pinned Linux collector 36/36", self.status)
-        self.assertIn("Unchanged-path evidence last run at `22d89d27`", self.status)
-        self.assertIn(
-            "Changes after `22d89d27` affect only Linux response-loop "
-            "test-evidence plumbing",
-            self.status,
-        )
-        self.assertIn(
-            "whose observer activation is exclusive to "
-            '`cfg(all(test, target_os = "linux"))` launch modes',
-            self.status,
-        )
-        self.assertIn("whose shipping defaults are inert", self.status)
+        self.assertIn("collector suite passes 36/36", self.status)
+        self.assertIn("observer-activation contract", self.status)
         self.assertIn("one-shot exec supervision", self.status)
-        self.assertIn("invalidated first notification", self.status)
         self.assertIn("source-level enforcement", self.status)
         self.assertIn("does not prove arbitrary static parser code trustworthy", self.status)
         self.assertIn(
@@ -239,11 +241,119 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "no full unsupported-architecture compile pass is claimed",
             self.flat_status,
         )
-        self.assertIn(f"Exact Linux code head `{M1_REPAIR_HEAD}`", self.status)
+        self.assertIn(M1_REPAIR_HEAD, self.status)
         self.assertIn("daemon 1,777/1,777", self.status)
         self.assertIn("no exact postcommit history claim", self.status)
         self.assertNotIn("`608dd04d`: history 1,357", self.status)
         self.assertNotIn("Working tree after `0dcbcdf2`", self.status)
+
+    def test_m2_working_tree_binds_arguments_and_identity_to_one_plan(self) -> None:
+        self.assertRegex(
+            self.core_decode,
+            r"(?m)^pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 1;$",
+        )
+        self.assertRegex(
+            self.core_decode,
+            r'(?m)^pub const UNQUALIFIED_ARTIFACT_NAMESPACE: &str = '
+            r'"decoder-plan-v1-unqualified";$',
+        )
+        self.assertRegex(
+            self.core_recipe,
+            r"(?m)^pub const CACHE_RECIPE_VERSION: i64 = 3;$",
+        )
+        digest_body = self.core_decode.split("pub fn plan_digest", 1)[1].split(
+            "pub fn artifact_namespace", 1
+        )[0]
+        self.assertNotIn("self.decode.reason", digest_body)
+        self.assertIn('feed("source_facts", self.source_facts_digest.as_bytes())', digest_body)
+
+        self.assertIn(
+            "pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution)",
+            normalized(self.core_transcode),
+        )
+        self.assertEqual(self.daemon_transcode.count("transcode::hls_args("), 3)
+        self.assertNotIn("transcode::hls_args(&file", self.daemon_transcode)
+        self.assertIn("plan: &'a ResolvedTranscode", self.daemon_transcode)
+        self.assertEqual(
+            self.daemon_transcode.count('std::env::var("PLURX_HWDECODE")'), 1
+        )
+        self.assertIn("struct LiveTvTranscodePlan", self.live_tv)
+        self.assertIn('.args(["-hwaccel", "none"])', self.live_tv)
+
+        builders = [
+            surface
+            for surface in self.inventory["surfaces"]
+            if surface["kind"] == "hls_builder"
+        ]
+        self.assertEqual(len(builders), 4)
+        for surface in builders:
+            with self.subTest(surface=surface["id"]):
+                source = (ROOT / surface["source"]).read_text(encoding="utf-8")
+                self.assertEqual(surface.get("m2_state"), "migrated")
+                self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
+
+        self.assertIn(
+            "M2 implementation active; review and qualification pending", self.status
+        )
+        self.assertIn("None for M2", self.status)
+        self.assertIn("decoder-plan-v1-unqualified", self.status)
+        self.assertIn(
+            "No new compile-time feature gate or hidden runtime enable switch is "
+            "introduced by M2.",
+            self.flat_status,
+        )
+        self.assertIn(
+            "Run it once only after the whole-PR review findings and focused/unit "
+            "failures are repaired",
+            self.status,
+        )
+
+    def test_one_artifact_name_per_source_however_it_was_measured(self) -> None:
+        """The producer and the player must compute one name for one title.
+
+        The artifact key is the catalog identity, which every route derives the
+        same way. The descriptor fingerprint answers a different question and is
+        kept out of the key: when it was in the key, descriptor-bound and
+        catalog-row planning produced disjoint key spaces for identical work and
+        the pre-transcode cache could never hit.
+        """
+        self.assertRegex(
+            self.core_decode,
+            r"(?m)^pub struct DecodeCacheIdentity\(String\);$",
+        )
+        self.assertIn("pub fn from_media_file(file: &MediaFile) -> Self", self.core_decode)
+        self.assertRegex(
+            self.core_decode,
+            r"(?m)^pub enum PlanSourceBinding \{$",
+        )
+
+        digest_body = self.core_decode.split("pub fn plan_digest", 1)[1].split(
+            "pub fn artifact_namespace", 1
+        )[0]
+        self.assertIn("source_cache_identity", digest_body)
+        self.assertNotIn("source_binding", digest_body)
+        self.assertNotIn("observed_source_identity", digest_body)
+
+        facts_digest = self.core_decode.split("struct FactsDigest", 1)[1].split("}", 1)[0]
+        self.assertIn("input_video_stream", facts_digest)
+        self.assertNotIn("source_identity", facts_digest)
+
+        recipe_ctor = self.core_recipe.split("pub fn new<'a>(", 1)[1].split(")", 1)[0]
+        self.assertNotIn("MediaFile", recipe_ctor)
+        self.assertIn("plan: &'a ResolvedTranscode", recipe_ctor)
+        self.assertNotIn("self.file", self.core_recipe)
+
+        self.assertIn(
+            "One name per source, however the source was measured", self.status
+        )
+        self.assertIn(
+            "live and offline resolution still\nplan from stored FFprobe JSON and "
+            "therefore carry `CatalogRow`",
+            self.status,
+        )
+        self.assertIn(
+            "nothing in M2 yet refuses a `CatalogRow` plan", self.status
+        )
 
 
 if __name__ == "__main__":

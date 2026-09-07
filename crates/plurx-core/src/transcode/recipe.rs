@@ -14,23 +14,32 @@
 //! cache that serves stale output forever, and it will look like a bug in
 //! whatever feature added the field.
 //!
-//! **Invalidation is by mismatch, never by deletion.** The source file's size
-//! and mtime are in the key, so a file that changes simply stops matching its
-//! old entry; nothing has to notice the change, and nothing can fail to. The
-//! orphan ages out through LRU like anything else. A cache that has to be
-//! *told* about a change is a cache that will one day not be told.
+//! **Invalidation is by mismatch, never by deletion.** The source file's id,
+//! size and mtime are in the key — carried in the plan, as its cache identity
+//! — so a file that changes simply stops matching its old entry; nothing has
+//! to notice the change, and nothing can fail to. The orphan ages out through
+//! LRU like anything else. A cache that has to be *told* about a change is a
+//! cache that will one day not be told.
+//!
+//! **One key per source, however the source was measured.** Producers reach a
+//! film by different routes: the speculative producer holds a descriptor, live
+//! and offline resolution read the catalog row. Those routes fingerprint the
+//! source differently, and a key built on the fingerprint gives them disjoint
+//! key spaces — the producer fills the cache and the player never hits it,
+//! which is indistinguishable from a cache that is merely cold. The key
+//! therefore uses the catalog identity every route computes the same way, and
+//! descriptor continuity is checked separately, as a precondition, never as
+//! part of the name.
 
 use sha2::{Digest, Sha256};
 
-use crate::domain::MediaFile;
-
-use super::{Encoder, OutputGrade, SubtitleBurn, ToneMap, TranscodeOptions, SEGMENT_SECONDS};
+use super::{ResolvedTranscode, SEGMENT_SECONDS};
 
 /// Bumped when the meaning of a recipe changes in a way the field list cannot
 /// express — a different hash construction, a corrected serialisation, a fixed
 /// bug in what the fields *mean*. Every old entry misses; nothing is served
 /// wrongly while a deploy rolls out.
-const CACHE_FORMAT_VERSION: u32 = 2;
+pub const CACHE_RECIPE_VERSION: i64 = 3;
 
 /// Everything about *how this server encodes* that changes the output bytes.
 ///
@@ -41,29 +50,16 @@ const CACHE_FORMAT_VERSION: u32 = 2;
 /// the key, every viewer keeps getting the old one until somebody notices by
 /// eye.
 ///
-/// The encoder family is in here too, and stays until QSV, VA-API, NVENC,
-/// VideoToolbox and software are *demonstrated* to satisfy one declared output
-/// contract (decision 6). Until then a QSV-produced entry is not a thing a
-/// software node may serve, and pretending otherwise trades correctness for
-/// a hit rate nobody measured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineDigest {
     /// `ffmpeg -version`'s first line, verbatim — build, not just version. A
     /// distribution's patched 6.1 and a jellyfin 6.1 are different encoders.
     pub ffmpeg_build: String,
-    pub encoder: Encoder,
 }
 
 impl PipelineDigest {
     fn feed(&self, h: &mut Sha256) {
         field(h, "ffmpeg", self.ffmpeg_build.as_bytes());
-        field(h, "encoder", self.encoder.label().as_bytes());
-        field(h, "codec", self.encoder.video_codec().as_bytes());
-        // The output contract this build produces, spelled out rather than
-        // implied by the encoder name: a future change to any of these is a
-        // different picture from the same recipe, and has to miss.
-        field(h, "pixfmt", b"yuv420p");
-        field(h, "colour", b"bt709/bt709/bt709/tv");
         field(h, "muxer", b"hls/mpegts");
         field(h, "segment_policy", SEGMENT_SECONDS.to_string().as_bytes());
     }
@@ -75,113 +71,49 @@ impl PipelineDigest {
 /// the two cannot describe different things.
 #[derive(Debug, Clone)]
 pub struct Recipe<'a> {
-    pub digest: &'a PipelineDigest,
-    pub file: &'a MediaFile,
-    pub opts: &'a TranscodeOptions,
+    digest: &'a PipelineDigest,
+    plan: &'a ResolvedTranscode,
     /// Whether the audio is copied rather than re-encoded. Not in
-    /// [`TranscodeOptions`] because the transcode path always re-encodes;
+    /// [`ResolvedTranscode`] because the transcode path always re-encodes;
     /// carried explicitly so the copy path can share this key space.
-    pub audio_copied: bool,
+    audio_copied: bool,
 }
 
 impl Recipe<'_> {
+    pub fn new<'a>(
+        digest: &'a PipelineDigest,
+        plan: &'a ResolvedTranscode,
+        audio_copied: bool,
+    ) -> Recipe<'a> {
+        Recipe {
+            digest,
+            plan,
+            audio_copied,
+        }
+    }
+
     /// The hex SHA-256 that names this transcode's output.
     pub fn hash(&self) -> String {
         let mut h = Sha256::new();
-        field(&mut h, "v", CACHE_FORMAT_VERSION.to_string().as_bytes());
+        field(&mut h, "v", CACHE_RECIPE_VERSION.to_string().as_bytes());
         self.digest.feed(&mut h);
-        // This occupied the same position with the same literal in the
-        // manager-level digest before N1. Moving it here lets a per-title
-        // effective quality value participate without changing one byte of a
-        // legacy VBR recipe.
         field(
             &mut h,
-            "rate_control",
-            self.opts.effective_rate_control.recipe_value().as_bytes(),
+            "plan_namespace",
+            self.plan.artifact_namespace().as_bytes(),
         );
-
-        // The source. Size and mtime are what make invalidation automatic: a
-        // re-encoded or replaced file cannot match its old entry, whether or
-        // not anyone tells the cache about it.
-        field(&mut h, "file_id", self.file.id.to_string().as_bytes());
-        field(&mut h, "size", self.file.size.to_string().as_bytes());
-        field(&mut h, "mtime", self.file.mtime.to_string().as_bytes());
-        field(
-            &mut h,
-            "audio_offset",
-            self.file.audio_offset_ms.to_string().as_bytes(),
-        );
-
-        // What was asked for.
-        let o = self.opts;
-        field(&mut h, "height", o.target_height.to_string().as_bytes());
-        field(
-            &mut h,
-            "vbitrate",
-            o.video_bitrate_kbps.to_string().as_bytes(),
-        );
-        field(
-            &mut h,
-            "abitrate",
-            o.audio_bitrate_kbps.to_string().as_bytes(),
-        );
-        field(&mut h, "achannels", o.audio_channels.to_string().as_bytes());
-        field(
-            &mut h,
-            "aindex",
-            o.audio_index.unwrap_or(-1).to_string().as_bytes(),
-        );
+        // The source is inside the plan digest, as its cache identity — file
+        // id, size and mtime, hashed the one way every producer computes it.
+        // It used to be fed here from a `MediaFile` the caller passed
+        // alongside the plan, which meant nothing checked that the two
+        // described the same film; the constructor took the plan's word for
+        // the encode and the caller's word for the source. There is now no
+        // second source to disagree with the first.
+        field(&mut h, "plan", self.plan.plan_digest().as_bytes());
         field(
             &mut h,
             "aaction",
             if self.audio_copied { b"copy" } else { b"aac" },
-        );
-        field(&mut h, "tonemap", tone_map_name(o.tone_map).as_bytes());
-        // The effective per-session renderer, not the node's ordinary HDR10
-        // winner. Dolby Vision Profile 5 deliberately runs a different graph;
-        // hashing the boot winner would let differently rendered pixels share
-        // one cache entry.
-        field(&mut h, "pipeline", o.pipeline.name().as_bytes());
-        // The output contract, when it is not the one `PipelineDigest::feed`
-        // spells out above (`yuv420p`, `bt709/bt709/bt709/tv`, and the
-        // encoder's H.264 `video_codec`). Emitted only for a non-SDR grade so
-        // that every recipe written before M5 hashes to exactly the bytes it
-        // did — an SDR cache entry must not be invalidated by a rung it never
-        // used.
-        //
-        // Belt and braces: `pipeline` above is already unique per grade, so
-        // HDR10 output could not have collided with SDR output regardless.
-        // This makes the key *say* what the bytes are rather than leaving it
-        // implied by a graph name.
-        let grade = o.pipeline.output_grade();
-        if grade != OutputGrade::Sdr {
-            field(&mut h, "grade", grade.name().as_bytes());
-            field(&mut h, "grade_pixfmt", grade.pixel_format().as_bytes());
-            field(
-                &mut h,
-                "grade_colour",
-                format!(
-                    "{}/{}/{}/tv",
-                    grade.primaries(),
-                    grade.transfer(),
-                    grade.matrix()
-                )
-                .as_bytes(),
-            );
-            field(
-                &mut h,
-                "grade_codec",
-                self.digest
-                    .encoder
-                    .video_codec_for(grade)
-                    .unwrap_or("libx265")
-                    .as_bytes(),
-            );
-        }
-        field(
-            &mut h,
-            "burn",
-            burn_key(o.subtitle_burn.as_ref()).as_bytes(),
         );
 
         // Deliberately NOT in the key: `start_seconds`. A cached asset is the
@@ -205,44 +137,22 @@ fn field(h: &mut Sha256, name: &str, value: &[u8]) {
     h.update(value);
 }
 
-fn tone_map_name(t: ToneMap) -> &'static str {
-    match t {
-        ToneMap::Zscale => "zscale",
-        ToneMap::Libplacebo => "libplacebo",
-        ToneMap::Tonemapx => "tonemapx",
-        ToneMap::None => "none",
-    }
-}
-
-/// A burn's identity: which track, whether it is a picture, and whether it
-/// actually happened.
-///
-/// `applied` is always true today — every requested burn is performed since
-/// bitmap subtitles gained an overlay graph. The field stays because a future
-/// path that *cannot* burn must not be able to hash as though it did: an entry
-/// that claims subtitles it does not have is served to somebody who asked for
-/// them and gets none, with no error anywhere.
-fn burn_key(burn: Option<&SubtitleBurn>) -> String {
-    match burn {
-        None => "none".to_owned(),
-        Some(b) => format!(
-            "{}:{}:applied",
-            b.subtitle_index,
-            if b.bitmap { "bitmap" } else { "text" }
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcode::EffectiveRateControl;
+    use crate::domain::MediaFile;
+    use crate::transcode::{
+        resolve_transcode, AttemptRestrictions, DecodeCapabilities,
+        DecodeCapabilitySnapshotIdentity, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
+        DecodeSourceIdentity, EffectiveRateControl, Encoder, Pipeline, SoftwareDecoder,
+        SubtitleBurn, ToneMap, TranscodeMediaOptions, TranscodeOptions, TranscodeRequest,
+    };
+    use serde_json::json;
     use std::path::PathBuf;
 
     fn digest() -> PipelineDigest {
         PipelineDigest {
             ffmpeg_build: "ffmpeg version 6.1.1-3ubuntu5".to_owned(),
-            encoder: Encoder::Software,
         }
     }
 
@@ -272,14 +182,77 @@ mod tests {
         }
     }
 
-    fn hash_of(d: &PipelineDigest, f: &MediaFile, o: &TranscodeOptions, copied: bool) -> String {
-        Recipe {
-            digest: d,
-            file: f,
-            opts: o,
-            audio_copied: copied,
-        }
-        .hash()
+    fn decode_facts() -> DecodeFacts {
+        DecodeFacts::from_ffprobe_json(
+            &json!({
+                "streams": [{
+                    "index": 3,
+                    "codec_type": "video",
+                    "codec_name": "hevc",
+                    "profile": "Main 10",
+                    "width": 3840,
+                    "height": 2160,
+                    "pix_fmt": "yuv420p10le",
+                    "avg_frame_rate": "24000/1001",
+                    "r_frame_rate": "24000/1001",
+                    "color_range": "tv",
+                    "color_space": "bt2020nc",
+                    "color_transfer": "smpte2084",
+                    "color_primaries": "bt2020",
+                    "disposition": {"attached_pic": 0}
+                }]
+            }),
+            DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("valid source identity"),
+        )
+        .expect("valid decode facts")
+    }
+
+    fn capabilities(software_decoder: &str) -> DecodeCapabilities {
+        DecodeCapabilities::new(
+            DecodeCapabilitySnapshotIdentity::new(
+                "f".repeat(64),
+                "recipe-test-node".to_owned(),
+                Some("e".repeat(64)),
+            )
+            .expect("valid capability identity"),
+            vec![],
+            vec![SoftwareDecoder {
+                codec: "hevc".to_owned(),
+                implementation: software_decoder.to_owned(),
+            }],
+        )
+        .expect("valid legacy capability inventory")
+    }
+
+    fn plan_with_decoder(
+        f: &MediaFile,
+        o: &TranscodeOptions,
+        encoder: Encoder,
+        software_decoder: &str,
+    ) -> ResolvedTranscode {
+        resolve_transcode(
+            &TranscodeRequest::new(encoder, TranscodeMediaOptions::from_options(f, o)),
+            &decode_facts(),
+            &capabilities(software_decoder),
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::none(),
+        )
+        .expect("fixture must resolve to a validated legacy plan")
+    }
+
+    fn plan(f: &MediaFile, o: &TranscodeOptions, encoder: Encoder) -> ResolvedTranscode {
+        plan_with_decoder(f, o, encoder, "hevc")
+    }
+
+    fn hash_of(
+        d: &PipelineDigest,
+        f: &MediaFile,
+        o: &TranscodeOptions,
+        encoder: Encoder,
+        copied: bool,
+    ) -> String {
+        let plan = plan(f, o, encoder);
+        Recipe::new(d, &plan, copied).hash()
     }
 
     /// The property the whole cache rests on: anything that changes the output
@@ -295,39 +268,42 @@ mod tests {
         let base_d = digest();
         let base_f = media();
         let base_o = TranscodeOptions::default();
-        let base = hash_of(&base_d, &base_f, &base_o, false);
+        let base_encoder = Encoder::Software;
+        let base = hash_of(&base_d, &base_f, &base_o, base_encoder, false);
 
         type Mutate = (
             &'static str,
-            fn(&mut PipelineDigest, &mut MediaFile, &mut TranscodeOptions, &mut bool),
+            fn(&mut PipelineDigest, &mut MediaFile, &mut TranscodeOptions, &mut Encoder, &mut bool),
         );
         let cases: &[Mutate] = &[
             // The build and the pipeline: an ffmpeg upgrade or a different
             // tone-map graph is a different picture from the same recipe.
-            ("ffmpeg build", |d, _, _, _| {
+            ("ffmpeg build", |d, _, _, _, _| {
                 d.ffmpeg_build = "ffmpeg version 7.1".into()
             }),
-            ("encoder family", |d, _, _, _| d.encoder = Encoder::Qsv),
-            ("pipeline", |_, _, o, _| {
-                o.pipeline = crate::transcode::Pipeline::VppQsv
+            ("encoder family", |_, _, _, encoder, _| {
+                *encoder = Encoder::VideoToolbox
+            }),
+            ("pipeline", |_, _, o, _, _| {
+                o.pipeline = Pipeline::Hdr10Passthrough
             }),
             // The source. Size and mtime are the invalidation mechanism.
-            ("file id", |_, f, _, _| f.id = 43),
-            ("size", |_, f, _, _| f.size += 1),
-            ("mtime", |_, f, _, _| f.mtime += 1),
-            ("audio offset", |_, f, _, _| f.audio_offset_ms = 250),
+            ("file id", |_, f, _, _, _| f.id = 43),
+            ("size", |_, f, _, _, _| f.size += 1),
+            ("mtime", |_, f, _, _, _| f.mtime += 1),
+            ("audio offset", |_, f, _, _, _| f.audio_offset_ms = 250),
             // What was asked for.
-            ("height", |_, _, o, _| o.target_height = 720),
-            ("video bitrate", |_, _, o, _| o.video_bitrate_kbps += 1),
-            ("effective rate control", |_, _, o, _| {
+            ("height", |_, _, o, _, _| o.target_height = 720),
+            ("video bitrate", |_, _, o, _, _| o.video_bitrate_kbps += 1),
+            ("effective rate control", |_, _, o, _, _| {
                 o.effective_rate_control = EffectiveRateControl::Qvbr { quality: 23 }
             }),
-            ("audio bitrate", |_, _, o, _| o.audio_bitrate_kbps += 1),
-            ("audio channels", |_, _, o, _| o.audio_channels = 6),
-            ("audio index", |_, _, o, _| o.audio_index = Some(1)),
-            ("audio action", |_, _, _, c| *c = true),
-            ("tone map", |_, _, o, _| o.tone_map = ToneMap::None),
-            ("subtitle burn", |_, _, o, _| {
+            ("audio bitrate", |_, _, o, _, _| o.audio_bitrate_kbps += 1),
+            ("audio channels", |_, _, o, _, _| o.audio_channels = 6),
+            ("audio index", |_, _, o, _, _| o.audio_index = Some(1)),
+            ("audio action", |_, _, _, _, c| *c = true),
+            ("tone map", |_, _, o, _, _| o.tone_map = ToneMap::None),
+            ("subtitle burn", |_, _, o, _, _| {
                 o.subtitle_burn = Some(SubtitleBurn {
                     subtitle_index: 0,
                     bitmap: true,
@@ -338,10 +314,15 @@ mod tests {
         let mut seen = std::collections::HashMap::new();
         seen.insert(base.clone(), "unchanged");
         for (name, mutate) in cases {
-            let (mut d, mut f, mut o, mut c) =
-                (base_d.clone(), base_f.clone(), base_o.clone(), false);
-            mutate(&mut d, &mut f, &mut o, &mut c);
-            let got = hash_of(&d, &f, &o, c);
+            let (mut d, mut f, mut o, mut encoder, mut c) = (
+                base_d.clone(),
+                base_f.clone(),
+                base_o.clone(),
+                base_encoder,
+                false,
+            );
+            mutate(&mut d, &mut f, &mut o, &mut encoder, &mut c);
+            let got = hash_of(&d, &f, &o, encoder, c);
             assert_ne!(got, base, "changing the {name} did not change the hash");
             if let Some(other) = seen.insert(got, name) {
                 panic!("{name} and {other} hash the same — one of them is not in the key");
@@ -362,31 +343,45 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            hash_of(&d, &f, &o, false)
+            hash_of(&d, &f, &o, Encoder::Software, false)
         };
         assert_ne!(with(0, true), with(1, true), "different track");
         assert_ne!(with(0, true), with(0, false), "different kind");
         assert_ne!(
             with(0, false),
-            hash_of(&d, &f, &TranscodeOptions::default(), false),
+            hash_of(
+                &d,
+                &f,
+                &TranscodeOptions::default(),
+                Encoder::Software,
+                false,
+            ),
             "burning something is not the same as burning nothing"
         );
     }
 
-    /// Where a viewer joins a title is not a property of the title. Including
-    /// the start offset would give one film as many cache entries as it has
-    /// resume points, and hit none of them twice.
+    /// Attempt-local execution values must not fork artifact identity. They
+    /// are deliberately discarded before `TranscodeMediaOptions` becomes a
+    /// validated plan.
     #[test]
-    fn resume_position_is_not_part_of_the_identity() {
-        let (d, f) = (digest(), media());
-        let at = |secs| {
-            let o = TranscodeOptions {
-                start_seconds: secs,
-                ..Default::default()
-            };
-            hash_of(&d, &f, &o, false)
+    fn execution_only_fields_are_not_part_of_the_plan_or_recipe_identity() {
+        let (d, mut f) = (digest(), media());
+        let base = TranscodeOptions::default();
+        let expected = hash_of(&d, &f, &base, Encoder::Software, false);
+
+        let changed = TranscodeOptions {
+            start_seconds: 1234.5,
+            start_number: 480,
+            subtitle_file: Some(PathBuf::from("/var/cache/plurx/subtitles/7.ass")),
+            force_idr: true,
+            software_threads: Some(3),
+            ..base
         };
-        assert_eq!(at(0.0), at(1234.5));
+        f.path = PathBuf::from("/dev/fd/3");
+        assert_eq!(
+            hash_of(&d, &f, &changed, Encoder::Software, false),
+            expected
+        );
     }
 
     /// Fields are length-prefixed so their boundaries cannot blur. Without
@@ -403,8 +398,8 @@ mod tests {
         };
         // "108" + "01000" vs "1080" + "1000": identical concatenated.
         assert_ne!(
-            hash_of(&d, &f, &opts(108, 1000), false),
-            hash_of(&d, &f, &opts(1080, 1000), false)
+            hash_of(&d, &f, &opts(108, 1000), Encoder::Software, false),
+            hash_of(&d, &f, &opts(1080, 1000), Encoder::Software, false)
         );
         let mut a = f.clone();
         let mut b = f.clone();
@@ -413,8 +408,8 @@ mod tests {
         b.size = 12;
         b.mtime = 3;
         assert_ne!(
-            hash_of(&d, &a, &opts(1080, 8000), false),
-            hash_of(&d, &b, &opts(1080, 8000), false)
+            hash_of(&d, &a, &opts(1080, 8000), Encoder::Software, false),
+            hash_of(&d, &b, &opts(1080, 8000), Encoder::Software, false)
         );
     }
 
@@ -423,73 +418,45 @@ mod tests {
     #[test]
     fn the_same_recipe_always_has_the_same_name() {
         let (d, f, o) = (digest(), media(), TranscodeOptions::default());
-        let first = hash_of(&d, &f, &o, false);
-        assert_eq!(first, hash_of(&d, &f, &o, false));
+        let first = hash_of(&d, &f, &o, Encoder::Software, false);
+        assert_eq!(first, hash_of(&d, &f, &o, Encoder::Software, false));
         assert_eq!(first.len(), 64, "hex sha-256");
         assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// Version 2 intentionally invalidates version 1: the effective session
-    /// renderer now replaces the node's generic boot pipeline in the key, so
-    /// Profile 5 output made by the old relabel route can never be reused.
-    /// Pin the new bytes so any later fleet-wide invalidation stays explicit.
+    /// Version 3 binds the complete validated decode/render/encode plan and
+    /// deliberately invalidates every pre-plan recipe. Pin its exact bytes so
+    /// future namespace changes remain explicit fleet-wide decisions.
+    ///
+    /// The pinned value changed once during v3's development, when the source
+    /// moved *into* the plan: the recipe stopped taking a `MediaFile` beside
+    /// the plan (nothing checked that the two described the same film), the
+    /// plan digest gained the catalog cache identity, and the facts digest
+    /// dropped the descriptor fingerprint that had been splitting the
+    /// producer's key space from the player's. Same inputs, one fewer way to
+    /// be wrong. v3 has never been published, so nothing on disk moved.
     #[test]
-    fn legacy_vbr_recipe_hash_is_a_golden_fixture() {
+    fn planned_v3_recipe_hash_is_a_golden_fixture() {
         let (d, f, o) = (digest(), media(), TranscodeOptions::default());
         assert_eq!(
-            hash_of(&d, &f, &o, false),
-            "b9dae1c44d396f94c760a627b7a3b709ec591db227c162eb5588d91420f767c6"
+            hash_of(&d, &f, &o, Encoder::Software, false),
+            "c246f577226a5271249698d59491f739897cbcbb14635ff89e481fe39d0ce1be"
         );
     }
 
-    /// The HDR10 rung is a different picture from the same request, so it
-    /// must be a different entry — and adding it must not have moved a single
-    /// SDR key, or the whole fleet's cache misses on deploy for nothing.
-    ///
-    /// The second half is really enforced by
-    /// [`legacy_vbr_recipe_hash_is_a_golden_fixture`] above, which is a
-    /// literal. This states the rule the literal exists for.
+    /// The HDR10 rung is a different presentation from the SDR tone-map of
+    /// the same input, so it must occupy a different entry.
     #[test]
-    fn the_hdr10_grade_is_a_distinct_entry_and_no_sdr_key_moved() {
+    fn the_hdr10_grade_is_a_distinct_entry() {
         let (d, f) = (digest(), media());
         let sdr = TranscodeOptions::default();
         let hdr10 = TranscodeOptions {
-            pipeline: crate::transcode::Pipeline::DoviPassthrough,
+            pipeline: Pipeline::Hdr10Passthrough,
             ..Default::default()
         };
-        let reshape = TranscodeOptions {
-            pipeline: crate::transcode::Pipeline::DoviTonemapx,
-            ..Default::default()
-        };
-        let sdr_hash = hash_of(&d, &f, &sdr, false);
-        let hdr10_hash = hash_of(&d, &f, &hdr10, false);
+        let sdr_hash = hash_of(&d, &f, &sdr, Encoder::Software, false);
+        let hdr10_hash = hash_of(&d, &f, &hdr10, Encoder::Software, false);
         assert_ne!(hdr10_hash, sdr_hash);
-        assert_ne!(
-            hdr10_hash,
-            hash_of(&d, &f, &reshape, false),
-            "the two Dolby renderers produce different pictures"
-        );
-        // Every SDR pipeline still hashes exactly as it did — the grade
-        // fields are emitted only for a grade that is not SDR.
-        for pipeline in crate::transcode::PIPELINE_CANDIDATES
-            .iter()
-            .copied()
-            .chain(std::iter::once(crate::transcode::Pipeline::DoviTonemapx))
-        {
-            let o = TranscodeOptions {
-                pipeline,
-                ..Default::default()
-            };
-            assert_eq!(
-                o.pipeline.output_grade(),
-                crate::transcode::OutputGrade::Sdr,
-                "{pipeline:?}"
-            );
-        }
-        assert_eq!(
-            sdr_hash,
-            hash_of(&d, &f, &TranscodeOptions::default(), false)
-        );
     }
 
     #[test]
@@ -500,11 +467,28 @@ mod tests {
                 effective_rate_control: EffectiveRateControl::Qvbr { quality },
                 ..Default::default()
             };
-            hash_of(&d, &f, &o, false)
+            hash_of(&d, &f, &o, Encoder::Software, false)
         };
-        let vbr = hash_of(&d, &f, &TranscodeOptions::default(), false);
+        let vbr = hash_of(
+            &d,
+            &f,
+            &TranscodeOptions::default(),
+            Encoder::Software,
+            false,
+        );
         assert_ne!(hash(22), vbr);
         assert_ne!(hash(23), vbr);
         assert_ne!(hash(22), hash(23));
+    }
+
+    #[test]
+    fn actual_software_decoder_implementation_changes_identity() {
+        let (d, f, o) = (digest(), media(), TranscodeOptions::default());
+        let hevc = plan_with_decoder(&f, &o, Encoder::Software, "hevc");
+        let libdav1d = plan_with_decoder(&f, &o, Encoder::Software, "libdav1d");
+        assert_ne!(
+            Recipe::new(&d, &hevc, false).hash(),
+            Recipe::new(&d, &libdav1d, false).hash()
+        );
     }
 }

@@ -1,8 +1,8 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M1 whole-PR findings applied; exact-head confirmation pending · **Updated:** 2026-09-06 ·
-**Integration branch:** `effort/decoder-selection-recovery` · **M1 task PR base:**
-effort head `a8bbe574`
+**Status:** M2 implementation active; review and qualification pending · **Updated:**
+2026-09-06 · **Integration branch:** `effort/decoder-selection-recovery` ·
+**M2 task base:** M1 candidate `f7f98b013ffe9dcc5414e25e0b2e505df3e7beb7`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -19,29 +19,156 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M1 — explicit plans and bound facts |
-| Task branch | `codex/decoder-selection-m1` |
-| Task PR | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63), open against the effort; latest code/fix receipt is `81d46577`, followed only by this status-contract update. Final exact-head approval, Forgejo gate, and full qualification are pending |
+| Milestone | M2 — plan-bound arguments and identity |
+| Task branch | `codex/decoder-selection-m2`, working tree based on `f7f98b01` |
+| Task PR | Not opened. Whole-PR adversarial review, findings repair, focused/unit validation, the Forgejo effort gate, and one final full qualification are pending |
+| M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort, whose head is now `f7f98b01` — the same commit this M2 branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Exact Linux code head `07c8f905`: pinned Rust 1.97.1 all-target Clippy, pinned Linux collector 36/36, and the three injection/deadline/stop mutations pass. Unchanged-path evidence last run at `22d89d27` or its code-equivalent tree: planner 35/35, macOS collector 20/20, both real neutral-timeout producer regressions, and macOS all-target Clippy. Changes after `22d89d27` affect only Linux response-loop test-evidence plumbing whose observer activation is exclusive to `cfg(all(test, target_os = "linux"))` launch modes and whose shipping defaults are inert, plus validation mappings/docs. Linux additionally preserves one-shot exec supervision and pidfd-before-reap cleanup. Its explicit transitive post-fork helper inventory statically rejects common allocation and panic forms. Single-interruption success plus persistent expiry at ready send, acknowledgement, first seccomp receive, first response, and steady-state response are covered; an invalidated first notification separately proves bounded teardown. The steady-state deadline case requires observed response interruptions and a deadline-exit receipt; a distinct long-deadline case requires a stop-exit receipt. On `81d46577`, the focused timeout runner passes 66/66 and the complete validation package passes 154/154, including attempted-group retention after a failed stop confirmation, failure-total kill-stage shell cleanup, an injected second Linux teardown census failure, complete Darwin ambiguity collection, Linux zero-ID kernel rows, `/proc` start-tick identity, pidfd reuse refusal, leader-exit session ownership, live-identity disappearance, Windows launch failures, census bounds, resistant process groups, fixed-point discovery, and kill order; the formerly interrupted activation target passed 7/7 in 73.83 seconds on its unchanged runtime tree |
-| Exact receipt | `81d46577`: exact mapped history audit 1,387, catalog 24 points / 30 checks / 1,444 audited files, validation 154/154, operations 211/211, formatting, and the pinned all-target workspace compile pass. Runtime repair receipt `bc3c3bee` remains the exact 1,378-history mutation-proof receipt |
-| Full PR validation | Exact code head `59d0a4d1` passed `make validate-full`: 23 passed, 0 failed, 2 declared skips for M0. Historical pre-rebase head `01368ce1` remains history only. M1 head `22ab9c8d` completed 22 checks, failed only `cluster-auth`, and declared 2 skips: the 1,800-second aggregate `cluster-auth` ceiling expired after replicated Store and live topology passed and while activation was 3/7; that target then passed 7/7 in 73.83 seconds. `81d46577` retains the exact 3,600-second outer ceiling and repairs timeout containment. Linux binds process identity to kernel start ticks; after the initial numeric stop of the anchored root group, child admission and all final kills use exact pidfd identities. Darwin retries every owned ambiguity, commits groups only after a matching stopped owner, retains attempted groups through failed admission, and refuses final groups with unowned identities under the documented trusted-host boundary. Both paths prove recorded live identities disappeared; the runner reaps only its owned shell, and kill-stage errors still directly kill and reap it. Windows tree-kill launch or result failures likewise abort rather than produce a verdict. Validation checks may not daemonize, double-fork, or deliberately orphan child sessions; arbitrary detached-session containment is not claimed. Full-suite requalification is pending after exact review and the Forgejo effort gate |
-| Blocker | Obtain three exact-head approvals, then rerun the complete full-suite qualification once |
+| Focused validation | Working tree on pinned 1.97.1: decoder selector 42/42, core recipe identity 9/9, daemon `decode_facts::tests` 20/20, daemon `transcode::tests` 217/217 including the two new plan-key regressions, both named `live_tv` argument baselines, `make effort-rust-check` (fmt-check plus workspace all-target compile) and `make lint` (workspace Clippy, warnings as errors) clean, `git diff --check` clean. Non-Rust status contract 8/8 and the 73-row inventory contract pass. No exact M2 commit receipt is claimed |
+| Exact receipt | None for M2. The current statements describe an uncommitted working tree, not a reviewed or qualified artifact |
+| Full PR validation | Not run for M2. Run it once only after the whole-PR review findings and focused/unit failures are repaired |
+| Blocker | Finish the M2 implementation, review the whole candidate once, repair its findings, pass focused/unit tests, then qualify and merge the PR |
 
 ## Milestones
 
 | Milestone | State | Exit evidence |
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Whole-PR findings applied; exact-head confirmation pending | `07c8f905` makes notification receive one-shot after each fresh readiness poll, bounds bootstrap and steady-state response retries by the shared deadline/stop signal, and makes both steady-response exits mutation-sensitive with observed interruption and branch-specific exit receipts; mandatory pinned-Linux collector regressions pass 36/36. On POSIX, `81d46577` uses bounded race-resistant process census, freezes the launch session and retained-parent child sessions to a stable closure, retains attempted groups through failed admission, refuses stale or unowned identities before teardown, verifies recorded live identities disappeared, and reaps only the owned shell within one cleanup deadline while retaining the exact 3,600-second outer budget and unchanged production deadlines. Linux child admission and final kills are pidfd-bound after the initial numeric stop of the anchored root group; Darwin numeric group signalling remains limited to the trusted-host contract. The documented check contract forbids daemonization and does not claim arbitrary detached-session containment |
-| M2 · arguments and identity use one plan | Not started | — |
+| M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
+| M2 · arguments and identity use one plan | Active working tree; review and qualification pending | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
 | M3 · owned observation and health receipts | Not started | — |
 | M4 · mixed resource admission | Not started | — |
 | M5 · durable budget and prepublication recovery | Not started | — |
 | M6 · postpublication replacement and client intent | Not started | — |
 | M7 · offline, shared cache, and handoff enforcement | Not started | — |
 | M8 · fleet qualification and promotion | Not started | — |
+
+## M2 working tree — one plan names and builds the attempt
+
+M2 makes one validated `ResolvedTranscode` the semantic input to both movie
+FFmpeg arguments and content identity. The plan digest is version 1 and feeds
+length-prefixed field names and values. It binds decoder backend, the actual
+software decoder implementation, absolute input video stream, surface
+contract, evidence class, policy revision, source-fact digest, encoder,
+renderer, media options, and output presentation contract. Selection reason
+text is deliberately excluded: two routes that resolve to the same byte
+contract may reuse one artifact.
+
+Attempt-local values live in a validated `TranscodeExecution`. Source and
+output paths, resume position, start number, pacing, software-thread allowance,
+subtitle sidecar path, force-IDR request, and scratch location affect the
+command invocation but not `plan_digest`. Environment policy is sampled while
+the plan is resolved; command and recipe builders do not reread it, so changing
+the environment after preparation changes neither arguments nor identity.
+
+Recipe format 3 hashes the plan digest beneath the explicit
+`decoder-plan-v1-unqualified` namespace. The version bump makes affected older
+entries and prefixes miss. M3 must add owned diagnostic completion before any
+artifact namespace can claim decoder-health qualification; M2 does not turn
+automatic recovery on.
+
+The three shipping movie builders now consume the plan directly:
+
+| Path | Working-tree binding |
+|---|---|
+| Live HLS | Resolves before cache lookup; an admission-driven encoder change resolves a new complete plan before spawn |
+| Speculative/resumable production | Resolves bound source facts before recipe hash and cache claim, then carries the same plan through every retained part |
+| Offline production | Resolves one plan from retained probe facts before recipe identity and production |
+| Prepublication retry | Prepares the alternate semantic request, resolves the complete alternate plan, then freezes arguments and the plan digest in the retry fingerprint |
+
+Live TV cannot know codec/profile facts until tuner bytes arrive. Its separate
+`LiveTvTranscodePlan` therefore freezes the pre-body contract explicitly:
+software input auto-detection, absolute `0:v:0`, selected encoder, output
+height, thread allowance, and force-IDR policy. The command states
+`-hwaccel none` and stays outside the movie cache namespace rather than
+inventing source facts.
+
+No new compile-time feature gate or hidden runtime enable switch is introduced
+by M2. This milestone changes argument and identity ownership; the Developer
+settings enablement and its safety prerequisites remain M8 work.
+
+### One name per source, however the source was measured
+
+The plan digest binds a `DecodeCacheIdentity` — the catalog row's file id, size
+and mtime, length-prefixed and hashed the one way every producer computes it.
+`Recipe::new` takes the pipeline digest and the plan, and nothing else.
+
+It previously took a `MediaFile` beside the plan and hashed that file's id,
+size and mtime itself, which meant nothing checked that the plan and the file
+described the same title: the constructor took the plan's word for the encode
+and the caller's word for the source. There is now no second source that could
+disagree with the first.
+
+The deeper fault that change closed was in `DecodeFacts`. Its digest included
+the *descriptor fingerprint* — device, inode, ctime — and that digest feeds the
+plan digest, which feeds the recipe hash. Two producers reach the same title by
+different routes: speculative production holds a descriptor, while live and
+offline resolution derive a placeholder identity from the catalog row. The two
+routes fingerprint one file differently, so they computed different plan
+digests and different artifact names for identical work. The speculative
+producer would have filled the cache forever without a single live hit, and the
+symptom is indistinguishable from a cache that is merely cold. The facts digest
+now describes the measured stream only; which stream was selected still changes
+it, and the descriptor does not.
+
+Descriptor continuity survives as a separate question with a separate answer.
+`ResolvedTranscode::observed_source_identity` retains the fingerprint the facts
+were read through, and `ResolvedTranscode::source_binding` records
+`DescriptorBound` or `CatalogRow`. Neither enters the digest: a title measured
+through a held descriptor and the same title measured from its row must name
+one artifact, or the producer and the player stop sharing a cache. What the
+binding governs is trust, not identity.
+
+**Scope limit, stated plainly.** Only the speculative producer currently holds
+a descriptor across measurement and encode; live and offline resolution still
+plan from stored FFprobe JSON and therefore carry `CatalogRow`. M2 does not
+claim otherwise, and nothing in M2 yet refuses a `CatalogRow` plan — the gate
+that must require `DescriptorBound` before a reuse is called health-qualified
+arrives with receipts in M3, together with the qualified artifact namespace.
+Until then every artifact stays in `decoder-plan-v1-unqualified`.
+
+Two regressions hold the key space closed. `an_alternative_plan_cannot_publish_
+or_resume_under_the_failed_plans_key` proves a changed decode route resolves to
+its own plan digest and its own recipe hash, that the successor attempt cannot
+be admitted under the failed producer's name, and that the retry builder
+refuses to carry the plan of the route it is replacing.
+`a_pre_plan_staged_prefix_is_quarantined_by_the_v3_recipe_hash` proves a staged
+prefix written under a pre-plan recipe hash is quarantined rather than
+assembled into the new encode.
+
+### A correction to the plan's own command list
+
+Plan §13 lists `cargo clippy -p plurx-core -p plurxd --all-targets -- -D
+warnings` and its `--no-default-features` sibling. Both are red on the merged
+effort head `f7f98b01` itself, before any M2 change: selecting those two
+packages individually drops the feature unification the workspace build
+provides, so `hiqlite`-gated fixtures in
+`crates/plurx-core/tests/store_contract.rs` and the `live-hls-recovery`
+surfaces in `admission.rs` and `playback_control.rs` become dead code. Measured
+on the untouched M1 clone at `f7f98b01`: 3 dead-code errors for the
+package-selected form and 10 for the no-default-features form.
+
+The repository's own gate is `make lint` — `cargo clippy --workspace
+--all-targets -- -D warnings` (Makefile) — and that is what CI runs. It is
+green on this working tree, as is `make effort-rust-check`. M2 therefore
+records the workspace commands as its lint evidence and does not repair
+unrelated pre-existing dead code to satisfy a package-selected invocation the
+repository does not use. §13's list should be corrected to the workspace form.
+
+**Pending evidence:** the working tree still needs its complete focused Rust
+suite, pinned compile and lint checks, one whole-candidate adversarial review,
+repair of every finding and failed unit test, the Forgejo effort gate, and one
+final full qualification. Until those finish, every M2 statement in this
+section describes implementation state, not a merge-ready receipt.
+
+## M1 exact qualification record
+
+| Field | Evidence |
+|---|---|
+| Exact receipt | `81d46577`: exact mapped history audit 1,387, catalog 24 points / 30 checks / 1,444 audited files, validation 154/154, operations 211/211, formatting, and the pinned all-target workspace compile pass. Runtime repair receipt `bc3c3bee` remains the exact 1,378-history mutation-proof receipt |
+| Rejected full run | M1 head `22ab9c8d` completed 22 checks, failed only `cluster-auth`, and declared 2 skips; its 1,800-second aggregate ceiling expired after replicated Store and live topology passed and while activation was 3/7 |
+| Timeout containment | `81d46577` retains the exact 3,600-second outer ceiling. The runner proves recorded live identities disappeared and reaps only its owned shell. Validation checks may not daemonize, double-fork, or deliberately orphan child sessions; arbitrary detached-session containment is not claimed |
 
 ## M1 explicit plan and bound-fact extraction
 
@@ -51,8 +178,9 @@ single selector validates complete decoder, renderer, encoder, surface, source,
 and presentation semantics before returning a plan. It retains the current
 legacy preference order without making advertised decoder names qualified
 evidence. M1 models a not-yet-consumed MPEG-4/VideoToolbox compatibility
-exclusion independent of container and profile; M2 will make command arguments
-and cache identity consume that rule, so the M1 base behavior is unchanged.
+exclusion independent of container and profile. The M2 working tree makes
+command arguments and cache identity consume that result; qualification is
+still pending.
 
 The daemon collector discovers and fingerprints a configured parser artifact.
 The enforced production boundary requires a self-contained Linux ELF with no
@@ -91,7 +219,8 @@ fail closed. Because M1 only observes facts, its two-second subdeadline logs and
 continues the unchanged legacy production route, and the time spent observing
 is added back to the producer deadline so it cannot consume the legacy FFmpeg
 startup budget. Already assembled output is checked before probing. Command
-construction remains an M2 migration.
+construction is now present in the unqualified M2 working tree described
+above.
 
 Historical first-review focused evidence on M1 code head `cc464663`:
 
@@ -273,21 +402,22 @@ compile pass is claimed.
 The machine-checked inventory is
 [`decoder-selection-m0-inventory.toml`](../tests/playback/decoder-selection-m0-inventory.toml).
 It stores a stable identifier, source file, exact anchor, classification, and
-migration obligation for every row summarized below. The focused inventory
-test fails when an anchor moves, a fourth movie `hls_args` call appears, or a
-direct shipping Live TV FFmpeg command is added or moved without an inventory
-update.
+migration obligation for every row summarized below. Its four HLS-builder rows
+also carry an exact M2 plan anchor and `migrated` state. The focused inventory
+test fails when either generation of anchor moves, a fourth movie `hls_args`
+call appears, or a direct shipping Live TV FFmpeg command is added or moved
+without an inventory update.
 
 The shipping HLS surface has three movie `hls_args` callers and one direct Live
 TV builder. Core calls below `mod tests` are argument regressions, not shipping
 construction paths.
 
-| Caller | Owner | Current purpose | Migration obligation |
+| Caller | Owner | M2 binding | Remaining obligation |
 |---|---|---|---|
-| `PrepublicationTranscodeRetry::build` | `crates/plurxd/src/transcode.rs` | Freezes the one-step retry arguments and fingerprint | Freeze a validated reason-specific alternate plan and one shared budget |
-| `ProducerRunner::produce_into` | `crates/plurxd/src/transcode.rs` | Builds each resumable pre-transcode/offline part | Carry plan identity and health evidence across every part and assembly |
-| `Manager::start_with_audio_offset` | `crates/plurxd/src/transcode.rs` | Builds the live HLS producer command | Resolve once from the held source and use that plan for command, identity, and admission |
-| `live_ffmpeg_command` | `crates/plurxd/src/live_tv.rs` | Builds direct tuner-input HLS without the movie builder | Freeze current arguments, then resolve decoder choice through the same bound plan and health model |
+| `PrepublicationTranscodeRetry::build` | `crates/plurxd/src/transcode.rs` | Accepts the resolved alternate plan and binds its digest into the frozen retry fingerprint | M5 must bind this alternative to the shared recovery budget |
+| `ProducerRunner::produce_into` | `crates/plurxd/src/transcode.rs` | Carries one `ResolvedTranscode` through the recipe and every resumable part command | M3 must attach joined health evidence to part assembly and publication |
+| `Manager::start_with_audio_offset` | `crates/plurxd/src/transcode.rs` | Resolves before lookup and resolves again after an admission-driven encoder change | M3 must gate reusable publication on owned health completion |
+| `live_ffmpeg_command` | `crates/plurxd/src/live_tv.rs` | Consumes a frozen `LiveTvTranscodePlan` with explicit software input decode and absolute video mapping | M3 must replace the current bounded substring latch with selected-stream health evidence |
 
 The media subprocess ownership surface is broader than the three builders.
 The distinction between owner, consumer, and support process is deliberate:

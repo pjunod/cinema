@@ -1,12 +1,16 @@
 version = 1
 
 # Shipping command builders. A new production hls_args call must be added here.
+# M2 keeps the frozen M0 anchor and adds the exact plan-consuming anchor; this
+# lets the same inventory prove that migration did not drop a shipping caller.
 [[surfaces]]
 id = "builder.prepublication_retry"
 kind = "hls_builder"
 source = "crates/plurxd/src/transcode.rs"
 anchor = "impl PrepublicationTranscodeRetry"
 obligation = "freeze the validated alternate plan and shared recovery budget"
+m2_state = "migrated"
+m2_anchor = "fn build(\n        file: &plurx_core::domain::MediaFile,\n        prepared: PreparedTranscodeRetry,\n        plan: &ResolvedTranscode,"
 
 [[surfaces]]
 id = "builder.resumable_part"
@@ -14,6 +18,8 @@ kind = "hls_builder"
 source = "crates/plurxd/src/transcode.rs"
 anchor = "async fn produce_into("
 obligation = "carry plan identity and health evidence through every retained part"
+m2_state = "migrated"
+m2_anchor = "struct PortableProduction<'a> {\n    file: &'a plurx_core::domain::MediaFile,\n    opts: &'a TranscodeOptions,\n    plan: &'a ResolvedTranscode,"
 
 [[surfaces]]
 id = "builder.live_hls"
@@ -21,6 +27,8 @@ kind = "hls_builder"
 source = "crates/plurxd/src/transcode.rs"
 anchor = "async fn start_with_audio_offset("
 obligation = "resolve once from the held source for command, identity, and admission"
+m2_state = "migrated"
+m2_anchor = "let args = transcode::hls_args(&plan, &execution);"
 
 [[surfaces]]
 id = "builder.live_tv_hls"
@@ -28,6 +36,8 @@ kind = "hls_builder"
 source = "crates/plurxd/src/live_tv.rs"
 anchor = "fn live_ffmpeg_command("
 obligation = "freeze direct Live TV HLS arguments and migrate its decoder choice to the same explicit plan"
+m2_state = "migrated"
+m2_anchor = "struct LiveTvTranscodePlan {"
 
 # Process owners and consumers. Support-only subprocesses remain explicit so
 # their success cannot be mistaken for decoded-video producer health.

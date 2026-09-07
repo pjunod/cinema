@@ -13,7 +13,9 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{EffectiveRateControl, Encoder, OutputGrade, Pipeline, SubtitleBurn, ToneMap};
+use super::{
+    EffectiveRateControl, Encoder, OutputGrade, Pipeline, SubtitleBurn, ToneMap, TranscodeOptions,
+};
 use crate::domain::{DolbyVisionFacts, MediaFile};
 
 const MAX_FACT_TOKEN_BYTES: usize = 128;
@@ -21,6 +23,15 @@ const MAX_DECODER_NAME_BYTES: usize = 128;
 
 /// Stable revision of the explicit legacy-preference extraction.
 pub const LEGACY_DECODE_POLICY_REVISION: u32 = 1;
+
+/// Stable serialization contract for [`ResolvedTranscode::plan_digest`].
+/// Changing the meaning or order of any fed field requires a revision bump.
+pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 1;
+
+/// M2 plans deliberately remain outside the future qualified-artifact
+/// namespace. M3 replaces this marker only after owned diagnostic completion
+/// can produce an authenticated health receipt.
+pub const UNQUALIFIED_ARTIFACT_NAMESPACE: &str = "decoder-plan-v1-unqualified";
 
 /// The input decoder family, independent of the output encoder family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -41,6 +52,15 @@ impl DecodeBackend {
             Self::Cuda => "cuda",
             Self::Qsv => "qsv",
             Self::Vaapi => "vaapi",
+        }
+    }
+}
+
+impl DecodeEvidence {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Qualified => "qualified_selection",
+            Self::LegacyUnverified => "legacy_unverified_selection",
         }
     }
 }
@@ -116,6 +136,18 @@ pub enum FrameDomain {
     Vaapi,
     Vulkan,
     OpenCl,
+}
+
+impl FrameDomain {
+    fn name(self) -> &'static str {
+        match self {
+            Self::SystemMemory => "system_memory",
+            Self::Qsv => "qsv",
+            Self::Vaapi => "vaapi",
+            Self::Vulkan => "vulkan",
+            Self::OpenCl => "opencl",
+        }
+    }
 }
 
 /// The validated handoff between the selected decoder and renderer.
@@ -311,6 +343,70 @@ impl DecodeSourceIdentity {
     }
 }
 
+/// Which source a cached artifact belongs to, in the one spelling every
+/// producer can compute.
+///
+/// This is deliberately *not* [`DecodeSourceIdentity`]. That one fingerprints a
+/// held descriptor — device, inode, ctime — and is the right answer to "are the
+/// bytes I probed still the bytes I am about to encode?". It is the wrong answer
+/// to "have we already made this?", because two producers looking at the same
+/// film through different means compute different fingerprints for it. The
+/// speculative producer holds a descriptor; live and offline resolution work
+/// from the catalog row. Keying artifacts on the descriptor fingerprint gives
+/// those paths disjoint key spaces for identical work: the producer fills the
+/// cache forever and playback never hits it — which looks exactly like a cache
+/// that is merely cold, and is the failure this module's header warns about.
+///
+/// So the artifact key uses the catalog's identity — file id, size, mtime —
+/// which every path can compute from the row it already has, and which still
+/// invalidates by mismatch: a replaced file changes size or mtime and simply
+/// stops matching. Descriptor continuity is a separate question, answered
+/// separately, and never mixed into this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecodeCacheIdentity(String);
+
+impl DecodeCacheIdentity {
+    /// The catalog row's identity. Length-prefixed so that adjacent values
+    /// cannot run together into another row's bytes.
+    pub fn from_media_file(file: &MediaFile) -> Self {
+        let mut digest = Sha256::new();
+        for (name, value) in [
+            ("file_id", file.id.to_string()),
+            ("size", file.size.to_string()),
+            ("mtime", file.mtime.to_string()),
+        ] {
+            digest.update((name.len() as u32).to_le_bytes());
+            digest.update(name.as_bytes());
+            digest.update((value.len() as u32).to_le_bytes());
+            digest.update(value.as_bytes());
+        }
+        Self(hex::encode(digest.finalize()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// How a plan's facts were obtained, so that callers can refuse to claim more
+/// than they proved.
+///
+/// Deliberately absent from [`ResolvedTranscode::plan_digest`]: a film measured
+/// through a held descriptor and the same film measured from its catalog row
+/// must name the same artifact, or the producer and the player stop sharing a
+/// cache. What the binding governs is not identity but *trust* — whether a
+/// caller may assert that the bytes it is about to serve are the bytes that
+/// were measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanSourceBinding {
+    /// The facts were read through a descriptor held across the measurement.
+    DescriptorBound,
+    /// The facts came from stored probe output identified by the catalog row.
+    /// Correct for planning; not proof that the file has not since changed.
+    CatalogRow,
+}
+
 /// Already-scanned source metadata that selective on-demand FFprobe output
 /// cannot be trusted to reproduce on every supported build. Its digest enters
 /// both the fact cache key and the resolved fact digest.
@@ -451,6 +547,7 @@ pub struct DecodeFacts {
     hdr_format: Option<String>,
     dolby_vision: DolbyVisionFacts,
     source_identity: DecodeSourceIdentity,
+    binding: PlanSourceBinding,
     facts_digest: String,
 }
 
@@ -473,7 +570,6 @@ struct FactsDigest<'a> {
     dynamic_range: Option<DynamicRangeClass>,
     hdr_format: &'a Option<String>,
     dolby_vision: DolbyVisionFacts,
-    source_identity: &'a DecodeSourceIdentity,
 }
 
 impl DecodeFacts {
@@ -584,7 +680,6 @@ impl DecodeFacts {
             dynamic_range,
             hdr_format: &hdr_format,
             dolby_vision,
-            source_identity: &source_identity,
         };
         let encoded = serde_json::to_vec(&digest_input)
             .map_err(|_| PlanError::InvalidFact("serialization"))?;
@@ -608,6 +703,7 @@ impl DecodeFacts {
             hdr_format,
             dolby_vision,
             source_identity,
+            binding: PlanSourceBinding::CatalogRow,
             facts_digest,
         })
     }
@@ -727,6 +823,19 @@ impl DecodeFacts {
 
     pub fn source_identity(&self) -> &DecodeSourceIdentity {
         &self.source_identity
+    }
+
+    pub fn binding(&self) -> PlanSourceBinding {
+        self.binding
+    }
+
+    /// Mark facts that were read through a descriptor held across the
+    /// measurement. Only the bound collector may say this, and it says it at
+    /// the one place that holds the descriptor.
+    #[must_use]
+    pub fn descriptor_bound(mut self) -> Self {
+        self.binding = PlanSourceBinding::DescriptorBound;
+        self
     }
 
     pub fn facts_digest(&self) -> &str {
@@ -1345,9 +1454,34 @@ pub struct TranscodeMediaOptions {
     pub audio_bitrate_kbps: u32,
     pub audio_index: Option<i64>,
     pub audio_offset_ms: i64,
+    pub input_has_audio: bool,
     pub tone_map: ToneMap,
     pub pipeline: Pipeline,
     pub subtitle_burn: Option<SubtitleBurn>,
+    /// Which source this is, for the artifact key. Semantic, not execution:
+    /// two requests differing only here are two different outputs.
+    pub cache_identity: DecodeCacheIdentity,
+}
+
+impl TranscodeMediaOptions {
+    /// Copy only media semantics from the legacy aggregate. Attempt-local
+    /// paths, positions, pacing, and resource caps stay in execution state.
+    pub fn from_options(source: &MediaFile, options: &TranscodeOptions) -> Self {
+        Self {
+            target_height: options.target_height,
+            video_bitrate_kbps: options.video_bitrate_kbps,
+            effective_rate_control: options.effective_rate_control,
+            audio_channels: options.audio_channels,
+            audio_bitrate_kbps: options.audio_bitrate_kbps,
+            audio_index: options.audio_index,
+            audio_offset_ms: source.audio_offset_ms,
+            input_has_audio: !source.audio_streams.is_empty(),
+            tone_map: options.tone_map,
+            pipeline: options.pipeline,
+            subtitle_burn: options.subtitle_burn.clone(),
+            cache_identity: DecodeCacheIdentity::from_media_file(source),
+        }
+    }
 }
 
 /// Requested semantic pipeline before decode resolution.
@@ -1520,7 +1654,14 @@ pub struct ResolvedTranscode {
     encoder: Encoder,
     options: TranscodeMediaOptions,
     source_facts_digest: String,
+    /// The descriptor fingerprint the facts were read through. Carried for
+    /// continuity checks, never for identity — see
+    /// [`ResolvedTranscode::observed_source_identity`].
+    source_identity: DecodeSourceIdentity,
+    source_binding: PlanSourceBinding,
     output_contract: PresentationContract,
+    input_dynamic_range: Option<DynamicRangeClass>,
+    routing_dynamic_range: Option<String>,
 }
 
 impl ResolvedTranscode {
@@ -1542,6 +1683,255 @@ impl ResolvedTranscode {
 
     pub fn output_contract(&self) -> &PresentationContract {
         &self.output_contract
+    }
+
+    pub fn input_dynamic_range(&self) -> Option<DynamicRangeClass> {
+        self.input_dynamic_range
+    }
+
+    pub fn input_dynamic_range_name(&self) -> Option<&'static str> {
+        self.input_dynamic_range.map(DynamicRangeClass::name)
+    }
+
+    pub fn input_is_hdr(&self) -> bool {
+        self.input_dynamic_range
+            .is_some_and(DynamicRangeClass::is_hdr)
+    }
+
+    pub fn routing_dynamic_range(&self) -> Option<&str> {
+        self.routing_dynamic_range.as_deref()
+    }
+
+    pub fn plan_version(&self) -> u32 {
+        RESOLVED_TRANSCODE_PLAN_VERSION
+    }
+
+    /// Content-stable identity for the complete validated semantic plan.
+    /// Length-prefixed fields prevent adjacent values from colliding, while
+    /// explicit spellings keep this independent of Rust debug output.
+    pub fn plan_digest(&self) -> String {
+        let mut digest = Sha256::new();
+        let mut feed = |name: &str, value: &[u8]| {
+            digest.update((name.len() as u32).to_le_bytes());
+            digest.update(name.as_bytes());
+            digest.update((value.len() as u32).to_le_bytes());
+            digest.update(value);
+        };
+        feed(
+            "plan_version",
+            RESOLVED_TRANSCODE_PLAN_VERSION.to_string().as_bytes(),
+        );
+        feed(
+            "artifact_namespace",
+            UNQUALIFIED_ARTIFACT_NAMESPACE.as_bytes(),
+        );
+        feed("decode_backend", self.decode.backend.name().as_bytes());
+        feed(
+            "software_decoder",
+            self.decode
+                .software_decoder
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        feed(
+            "input_video_stream",
+            self.decode.input_video_stream.to_string().as_bytes(),
+        );
+        feed("decode_evidence", self.decode.evidence.name().as_bytes());
+        feed(
+            "decode_policy_revision",
+            self.decode.policy_revision.to_string().as_bytes(),
+        );
+        let surface = &self.decode.surface;
+        feed("decode_domain", surface.decode_domain.name().as_bytes());
+        feed(
+            "decoder_download_format",
+            surface
+                .decoder_download_format
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        feed("renderer_domain", surface.renderer_domain.name().as_bytes());
+        feed(
+            "renderer_upload_format",
+            surface
+                .renderer_upload_format
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        feed(
+            "renderer_download_format",
+            surface
+                .renderer_download_format
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        feed(
+            "encoder_upload_domain",
+            surface
+                .encoder_upload_domain
+                .map(FrameDomain::name)
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        feed(
+            "encoder_upload_format",
+            surface
+                .encoder_upload_format
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        feed(
+            "required_side_data",
+            if surface.required_side_data {
+                b"1"
+            } else {
+                b"0"
+            },
+        );
+        feed("encoder", self.encoder.label().as_bytes());
+        let options = &self.options;
+        feed("height", options.target_height.to_string().as_bytes());
+        feed(
+            "video_bitrate",
+            options.video_bitrate_kbps.to_string().as_bytes(),
+        );
+        feed(
+            "rate_control",
+            options.effective_rate_control.recipe_value().as_bytes(),
+        );
+        feed(
+            "audio_channels",
+            options.audio_channels.to_string().as_bytes(),
+        );
+        feed(
+            "audio_bitrate",
+            options.audio_bitrate_kbps.to_string().as_bytes(),
+        );
+        feed(
+            "audio_index",
+            options.audio_index.unwrap_or(-1).to_string().as_bytes(),
+        );
+        feed(
+            "audio_offset_ms",
+            options.audio_offset_ms.to_string().as_bytes(),
+        );
+        feed(
+            "input_has_audio",
+            if options.input_has_audio { b"1" } else { b"0" },
+        );
+        feed(
+            "tone_map",
+            match options.tone_map {
+                ToneMap::Zscale => b"zscale",
+                ToneMap::Libplacebo => b"libplacebo",
+                ToneMap::Tonemapx => b"tonemapx",
+                ToneMap::None => b"none",
+            },
+        );
+        feed("renderer", options.pipeline.name().as_bytes());
+        let subtitle = match options.subtitle_burn.as_ref() {
+            None => "none".to_owned(),
+            Some(subtitle) => format!(
+                "{}:{}",
+                subtitle.subtitle_index,
+                if subtitle.bitmap { "bitmap" } else { "text" }
+            ),
+        };
+        feed("subtitle", subtitle.as_bytes());
+        feed("source_facts", self.source_facts_digest.as_bytes());
+        feed(
+            "source_cache_identity",
+            options.cache_identity.as_str().as_bytes(),
+        );
+        let presentation = &self.output_contract;
+        feed("output_grade", presentation.output_grade.name().as_bytes());
+        feed("output_codec", presentation.output_codec.as_bytes());
+        feed("output_encoder", presentation.output_encoder.as_bytes());
+        feed(
+            "output_profile",
+            presentation
+                .output_profile
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        feed(
+            "output_pixel_format",
+            presentation.output_pixel_format.as_bytes(),
+        );
+        feed(
+            "output_dynamic_range",
+            presentation.output_dynamic_range.as_bytes(),
+        );
+        feed("output_transfer", presentation.output_transfer.as_bytes());
+        feed("output_matrix", presentation.output_matrix.as_bytes());
+        feed("output_primaries", presentation.output_primaries.as_bytes());
+        feed(
+            "output_width_rule",
+            match presentation.width_rule {
+                OutputWidthRule::PreserveAspectEven => b"preserve_aspect_even",
+            },
+        );
+        feed(
+            "requested_max_height",
+            presentation.requested_max_height.to_string().as_bytes(),
+        );
+        feed(
+            "effective_width",
+            presentation
+                .effective_width
+                .unwrap_or(0)
+                .to_string()
+                .as_bytes(),
+        );
+        feed(
+            "effective_height",
+            presentation
+                .effective_height
+                .unwrap_or(0)
+                .to_string()
+                .as_bytes(),
+        );
+        feed(
+            "subtitle_rendering",
+            match presentation.subtitle_rendering {
+                SubtitleRendering::None => b"none",
+                SubtitleRendering::TextBurn => b"text_burn",
+                SubtitleRendering::BitmapBurn => b"bitmap_burn",
+            },
+        );
+        hex::encode(digest.finalize())
+    }
+
+    pub fn artifact_namespace(&self) -> &'static str {
+        UNQUALIFIED_ARTIFACT_NAMESPACE
+    }
+
+    /// Which source the artifact this plan names belongs to.
+    pub fn cache_identity(&self) -> &DecodeCacheIdentity {
+        &self.options.cache_identity
+    }
+
+    /// The descriptor this plan's facts were read through, when they were read
+    /// through one. Deliberately absent from [`Self::plan_digest`]: it answers
+    /// "are these still the bytes I measured?", not "is this the same output?".
+    /// Callers that hold a source must check it before trusting the plan;
+    /// callers that hold none must fail closed rather than assume.
+    pub fn observed_source_identity(&self) -> &DecodeSourceIdentity {
+        &self.source_identity
+    }
+
+    /// How this plan's facts were obtained. A caller that must prove the bytes
+    /// it serves are the bytes that were measured requires
+    /// [`PlanSourceBinding::DescriptorBound`] and fails closed otherwise.
+    pub fn source_binding(&self) -> PlanSourceBinding {
+        self.source_binding
     }
 }
 
@@ -1803,7 +2193,11 @@ pub fn resolve_transcode(
         encoder: request.encoder,
         options,
         source_facts_digest: facts.facts_digest.clone(),
+        source_identity: facts.source_identity.clone(),
+        source_binding: facts.binding,
         output_contract,
+        input_dynamic_range: facts.dynamic_range,
+        routing_dynamic_range: facts.routing_dynamic_range().map(str::to_owned),
     })
 }
 
