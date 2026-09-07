@@ -8823,6 +8823,9 @@ pub enum PretranscodeProduceOutcome {
     StoreUnavailable,
     PolicyChanged,
     SourceChanged,
+    /// Produced and served, refused durable retention by its health receipt.
+    /// Terminal: the same plan on the same source reaches the same decoder.
+    HealthRefused,
 }
 
 /// A validated, zero-origin portable package request. Native subtitles are a
@@ -8854,6 +8857,13 @@ pub enum OfflineProduceOutcome {
     StoreUnavailable,
     PolicyChanged,
     SourceChanged,
+    /// The generation was produced and served, and refused durable retention
+    /// because its producer health receipt does not permit reuse.
+    ///
+    /// A terminal answer, not a yield. The same plan on the same source will
+    /// reach the same decoder and produce the same refused receipt, so a caller
+    /// that retried this would re-encode the title forever.
+    HealthRefused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -9935,10 +9945,28 @@ fn is_pretranscode_part_path(path: &str) -> bool {
 pub(crate) const ASSEMBLED_DIR: &str = "assembled";
 pub(crate) const ASSEMBLED_TEMP_DIR: &str = ".assembled.tmp";
 
+/// Adopt an assembly an earlier pass already placed, if it is *this* set of
+/// parts' assembly.
+///
+/// The tie is the playlist. `publish_from` writes exactly the bytes
+/// `crate::produce::assemble` produces, so a byte-equal playlist means these
+/// parts, in this order, with these durations — and the assembled segments are
+/// hard links to their bytes. When it matches, the parts' own receipts describe
+/// the assembled bytes and the caller's settled health is the generation's.
+///
+/// When it does not, the assembly was built from something else and this pass
+/// can certify nothing about it, so the receipt is dropped. Getting this wrong
+/// in the safe-looking direction is expensive: a long film is assembled and
+/// then re-hashed for its manifest, and that hash can yield. Refusing to carry
+/// the receipt across that yield would make the next pass adopt a receipt-less
+/// assembly and, under the qualified identity, refuse the film permanently —
+/// the very outcome the per-part records exist to prevent.
 async fn assembled_publication(
     directory: &plurx_core::fs_secure::SecureDirectory,
-    parts: usize,
+    parts: &[crate::produce::Part],
+    health: Option<crate::decoder_health::ProducerHealthReceipt>,
 ) -> Option<Published> {
+    let expected = crate::produce::assemble(parts);
     let bytes = directory
         .read_bounded_child(
             "index.m3u8",
@@ -9962,15 +9990,21 @@ async fn assembled_publication(
         }
         measured = measured.saturating_add(metadata.identity.size.min(i64::MAX as u64) as i64);
     }
+    if playlist != expected.playlist {
+        // Not this set of parts' assembly. The bytes may still be a perfectly
+        // good generation, so it is still adopted — but nothing this pass
+        // observed describes them.
+        tracing::info!(
+            "adopting an assembled generation that these parts did not produce; \
+             it carries no producer health receipt"
+        );
+    }
     Some(Published {
         bytes: measured,
         duration_ms: parsed.duration_ms(),
         segments: parsed.segments.len(),
-        parts,
-        // A generation an earlier pass already assembled. Its parts may be
-        // gone and its diagnostics certainly are, so this pass has nothing to
-        // certify it with and says so.
-        health: None,
+        parts: parts.len(),
+        health: health.filter(|_| playlist == expected.playlist),
     })
 }
 
@@ -9980,6 +10014,58 @@ async fn assembled_publication(
 /// placement boundary leaves only `.assembled.tmp`, which the retry rebuilds;
 /// the numbered parts remain the authoritative encode checkpoint until the
 /// final generation is durably settled.
+/// Release a claim this pass took and will not settle.
+///
+/// A queue-fenced production does not own an unfenced claim row, so it has
+/// nothing to release; every other path does.
+async fn forget_unfenced_claim_with(
+    store: &dyn Store,
+    hash: &str,
+    node_id: &str,
+    publication_fence: Option<&PublicationFence>,
+) {
+    match publication_fence {
+        Some(fence) => {
+            let _ = PublicationStore::fenced(store, fence.clone())
+                .forget_cache_entry(hash, node_id, "local")
+                .await;
+        }
+        None => {
+            let _ = store.forget_cache_entry(hash, node_id, "local").await;
+        }
+    }
+}
+
+/// Whether a generation may be kept, or reused, under this plan's identity.
+///
+/// One rule for both directions, and it reads the *manifest* rather than any
+/// in-memory value, because the manifest is what a future request will have to
+/// re-read. A receipt that exists only in this process cannot certify anything
+/// tomorrow, so under the qualified identity a generation with no manifest is
+/// refused exactly as one whose receipt refuses itself is.
+///
+/// The unqualified identity keeps its present behaviour exactly: it never
+/// asked for a receipt and it still does not.
+///
+/// There is deliberately no third case for "old artifact, be lenient".
+/// Relabelling an artifact that predates the contract as health-qualified is
+/// what separate namespaces exist to make impossible, and a leniency here
+/// would put it straight back.
+fn generation_permits_reuse(
+    plan: &ResolvedTranscode,
+    manifest: Option<&plurx_core::transcode::manifest::GenerationManifest>,
+) -> bool {
+    if !plan.enforces_receipt() {
+        return true;
+    }
+    manifest.is_some_and(|manifest| {
+        manifest
+            .producer_health
+            .as_ref()
+            .is_some_and(plurx_core::transcode::health::ProducerHealthReceipt::permits_reuse)
+    })
+}
+
 /// Everything this pass knows about the health of one generation.
 ///
 /// Not "one receipt per part". Every producer attempt made toward the
@@ -10062,7 +10148,7 @@ async fn publish_from(
     health: Option<crate::decoder_health::ProducerHealthReceipt>,
 ) -> Result<Option<Published>, String> {
     if let Ok(generation) = temp.open_child_directory(ASSEMBLED_DIR).await {
-        if let Some(published) = assembled_publication(&generation, parts.len()).await {
+        if let Some(published) = assembled_publication(&generation, parts, health.clone()).await {
             // An assembly an earlier pass already placed. Whatever this pass
             // observed, it observed while making parts — not these bytes — so
             // the receipt it was handed is dropped rather than attached to
@@ -10306,6 +10392,14 @@ pub struct TranscodeManager {
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
+    /// Which artifact identity this node currently plans into.
+    ///
+    /// Published rather than read per plan, for the same reason the rate
+    /// control is: it decides an artifact's name, and a name that changed
+    /// between a claim and its settlement would settle one identity's bytes
+    /// under another's key. A change to it is a policy generation change, which
+    /// is the mechanism this producer already has for exactly that.
+    artifact_qualification: std::sync::RwLock<plurx_core::transcode::ArtifactQualification>,
     /// Serializes probe → durable settings → publication. Without this, two
     /// concurrent admin PUTs can leave the store describing one request and
     /// the in-memory effective snapshot describing the other.
@@ -10640,6 +10734,9 @@ impl TranscodeManager {
             runtime_cache,
             subtitle_cache,
             rate_control: std::sync::RwLock::new(RateControlSnapshot::bitrate(caps.quality_rc)),
+            artifact_qualification: std::sync::RwLock::new(
+                plurx_core::transcode::ArtifactQualification::Unqualified,
+            ),
             rate_control_update: Mutex::new(()),
             caps,
             decoders: Vec::new(),
@@ -11467,7 +11564,8 @@ impl TranscodeManager {
         )
         .map_err(|error| format!("decoder capability snapshot is invalid: {error}"))?;
         let compatibility = std::env::var("PLURX_HWDECODE").ok();
-        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref());
+        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
+            .qualifying_artifacts(self.artifact_qualification());
         transcode::resolve_transcode(
             &TranscodeRequest::new(encoder, TranscodeMediaOptions::from_options(file, options)),
             facts,
@@ -13180,7 +13278,12 @@ impl TranscodeManager {
                 PretranscodeProduceOutcome::Yielded
                 | PretranscodeProduceOutcome::StoreUnavailable
                 | PretranscodeProduceOutcome::PolicyChanged
-                | PretranscodeProduceOutcome::SourceChanged => None,
+                | PretranscodeProduceOutcome::SourceChanged
+                // Speculative warming has nothing to settle: it holds no queue
+                // row and no package. The bytes were served if anyone was
+                // waiting and are gone; there is nothing to report but the
+                // absence of a warmed entry.
+                | PretranscodeProduceOutcome::HealthRefused => None,
             },
         )
     }
@@ -13344,6 +13447,7 @@ impl TranscodeManager {
                 OfflineProduceOutcome::StoreUnavailable => {
                     PretranscodeProduceOutcome::StoreUnavailable
                 }
+                OfflineProduceOutcome::HealthRefused => PretranscodeProduceOutcome::HealthRefused,
                 OfflineProduceOutcome::Cached(_)
                 | OfflineProduceOutcome::Yielded
                 | OfflineProduceOutcome::ClaimedElsewhere => PretranscodeProduceOutcome::Yielded,
@@ -13470,7 +13574,7 @@ impl TranscodeManager {
         let PortableProduction {
             file,
             opts,
-            plan: _,
+            plan,
             deadline,
             yield_to_offline: _,
             cancelled,
@@ -13563,6 +13667,28 @@ impl TranscodeManager {
             } else {
                 None
             };
+            if !generation_permits_reuse(plan, manifest.as_deref()) {
+                // Unreachable while the retention rule below holds, because a
+                // row under this identity is only ever written for a
+                // generation whose receipt permitted it, and the namespace
+                // names the receipt version so a build that cannot read one
+                // never computes this key. Reaching it means that invariant is
+                // broken.
+                //
+                // Terminal rather than `Err`, and that distinction is the
+                // whole point: `Err` is retryable in both callers, so a
+                // condition stored on disk would be retried on a backoff
+                // forever and reported to a user as an encoder fault. It also
+                // does not invalidate — deleting bytes and failing dependent
+                // packages over a bookkeeping fault is the trade this rule
+                // exists to refuse.
+                tracing::error!(
+                    recipe = %hash,
+                    namespace = plan.artifact_namespace(),
+                    "a health-qualified cache row has no receipt permitting its reuse"
+                );
+                return Ok(OfflineProduceOutcome::HealthRefused);
+            }
             let playlist_bytes = match &manifest {
                 Some(manifest) => manifest
                     .read_verified_playlist(&root, "index.m3u8")
@@ -13962,6 +14088,54 @@ impl TranscodeManager {
             .rename_child_to(ASSEMBLED_DIR, final_parent, identity)
             .await
             .map_err(|error| format!("publishing {}: {error}", final_dir.display()))?;
+        // The same rule, applied before any write that would let a future
+        // request find these bytes. The session that asked for them already
+        // has them: the generation is assembled and renamed into place above,
+        // and refusing here declines to *keep* it, never to serve it.
+        //
+        // It reads the manifest, so the paths that publish none — speculative
+        // warming and offline preparation — retain nothing under the qualified
+        // identity even when their own receipt was clean. That is the honest
+        // state rather than a gap papered over: a receipt this process never
+        // wrote down cannot certify the bytes to whatever reads them next.
+        if !generation_permits_reuse(plan, manifest.as_ref()) {
+            tracing::warn!(
+                recipe = %hash,
+                namespace = plan.artifact_namespace(),
+                manifest = manifest.is_some(),
+                qualification = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.producer_health.as_ref())
+                    .map_or("absent", |receipt| receipt.qualification.name()),
+                terminal_fault = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.producer_health.as_ref())
+                    .and_then(|receipt| receipt.terminal_fault)
+                    .map(crate::decoder_health::DecodeFaultKind::name),
+                "refusing to retain a generation whose producer health receipt does not permit reuse"
+            );
+            let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
+            drop(publication_guard);
+            let _ = quarantine_remove_cache_tree(&temp, 3).await;
+            // The same cleanup the failure arm does, and for a sharper reason.
+            // A refused generation leaves the `complete = 0` claim behind
+            // unless this runs, and that claim is not merely litter: the next
+            // request for this recipe cannot claim it, finds no staging tree
+            // to resume, and stands down as `ClaimedElsewhere` — while
+            // `stale_cache_claims` refuses to reap a claim whose package is
+            // still queued. The package holds the claim and the claim holds
+            // the package, forever.
+            if pretranscode_fence.is_none() {
+                forget_unfenced_claim_with(
+                    self.store.as_ref(),
+                    &hash,
+                    &cache.node_id,
+                    publication_fence.as_ref(),
+                )
+                .await;
+            }
+            return Ok(OfflineProduceOutcome::HealthRefused);
+        }
         if let (Some(fence), Some(manifest)) = (pretranscode_fence.as_ref(), manifest.as_ref()) {
             if let Some(expected) = expected_policy_generation.as_deref() {
                 if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
@@ -14105,7 +14279,9 @@ impl TranscodeManager {
             .try_fold(0_i64, |total, part| total.checked_add(part.duration_ms()))
             .ok_or("retained transcode duration overflow")?;
         if let Ok(assembled) = temp.open_child_directory(ASSEMBLED_DIR).await {
-            if let Some(published) = assembled_publication(&assembled, parts.len()).await {
+            if let Some(published) =
+                assembled_publication(&assembled, &parts, generation_health.settle()).await
+            {
                 tracing::info!(
                     recipe = %hash,
                     segments = published.segments,
@@ -15607,6 +15783,37 @@ impl TranscodeManager {
             .flatten()
             .unwrap_or_default();
         self.caps.choose(&prefer)
+    }
+
+    /// The artifact identity this node plans into right now.
+    pub fn artifact_qualification(&self) -> plurx_core::transcode::ArtifactQualification {
+        *self
+            .artifact_qualification
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Publish the effective artifact identity.
+    ///
+    /// Test-only, and that is the sequencing rather than an omission. The
+    /// operator setting, the node effective-mode intersection and the
+    /// `Settings > Developer` control land together with the paths that cannot
+    /// yet publish a manifest, so a control that rotates a fleet's key space
+    /// never exists before everything behind it works. What is here is the
+    /// enforcement that control will select, complete and exercised.
+    #[cfg(test)]
+    pub(crate) fn test_publish_artifact_qualification(
+        &self,
+        qualification: plurx_core::transcode::ArtifactQualification,
+    ) {
+        *self
+            .artifact_qualification
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = qualification;
+        tracing::info!(
+            namespace = qualification.namespace(),
+            "published the effective artifact identity"
+        );
     }
 
     fn rate_control_snapshot(&self) -> RateControlSnapshot {
@@ -27104,7 +27311,16 @@ pub(crate) mod tests {
             "an empty resumable segment must not become a checkpoint"
         );
         assert!(
-            assembled_publication(&capability, 1).await.is_none(),
+            assembled_publication(
+                &capability,
+                &[crate::produce::Part {
+                    segments: vec!["seg00000.ts".to_owned()],
+                    durations_ms: vec![2_000],
+                }],
+                None
+            )
+            .await
+            .is_none(),
             "an empty assembled segment must not become a published generation"
         );
     }
@@ -37856,12 +38072,45 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_adopted_assembly_never_inherits_this_pass_receipt() {
-        // The trap this test exists for: `publish_from` returns early when an
-        // earlier pass already placed the assembly, and the receipt it was
-        // handed describes parts, not those bytes. Attaching it there would
-        // certify an artifact from an observation of different work — the
-        // exact substitution the whole effort refuses.
+    async fn adopting_this_pass_parts_own_assembly_keeps_their_receipt() {
+        // The case that makes long films certifiable at all. Assembling a film
+        // and then hashing it for its manifest is preemptible, so a pass can
+        // leave a finished assembly behind and yield. If the next pass adopted
+        // it without a receipt, every film long enough to be interrupted there
+        // would be refused permanently under the qualified identity — the exact
+        // failure the per-part records exist to prevent, reached one step
+        // later.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let parts = vec![
+            write_health_part(&temp, 0, 2).await,
+            write_health_part(&temp, 1, 1).await,
+        ];
+        let receipt = health_receipt(crate::decoder_health::Qualification::Qualified);
+        publish_from(&temp, &parts, Some(receipt.clone()))
+            .await
+            .expect("first publish")
+            .expect("assembled generation");
+
+        let assembled = temp
+            .open_child_directory(ASSEMBLED_DIR)
+            .await
+            .expect("assembled directory");
+        let adopted = assembled_publication(&assembled, &parts, Some(receipt.clone()))
+            .await
+            .expect("adopted generation");
+        assert_eq!(adopted.segments, 3);
+        assert_eq!(adopted.health, Some(receipt));
+    }
+
+    #[tokio::test]
+    async fn an_assembly_these_parts_did_not_produce_carries_no_receipt() {
+        // The tie is the playlist, because `publish_from` writes exactly the
+        // bytes `assemble` produces. A generation assembled from something
+        // else is still adopted — the bytes may be perfectly good — but
+        // nothing this pass observed describes them.
         let directory = crate::test_tempdir().expect("staging");
         let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
             .await
@@ -37871,20 +38120,29 @@ pub(crate) mod tests {
             .await
             .expect("first publish")
             .expect("assembled generation");
-        let adopted = publish_from(
-            &temp,
-            &parts,
+
+        let assembled = temp
+            .open_child_directory(ASSEMBLED_DIR)
+            .await
+            .expect("assembled directory");
+        // The same segments, described by a part list that is not the one that
+        // made them.
+        let mistaken = vec![crate::produce::Part {
+            segments: vec!["seg00000.ts".to_owned(), "seg00001.ts".to_owned()],
+            durations_ms: vec![1_000, 2_500],
+        }];
+        let adopted = assembled_publication(
+            &assembled,
+            &mistaken,
             Some(health_receipt(
                 crate::decoder_health::Qualification::Qualified,
             )),
         )
         .await
-        .expect("adopting publish")
         .expect("adopted generation");
-        assert_eq!(adopted.segments, 2);
         assert_eq!(
             adopted.health, None,
-            "an assembly this pass did not place carries no receipt from it"
+            "a receipt describes the parts it was settled over, not whatever is on disk"
         );
     }
 
@@ -38198,5 +38456,253 @@ pub(crate) mod tests {
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound));
         // And the part reads back as unobserved rather than as anything else.
         assert!(!resumed_health(&temp, &health_plan_digest()).await[0].permits_reuse());
+    }
+
+    // ---- the qualified artifact identity's receipt contract -----------------
+
+    fn generation_manifest_with(
+        health: Option<crate::decoder_health::ProducerHealthReceipt>,
+    ) -> plurx_core::transcode::manifest::GenerationManifest {
+        plurx_core::transcode::manifest::GenerationManifest {
+            format_version: 1,
+            generation_id: "generation-under-test".to_owned(),
+            object_count: 1,
+            objects: vec![plurx_core::transcode::manifest::GenerationObject {
+                name: "index.m3u8".to_owned(),
+                bytes: 32,
+                sha256: "a".repeat(64),
+            }],
+            manifest_digest: "b".repeat(64),
+            producer_health: health,
+        }
+    }
+
+    async fn plan_under(
+        qualification: plurx_core::transcode::ArtifactQualification,
+    ) -> (
+        ResolvedTranscode,
+        TranscodeManager,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, work, cache) = cached_manager(&store);
+        mgr.test_publish_artifact_qualification(qualification);
+        let opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let plan = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("resolve plan");
+        (plan, mgr, work, cache)
+    }
+
+    #[tokio::test]
+    async fn the_published_identity_reaches_the_plan_and_renames_the_artifact() {
+        use plurx_core::transcode::{
+            ArtifactQualification, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
+            UNQUALIFIED_ARTIFACT_NAMESPACE,
+        };
+
+        let (unqualified, mgr, _work, _cache) =
+            plan_under(ArtifactQualification::Unqualified).await;
+        assert_eq!(
+            unqualified.artifact_namespace(),
+            UNQUALIFIED_ARTIFACT_NAMESPACE
+        );
+        assert!(!unqualified.enforces_receipt());
+
+        let (qualified, other, _work2, _cache2) =
+            plan_under(ArtifactQualification::HealthQualified).await;
+        assert_eq!(
+            qualified.artifact_namespace(),
+            HEALTH_QUALIFIED_ARTIFACT_NAMESPACE
+        );
+        assert!(qualified.enforces_receipt());
+
+        // Two identities, two artifact names: nothing produced under an
+        // enforced receipt contract can land on a key an unenforced production
+        // could also compute.
+        let digest = mgr.digest().expect("cache configured");
+        let other_digest = other.digest().expect("cache configured");
+        assert_ne!(
+            mgr.effective_recipe(&digest, &unqualified, false).hash(),
+            other
+                .effective_recipe(&other_digest, &qualified, false)
+                .hash()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_unqualified_identity_asks_a_generation_for_nothing() {
+        use plurx_core::transcode::ArtifactQualification;
+
+        let (plan, _mgr, _work, _cache) = plan_under(ArtifactQualification::Unqualified).await;
+        // Every shape, including the ones the qualified identity refuses.
+        assert!(generation_permits_reuse(&plan, None));
+        assert!(generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(None))
+        ));
+        assert!(generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(Some(health_receipt(
+                crate::decoder_health::Qualification::Rejected
+            ))))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_qualified_identity_keeps_only_what_a_written_receipt_permits() {
+        use plurx_core::transcode::ArtifactQualification;
+
+        let (plan, _mgr, _work, _cache) = plan_under(ArtifactQualification::HealthQualified).await;
+
+        // No manifest at all. This is the case the paths that publish none —
+        // speculative warming, offline preparation — land in, and it has to be
+        // a refusal: a receipt this process never wrote down cannot certify
+        // the bytes to whatever reads them next.
+        assert!(!generation_permits_reuse(&plan, None));
+
+        // A manifest that carries no receipt. Every generation published
+        // before receipts existed looks like this, which is exactly why the
+        // qualified identity is a separate key space rather than a flag.
+        assert!(!generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(None))
+        ));
+
+        for refused in [
+            crate::decoder_health::Qualification::Rejected,
+            crate::decoder_health::Qualification::Unqualified,
+        ] {
+            assert!(
+                !generation_permits_reuse(
+                    &plan,
+                    Some(&generation_manifest_with(Some(health_receipt(refused))))
+                ),
+                "{refused:?} must not be kept"
+            );
+        }
+
+        assert!(generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(Some(health_receipt(
+                crate::decoder_health::Qualification::Qualified
+            ))))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_receipt_from_a_version_this_build_does_not_know_is_not_permission() {
+        use plurx_core::transcode::ArtifactQualification;
+
+        let (plan, _mgr, _work, _cache) = plan_under(ArtifactQualification::HealthQualified).await;
+        let mut future = health_receipt(crate::decoder_health::Qualification::Qualified);
+        future.receipt_version = crate::decoder_health::PRODUCER_HEALTH_RECEIPT_VERSION + 1;
+        assert!(!generation_permits_reuse(
+            &plan,
+            Some(&generation_manifest_with(Some(future)))
+        ));
+    }
+
+    /// The retention rule, driven through a real production.
+    ///
+    /// Every other test of it calls the predicate. This one runs the producer:
+    /// a real ffmpeg makes a real generation, the qualified identity refuses to
+    /// keep it because this path publishes no manifest to carry a receipt, and
+    /// the two things that must be true afterwards are checked — nothing is
+    /// left claimed, and nothing is left served.
+    ///
+    /// The claim half is the one worth having. A refusal that quarantined the
+    /// bytes and left the `complete = 0` row behind would deadlock the recipe:
+    /// the next request cannot claim it, finds no staging tree to resume, and
+    /// stands down — while the reaper refuses to collect a claim whose package
+    /// is still queued.
+    #[tokio::test]
+    async fn a_refused_generation_is_neither_kept_nor_left_claimed() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("Refused.mkv");
+        write_real_video(&source, 2);
+        let file_id = seed_real_file(&store, &source).await;
+        let (mgr, _work, cache) = cached_manager(&store);
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        let mgr = Arc::new(mgr);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+
+        let hash = recipe_hash_for(&mgr, &file, 240).await;
+        assert!(
+            mgr.produce(&file, 240, Instant::now() + Duration::from_secs(120))
+                .await
+                .expect("produce")
+                .is_none(),
+            "a generation with no written receipt must not be reported as produced"
+        );
+
+        assert!(
+            store
+                .cache_hit(&hash, NODE)
+                .await
+                .expect("cache lookup")
+                .is_none(),
+            "a refused generation must not be reusable"
+        );
+        assert!(
+            !cache.path().join(&hash[..2]).join(&hash).exists(),
+            "a refused generation must not be left on disk"
+        );
+        // And the claim is released, so the next request for this recipe can
+        // take it rather than standing down against a row nothing will reap.
+        assert!(
+            mgr.store
+                .claim_cache_entry(
+                    &hash,
+                    file.id,
+                    CACHE_RECIPE_VERSION,
+                    NODE,
+                    &format!("{}/{hash}", &hash[..2]),
+                )
+                .await
+                .expect("claim after a refusal"),
+            "a refused production must not leave its claim behind"
+        );
+
+        // The same producer under the identity that asks for nothing keeps its
+        // work, so the assertion above is about the receipt contract and not
+        // about the fixture failing to encode.
+        let (lenient, _work2, lenient_cache) = cached_manager(&store);
+        let lenient = Arc::new(lenient);
+        let lenient_hash = recipe_hash_for(&lenient, &file, 240).await;
+        assert!(
+            lenient
+                .produce(&file, 240, Instant::now() + Duration::from_secs(120))
+                .await
+                .expect("produce")
+                .is_some(),
+            "the unqualified identity keeps what it made"
+        );
+        assert!(lenient_cache
+            .path()
+            .join(&lenient_hash[..2])
+            .join(&lenient_hash)
+            .exists());
     }
 }

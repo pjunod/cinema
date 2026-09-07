@@ -36,7 +36,20 @@ pub const UNQUALIFIED_ARTIFACT_NAMESPACE: &str = "decoder-plan-v1-unqualified";
 /// enforced over them. Nothing under this identity was produced without an
 /// authenticated receipt permitting its reuse, which is the only thing the
 /// name is allowed to mean.
-pub const HEALTH_QUALIFIED_ARTIFACT_NAMESPACE: &str = "decoder-plan-v1-health-qualified";
+///
+/// The receipt schema version is part of the name, and the assertion below is
+/// what keeps it that way. A build that cannot read a receipt refuses to reuse
+/// the artifact carrying it, so if the two could disagree — one namespace,
+/// two receipt versions — a rollback or a mixed-version cluster would find
+/// rows it had produced, could not read, and could not replace: every request
+/// refused, every retry refused the same way, and nothing to remove the row.
+/// Naming the version makes that a key-space change instead, which is the one
+/// shape this effort already knows how to survive.
+pub const HEALTH_QUALIFIED_ARTIFACT_NAMESPACE: &str = "decoder-plan-v1-health-qualified-r1";
+const _: () = assert!(
+    super::health::PRODUCER_HEALTH_RECEIPT_VERSION == 1,
+    "the qualified artifact namespace names the receipt version it can read; bump both together"
+);
 
 /// Which artifact identity a plan's output belongs to.
 ///

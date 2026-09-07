@@ -25,10 +25,16 @@ const TRANSFER_PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 const QUALITY_HEIGHTS: [i64; 4] = [360, 480, 720, 1080];
 const PREPARE_RESULTS: [&str; 3] = ["ok", "failed", "cancelled"];
 const PREPARE_BUCKETS: [u64; 7] = [60, 300, 900, 3_600, 10_800, 21_600, u64::MAX];
-const FAILURE_CODES: [&str; 5] = [
+const FAILURE_CODES: [&str; 6] = [
     "source_unavailable",
     "invalid_track",
     "encoder_failed",
+    // A decode the producer could not certify. Deliberately its own label
+    // rather than folded into `encoder_failed`: the encoder did not fail, and
+    // an operator watching this metric needs to see the difference between a
+    // machine that cannot encode and one whose decoder is producing output
+    // nobody should keep.
+    "decode_unhealthy",
     "subtitle_failed",
     "other",
 ];
@@ -79,7 +85,7 @@ pub(crate) struct OfflineMetrics {
     prepared_media_seconds: AtomicU64,
     prepared_bytes: AtomicU64,
     transfer_bytes: AtomicU64,
-    failures: [AtomicU64; 5],
+    failures: [AtomicU64; FAILURE_CODES.len()],
     cancellations: AtomicU64,
     transfers: Mutex<TransferRegistry>,
 }
@@ -610,6 +616,26 @@ impl OfflineManager {
             | Ok(OfflineProduceOutcome::PolicyChanged)
             | Ok(OfflineProduceOutcome::SourceChanged) => {
                 self.requeue(&package, work_started).await
+            }
+            Ok(OfflineProduceOutcome::HealthRefused) => {
+                // Failed rather than requeued. Retrying reaches the same
+                // decoder on the same source and settles the same refused
+                // receipt, so a requeue here is an encode loop with a
+                // spinner on the end of it. The message says what the user can
+                // act on: the download is not available from this server, and
+                // the reason is the server's, not their connection's.
+                tracing::warn!(
+                    package = %package.id,
+                    "offline preparation refused: the produced generation is not health-qualified"
+                );
+                self.fail(
+                    &package,
+                    "transcoding",
+                    "decode_unhealthy",
+                    "This server could not produce a verified copy of this title for download.",
+                    work_started,
+                )
+                .await;
             }
             Err(error) => {
                 tracing::warn!(package = %package.id, %error, "offline preparation failed");

@@ -32,6 +32,8 @@ M3B_TASK_BASE = "de05be0494d846bc3b77e462505f1d3ecdb21b46"
 M3C1_MERGED_HEAD = "bf75c62cf642ecac7671456aa88e48ed57fd46fd"
 M3C2_MERGED_HEAD = "ff10c2dbfcf74d6e78d51b69378fd40a540b3ff4"
 M3C3_TASK_BASE = M3C2_MERGED_HEAD
+M3C3_MERGED_HEAD = "b602b9f2add7c14861265f7d384c1d9910b0c742"
+M3C4_TASK_BASE = M3C3_MERGED_HEAD
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -176,10 +178,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(f"M3c3 task base:** effort head `{M3C3_TASK_BASE}`", self.flat_status)
+        self.assertIn(f"M3c4 task base:** effort head `{M3C4_TASK_BASE}`", self.flat_status)
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C2_MERGED_HEAD[:8], self.status)
+        self.assertIn(M3C3_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -303,7 +306,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M3c3 candidate; M0–M3c2, M4 and M5a merged into the effort", self.status
+            "M3c4 candidate; M0–M3c3, M4 and M5a merged into the effort", self.status
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
@@ -462,7 +465,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertRegex(contract["id"], r"\A[A-Za-z0-9._-]+\Z")
 
         # The status document does not claim a reader consults one yet.
-        self.assertIn("No reader consults a receipt yet; that is M3c4", self.status)
+        self.assertIn("Nothing selects it in production yet", self.status)
         # And the document does not name two different milestones for it.
         self.assertNotIn("That is M3c3, and it now has something", self.status)
 
@@ -537,11 +540,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             'pub const UNQUALIFIED_ARTIFACT_NAMESPACE: &str = "decoder-plan-v1-unqualified";',
             decode,
         )
+        # The receipt schema version is part of the name; the assertion beside
+        # it is what keeps the two from drifting apart.
         self.assertIn(
             "pub const HEALTH_QUALIFIED_ARTIFACT_NAMESPACE: &str = "
-            '"decoder-plan-v1-health-qualified";',
+            '"decoder-plan-v1-health-qualified-r1";',
             decode,
         )
+        self.assertIn("super::health::PRODUCER_HEALTH_RECEIPT_VERSION == 1", decode)
         # Unqualified is the default, so a fleet that has not turned it on
         # computes the names it always computed.
         qualification = decode.split("pub enum ArtifactQualification {", 1)[1].split(
@@ -583,6 +589,73 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "and so\n  does `verified_cache_hit`, which reads like a reuse decision and is not",
             self.status,
         )
+
+    def test_m3c4_a_refusal_declines_to_keep_and_is_terminal(self) -> None:
+        """Refusing to keep a generation must not refuse to serve it, or loop.
+
+        Two failure modes sit either side of this rule. Route it through
+        invalidation and it deletes bytes and fails a download a user already
+        has; make it a yield and the same plan re-encodes the same title on
+        every discovery pass forever.
+        """
+        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        state = (ROOT / "crates/plurxd/src/state.rs").read_text(encoding="utf-8")
+        offline = (ROOT / "crates/plurxd/src/offline.rs").read_text(encoding="utf-8")
+
+        # One rule, both directions, reading the manifest rather than any
+        # in-memory value.
+        rule = daemon.split("fn generation_permits_reuse(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if !plan.enforces_receipt() {\n        return true;", rule)
+        self.assertIn("manifest.is_some_and(", rule)
+        self.assertIn("producer_health", rule)
+        self.assertIn("permits_reuse", rule)
+        self.assertEqual(daemon.count("generation_permits_reuse(plan,"), 2)
+
+        # The refusal is its own outcome, and it never invalidates.
+        self.assertIn("OfflineProduceOutcome::HealthRefused", daemon)
+        refusal = daemon.split(
+            "if !generation_permits_reuse(plan, manifest.as_ref()) {", 1
+        )[1].split("return Ok(OfflineProduceOutcome::HealthRefused);", 1)[0]
+        self.assertNotIn("invalidate_cache", refusal)
+        self.assertIn("quarantine_remove_cache_tree", refusal)
+
+        # Terminal at every caller: a cancelled queue job with a code that is
+        # not one of the re-enqueueable ones, and a failed package.
+        self.assertIn('cancel_job(self.store.as_ref(), "health_refused"', state)
+        # And the code it cancels with is not one the queue treats as
+        # provisional, which is the difference between a terminal refusal and a
+        # title re-encoded on every discovery pass.
+        enqueue = (ROOT / "crates/plurx-core/src/store/sqlite/pretranscode.rs").read_text(
+            encoding="utf-8"
+        )
+        suppression = enqueue.split("fn enqueue_pretranscode_job", 1)[1][:8000]
+        self.assertIn("policy_changed", suppression)
+        self.assertNotIn("health_refused", suppression)
+        self.assertIn('"decode_unhealthy"', offline)
+        # With its own metric label: the encoder did not fail, and an operator
+        # cannot see that if it is bucketed as `other`.
+        codes = offline.split("const FAILURE_CODES", 1)[1].split("];", 1)[0]
+        self.assertIn('"decode_unhealthy"', codes)
+        health_arm = offline.split("Ok(OfflineProduceOutcome::HealthRefused) => {", 1)[1].split(
+            "\n            }", 1
+        )[0]
+        self.assertNotIn("self.requeue(", health_arm)
+
+        # The qualified namespace names the receipt version it can read, so a
+        # build that cannot read one never computes these keys.
+        decode = CORE_DECODE.read_text(encoding="utf-8")
+        self.assertIn('"decoder-plan-v1-health-qualified-r1"', decode)
+        self.assertIn(
+            "super::health::PRODUCER_HEALTH_RECEIPT_VERSION == 1", decode
+        )
+
+        # Nothing turns it on: the only writer of the effective identity is
+        # test-only until the enable path lands.
+        self.assertIn(
+            "#[cfg(test)]\n    pub(crate) fn test_publish_artifact_qualification(", daemon
+        )
+        self.assertEqual(daemon.count("fn test_publish_artifact_qualification("), 1)
+        self.assertIn("Nothing turns this on", self.status)
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.

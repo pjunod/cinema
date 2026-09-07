@@ -8357,6 +8357,19 @@ impl JobManager {
                     skipped += 1;
                     *reasons.entry("source_changed").or_default() += 1;
                 }
+                Ok(PretranscodeProduceOutcome::HealthRefused) => {
+                    // Cancelled, not yielded, and deliberately not with a
+                    // re-enqueueable error code. The same plan on the same
+                    // source reaches the same decoder and settles the same
+                    // refused receipt, so a job that retried this would
+                    // re-encode the title on every discovery pass forever.
+                    let now_unix_ms = clock_ms();
+                    let _ = fence
+                        .cancel_job(self.store.as_ref(), "health_refused", now_unix_ms)
+                        .await;
+                    skipped += 1;
+                    *reasons.entry("health_refused").or_default() += 1;
+                }
                 Err(error) if crate::transcode::is_retryable_capacity_error(&error) => {
                     let now_unix_ms = clock_ms();
                     let _ = fence
