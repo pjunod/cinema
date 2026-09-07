@@ -404,6 +404,26 @@ a settled contract instead of three guesses.
   add the client state that gates the later retirement. Adding the state first
   produces a protocol change that reads as progress and does nothing.
 
+  **The schema already permits the deferral — checked, 2026-09-07.** This was
+  the thing that could have made the whole approach impossible, and it does
+  not: `media_playback_pointers` is `PRIMARY KEY (user_id, playback_id)` with
+  `current_incarnation_id` UNIQUE, so exactly one incarnation is *current* per
+  playback — but `media_sessions` carries no uniqueness on
+  `(playback_id, state)`. Two sessions may both be `active` for one playback;
+  the pointer, not the state column, is what makes one of them current. A
+  predecessor can therefore stay `active` while the pointer already names the
+  successor, which is exactly the window §4's drain needs. No schema change is
+  required.
+
+  What must be audited before relying on that: every place that reads
+  `state = 'active'` **without** consulting the pointer would see a draining
+  predecessor as a live session. The capacity counters already show both
+  spellings, which is the tell — `sessions.rs:970` excludes the pointer's
+  current incarnation explicitly, while `sessions.rs:446` does not. Any sweep
+  that reaps or takes over by `owner_node_id` + `state = 'active'` needs the
+  same exclusion before a predecessor is allowed to outlive its commit, or
+  recovery will treat a draining stream as one to rescue.
+
 - **The bounded-drain machinery already exists at
   `settle_activation_predecessor`**
   (`http/hls.rs:3083`), bounded by `PREDECESSOR_PROJECTION_FAST_WINDOW` (5 s)
