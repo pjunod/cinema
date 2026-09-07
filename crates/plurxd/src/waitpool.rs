@@ -263,6 +263,22 @@ struct State {
     next_id: u64,
 }
 
+/// How much of the node cap a session that already holds slots may fill.
+///
+/// The remainder is reachable only by a session holding nothing, so a viewer
+/// arriving with no foothold is never refused on behalf of one that already
+/// has several.
+///
+/// An eighth, and at least one slot, because the point is to keep the door
+/// from being shut completely rather than to divide the pool evenly — an
+/// incumbent should still get the great majority of a busy node, since it is
+/// serving a viewer who is already watching. The floor of one general slot
+/// keeps a degenerate cap from locking incumbents out entirely.
+fn general_admission(global_cap: usize) -> usize {
+    let reserve = (global_cap / 8).max(1);
+    global_cap.saturating_sub(reserve).max(1)
+}
+
 impl State {
     /// Release the cap slots one departing waiter held. The waiter itself
     /// must already be out of `waiters`.
@@ -444,11 +460,33 @@ impl WaitPool {
         // the per-session refusal deliberately wins even on a full node, so
         // conflating them would inflate the very number an operator sizes the
         // node cap from.
-        if state.per_session.get(session).copied().unwrap_or(0) >= self.per_session_cap {
+        let held = state.per_session.get(session).copied().unwrap_or(0);
+        if held >= self.per_session_cap {
             self.metrics.refused[WaitRefused::SessionBusy.index()].fetch_add(1, Relaxed);
             return Err(WaitRefused::SessionBusy);
         }
-        if state.total >= self.global_cap.load(Relaxed) {
+        // A session holding nothing may draw on the whole cap; one that
+        // already has a foothold may not take the last of it.
+        //
+        // Admission below the per-session ceiling used to be pure arrival
+        // order, and that is worse than it sounds: a struggling client
+        // retries, so the viewers doing worst compete hardest for slots and
+        // crowd out the ones who would have been fine. A viewer forty minutes
+        // into a film lost to whoever asked first.
+        //
+        // This is a reservation rather than a queue on purpose. Round-robin
+        // is fairer in principle and needs ordering, per-waiter bookkeeping
+        // and a starvation rule; the pathology worth fixing is narrower than
+        // that — a session with slots taking the last slot from a session
+        // with none — and a reservation fixes exactly it, in one comparison,
+        // with no state that can go stale.
+        let global_cap = self.global_cap.load(Relaxed);
+        let ceiling = if held == 0 {
+            global_cap
+        } else {
+            general_admission(global_cap)
+        };
+        if state.total >= ceiling {
             self.metrics.refused[WaitRefused::PoolFull.index()].fetch_add(1, Relaxed);
             return Err(WaitRefused::PoolFull);
         }
@@ -967,9 +1005,30 @@ mod tests {
         );
     }
 
+    /// Two caps bound a viewer and the node, and the last of the node is
+    /// held back for a viewer holding nothing.
+    ///
+    /// This test used to be named `..._but_do_not_share_fairly` and its final
+    /// assertion pinned the gap: a newcomer with no slots at all was refused
+    /// while a session that already had a foothold kept taking room. That was
+    /// honest about the behaviour and the behaviour was wrong.
+    ///
+    /// Why it mattered more than it sounds: admission below the per-session
+    /// ceiling was pure arrival order, and a struggling client retries. So the
+    /// viewers doing worst competed hardest for slots and crowded out the ones
+    /// who would have been fine, and a viewer forty minutes into a film lost
+    /// to whoever asked first.
+    ///
+    /// The reservation is one comparison, not a queue. Round-robin is fairer
+    /// in principle and needs ordering, per-waiter bookkeeping and a
+    /// starvation rule; the pathology worth fixing is narrower — a session
+    /// with slots taking the last slot from a session with none.
     #[test]
-    fn the_two_caps_bound_a_viewer_and_the_node_but_do_not_share_fairly() {
+    fn two_caps_bound_a_viewer_and_the_node_and_the_last_slot_waits_for_a_newcomer() {
+        // Cap 6, so general admission is 5 and one slot is newcomer-only.
         let pool = WaitPool::new(6, 4);
+        assert_eq!(general_admission(6), 5, "one slot of six is held back");
+
         let mut storm = Vec::new();
         for index in 0..4 {
             storm.push(
@@ -989,7 +1048,13 @@ mod tests {
         let _quiet = pool
             .register(key(20), "quiet")
             .expect("a newcomer takes the room the storm could not");
-        let _also = pool.register(key(21), "quiet").expect("and the rest of it");
+
+        // `quiet` now holds one, so it is an incumbent and general admission
+        // is where it stops. The remaining slot is not for it.
+        assert!(
+            matches!(pool.register(key(21), "quiet"), Err(WaitRefused::PoolFull)),
+            "a session that already has a foothold cannot take the last slot"
+        );
 
         // A session at its own ceiling on a node that is also full still
         // hears `SessionBusy`. The per-session bound is the more specific
@@ -1001,17 +1066,53 @@ mod tests {
             ),
             "the per-session refusal is not swallowed by the node being full"
         );
-        // And a viewer holding nothing at all is refused for the node — the
-        // fair-share gap, stated rather than hidden.
+
+        // And the slot that was held back goes to the viewer holding nothing.
+        // This is the assertion that was inverted before.
+        let _third = pool
+            .register(key(22), "third")
+            .expect("a viewer with no slots reaches the reserved one");
+        assert_eq!(pool.len(), 6, "which fills the node exactly");
+
+        // With the node genuinely full, even a newcomer is refused. The
+        // reservation moves who gets the last slot; it does not invent one.
         assert!(
-            matches!(pool.register(key(22), "third"), Err(WaitRefused::PoolFull)),
-            "first-come-first-served: a newcomer with no slots is still refused"
+            matches!(pool.register(key(23), "fourth"), Err(WaitRefused::PoolFull)),
+            "a reservation is not extra capacity",
         );
+
         drop(storm);
         assert!(
-            pool.register(key(23), "third").is_ok(),
+            pool.register(key(24), "fourth").is_ok(),
             "and the room comes back when the storm's requests finish"
         );
+    }
+
+    /// The reserve scales with the cap and never eats it.
+    ///
+    /// A fixed number would be most of a small node and nothing on a large
+    /// one. The floor of one general slot is what keeps a degenerate cap from
+    /// locking incumbents out of their own node entirely — at cap 1 the
+    /// reservation has to be inert, because the alternative is a pool that
+    /// can only ever serve a session's first request.
+    #[test]
+    fn the_reserve_is_a_slice_of_the_cap_with_room_left_for_incumbents() {
+        for (cap, general) in [(1, 1), (2, 1), (8, 7), (64, 56), (256, 224)] {
+            assert_eq!(
+                general_admission(cap),
+                general,
+                "cap {cap} should leave {general} for a session that already \
+                 holds slots",
+            );
+            assert!(
+                general_admission(cap) >= 1,
+                "an incumbent can always hold at least one slot",
+            );
+            assert!(
+                general_admission(cap) <= cap,
+                "the reservation never grants capacity the node does not have",
+            );
+        }
     }
 
     /// A departing session's parked requests leave with it.
