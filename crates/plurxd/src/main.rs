@@ -2,6 +2,7 @@ mod admission;
 mod cachekeep;
 mod copyseg;
 mod decode_facts;
+mod decoder_health;
 mod delivery;
 mod dv_disk;
 mod dvpipe;

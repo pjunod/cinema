@@ -20,9 +20,11 @@ CORE_TRANSCODE = ROOT / "crates/plurx-core/src/transcode/mod.rs"
 CORE_RECIPE = ROOT / "crates/plurx-core/src/transcode/recipe.rs"
 DAEMON_TRANSCODE = ROOT / "crates/plurxd/src/transcode.rs"
 LIVE_TV = ROOT / "crates/plurxd/src/live_tv.rs"
+DECODER_HEALTH = ROOT / "crates/plurxd/src/decoder_health.rs"
 FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M1_EFFORT_BASE = "a8bbe574"
 M2_TASK_BASE = "f7f98b013ffe9dcc5414e25e0b2e505df3e7beb7"
+M3A_TASK_BASE = "773ad4888194ad3b2986b60bd8d1bd4d67595b4a"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -168,7 +170,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"M2 task base:** M1 candidate `{M2_TASK_BASE}`", self.flat_status
+            f"M3a task base:** M2 candidate `{M3A_TASK_BASE}`", self.flat_status
         )
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
@@ -292,20 +294,24 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(surface.get("m2_state"), "migrated")
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
-        self.assertIn(
-            "M2 implementation active; review and qualification pending", self.status
-        )
-        self.assertIn("None for M2", self.status)
+        self.assertIn("M3a candidate; M2 merged into the effort", self.status)
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
             "No new compile-time feature gate or hidden runtime enable switch is "
             "introduced by M2.",
             self.flat_status,
         )
+        # The effort still owes exactly one full qualification; what changed
+        # is where it is owed. `AGENTS.md` puts it on the promotion head, not
+        # on every task candidate, and the deviation is recorded rather than
+        # taken silently.
         self.assertIn(
-            "Run it once only after the whole-PR review findings and focused/unit "
-            "failures are repaired",
-            self.status,
+            "Deferred to the `Main promotion gate`, per `AGENTS.md`", self.status
+        )
+        self.assertIn(
+            "the effort still owes exactly one `make validate-full` on the exact "
+            "promotion head",
+            self.flat_status,
         )
 
     def test_one_artifact_name_per_source_however_it_was_measured(self) -> None:
@@ -395,6 +401,62 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(
             "What the whole-PR review found, and what it changed", self.status
         )
+
+    def test_m3a_grammar_is_the_qualified_one(self) -> None:
+        """The Rust grammar and the M0 harness are one policy, not two.
+
+        Both files hold the same four constants and the same primary-record
+        rule. Nothing but this test stops the Rust copy from drifting away from
+        the numbers and the wording the retained fixtures qualified, and a
+        grammar that has drifted is a grammar that acts on evidence it does not
+        have.
+        """
+        health = DECODER_HEALTH.read_text(encoding="utf-8")
+        for name, value in (
+            ("VIDEO_DECODE_ERROR_WINDOW", "Duration = Duration::from_millis(2_000)"),
+            ("VIDEO_DECODE_ERROR_LIMIT", "usize = 5"),
+            ("DIAGNOSTIC_DRAIN_BUDGET", "Duration = Duration::from_millis(2_000)"),
+            ("MAX_DIAGNOSTIC_LINE_BYTES", "usize = 16 * 1024"),
+            ("AUTOMATIC_PRODUCER_RECOVERY_LIMIT", "u32 = 1"),
+        ):
+            with self.subTest(constant=name):
+                self.assertIn(f"pub const {name}: {value};", health)
+
+        # The message is the harness's literal, matched as a prefix. A
+        # `contains` here is what let a filter-graph failure carrying the
+        # contract's own detail text read as a decode failure.
+        self.assertIn(
+            'const PRIMARY_MESSAGE: &str = "Error submitting packet to decoder:";',
+            health,
+        )
+        self.assertIn(
+            "Error submitting packet to decoder:",
+            self.harness,
+            "the harness and the Rust grammar name the same message",
+        )
+        # Both halves of the stream selector, and every contract field that
+        # changes what a line means.
+        for field in (
+            "ffmpeg_version",
+            "binary_sha256",
+            "buildconf_sha256",
+            "stderr_mode",
+            "input_codec",
+            "decoder",
+        ):
+            with self.subTest(covered_field=field):
+                self.assertIn(f"build.{field}", health)
+        self.assertIn("selected_input", health)
+        self.assertIn("selected_stream", health)
+
+        # No retained contract qualifies a fatal family, so the grammar cannot
+        # emit a backend fault on the builds this repository has evidence for.
+        self.assertNotIn("backend_fault_detail", CONTRACTS.read_text(encoding="utf-8"))
+        self.assertIn("backend_fault_detail", health)
+
+        m3a = self.status.split("## M3a working tree", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("a tolerant structural match", " ".join(m3a.split()))
+        self.assertIn("22/22", m3a)
 
 
 if __name__ == "__main__":

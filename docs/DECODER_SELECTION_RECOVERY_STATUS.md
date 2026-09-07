@@ -1,8 +1,8 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M2 implementation active; review and qualification pending · **Updated:**
-2026-09-06 · **Integration branch:** `effort/decoder-selection-recovery` ·
-**M2 task base:** M1 candidate `f7f98b013ffe9dcc5414e25e0b2e505df3e7beb7`
+**Status:** M3a candidate; M2 merged into the effort · **Updated:**
+2026-09-07 · **Integration branch:** `effort/decoder-selection-recovery` ·
+**M3a task base:** M2 candidate `773ad4888194ad3b2986b60bd8d1bd4d67595b4a`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -19,16 +19,16 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M2 — plan-bound arguments and identity |
-| Task branch | `codex/decoder-selection-m2`, working tree based on `f7f98b01` |
-| Task PR | Not opened. Whole-PR adversarial review, findings repair, focused/unit validation, the Forgejo effort gate, and one final full qualification are pending |
-| M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort, whose head is now `f7f98b01` — the same commit this M2 branch is based on |
+| Milestone | M3a — owned diagnostic observation |
+| Task branch | `codex/decoder-selection-m3a`, based on effort head `773ad488` |
+| Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
+| M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | Working tree on pinned 1.97.1: decoder selector 42/42, core recipe identity 9/9, daemon `decode_facts::tests` 20/20, daemon `transcode::tests` 217/217 including the two new plan-key regressions, both named `live_tv` argument baselines, `make effort-rust-check` (fmt-check plus workspace all-target compile) and `make lint` (workspace Clippy, warnings as errors) clean, `git diff --check` clean. Non-Rust status contract 8/8 and the 73-row inventory contract pass. No exact M2 commit receipt is claimed |
-| Exact receipt | None for M2. The current statements describe an uncommitted working tree, not a reviewed or qualified artifact |
-| Full PR validation | Not run for M2. Run it once only after the whole-PR review findings and focused/unit failures are repaired |
-| Blocker | Finish the M2 implementation, review the whole candidate once, repair its findings, pass focused/unit tests, then qualify and merge the PR |
+| Focused validation | This head on pinned 1.97.1: `decoder_health` 22/22, `make effort-rust-check` (fmt-check plus workspace all-target compile) and `make lint` (workspace Clippy, warnings as errors) clean, `git diff --check` clean, `make history-check` clean. The non-Rust status contract now also pins the Rust grammar's constants and its primary-record rule against the M0 harness |
+| Exact receipt | M2's is `773ad488`, merged. M3a's is the head this PR carries; it is a reviewed and repaired candidate, and the effort gate is what makes it a receipt |
+| Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
+| Blocker | The Forgejo `Effort development gate` on this head. Per `AGENTS.md` a task PR into an effort branch defers the full suite to the `Main promotion gate`; the effort's one `make validate-full` is owed at promotion, not here |
 
 ## Milestones
 
@@ -36,8 +36,8 @@ An unchecked item is not implied by a nearby passing check.
 |---|---|---|
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
-| M2 · arguments and identity use one plan | Active working tree; review and qualification pending | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | Not started | — |
+| M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
+| M3 · owned observation and health receipts | M3a working tree (grammar and accumulator); M3b/M3c not started | The diagnostic grammar, the sliding-window accumulator and the bounded reader exist with their full test suite, replayed against the retained M0 fixtures. Nothing outside those tests calls them yet, by design |
 | M4 · mixed resource admission | Not started | — |
 | M5 · durable budget and prepublication recovery | Not started | — |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -182,6 +182,141 @@ production derivation. Two assertions the recipe suite had dropped during M2
 were restored, and one of them is now stronger than it was: a renderer the
 source cannot feed is refused outright rather than merely given a distinct
 cache entry.
+
+## M3a working tree — deciding whether a decode worked
+
+A producer that emits segments and exits zero is indistinguishable, from
+outside, from one that spent the whole film failing to decode and wrote green
+frames. Both advance the playlist; both finish. The difference was in stderr,
+and stderr was logged and thrown away — which is how a cache can hold a broken
+title indefinitely with every counter reading healthy.
+
+`crates/plurxd/src/decoder_health.rs` is the part that reads it. M3a lands the
+grammar, the accumulator and the bounded reader as one reviewable piece with
+their whole test suite; M3b wires them into the producer. Nothing outside the
+tests calls any of it yet, which is the point of the split — the subtle logic
+gets reviewed on its own, before it is threaded through a 36,000-line file.
+
+### Two tiers, because §7.2 draws the line and the difference is a session
+
+A line with the FFmpeg 8 *shape* — the `vist#<file>:<stream>` and `[dec:…]`
+contexts, the selected stream, the literal message `Error submitting packet to
+decoder:` — is a **structural** primary record. It counts toward the window, it
+latches a fault, and it refuses the attempt's output a cache receipt. It is not
+permission to end a session.
+
+For that the line must additionally match a **versioned diagnostic contract**:
+this FFmpeg version, this binary and buildconf, these log flags, this codec and
+this decoder, the severity label in its right place, the exact detail text after
+the colon, and the context addresses when the contract says those are
+load-bearing. §7.2's words are "a tolerant structural match without that
+external build receipt is observation only", and the accumulator implements them
+literally — `automatic_action_allowed` requires that *every record in the window
+that latched the fault* carried the receipt, not that the attempt saw one
+somewhere.
+
+The retained #913 capture is why the tier exists rather than being a nicety. Its
+records have the shape and name the right stream, but FFmpeg 7.1.4 wrote them
+without severity labels and compressed thirty-six of them into one summary line.
+Replayed, it latches a fault, refuses the cache, and never acts — which is
+exactly the three answers it should give.
+
+Three rules carry the rest, and each exists because of a specific way this could
+report a healthy stream as broken:
+
+**Only the selected video stream counts.** An audio decoder failing, an
+unselected video stream failing, the encoder failing, a *filter graph* failing
+with the contract's own detail text, or a filename containing the word `error`
+all appear in the same stream of text, and none of them is a decode fault on the
+picture being served. Attribution is the full `vist#<file>:<stream>` pair — both
+halves, because a session with an overlay or a concat has a second input and
+`0:0` would then attribute another file's failures to this picture — plus the
+`[dec:…]` context and the message as a literal prefix rather than a search.
+
+**A repeat summary disqualifies the attempt from automatic action, and keeps
+its provenance.** `Last message repeated 8 times` means the log was compressed
+and the timestamps the window is evaluated against are gone. Counting the
+summary as one record understates it; expanding it to eight invents
+observations. Neither is a basis for acting. §7.2 also asks for the summary's
+provenance, so the accumulator keeps the three counts the M0 harness keeps —
+summaries following the selected stream's own failure, summaries following
+something else, and summaries that follow nothing attributable — and the
+retained control fixture places one in all five positions so that a single
+boolean cannot pass for an answer.
+
+**Progress never clears a fault.** The accumulator has no method that clears a
+latch. A decoder that fails and then recovers enough to emit frames is still
+producing a film with holes in it, and the frames arriving afterwards are
+exactly what made this invisible before.
+
+The deployed fleet's FFmpeg 5.1.9 reports `Error while decoding stream #0:0`
+with no decoder context at all, and the retained `unqualified-ffmpeg-5.stderr`
+fixture is replayed as a test asserting it produces no attributed fault — and
+asserting, in the same test, that the fixture really does carry a decode
+failure, so the test cannot be satisfied by a grammar that classifies nothing.
+**That is the honest state of automatic recovery on this fleet: it will observe
+and it will not act, until either the container FFmpeg is upgraded or a 5.1.9
+grammar is qualified against its own retained fixture.**
+
+No contract names a fatal family, and that is deliberate. The one fatal in the
+retained evidence is `Decode error rate 1 exceeds maximum 0.666667` — FFmpeg
+abandoning a corrupt *input*, not a backend that has become unavailable. A
+decoder swap cannot repair a file, so treating it as `DecodeBackendUnavailable`
+would have asked for one. The fatal family is contract-driven
+(`backend_fault_detail`), absent from every retained contract, and therefore
+unreachable on the retained builds; a test asserts that the retained fatal
+classifies as nothing at all.
+
+One defect the suite found on its own: the sliding window held every timestamp
+inside it, so its size was a function of the child's error *rate*. A flood test
+of ten thousand records caught it. Only the newest few can ever matter — if
+five records are in the window then the five most recent are, because the
+window is a suffix in time — so the deque is capped at the limit and memory is
+a function of the parser rather than of the stream.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate. It found six blockers, all in
+this milestone's own work; all are repaired in this head, together with eight of
+its non-blocking findings.
+
+| Finding | Disposition |
+|---|---|
+| `qualifies_reuse` ignored `compressed_log` and `oversized_lines`, so replaying the originating #913 capture certified its output as reusable — the exact artifact this effort exists to stop caching. §7.1 says a truncated or unreadable stream disallows a qualified receipt | Reuse now requires a complete *and* uncompressed observation with no structural record and no fault, and `the_originating_capture_is_diagnosed_and_never_certified_reusable` replays #913 to prove all three answers |
+| `oversized_lines` was counted and never consulted. A child emitting three megabytes without a newline had its tail discarded, and the attempt still reported a complete observation | `note_oversized_line` marks the observation incomplete, as does a lossily-decoded non-UTF-8 line — read for the log, never counted as exact |
+| The primary-error rule was `contains("[error]") && contains(error_detail)`, far looser than the qualified M0 grammar. `[vist#0:0/rawvideo @ …] [dec:rawvideo @ …] [error] Error initializing filters: Invalid data found when processing input` matched it, and five such lines would have latched a fault on a filter-graph failure | The Rust grammar now parses what the harness's regex parses: the bracketed contexts and their addresses, the stream pair, the severity, the literal message prefix, and the detail compared for equality. That exact line is asserted `Unrelated` |
+| `covers_build` compared three of thirteen contract fields, and neither `decoder` nor `stderr_mode` was among them. A contract for `h264` still claimed to cover the build after this effort swapped in `h264_qsv`, whose failures the grammar cannot see — a silent permanent all-clear. `stderr_mode` is the same hazard one level up: without `level` there are no severity labels at all | `covers_build` takes an `ObservedBuild` and compares version, binary, buildconf, log flags, codec and decoder. A table-driven test mutates each field alone and asserts the contract stops covering it |
+| `HealthAccumulator` derived `Default`, and the derived value set `observation_complete: false` — so the idiomatic `HealthAccumulator::default()` M3b would write yields an accumulator that can never qualify and never act, silently | `Default` is hand-written as `Self::new()`, with a test |
+| Any `[fatal]` on the selected stream latched `DecodeBackendUnavailable`, consulting no contract field, and the only fatal in the evidence is an input-corruption fatal | The fatal family is a contract field, absent everywhere in M0. The retained fatal now classifies as `Unrelated`, and a synthetic contract that does name a family proves the latch still works when one is qualified |
+
+Also repaired from the non-blocking set: the repeat marker is anchored rather
+than searched, so `/media/Last message repeated 8 times.mkv` can no longer
+disqualify a title forever; a repeat marker without a bounded count is
+`Malformed` rather than an ordinary line, because reading it as ordinary reports
+a compressed stream as an uncompressed one; the three repeat-provenance counters
+§7.2 asks for are kept instead of one boolean; a fatal no longer inflates
+`primary_error_records`; the `vist#` *file* index is parsed rather than
+hardcoded to `0`; two contracts sharing an id are refused rather than
+first-wins; the fixture-comment branch is gone from the production classifier;
+and `observe` states its monotonic-observation invariant as a `debug_assert`.
+`AUTOMATIC_RECOVERY_LIMIT` is renamed to the plan's
+`AUTOMATIC_PRODUCER_RECOVERY_LIMIT` and its doc corrected to the plan's meaning
+— one per *recovery epoch*, not one per attempt, which is not a budget.
+
+Focused evidence, pinned `rustc 1.97.1`:
+`cargo test -p plurxd --bin plurxd decoder_health` — 22/22, including replays of
+`qualified-ffmpeg-8.stderr` (latches on its fifth record, all five
+contract-qualified, action allowed, reuse refused), `issue-913-legacy.stderr`
+(latches, zero contract-qualified, compressed, no action, reuse refused),
+`tolerant-controls.stderr` (five records, never five at once, never latches),
+`repeat-attribution-controls.stderr` (one selected, two unrelated and two
+ambiguous summaries) and `unqualified-ffmpeg-5.stderr` (no attribution, no
+fault). `make effort-rust-check` and `make lint` clean; `git diff --check`
+clean.
+
+`Cargo.lock` gains one line: `toml` moves from a workspace dependency
+plurx-core already used to one plurxd also declares, for reading the retained
+contract table. No new crate enters the graph.
 
 ### A correction to the plan's own command list
 
@@ -777,7 +912,8 @@ full-base diff. The exact head then passed the full PR suite recorded below.
 | 2026-09-06 | Run qualification through task-scoped `ffmpeg-full` 8.1.2_2 wrappers | The installed full build provides `zscale`; the wrappers add only the retained x265 ABI 216 library path and leave the host installation unchanged |
 | 2026-09-06 | Accept two declared full-suite skips on this Darwin builder | Android device validation requires unavailable `adb`; the two-node Live TV drill is Linux-only. Both remain explicit M8 fleet/client prerequisites rather than passing claims |
 | 2026-09-06 | Reuse warmed cluster targets for the final exact-head suite | The first diagnostic run spent its 1,800-second bound compiling vendor targets. Warm targets change no source or test semantics and let the complete three-node workload run inside the same fixed bound |
-| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact plus kernel isolation for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. The supported path requires memfd seals, `execveat`, Landlock, seccomp-BPF with user notification, `close_range`, pidfds, and a supervised native thread on x86-64 or arm64 Linux; failure is a neutral M1 observation and keeps legacy routing. Other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name these prerequisites rather than hide them behind a code feature gate |
+| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact plus kernel isolation for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. The supported path requires memfd seals, `execveat`, Landlock, seccomp-BPF with user notification, `close_range`, pidfds, and a supervised native thread on x86-64 or arm64 Linux; failure is a neutral M1 observation and keeps legacy routing. Other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name these prerequisites rather than hide them behind a code feature gate || 2026-09-07 | Qualify task PRs with the `Effort development gate` and defer the full suite to the `Main promotion gate` | The plan's per-milestone workflow asks for one `make validate-full` on every task candidate; `AGENTS.md` and `effort-ci.yml` say a task PR into an effort branch runs the development gate and the effort's single full qualification happens at promotion. The repository's own pipeline is what the branch protection enforces, and one full suite per task is fifty minutes of three-node cluster work per milestone with nothing between them to invalidate. Recorded here rather than silently: the effort still owes exactly one `make validate-full` on the exact promotion head |
+| 2026-09-07 | No M0 contract names a fatal decode family | The only fatal in the retained evidence is `Decode error rate 1 exceeds maximum`, which is FFmpeg abandoning a corrupt input rather than a backend becoming unavailable. Labelling it `DecodeBackendUnavailable` would ask M3b to swap decoders for a fault a decoder swap cannot repair, so the family is contract-driven and absent until one is qualified against its own fixture |
 
 ## Validation ledger
 
