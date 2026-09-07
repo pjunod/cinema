@@ -2545,11 +2545,31 @@ mod tests {
     }
 
     #[test]
-    fn recovery_writer_populates_every_required_settings_column() {
-        assert_eq!(
-            RECOVERY_WRITE_SQL,
-            "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)"
-        );
+    fn recovery_writer_sql_executes_against_the_production_settings_shape() {
+        let connection = rusqlite::Connection::open_in_memory().expect("open settings database");
+        connection
+            .execute_batch(
+                "CREATE TABLE settings (\
+                    key TEXT PRIMARY KEY,\
+                    value TEXT NOT NULL,\
+                    updated_at INTEGER NOT NULL\
+                ) STRICT;",
+            )
+            .expect("create production settings shape");
+        connection
+            .execute(
+                RECOVERY_WRITE_SQL,
+                rusqlite::params!["recovery.key", "recovery.value", 1_i64],
+            )
+            .expect("execute recovery writer statement");
+        let stored: (String, i64) = connection
+            .query_row(
+                "SELECT value, updated_at FROM settings WHERE key = 'recovery.key'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read recovery writer row");
+        assert_eq!(stored, ("recovery.value".to_owned(), 1));
     }
 
     #[test]
