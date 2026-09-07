@@ -52,7 +52,7 @@ bump may break compatibility and a **patch** bump never does.
   media-session relay, control and abort a learner ingress originated — and
   every voter refused the learner's. The predicate is now member-scoped for the
   internal peer routes, which is what
-  `docs/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 specified: the committed-voter
+  `docs/cluster/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md` §2 specified: the committed-voter
   predicate belongs to membership mutation alone. Activity aggregation is
   unchanged and stays voter-only at both ends, because its peer directory never
   names a learner. The cluster-check learner scenario now sends an internal
@@ -74,6 +74,21 @@ bump may break compatibility and a **patch** bump never does.
   check, so a web change reaches it without knowing its name.
 
 ### Changed
+
+- **`docs/` has a landing page, and 144 of its 161 root files now live in a
+  subject folder.** Everything written about one piece of work — the plan, its
+  reviews, the handoffs, the status tracker, the diagnoses — sits together in
+  `docs/playback-control/`, `streaming/`, `cluster/`, `clients/`,
+  `performance/`, `ci/`, `features/`, `reviews/` or `archive/`, leaving the
+  eighteen maintained reference documents alone at the root where the README's
+  reading path expects them. [docs/README.md](docs/README.md) is the index:
+  every file, the question it answers, and whether it is live, open, built or
+  done. Nothing was deleted and no document's content changed; every reference
+  to a moved path — in prose, in source comments, in `validation/points.toml`
+  globs and in CI workflows — was rewritten with it, and
+  `tests/operations/test_docs_index.py` now fails the build if a document is
+  added or moved without the index following, or if any link in the repo
+  points at a `docs/` path that does not exist.
 
 - **Activity's Now playing row reads as a card, not a sentence.** The Stream
   cell used to print every session fact it had as one " · "-joined run-on —
@@ -123,18 +138,18 @@ bump may break compatibility and a **patch** bump never does.
 ### Added
 
 - **One routing table now says what every player does with a press.**
-  `docs/UI-NAVIGATION-AUDIT.md` records why the tvOS, Android, and web players
+  `docs/clients/UI-NAVIGATION-AUDIT.md` records why the tvOS, Android, and web players
   diverged — a hidden-chrome directional press that seeks before it reveals, a
   seek bar that shares a row with the buttons and treats horizontal input as
   a seek, three auto-hide state machines, and a different Back precedence per
   client — with every claim anchored to `18886477`.
-  `docs/PLAYER-INPUT-CONTRACT.md` is the rule the three players will be tested against: state
+  `docs/clients/PLAYER-INPUT-CONTRACT.md` is the rule the three players will be tested against: state
   × input → outcome per surface, rendered from
   `tests/playback/player-input-contract.json` by `scripts/player-contract-table`
   and held identical by `tests/playback/player-input-contract.test.js` under
   `make web-check`. The rulings it encodes: hidden chrome reveals and never
   seeks; the 10-foot seek bar is its own row with preview-then-commit; the
-  ±30 s vertical seek is gone. `docs/PLAYER-INPUT-CONTRACT-PLAN.md` sequences
+  ±30 s vertical seek is gone. `docs/clients/PLAYER-INPUT-CONTRACT-PLAN.md` sequences
   the client work (web, Android, Apple, then a validation fence that keeps key
   handling in one adapter file per client). No player behaviour changes in
   this entry.
@@ -2448,7 +2463,7 @@ begin with 0.2.7.
 ### Fixed
 
 - **One frame died at every segment boundary of a 4K HEVC remux.** The
-  investigation is written up in `docs/STUTTER-4K.md`; the shipped fixes,
+  investigation is written up in `docs/streaming/STUTTER-4K.md`; the shipped fixes,
   in order: the copied stream no longer carries in-band parameter sets that
   its `hvc1` tag promises are absent (a spec violation handed to the
   decoder once per segment); a Dolby Vision source sheds its enhancement

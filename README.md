@@ -28,6 +28,10 @@ it is not: plurx is not a DVR.
 
 ## Start here
 
+[docs/README.md](docs/README.md) is the index of everything below: every file
+under `docs/`, the question it answers, and whether it is still live. Start
+there when you know what you are looking for; read on when you don't.
+
 New to the project? Read in this order. [docs/FEATURES.md](docs/FEATURES.md) is
 the shortest answer to *what does this actually do* — the exhaustive inventory,
 including what it deliberately doesn't. Then [docs/OPERATIONS.md](docs/OPERATIONS.md)
@@ -41,27 +45,27 @@ commit, CI, and full depth, and how to add a regression without losing it.
 [docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md) explains the
 effort-branch lane for large projects: compile quickly during task integration,
 then run one complete exact-tree qualification before merging to `main`.
-[docs/HDHOMERUN-LIVE-TV-PLAN.md](docs/HDHOMERUN-LIVE-TV-PLAN.md) is the plan for
+[docs/features/HDHOMERUN-LIVE-TV-PLAN.md](docs/features/HDHOMERUN-LIVE-TV-PLAN.md) is the plan for
 one HDHomeRun tuner as bounded live HLS across the web, Apple, and Android
 clients, with DRM and ATSC 3.0 codec limits stated explicitly, and
-[docs/HDHOMERUN-LIVE-TV-STATUS.md](docs/HDHOMERUN-LIVE-TV-STATUS.md) is what is
+[docs/features/HDHOMERUN-LIVE-TV-STATUS.md](docs/features/HDHOMERUN-LIVE-TV-STATUS.md) is what is
 built versus what is proved: the hardware pass has now run against a real
 HDHomeRun FLEX 4K, ATSC 1.0 plays end to end, and ATSC 3.0 is refused by the
 startup budget rather than by a codec.
-[docs/AGENT-COMPILE-LOOP.md](docs/AGENT-COMPILE-LOOP.md) is its short
+[docs/ci/AGENT-COMPILE-LOOP.md](docs/ci/AGENT-COMPILE-LOOP.md) is its short
 companion for anyone — contributor or coding agent — whose checkout has no
 Rust toolchain: how to put `cargo check`, Clippy and the unit suite ten
 minutes away instead of pushing to find out.
-[docs/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md](docs/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md)
+[docs/cluster/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md](docs/cluster/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md)
 specifies the TLS flush correction, bounded snapshot recovery, and the
 regressions required before the clustering reliability fixes ship.
-[docs/CI_TEST_OVERHAUL_PLAN.md](docs/CI_TEST_OVERHAUL_PLAN.md) records
+[docs/ci/CI_TEST_OVERHAUL_PLAN.md](docs/ci/CI_TEST_OVERHAUL_PLAN.md) records
 the measured failure order, docs-only lane, suite split, and safe rebase-result
 reuse roadmap. Then
 [docs/PLAYBACK.md](docs/PLAYBACK.md) traces the end-to-end path a file takes to
 become a stream — every direct/remux/transcode fork and the per-browser
 transport choice behind it;
-[docs/PLAYBACK-CAPS-V2-PLAN.md](docs/PLAYBACK-CAPS-V2-PLAN.md) is the open
+[docs/streaming/PLAYBACK-CAPS-V2-PLAN.md](docs/streaming/PLAYBACK-CAPS-V2-PLAN.md) is the open
 implementation plan for making that decision negotiate the highest grade a
 device can show — structured capabilities, an HDR10 transcode rung, and
 Dolby Vision Profile 7 → 8.1 conversion on the fly and on disk.
@@ -71,46 +75,46 @@ turns that map into an automated source × quality × operation matrix, with
 Cinema/plurx-vs-Plex A/B suite — identical corpus, separate engine and decoded-
 frame clocks, raw evidence, percentiles, failure rates, and ratio direction —
 and with
-[docs/PGS_OVERLAY_PLAN.md](docs/PGS_OVERLAY_PLAN.md) defining the proposed
+[docs/clients/PGS_OVERLAY_PLAN.md](docs/clients/PGS_OVERLAY_PLAN.md) defining the proposed
 Dolby Vision-safe bitmap-subtitle path and
-[docs/PGS-OVERLAY-M0-FEASIBILITY.md](docs/PGS-OVERLAY-M0-FEASIBILITY.md)
+[docs/clients/PGS-OVERLAY-M0-FEASIBILITY.md](docs/clients/PGS-OVERLAY-M0-FEASIBILITY.md)
 recording the parser, fixture, resource, and physical-device evidence required
 before that path can ship, and with
-[docs/STUTTER-4K.md](docs/STUTTER-4K.md) as the open investigation into the one
+[docs/streaming/STUTTER-4K.md](docs/streaming/STUTTER-4K.md) as the open investigation into the one
 fork that misbehaves: what is already ruled out and the experiment that ruled it
 out, so the next attempt starts where the last one stopped. If you run plurx
 beside monarr,
 [docs/INTEGRATION.md](docs/INTEGRATION.md) documents every seam between them —
 what each does, where you watch it, and the command that proves it works.
-[docs/PLAYER-INPUT-CONTRACT.md](docs/PLAYER-INPUT-CONTRACT.md) is the one
+[docs/clients/PLAYER-INPUT-CONTRACT.md](docs/clients/PLAYER-INPUT-CONTRACT.md) is the one
 routing table every player obeys — what a press, click, or swipe does in each
-state on every client — with [docs/UI-NAVIGATION-AUDIT.md](docs/UI-NAVIGATION-AUDIT.md)
+state on every client — with [docs/clients/UI-NAVIGATION-AUDIT.md](docs/clients/UI-NAVIGATION-AUDIT.md)
 recording why the three players diverged and
-[docs/PLAYER-INPUT-CONTRACT-PLAN.md](docs/PLAYER-INPUT-CONTRACT-PLAN.md) the
+[docs/clients/PLAYER-INPUT-CONTRACT-PLAN.md](docs/clients/PLAYER-INPUT-CONTRACT-PLAN.md) the
 milestones that make them conform.
-[docs/EBOOK-READER-PLAN.md](docs/EBOOK-READER-PLAN.md) finishes the Books loop:
+[docs/clients/EBOOK-READER-PLAN.md](docs/clients/EBOOK-READER-PLAN.md) finishes the Books loop:
 Curator's import handoff, Cinema-owned reading state, the EPUB renderer,
 phone/tablet clients, and offline originals, each behind an acceptance gate.
 Scope and the phased
 plan live in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) and
 [docs/ROADMAP.md](docs/ROADMAP.md), with
-[docs/CLUSTERING-PLAN.md](docs/CLUSTERING-PLAN.md) turning Phase 4 into ordered
+[docs/cluster/CLUSTERING-PLAN.md](docs/cluster/CLUSTERING-PLAN.md) turning Phase 4 into ordered
 milestones and acceptance checks, with
-[docs/CLUSTER-PERFORMANCE-PLAN.md](docs/CLUSTER-PERFORMANCE-PLAN.md) defining
+[docs/cluster/CLUSTER-PERFORMANCE-PLAN.md](docs/cluster/CLUSTER-PERFORMANCE-PLAN.md) defining
 the post-membership topology, consistency classes, observability, and ordered
 work that turns additional nodes into measured read and application capacity,
 and
-[docs/CLUSTER-MEDIA-POOL-PLAN.md](docs/CLUSTER-MEDIA-POOL-PLAN.md) defining how
+[docs/cluster/CLUSTER-MEDIA-POOL-PLAN.md](docs/cluster/CLUSTER-MEDIA-POOL-PLAN.md) defining how
 those voters become one capability-aware transcode, cache, and failover pool,
-and [docs/WINDOWS-PORT-PLAN.md](docs/WINDOWS-PORT-PLAN.md) laying out what a
+and [docs/features/WINDOWS-PORT-PLAN.md](docs/features/WINDOWS-PORT-PLAN.md) laying out what a
 native Windows server takes — the Unix surface inventoried, the decision per
 piece, and milestones from first compile to measured hardware transcode;
 client strategy in
 [docs/CLIENTS.md](docs/CLIENTS.md), with
-[docs/APPLE-NATIVE-SUBTITLES-HANDOFF.md](docs/APPLE-NATIVE-SUBTITLES-HANDOFF.md)
+[docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md](docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md)
 recording what the Apple native-subtitle work shipped, why each choice was
 made, and the copied-Dolby failure that was resolved on physical hardware,
-and [docs/APPLE-NATIVE-SUBTITLES-PLAN.md](docs/APPLE-NATIVE-SUBTITLES-PLAN.md)
+and [docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md](docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md)
 preserving the independent review, remediation history, and physical-device
 acceptance trail; the trust
 model — who can reach what, and what plurx leaves to the reverse proxy — in
@@ -315,7 +319,7 @@ a live, filterable log viewer. Full guide:
 | [`crates/plurxd`](crates/plurxd) | The HTTP daemon (axum) · transcode orchestrator · the embedded single-file web app |
 | [`crates/plurx-compat-plex`](crates/plurx-compat-plex) | Plex Media Server API façade + GDM discovery responder |
 | [`tests/playback`](tests/playback) | Synthetic playback corpus contract · smoke/full source × quality × operation matrix |
-| [`docs/`](docs) | Architecture · playback · features · operations · cheat sheet · requirements · roadmap · clients |
+| [`docs/`](docs) | [Indexed by `docs/README.md`](docs/README.md) — the reference set at the root · one folder per subject: `playback-control` · `streaming` · `cluster` · `clients` · `performance` · `ci` · `features` · `reviews` · `archive` |
 | [`deploy/`](deploy) | Docker/Compose, systemd unit, macOS launchd agent, and Unraid templates |
 
 ## Status
@@ -334,7 +338,7 @@ Phases are gates — each ends with something you actually use. Full detail in
   deploy templates).
 - [x] **Phase 3 — Cluster spike.** The HA decision gate: store backend (hiqlite)
   and transcode-failover mechanic decided and validated against real sources. See
-  [docs/PHASE3-SPIKE.md](docs/PHASE3-SPIKE.md).
+  [docs/cluster/PHASE3-SPIKE.md](docs/cluster/PHASE3-SPIKE.md).
 - [x] **Home video & photos.** A `home` library kind: mirrored folder trees,
   filename-verbatim titles, capture dates, seed-once `.nfo` sidecars, photo
   lightbox, local frame-grab artwork, and in-UI metadata editing.
@@ -347,7 +351,7 @@ Phases are gates — each ends with something you actually use. Full detail in
   readers are complete. App-managed offline EPUB copies now ship on iPhone,
   iPad, and Android phones/tablets; televisions remain deliberately excluded.
   Metadata enrichment and the physical airplane-mode acceptance matrix remain
-  in [EBOOK-READER-PLAN.md](docs/EBOOK-READER-PLAN.md). M0–M3 are complete and
+  in [EBOOK-READER-PLAN.md](docs/clients/EBOOK-READER-PLAN.md). M0–M3 are complete and
   M4 implementation is complete with device acceptance in progress.
 - [~] **Playback experience.** Borderless player, staged loading, rich stats,
   skip intro/credits with auto-skip, and immutable film-addressed VOD HLS are
