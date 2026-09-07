@@ -2387,9 +2387,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         recovery = jobs["cluster_transport_recovery"]
         make_commands = make_dry_run_commands("cluster-transport-recovery-check")
 
-        self.assertEqual(len(make_commands), 14)
+        self.assertEqual(len(make_commands), 15)
         self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
-        self.assertIn("PLURX_EXPECT_TEST_COUNT=24", make_commands[1])
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=25", make_commands[1])
         self.assertIn("scripts/require-test-count", make_commands[1])
         self.assertIn("transport_recovery::tests --lib", make_commands[1])
         exact_regressions = (
@@ -2402,6 +2402,7 @@ for (const startupDelay of [0, 1600, 7000]) {
             "owned_async_task_growth_has_no_resource_slack",
             "owned_async_task_guard_tracks_abort_safe_lifetime",
             "recovery_series_preserves_failed_retry_and_resets_after_completion",
+            "outbound_retry_counts_only_when_openraft_issues_the_next_chunk",
             "recovery_series_counts_every_replacement_client_connection_attempt",
             "production_snapshot_executor_worker_is_counted_until_joined",
         )
@@ -2413,9 +2414,10 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[10])
         self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[11])
         self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[12])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[13])
         self.assertIn(
             "transport-recovery target/validation/cluster-transport-recovery.json",
-            make_commands[13],
+            make_commands[14],
         )
 
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", recovery)

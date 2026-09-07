@@ -348,19 +348,8 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             transport_recovery::validate_transport_recovery_bytes(&bytes)
         }
         Some("transport-recovery-voter-smoke") => {
-            if args.get(3).is_some() {
-                bail!("transport-recovery-voter-smoke accepts at most one cycle count");
-            }
-            let cycles = args
-                .get(2)
-                .map(|value| {
-                    value
-                        .parse::<u32>()
-                        .context("parse voter smoke cycle count")
-                })
-                .transpose()?
-                .unwrap_or(TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES);
-            transport_recovery::run_transport_recovery_voter_smoke(cycles).await
+            let plan = transport_recovery::voter_smoke_plan(&args[2..])?;
+            transport_recovery::run_transport_recovery_voter_smoke(plan).await
         }
         Some("transport-recovery-writer") => {
             let config = args

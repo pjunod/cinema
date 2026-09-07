@@ -69,6 +69,38 @@ impl RecoveryRole {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RecoverySmokePlan {
+    pub(crate) role: RecoveryRole,
+    pub(crate) minimum_sqlite_bytes: u64,
+    pub(crate) cycles_required: u32,
+}
+
+pub(crate) fn voter_smoke_plan(arguments: &[String]) -> Result<RecoverySmokePlan> {
+    if arguments.len() > 1 {
+        bail!("transport-recovery-voter-smoke accepts at most one cycle count");
+    }
+    let cycles_required = arguments
+        .first()
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .context("parse voter smoke cycle count")
+        })
+        .transpose()?
+        .unwrap_or(TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES);
+    if !(1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE).contains(&cycles_required) {
+        bail!(
+            "transport-recovery voter smoke requires 1..={TRANSPORT_RECOVERY_CYCLES_PER_ROLE} cycles"
+        );
+    }
+    Ok(RecoverySmokePlan {
+        role: RecoveryRole::Voter,
+        minimum_sqlite_bytes: TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+        cycles_required,
+    })
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoverySnapshotPolicy {
@@ -398,15 +430,15 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_transport_recovery_voter_smoke(cycles_required: u32) -> Result<()> {
+pub(crate) async fn run_transport_recovery_voter_smoke(plan: RecoverySmokePlan) -> Result<()> {
     if std::env::consts::OS != "linux" {
         bail!("transport-recovery voter smoke requires Linux /proc evidence");
     }
-    if !(1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE).contains(&cycles_required) {
-        bail!(
-            "transport-recovery voter smoke requires 1..={TRANSPORT_RECOVERY_CYCLES_PER_ROLE} cycles"
-        );
-    }
+    let RecoverySmokePlan {
+        role,
+        minimum_sqlite_bytes,
+        cycles_required,
+    } = plan;
     let build_sha = resolve_build_sha()
         .context("resolve transport-recovery candidate SHA before voter smoke")?;
     let executable = harness_executable()?;
@@ -415,12 +447,12 @@ pub async fn run_transport_recovery_voter_smoke(cycles_required: u32) -> Result<
     let voter = run_role_campaign(
         &executable,
         root.path(),
-        RecoveryRole::Voter,
-        TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+        role,
+        minimum_sqlite_bytes,
         cycles_required,
     )
     .await?;
-    if voter.role != RecoveryRole::Voter
+    if voter.role != role
         || voter.cycles_required != cycles_required
         || voter.cycles.len() != cycles_required as usize
         || voter
@@ -2450,6 +2482,35 @@ mod tests {
     #[test]
     fn complete_twenty_plus_twenty_artifact_is_accepted() {
         validate_transport_recovery_artifact(&artifact()).expect("valid recovery artifact");
+    }
+
+    #[test]
+    fn voter_smoke_plan_is_bounded_and_cannot_claim_full_qualification() {
+        let default = voter_smoke_plan(&[]).expect("default voter smoke plan");
+        assert_eq!(default.role, RecoveryRole::Voter);
+        assert_eq!(
+            default.minimum_sqlite_bytes,
+            TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES
+        );
+        assert_eq!(
+            default.cycles_required,
+            TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES
+        );
+        assert_ne!(
+            default.cycles_required, TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+            "smoke success must remain distinct from full qualification"
+        );
+
+        let requested = voter_smoke_plan(&["3".to_owned()]).expect("requested smoke plan");
+        assert_eq!(requested.cycles_required, 3);
+        for arguments in [
+            vec!["0".to_owned()],
+            vec![(TRANSPORT_RECOVERY_CYCLES_PER_ROLE + 1).to_string()],
+            vec!["not-a-count".to_owned()],
+            vec!["3".to_owned(), "extra".to_owned()],
+        ] {
+            assert!(voter_smoke_plan(&arguments).is_err());
+        }
     }
 
     #[test]
