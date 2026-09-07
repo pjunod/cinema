@@ -12,10 +12,14 @@ READ FOR THE TASK
 - Add docs/PLAYBACK.md and docs/PLAYBACK-TESTING.md for playback; relevant
   APPLE handoff/plan documents for active initiatives; docs/PUBLISHING.md only
   for signing, TestFlight, or App Store work.
+- docs/README.md indexes every document by the question it answers; use it
+  rather than listing the directory. A new Apple document belongs in
+  docs/clients/ with a row added to that index in the same commit.
 
 TERRITORY
 
-- `clients/apple/**` and `docs/APPLE-*.md`.
+- `clients/apple/**`, `docs/clients/APPLE-*.md`, and the Apple-specific
+  documents in `docs/streaming/` named by a recorded handoff.
 - Do not edit server, Android, shared CI/validation, Makefile, changelog, or
   cross-cutting docs without a recorded handoff.
 

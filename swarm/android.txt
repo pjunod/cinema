@@ -11,10 +11,13 @@ READ FOR THE TASK
   docs/VALIDATION.md.
 - Add docs/PLAYBACK.md and docs/PLAYBACK-TESTING.md for playback and
   docs/PUBLISHING.md only for signing or Google Play work.
+- docs/README.md indexes every document by the question it answers; use it
+  rather than listing the directory. A new Android document belongs in
+  docs/clients/ with a row added to that index in the same commit.
 
 TERRITORY
 
-- `clients/android/**` and `docs/ANDROID-*.md`.
+- `clients/android/**` and `docs/clients/ANDROID-*.md`.
 - Do not edit server, Apple, shared CI/validation, Makefile, changelog, or
   cross-cutting docs without a recorded handoff.
 

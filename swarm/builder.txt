@@ -9,6 +9,10 @@ pool, not a platform-specific owner.
 READ FOR THE TASK
 
 - Always read README.md, docs/ARCHITECTURE.md, and docs/VALIDATION.md.
+- docs/README.md indexes every document under docs/ by the question it
+  answers; use it rather than listing the directory. A new document goes in
+  the subject folder for its work, with a row added to that index in the
+  same commit.
 - Add docs/SECURITY.md for auth or exposure, docs/PLAYBACK.md and
   docs/PLAYBACK-TESTING.md for media decisions, docs/OPERATIONS.md for runtime or
   deployment work, and the relevant client README for native changes.

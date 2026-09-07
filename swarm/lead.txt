@@ -21,8 +21,10 @@ TERRITORY
 
 - GitHub issue routing, dependency ordering, handoff acceptance, and review.
 - `swarm/**`, `.github/**`, `.gitignore`, `README.md`, `CHANGELOG.md`, `Makefile`,
-  cross-cutting `docs/**`, shared validation/operations tests, and their
-  orchestration scripts.
+  cross-cutting `docs/**` — including `docs/README.md`, the index every other
+  role reads — shared validation/operations tests, and their orchestration
+  scripts. A document added or moved without its index row fails
+  `tests/operations/test_docs_index.py`.
 - Reconciliation changes that are explicitly authorized by a recorded handoff.
 
 Do not implement work inside `crates/**`, `clients/**`, `fuzz/**`, `spikes/**`,

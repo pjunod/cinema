@@ -5,6 +5,20 @@ workflows. GitHub branch protection is unavailable on the current account
 plan, so every contributor and coding agent must enforce the merge convention
 below.
 
+## Where the documents are
+
+[docs/README.md](docs/README.md) indexes every document under `docs/`: what
+question each one answers, and whether it is live, open, built, or done. Read
+it instead of listing the directory — the root holds the eighteen maintained
+reference documents, and everything else lives in the folder for the work it
+describes (`playback-control/`, `streaming/`, `cluster/`, `clients/`,
+`performance/`, `ci/`, `features/`, `reviews/`, `archive/`).
+
+A document you add or move belongs in the subject folder for its work and
+needs a row on that index **in the same commit**;
+`tests/operations/test_docs_index.py` fails the build otherwise, and the same
+test refuses any reference in the repo to a `docs/` path that does not exist.
+
 ## Rust compile loop
 
 At the start of any session that may change Rust, establish a working compiler
