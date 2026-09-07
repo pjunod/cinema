@@ -1,6 +1,6 @@
 # Cluster transport recovery — live implementation status
 
-**Status:** active · **Effort:** `effort/cluster-transport-recovery` ·
+**Status:** deploy-first promotion · **Effort:** `effort/cluster-transport-recovery` ·
 **Started:** 2026-09-05 · **Last updated:** 2026-09-06
 
 Companion to [OPERATIONS.md](OPERATIONS.md) (operator contracts) and
@@ -9,6 +9,22 @@ qualification rules) — this page answers *what is implemented, what has been
 proved, and what remains*. Update it in the same commit that changes a
 milestone's state. A green helper test is evidence for that helper, not for the
 whole recovery contract.
+
+## Ship checkpoint — promotion is intentionally ahead of exhaustive qualification
+
+M1–M5 are integrated on the effort branch at `94816046`. M5 passed three
+independent exact-head adversarial reviews, Rust 1.97.1 workspace check and
+denied-warning Clippy, all 27 focused transport-recovery tests, operations and
+history contracts, the green Effort development gate, one full voter warmup,
+and three consecutive counted large-image voter recoveries on `nynuc`.
+
+Paul explicitly directed promotion after three or four clean voter recoveries
+so the implementation can run while exhaustive checking continues. This is a
+deploy-first exception, not a qualification claim. The retained 20-voter plus
+20-learner campaign, one full-suite run on the frozen tree, exact-tree receipt,
+image publication, and fleet rollout verification remain open. Follow
+[CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md](CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md)
+without weakening or feature-gating the shipped behavior.
 
 ## Outcome — bounded recovery without weakening authority
 
@@ -31,8 +47,8 @@ change.
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
 | M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
 | M4 · transport status | `codex/cluster-transport-m4` | [!66](http://192.168.4.7:3000/noirr/plurx/pulls/66) | merged into the effort at `abe2ad9a` after the final clean candidate passed the complete focused lane, exact pinned workspace check and denied-warning Clippy, static/operations/web preflight, three exact-candidate adversarial reviews, and the green replacement effort gate | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
-| M5 · recovery campaign | `codex/cluster-transport-m5-final-v2` | not opened | campaign implementation and its persistent regression mapping are rebased in an independent clone onto merged M4 effort tip `abe2ad9a`; exact-tree compile, focused regression, Linux campaign qualification, and fresh adversarial review are next | Actual TLS transport matrix · 20 learner and 20 voter cycles |
-| Final promotion | `effort/cluster-transport-recovery` | not opened | not started | Full suite once after all review fixes · current-tree qualification receipt |
+| M5 · recovery campaign | `codex/cluster-transport-m5-final-v2` | [!70](http://192.168.4.7:3000/noirr/plurx/pulls/70) | merged into the effort at `94816046` after three clean exact-head reviews, the green effort gate, and three counted voter recoveries following one warmup | Actual TLS transport matrix implemented; retained 20 voter plus 20 learner qualification deferred |
+| Final promotion | `effort/cluster-transport-recovery` | opening | deploy-first promotion authorized after three clean voter cycles | Full suite once · 20+20 retained campaign · current-tree qualification receipt · publication and rollout verification |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
 
