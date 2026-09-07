@@ -21,12 +21,15 @@ CORE_RECIPE = ROOT / "crates/plurx-core/src/transcode/recipe.rs"
 DAEMON_TRANSCODE = ROOT / "crates/plurxd/src/transcode.rs"
 LIVE_TV = ROOT / "crates/plurxd/src/live_tv.rs"
 DECODER_HEALTH = ROOT / "crates/plurxd/src/decoder_health.rs"
+CORE_HEALTH = ROOT / "crates/plurx-core/src/transcode/health.rs"
+CORE_MANIFEST = ROOT / "crates/plurx-core/src/transcode/manifest.rs"
 FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M1_EFFORT_BASE = "a8bbe574"
 M2_TASK_BASE = "f7f98b013ffe9dcc5414e25e0b2e505df3e7beb7"
 M3A_TASK_BASE = "773ad4888194ad3b2986b60bd8d1bd4d67595b4a"
 M5A_TASK_BASE = "f0f7aec8254ce7c09221bf4462f2f34905f172ef"
 M3B_TASK_BASE = "de05be0494d846bc3b77e462505f1d3ecdb21b46"
+M3C_TASK_BASE = "03ff36d655b8ffc754bea225e220f4345aaa15b4"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -171,9 +174,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(
-            f"M3b2 task base:** M3b1 candidate `{M3B_TASK_BASE}`", self.flat_status
-        )
+        self.assertIn(f"M3c1 task base:** effort head `{M3C_TASK_BASE}`", self.flat_status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -296,7 +297,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(surface.get("m2_state"), "migrated")
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
-        self.assertIn("M3b2 candidate; M0–M3b1 merged into the effort", self.status)
+        self.assertIn(
+            "M3c1 candidate; M0–M3b2, M4 and M5a merged into the effort", self.status
+        )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
             "No new compile-time feature gate or hidden runtime enable switch is "
@@ -403,6 +406,58 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(
             "What the whole-PR review found, and what it changed", self.status
         )
+
+    def test_m3c1_receipt_is_authenticated_and_unattributed_bytes_carry_none(self) -> None:
+        """A receipt the manifest digest does not cover is worse than none.
+
+        A reader would believe it, and anyone who can write the generation
+        directory could edit it. These four pins are what stop the field from
+        drifting out of the digested body, out of its backward-compatible
+        encoding, or into a publication path that did not observe the bytes it
+        would be describing.
+        """
+        manifest = CORE_MANIFEST.read_text(encoding="utf-8")
+        health = CORE_HEALTH.read_text(encoding="utf-8")
+        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+
+        # The receipt is inside `ManifestBody`, which is what `body_digest`
+        # hashes — not merely a field beside the digest.
+        body = manifest.split("struct ManifestBody<'a> {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("producer_health: Option<&'a ProducerHealthReceipt>", body)
+        self.assertIn('#[serde(skip_serializing_if = "Option::is_none")]', body)
+        # And absent still encodes exactly as it did before the field existed.
+        self.assertIn(
+            '#[serde(default, skip_serializing_if = "Option::is_none")]', manifest
+        )
+
+        # `publish` is the entry point for callers assembling bytes they did
+        # not watch being produced, and it cannot claim otherwise.
+        self.assertIn(
+            "publish_controlled(root, generation_id, ordered_names, None, || false)",
+            normalized(manifest),
+        )
+
+        # Every attempt is recorded, produced or not: an attempt that decodes
+        # nothing and exits zero writes no segment, and its receipt is the one
+        # that says the film is truncated.
+        self.assertIn("struct GenerationObservation {", daemon)
+        self.assertEqual(daemon.count("generation_health.record(receipt);"), 1)
+        self.assertNotIn("part_receipts", daemon)
+
+        # One bound for the contract identifier, enforced where the identifier
+        # is authored as well as where it is stored.
+        self.assertIn("pub const MAX_DIAGNOSTIC_CONTRACT_BYTES: usize = 128;", health)
+        self.assertIn("pub fn safe_diagnostic_contract_id(", health)
+        self.assertIn(
+            "ContractLoadError::UnsafeId", DECODER_HEALTH.read_text(encoding="utf-8")
+        )
+        for contract in tomllib.loads(CONTRACTS.read_text(encoding="utf-8"))["contracts"]:
+            with self.subTest(contract=contract["id"]):
+                self.assertLessEqual(len(contract["id"].encode("utf-8")), 128)
+                self.assertRegex(contract["id"], r"\A[A-Za-z0-9._-]+\Z")
+
+        # The status document does not claim a reader consults one yet.
+        self.assertIn("No reader consults one yet; that is M3c2", self.status)
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.

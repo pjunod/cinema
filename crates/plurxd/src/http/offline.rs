@@ -1592,6 +1592,7 @@ mod tests {
                 object_count: objects.len(),
                 objects,
                 manifest_digest: "b".repeat(64),
+                producer_health: None,
             });
             let weight = crate::manifest_cache::decoded_weight(&manifest);
             one_manifest_weight = weight;

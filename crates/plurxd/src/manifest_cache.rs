@@ -37,10 +37,23 @@ fn cache() -> &'static Mutex<Cache> {
 }
 
 pub(crate) fn decoded_weight(manifest: &GenerationManifest) -> usize {
+    // The receipt itself is inline in `size_of::<GenerationManifest>()`; only
+    // the two strings it owns are on the heap, and they are counted here for
+    // the same reason every other string in this function is: this number is a
+    // memory budget, and an uncounted allocation is one the budget cannot see.
+    let health = manifest.producer_health.as_ref().map_or(0, |receipt| {
+        receipt.plan_digest.len().saturating_add(
+            receipt
+                .diagnostic_contract
+                .as_ref()
+                .map_or(0, std::string::String::len),
+        )
+    });
     manifest.objects.iter().fold(
         std::mem::size_of::<GenerationManifest>()
             .saturating_add(manifest.generation_id.len())
-            .saturating_add(manifest.manifest_digest.len()),
+            .saturating_add(manifest.manifest_digest.len())
+            .saturating_add(health),
         |total, object| {
             total
                 .saturating_add(std::mem::size_of_val(object))

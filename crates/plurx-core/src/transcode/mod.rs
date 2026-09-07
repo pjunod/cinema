@@ -15,6 +15,7 @@
 mod decode;
 pub mod dvconvert;
 mod encoder;
+pub mod health;
 pub mod manifest;
 mod pipeline;
 mod recipe;

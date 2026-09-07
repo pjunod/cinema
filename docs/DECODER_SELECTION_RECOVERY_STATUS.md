@@ -1,8 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3b2 candidate; M0–M3b1 merged into the effort · **Updated:**
-2026-09-07 · **Integration branch:** `effort/decoder-selection-recovery` ·
-**M3b2 task base:** M3b1 candidate `de05be0494d846bc3b77e462505f1d3ecdb21b46`
+**Status:** M3c1 candidate; M0–M3b2, M4 and M5a merged into the effort ·
+**Updated:** 2026-09-07 · **Integration branch:**
+`effort/decoder-selection-recovery` · **M3c1 task base:** effort head
+`03ff36d655b8ffc754bea225e220f4345aaa15b4`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -19,8 +20,8 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3b2 — the health barrier |
-| Task branch | `codex/decoder-selection-m3b2`, based on effort head `de05be04` |
+| Milestone | M3c1 — the artifact carries what was observed about it |
+| Task branch | `codex/decoder-selection-m3c`, based on effort head `03ff36d6` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
@@ -37,7 +38,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a and M3b1 merged; M3b2 candidate; M3c not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)) and M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) are in. M3b2 carries a latched fault to the actor as a sticky barrier progress compaction cannot lose, and settles every rolling attempt's receipt at its exit classification. No receipt gates anything yet |
+| M3 · owned observation and health receipts | M3a, M3b1 and M3b2 merged; M3c1 candidate; M3c2 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 makes the generation manifest carry and authenticate the joined producer receipt. No reader consults one yet; that is M3c2 |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -788,6 +789,159 @@ therefore records the workspace commands as its lint evidence throughout, and
 does not repair unrelated pre-existing dead code to satisfy a package-selected
 invocation the repository does not use. §13's list should be corrected to the
 workspace form.
+
+## M3c1 working tree — the artifact carries what was observed about it
+
+M3b settled a receipt per producer attempt and threw it away. This milestone
+gives it somewhere durable to live: the generation manifest, which is the file
+every cache reader already loads and authenticates before serving a byte of a
+title.
+
+`ProducerHealthReceipt` moved from `crates/plurxd/src/decoder_health.rs` to
+`crates/plurx-core/src/transcode/health.rs`, because the manifest carries it
+and the manifest is core's. Only the *shape* moved. Everything that produces a
+receipt — the grammar, the accumulator, the bounded reader — stays in the
+daemon, and the derivation moved with it rather than staying behind: settling an
+observation is now `HealthAccumulator::settle_receipt`, a method on the only
+object that saw the stream. `plurx-core` deliberately owns no way to decide that
+an attempt was clean.
+
+### The receipt is inside the digest, not beside it
+
+`GenerationManifest` gained `producer_health: Option<ProducerHealthReceipt>`,
+and so did the private `ManifestBody` that `body_digest` hashes. That second
+half is the whole point. A receipt the manifest digest did not cover would be a
+reuse certificate that anyone able to write the generation directory could
+edit, which is worse than no certificate at all, because a reader would believe
+it. Two tests hold that line from both directions: promoting `"unqualified"` to
+`"qualified"` in a published manifest fails validation, and so does deleting the
+receipt from one.
+
+The field is `#[serde(default, skip_serializing_if = "Option::is_none")]`, and
+that is a compatibility contract rather than a style choice. Every generation
+already on every deployed box was published by a build with no such field, and
+its stored digest was computed over a body without one. A receipt-less manifest
+therefore has to serialize — and so digest — exactly as it always did.
+`a_manifest_without_a_receipt_digests_exactly_as_it_did_before_the_field`
+asserts that against a locally declared copy of the pre-field body struct, so
+the test would fail if a future edit changed the encoding even in a way that
+kept the new field absent.
+
+The constraint is one-way, and that is worth stating rather than discovering.
+Old manifest into new build authenticates; new manifest into *old* build does
+not, because the older `body_digest` cannot see a field its `ManifestBody` does
+not have. Rolling this change back on a node that has already published
+receipts therefore invalidates the generations produced in the interval — they
+are re-encoded, not served wrong — and a rollback plan has to expect that.
+
+### Absent means unqualified, everywhere
+
+There is no third state. A manifest with no receipt is treated exactly as one
+with a rejected receipt would be: not reusable. That makes every path this
+milestone does not thread — `publish`, the legacy-generation adoption in
+`produce_normalized`, the shared cache, offline, the scrub's own fixtures —
+correct by default rather than by inspection. `publish` cannot take a receipt at
+all, which is honest: it exists for callers assembling bytes they did not watch
+being produced.
+
+### Joining the parts, weakest wins
+
+A generation is one artifact assembled from many parts, so
+`ProducerHealthReceipt::join` reduces every contributing part's receipt to the
+one the generation presents. Qualification takes the weakest; counters sum;
+the first terminal fault survives; the exit disposition takes the worst; and
+the contract identifier survives only if every part named the same one, because
+parts read by different grammars have not been read by one grammar.
+
+What enters the join is *every producer attempt this pass made*, not one
+receipt per part — a distinction the first draft of this milestone got wrong,
+and the review caught. An attempt whose decode fails writes no segment and
+exits zero, which is the exact failure this whole effort is named after; keying
+the record on "did it leave bytes behind" discards precisely the receipt worth
+keeping. Nothing else would have caught it either: the producer's progress
+observer is `FfmpegProgressObserver::offline`, which carries no control handle,
+so `DiagnosticObservation::fault_sink` returns `None` and the actor never hears
+about an offline part's fault. The receipt was the only record, and it was
+being thrown away. `GenerationObservation` now owns the accumulation —
+`inheriting`, `record`, `settle` — so "record every attempt" is the type's
+shape rather than a line one `if` could re-capture.
+
+A part this pass inherited from an earlier one enters that join as
+`unobserved`, which is `Unqualified` by construction, and one of those is
+enough to refuse the whole generation. A long film is produced across many
+preempted passes, and certifying it from the tail this pass happened to watch
+is the same false certificate in a different disguise.
+
+An intentional yield does *not* weaken the join. Almost every part in this
+pipeline ends by yielding; if it did, nothing would ever be certified.
+
+### Two places the receipt is deliberately dropped
+
+`publish_from` returns early when an earlier pass already placed the assembled
+generation. This pass's receipt describes parts, not those bytes, so it is
+dropped and the adopted assembly carries none.
+`an_adopted_assembly_never_inherits_this_pass_receipt` pins it, and the
+legacy-manifest adoption path in `produce_normalized` passes `None` for the same
+reason.
+
+The other is a receipt whose own fields are impossible — a plan digest that is
+not a digest, a contract identifier past its bound, more contract-qualified
+records than structural ones. Those are programming errors, not inputs: the
+counters are assembled in one process from one accumulator, and the identifier
+bound is now enforced where the identifier is authored.
+`MAX_DIAGNOSTIC_CONTRACT_BYTES` and `safe_diagnostic_contract_id` live beside
+the receipt in `plurx-core`, and `DiagnosticContract::load` refuses a table that
+would produce an unstorable id. Without that, a contract named with a Debian
+epoch — `ffmpeg-7:6.1.1-3ubuntu5-h264-v1` — would load cleanly and then quietly
+strip the receipt off every generation the fleet published. Publication treats
+one as a `debug_assert` and drops the receipt, leaving the generation serveable
+and uncertified. Refusing to publish would trade a whole encoded film for a
+wrong integer. On the *read* side the same bounds are a hard rejection, because
+there the bytes are an input, and a self-consistently digested manifest from a
+directory an attacker can write must not be believed just because it hashes.
+
+### Still not here
+
+Nothing yet *acts* on a receipt. `artifact_namespace()` still returns
+`decoder-plan-v1-unqualified` for every plan, `manifest_cache::load` still
+authorizes reuse on digest equality alone, and the `cachekeep` scrub, the
+`resume_parts` validation branch and `assembled_publication` all still accept an
+unobserved generation. Splitting the namespace — which must depend on the
+*policy* capability at plan time, never on the post-hoc receipt, or the cache key
+would depend on its own contents — and gating those four readers is M3c2.
+
+Live TV still has no plan and therefore no grammar; that is unchanged and still
+M3c's qualified-inventory work.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate. It found one blocker, and the
+blocker was the milestone's own central claim being false on the one path that
+matters most; all findings are repaired in this head.
+
+| Finding | Disposition |
+|---|---|
+| A part's receipt was recorded only when the part produced bytes. An attempt whose decode fails writes no segment and exits zero — the exact failure this effort is named after — so its `Rejected` receipt was logged and dropped, and the truncated film published as `qualified`. The comment justifying the drop said the actor already had the fault; it does not, because the offline progress observer carries no control handle and `fault_sink` returns `None` | `GenerationObservation` records every attempt, produced or not, before anything looks at what it wrote. The rule is the type's shape now, and `an_attempt_that_produced_no_bytes_still_refuses_the_generation` pins it |
+| The status-doc rewrite broke two assertions in `tests/validation/test_decoder_recovery_status.py`, which the milestone's own claim of a clean `make validation-lint` said nothing about | The contract test moves to the M3c1 strings, and gains `test_m3c1_receipt_is_authenticated_and_unattributed_bytes_carry_none` |
+| The contract-identifier bound was an invariant on a data file with nothing enforcing it at authoring time. A Debian-epoch id would `debug_assert` in test builds and silently uncertify every generation in release | `MAX_DIAGNOSTIC_CONTRACT_BYTES` and `safe_diagnostic_contract_id` moved to `plurx-core` beside the receipt, and `DiagnosticContract::load` refuses an unstorable id with `ContractLoadError::UnsafeId` |
+| Forward compatibility is one-way — a manifest with a receipt does not authenticate against an older build — and nothing said so | Recorded above, under the compatibility contract |
+| `join` weakened `qualification` on a plan-digest mismatch but not `exit_disposition`, and still attributed the foreign part's contract identifier to this generation | A mismatch now clears the identifier and weakens every mergeable field. `a_mismatched_plan_weakens_every_field_it_can` covers it |
+| Two new tests were vacuous: an invariant asserted as `u64::MAX <= u64::MAX`, and an emptiness that held by construction | Replaced by `each_counter_sums_its_own_field_and_saturates_there`, which fails if the join reads the wrong field, and by a settle test that also asserts the positive case |
+
+Focused evidence on this head, pinned `rustc 1.97.1`: core
+`cargo test -p plurx-core --lib -- transcode::` 157/157, which is 13 new
+`transcode::health::` join contracts and 6 new `transcode::manifest::` receipt
+contracts on top of the previous 138. Daemon `transcode::tests::` 230/230, with
+five new contracts — the inherited part refusing the generation it was carried
+into, a pass that attempted nothing settling to no receipt and a clean pass
+certifying its own, an attempt that produced no bytes still refusing the
+generation, a fresh assembly carrying the receipt its parts earned, and an
+adopted assembly carrying none. `decoder_health` 38/38 and
+`playback_control::tests::` 225/225 unchanged. `make lint` and
+`make validation-lint` clean;
+`python3 -m unittest tests.validation.test_decoder_recovery_status` 11/11 with
+one new contract; the rolling-producer ownership ledger is unchanged, because
+this milestone adds no task, timer or process shape.
 
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 

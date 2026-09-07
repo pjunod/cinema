@@ -8760,7 +8760,7 @@ struct Tracks {
 }
 
 /// A published cache entry, as measured on disk.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Published {
     bytes: i64,
     duration_ms: i64,
@@ -8772,6 +8772,9 @@ struct Published {
     /// test of the resume path has to assert on, or that test passes on a
     /// fixture small enough to finish before it is ever interrupted.
     parts: usize,
+    /// What observation concluded about every part these bytes came from, or
+    /// `None` when this pass did not produce them and so cannot say.
+    health: Option<crate::decoder_health::ProducerHealthReceipt>,
 }
 
 /// What one `produce` call achieved.
@@ -9762,6 +9765,10 @@ async fn assembled_publication(
         duration_ms: parsed.duration_ms(),
         segments: parsed.segments.len(),
         parts,
+        // A generation an earlier pass already assembled. Its parts may be
+        // gone and its diagnostics certainly are, so this pass has nothing to
+        // certify it with and says so.
+        health: None,
     })
 }
 
@@ -9771,12 +9778,71 @@ async fn assembled_publication(
 /// placement boundary leaves only `.assembled.tmp`, which the retry rebuilds;
 /// the numbered parts remain the authoritative encode checkpoint until the
 /// final generation is durably settled.
+/// Everything this pass knows about the health of one generation.
+///
+/// Not "one receipt per part". Every producer attempt made toward the
+/// generation is recorded, whether or not it left bytes behind, because the
+/// case this effort exists for is an attempt that decodes nothing and exits
+/// zero: FFmpeg drops every frame, writes no segment, and `read_part` returns
+/// an empty part. Keying the record on "did it produce" would discard exactly
+/// the receipt worth keeping, and the producer's progress observer carries no
+/// control handle, so nothing else in the process would ever see it.
+///
+/// A part carried over from an earlier pass is recorded too, as `unobserved`:
+/// nobody here watched it being made, and one of those is enough to refuse the
+/// whole generation. That is deliberate — a resumed film certified from the
+/// tail this pass happened to encode is exactly the false certificate this
+/// effort exists to prevent.
+struct GenerationObservation {
+    plan_digest: String,
+    attempts: Vec<crate::decoder_health::ProducerHealthReceipt>,
+}
+
+impl GenerationObservation {
+    /// Start from the parts an earlier pass left on disk.
+    fn inheriting(parts: &[crate::produce::Part], plan_digest: &str) -> Self {
+        Self {
+            plan_digest: plan_digest.to_owned(),
+            attempts: parts
+                .iter()
+                .map(|_| {
+                    crate::decoder_health::ProducerHealthReceipt::unobserved(
+                        plan_digest.to_owned(),
+                        // Whatever ended those parts, this pass found their
+                        // bytes already on disk. `CleanEnd` describes the read;
+                        // the receipt is unqualified regardless of it.
+                        crate::decoder_health::ExitDisposition::CleanEnd,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Record one producer attempt. Bounded by `PRODUCER_MAX_PARTS`, which is
+    /// what bounds the spawn loop this is called from.
+    fn record(&mut self, receipt: crate::decoder_health::ProducerHealthReceipt) {
+        self.attempts.push(receipt);
+    }
+
+    /// The one receipt the generation may present, or `None` when this pass
+    /// attempted nothing and inherited nothing.
+    fn settle(&self) -> Option<crate::decoder_health::ProducerHealthReceipt> {
+        crate::decoder_health::ProducerHealthReceipt::join(&self.plan_digest, &self.attempts)
+    }
+}
+
 async fn publish_from(
     temp: &plurx_core::fs_secure::SecureDirectory,
     parts: &[crate::produce::Part],
+    health: Option<crate::decoder_health::ProducerHealthReceipt>,
 ) -> Result<Option<Published>, String> {
     if let Ok(generation) = temp.open_child_directory(ASSEMBLED_DIR).await {
         if let Some(published) = assembled_publication(&generation, parts.len()).await {
+            // An assembly an earlier pass already placed. Whatever this pass
+            // observed, it observed while making parts — not these bytes — so
+            // the receipt it was handed is dropped rather than attached to
+            // somebody else's work. `assembled_publication` returns
+            // `health: None`, and that is the answer.
             return Ok(Some(published));
         }
     }
@@ -9827,6 +9893,7 @@ async fn publish_from(
         duration_ms: assembled.duration_ms,
         segments: assembled.placements.len(),
         parts: parts.len(),
+        health,
     }))
 }
 
@@ -13323,6 +13390,10 @@ impl TranscodeManager {
                             &root,
                             &generation_id,
                             &names,
+                            // Adopting a generation an earlier build published.
+                            // This run watched none of those bytes being made,
+                            // and a receipt is a claim about bytes you watched.
+                            None,
                             || {
                                 cancelled
                                     .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
@@ -13598,6 +13669,10 @@ impl TranscodeManager {
                 &generation,
                 &format!("{}:{}", job.id, job.fence),
                 &names,
+                // The join of every contributing part's receipt, and `None`
+                // when this pass adopted an assembly it did not make. This is
+                // the only place a producer receipt reaches durable storage.
+                published.health.clone(),
                 || {
                     cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
                         || !self.pretranscode_worker_idle()
@@ -13783,6 +13858,7 @@ impl TranscodeManager {
         // Whatever an earlier pass got through. Usually nothing; on a busy box
         // making a long film, this is how it eventually finishes.
         let mut parts = resume_parts(temp).await?;
+        let mut generation_health = GenerationObservation::inheriting(&parts, &plan.plan_digest());
         let mut retained_segments = parts.iter().map(|part| part.segments.len()).sum::<usize>();
         let mut retained_duration_ms = parts
             .iter()
@@ -13979,6 +14055,10 @@ impl TranscodeManager {
                 )
                 .await;
             report_producer_health(&format!("{hash} part {}", parts.len()), &receipt);
+            // Recorded before anything looks at what the attempt wrote. An
+            // attempt that decoded nothing and exited zero produces no
+            // segments, and that receipt is the one that matters most.
+            generation_health.record(receipt);
             let part = read_part(&part_dir).await;
             let produced = !part.is_empty();
             if produced {
@@ -14027,7 +14107,7 @@ impl TranscodeManager {
                     if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         return Ok(None);
                     }
-                    return publish_from(temp, &parts).await;
+                    return publish_from(temp, &parts, generation_health.settle()).await;
                 }
                 PartEnd::Preempted | PartEnd::Deadline => {
                     tracing::info!(
@@ -37386,6 +37466,189 @@ pub(crate) mod tests {
                 .fault_sink(&observer)
                 .is_none(),
             "no grammar, no sink"
+        );
+    }
+
+    fn health_plan_digest() -> String {
+        "9".repeat(64)
+    }
+
+    fn health_receipt(
+        qualification: crate::decoder_health::Qualification,
+    ) -> crate::decoder_health::ProducerHealthReceipt {
+        crate::decoder_health::ProducerHealthReceipt {
+            receipt_version: crate::decoder_health::PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest: health_plan_digest(),
+            diagnostic_contract: Some("ffmpeg-test-v1".to_owned()),
+            observation_complete: true,
+            video_decode_error_records: 0,
+            contract_qualified_error_records: 0,
+            terminal_fault: None,
+            exit_disposition: crate::decoder_health::ExitDisposition::CleanEnd,
+            qualification,
+        }
+    }
+
+    /// One part directory with `count` one-second segments, plus the playlist
+    /// `assemble` reads to place them.
+    async fn write_health_part(
+        temp: &plurx_core::fs_secure::SecureDirectory,
+        index: usize,
+        count: usize,
+    ) -> crate::produce::Part {
+        let name = crate::produce::part_dir(index);
+        let part = temp
+            .create_child_directory(&name)
+            .await
+            .expect("part directory");
+        let mut playlist = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:2\n");
+        let mut segments = Vec::new();
+        for segment in 0..count {
+            let file = format!("seg{segment:05}.ts");
+            part.atomic_write_child(&file, format!("part {index} segment {segment}").as_bytes())
+                .await
+                .expect("segment");
+            playlist.push_str("#EXTINF:1.000,\n");
+            playlist.push_str(&file);
+            playlist.push('\n');
+            segments.push(file);
+        }
+        playlist.push_str("#EXT-X-ENDLIST\n");
+        part.atomic_write_child("index.m3u8", playlist.as_bytes())
+            .await
+            .expect("part playlist");
+        crate::produce::Part {
+            segments,
+            durations_ms: vec![1_000; count],
+        }
+    }
+
+    fn one_part_fixture(count: usize) -> crate::produce::Part {
+        crate::produce::Part {
+            segments: (0..count)
+                .map(|index| format!("seg{index:05}.ts"))
+                .collect(),
+            durations_ms: vec![1_000; count],
+        }
+    }
+
+    #[test]
+    fn an_inherited_part_refuses_the_generation_it_was_carried_into() {
+        let parts = vec![one_part_fixture(1); 3];
+        let digest = health_plan_digest();
+        let mut observation = GenerationObservation::inheriting(&parts, &digest);
+        assert!(observation.attempts.iter().all(|receipt| {
+            receipt.plan_digest == digest
+                && !receipt.observation_complete
+                && receipt.qualification == crate::decoder_health::Qualification::Unqualified
+        }));
+        // The consequence that matters: however clean this pass's own work is,
+        // a generation carrying inherited parts cannot be certified.
+        observation.record(health_receipt(
+            crate::decoder_health::Qualification::Qualified,
+        ));
+        let settled = observation.settle().expect("settled receipt");
+        assert!(!settled.permits_reuse());
+    }
+
+    #[test]
+    fn a_pass_that_attempted_nothing_settles_to_no_receipt() {
+        let observation = GenerationObservation::inheriting(&[], &health_plan_digest());
+        assert_eq!(observation.settle(), None);
+        // And a pass whose only attempt was clean certifies its own work, so
+        // the test above is about inheritance rather than about nothing ever
+        // qualifying.
+        let mut clean = GenerationObservation::inheriting(&[], &health_plan_digest());
+        clean.record(health_receipt(
+            crate::decoder_health::Qualification::Qualified,
+        ));
+        assert!(clean.settle().expect("settled receipt").permits_reuse());
+    }
+
+    #[test]
+    fn an_attempt_that_produced_no_bytes_still_refuses_the_generation() {
+        // The defect this type exists to make structurally impossible. An
+        // attempt whose decode failed writes no segment and exits zero, so a
+        // record keyed on "did it produce bytes" would drop precisely the
+        // receipt saying the film is truncated at a corrupt region — and the
+        // producer's progress observer carries no control handle, so nothing
+        // else in the process ever sees that fault.
+        let digest = health_plan_digest();
+        let mut observation = GenerationObservation::inheriting(&[], &digest);
+        observation.record(health_receipt(
+            crate::decoder_health::Qualification::Qualified,
+        ));
+        let mut failed = health_receipt(crate::decoder_health::Qualification::Rejected);
+        failed.terminal_fault = Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure);
+        failed.video_decode_error_records = 5;
+        failed.contract_qualified_error_records = 5;
+        // No part accompanies this one: the attempt left nothing on disk. It
+        // is recorded regardless.
+        observation.record(failed);
+        observation.record(health_receipt(
+            crate::decoder_health::Qualification::Qualified,
+        ));
+        let settled = observation.settle().expect("settled receipt");
+        assert_eq!(
+            settled.qualification,
+            crate::decoder_health::Qualification::Rejected
+        );
+        assert_eq!(
+            settled.terminal_fault,
+            Some(crate::decoder_health::DecodeFaultKind::VideoDecodeFailure)
+        );
+        assert!(!settled.permits_reuse());
+    }
+
+    #[tokio::test]
+    async fn a_fresh_assembly_carries_the_receipt_its_parts_earned() {
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let parts = vec![
+            write_health_part(&temp, 0, 2).await,
+            write_health_part(&temp, 1, 1).await,
+        ];
+        let receipt = health_receipt(crate::decoder_health::Qualification::Qualified);
+        let published = publish_from(&temp, &parts, Some(receipt.clone()))
+            .await
+            .expect("publish")
+            .expect("assembled generation");
+        assert_eq!(published.segments, 3);
+        assert_eq!(published.health, Some(receipt));
+    }
+
+    #[tokio::test]
+    async fn an_adopted_assembly_never_inherits_this_pass_receipt() {
+        // The trap this test exists for: `publish_from` returns early when an
+        // earlier pass already placed the assembly, and the receipt it was
+        // handed describes parts, not those bytes. Attaching it there would
+        // certify an artifact from an observation of different work — the
+        // exact substitution the whole effort refuses.
+        let directory = crate::test_tempdir().expect("staging");
+        let temp = plurx_core::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("staging capability");
+        let parts = vec![write_health_part(&temp, 0, 2).await];
+        publish_from(&temp, &parts, None)
+            .await
+            .expect("first publish")
+            .expect("assembled generation");
+        let adopted = publish_from(
+            &temp,
+            &parts,
+            Some(health_receipt(
+                crate::decoder_health::Qualification::Qualified,
+            )),
+        )
+        .await
+        .expect("adopting publish")
+        .expect("adopted generation");
+        assert_eq!(adopted.segments, 2);
+        assert_eq!(
+            adopted.health, None,
+            "an assembly this pass did not place carries no receipt from it"
         );
     }
 }

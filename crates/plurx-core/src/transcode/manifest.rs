@@ -11,6 +11,8 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use super::health::{safe_diagnostic_contract_id, ProducerHealthReceipt};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 pub const MANIFEST_FILE: &str = "generation-manifest.json";
@@ -66,6 +68,19 @@ pub struct GenerationManifest {
     pub object_count: usize,
     pub objects: Vec<GenerationObject>,
     pub manifest_digest: String,
+    /// What observation concluded about the producer that made these bytes.
+    ///
+    /// Absent on every manifest published before this field existed, and on
+    /// every publication path that owns no diagnostic stream. Absent is not
+    /// "fine": a reader treats a missing receipt exactly as it treats an
+    /// unqualified one, so the default for a generation nobody watched is the
+    /// conservative one rather than the convenient one.
+    ///
+    /// Skipped when absent so that a manifest written before this field
+    /// existed serializes — and therefore authenticates — byte for byte the
+    /// way it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_health: Option<ProducerHealthReceipt>,
 }
 
 pub struct VerifiedObject {
@@ -116,6 +131,12 @@ struct ManifestBody<'a> {
     generation_id: &'a str,
     object_count: usize,
     objects: &'a [GenerationObject],
+    /// The receipt is inside the digested body, not beside it. A receipt the
+    /// manifest digest does not cover is a claim about the bytes that anyone
+    /// who can write the directory may edit, which is worth less than no claim
+    /// at all — a reader would trust it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    producer_health: Option<&'a ProducerHealthReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -436,12 +457,31 @@ where
     }
 }
 
-fn body_digest(generation_id: &str, objects: &[GenerationObject]) -> Result<String, String> {
+/// Whether a receipt read from disk is shaped the way this build writes them.
+///
+/// Not a judgement about what it concluded — `permits_reuse` is that, and it
+/// already refuses a version it does not know. This is the bound that keeps a
+/// parsed manifest small and its fields meaningful.
+fn safe_producer_health(receipt: &ProducerHealthReceipt) -> bool {
+    canonical_sha256(&receipt.plan_digest)
+        && receipt
+            .diagnostic_contract
+            .as_ref()
+            .is_none_or(|contract| safe_diagnostic_contract_id(contract))
+        && receipt.contract_qualified_error_records <= receipt.video_decode_error_records
+}
+
+fn body_digest(
+    generation_id: &str,
+    objects: &[GenerationObject],
+    producer_health: Option<&ProducerHealthReceipt>,
+) -> Result<String, String> {
     let body = ManifestBody {
         format_version: FORMAT_VERSION,
         generation_id,
         object_count: objects.len(),
         objects,
+        producer_health,
     };
     let encoded = serde_json::to_vec(&body)
         .map_err(|error| format!("serializing generation manifest: {error}"))?;
@@ -449,12 +489,18 @@ fn body_digest(generation_id: &str, objects: &[GenerationObject]) -> Result<Stri
 }
 
 /// Hash every named object once and publish the immutable manifest beside it.
+///
+/// Carries no producer health receipt, and cannot: this entry point exists for
+/// callers that assemble a generation out of bytes they did not watch being
+/// produced. The manifest it writes is therefore unqualified, which is the
+/// correct description of a generation nobody observed. A producer that *did*
+/// observe its own parts publishes through [`publish_controlled`].
 pub async fn publish(
     root: &Path,
     generation_id: &str,
     ordered_names: &[String],
 ) -> Result<GenerationManifest, String> {
-    publish_controlled(root, generation_id, ordered_names, || false)
+    publish_controlled(root, generation_id, ordered_names, None, || false)
         .await?
         .ok_or_else(|| "uncontrolled manifest publication yielded".to_owned())
 }
@@ -469,6 +515,7 @@ pub async fn publish_controlled<F>(
     root: &Path,
     generation_id: &str,
     ordered_names: &[String],
+    producer_health: Option<ProducerHealthReceipt>,
     should_yield: F,
 ) -> Result<Option<GenerationManifest>, String>
 where
@@ -477,7 +524,14 @@ where
     let directory = crate::fs_secure::SecureDirectory::open(root)
         .await
         .map_err(|error| format!("opening generation directory: {error}"))?;
-    publish_controlled_directory(&directory, generation_id, ordered_names, should_yield).await
+    publish_controlled_directory(
+        &directory,
+        generation_id,
+        ordered_names,
+        producer_health,
+        should_yield,
+    )
+    .await
 }
 
 async fn load_checkpoint_directory<F>(
@@ -838,11 +892,29 @@ pub async fn publish_controlled_directory<F>(
     root: &crate::fs_secure::SecureDirectory,
     generation_id: &str,
     ordered_names: &[String],
+    producer_health: Option<ProducerHealthReceipt>,
     mut should_yield: F,
 ) -> Result<Option<GenerationManifest>, String>
 where
     F: FnMut() -> bool,
 {
+    // A receipt this build cannot authenticate on the way back in is dropped,
+    // not published, and the generation is uncertified rather than lost. The
+    // failure is a programming error — the counters are assembled in-process
+    // from one accumulator — so it is loud where that matters and harmless
+    // where it does not: refusing to publish here would trade a whole encoded
+    // film for a wrong integer.
+    let producer_health = producer_health.filter(|receipt| {
+        let safe = safe_producer_health(receipt);
+        if !safe {
+            debug_assert!(safe, "producer health receipt fails its manifest bounds");
+            tracing::error!(
+                plan_digest = %receipt.plan_digest,
+                "dropping a producer health receipt that fails its manifest bounds"
+            );
+        }
+        safe
+    });
     if !safe_generation_id(generation_id)
         || ordered_names.is_empty()
         || ordered_names.len() > MAX_OBJECTS
@@ -937,8 +1009,9 @@ where
         format_version: FORMAT_VERSION,
         generation_id: generation_id.to_owned(),
         object_count: objects.len(),
-        manifest_digest: body_digest(generation_id, &objects)?,
+        manifest_digest: body_digest(generation_id, &objects, producer_health.as_ref())?,
         objects,
+        producer_health,
     };
     let encoded = serde_json::to_vec(&manifest)
         .map_err(|error| format!("serializing generation manifest: {error}"))?;
@@ -982,7 +1055,15 @@ fn parse_manifest(encoded: &[u8]) -> Result<GenerationManifest, String> {
             .len()
             != manifest.objects.len()
         || !canonical_sha256(&manifest.manifest_digest)
-        || body_digest(&manifest.generation_id, &manifest.objects)? != manifest.manifest_digest
+        || manifest
+            .producer_health
+            .as_ref()
+            .is_some_and(|receipt| !safe_producer_health(receipt))
+        || body_digest(
+            &manifest.generation_id,
+            &manifest.objects,
+            manifest.producer_health.as_ref(),
+        )? != manifest.manifest_digest
     {
         return Err("generation manifest failed validation".to_owned());
     }
@@ -1277,6 +1358,10 @@ impl GenerationManifest {
 
 #[cfg(test)]
 mod tests {
+    use super::super::health::{
+        DecodeFaultKind, ExitDisposition, Qualification, MAX_DIAGNOSTIC_CONTRACT_BYTES,
+        PRODUCER_HEALTH_RECEIPT_VERSION,
+    };
     use super::*;
 
     fn generation_tempdir() -> tempfile::TempDir {
@@ -1472,15 +1557,19 @@ mod tests {
             .await
             .expect("directory capability");
         let mut calls = 0usize;
-        assert!(
-            publish_controlled_directory(&capability, "generation-corrupt", &names, || {
+        assert!(publish_controlled_directory(
+            &capability,
+            "generation-corrupt",
+            &names,
+            None,
+            || {
                 calls += 1;
                 calls >= 3
-            })
-            .await
-            .expect("checkpointed publication")
-            .is_none()
-        );
+            }
+        )
+        .await
+        .expect("checkpointed publication")
+        .is_none());
         let encoded = capability
             .read_bounded_child(CHECKPOINT_FILE, MAX_CHECKPOINT_BYTES)
             .await
@@ -1514,7 +1603,7 @@ mod tests {
             .expect("publish corrupt checkpoint");
 
         let manifest =
-            publish_controlled_directory(&capability, "generation-corrupt", &names, || false)
+            publish_controlled_directory(&capability, "generation-corrupt", &names, None, || false)
                 .await
                 .expect("resume publication")
                 .expect("manifest");
@@ -1655,12 +1744,27 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(objects.iter().all(|object| safe_object_name(&object.name)));
         let generation_id = "g".repeat(256);
+        // The largest receipt this build can write: every optional field
+        // present, the contract id at its bound, both counters saturated.
+        let health = ProducerHealthReceipt {
+            receipt_version: u32::MAX,
+            plan_digest: "f".repeat(64),
+            diagnostic_contract: Some("c".repeat(MAX_DIAGNOSTIC_CONTRACT_BYTES)),
+            observation_complete: false,
+            video_decode_error_records: u64::MAX,
+            contract_qualified_error_records: u64::MAX,
+            terminal_fault: Some(DecodeFaultKind::DecodeBackendUnavailable),
+            exit_disposition: ExitDisposition::FailedTermination,
+            qualification: Qualification::Unqualified,
+        };
         let manifest = GenerationManifest {
             format_version: FORMAT_VERSION,
             generation_id: generation_id.clone(),
             object_count: objects.len(),
-            manifest_digest: body_digest(&generation_id, &objects).expect("manifest digest"),
+            manifest_digest: body_digest(&generation_id, &objects, Some(&health))
+                .expect("manifest digest"),
             objects,
+            producer_health: Some(health),
         };
         let encoded = serde_json::to_vec(&manifest).expect("serialize maximum manifest");
         assert!(encoded.len() as u64 <= MAX_MANIFEST_BYTES);
@@ -1788,13 +1892,18 @@ mod tests {
             .expect("seed durable prefix");
 
         let mut probes = 0usize;
-        let yielded =
-            publish_controlled_directory(&capability, "generation-post-load-yield", &names, || {
+        let yielded = publish_controlled_directory(
+            &capability,
+            "generation-post-load-yield",
+            &names,
+            None,
+            || {
                 probes += 1;
                 probes >= 67
-            })
-            .await
-            .expect("yield after loading the durable prefix");
+            },
+        )
+        .await
+        .expect("yield after loading the durable prefix");
         assert!(yielded.is_none());
 
         let mut reload_probes = 0usize;
@@ -1853,28 +1962,32 @@ mod tests {
         .expect("seed durable prefix");
         let names = vec![first_name.clone(), second_name];
         let mut probes = 0usize;
-        assert!(
-            publish_controlled_directory(&capability, "generation-mutated", &names, || {
+        assert!(publish_controlled_directory(
+            &capability,
+            "generation-mutated",
+            &names,
+            None,
+            || {
                 probes += 1;
                 probes >= 5
-            })
-            .await
-            .expect("yield after prefix validation")
-            .is_none()
-        );
+            }
+        )
+        .await
+        .expect("yield after prefix validation")
+        .is_none());
 
         tokio::fs::write(directory.path().join(&first_name), b"replacement prefix")
             .await
             .expect("mutate cached prefix");
         assert!(
-            publish_controlled_directory(&capability, "generation-mutated", &names, || false)
+            publish_controlled_directory(&capability, "generation-mutated", &names, None, || false)
                 .await
                 .expect("final fingerprint validation")
                 .is_none(),
             "a stale cached digest must clear its checkpoint instead of publishing"
         );
         let manifest =
-            publish_controlled_directory(&capability, "generation-mutated", &names, || false)
+            publish_controlled_directory(&capability, "generation-mutated", &names, None, || false)
                 .await
                 .expect("rehash replacement")
                 .expect("publish repaired generation");
@@ -2027,12 +2140,13 @@ mod tests {
             .await
             .expect("directory capability");
         let mut calls = 0usize;
-        let yielded = publish_controlled_directory(&capability, "generation-a", &names, || {
-            calls += 1;
-            calls >= 3
-        })
-        .await
-        .expect("yielded publication");
+        let yielded =
+            publish_controlled_directory(&capability, "generation-a", &names, None, || {
+                calls += 1;
+                calls >= 3
+            })
+            .await
+            .expect("yielded publication");
         assert!(yielded.is_none());
         let checkpoint = capability
             .read_bounded_child(CHECKPOINT_FILE, MAX_CHECKPOINT_BYTES)
@@ -2048,13 +2162,14 @@ mod tests {
         );
 
         let mut resume_calls = 0usize;
-        let manifest = publish_controlled_directory(&capability, "generation-a", &names, || {
-            resume_calls += 1;
-            false
-        })
-        .await
-        .expect("resumed publication")
-        .expect("completed manifest");
+        let manifest =
+            publish_controlled_directory(&capability, "generation-a", &names, None, || {
+                resume_calls += 1;
+                false
+            })
+            .await
+            .expect("resumed publication")
+            .expect("completed manifest");
         assert_eq!(manifest.object_count, 3);
         assert!(
             resume_calls <= 6,
@@ -2074,7 +2189,7 @@ mod tests {
             .expect("directory capability");
         let mut probes = 0usize;
         let yielded =
-            publish_controlled_directory(&capability, "generation-empty", &[name], || {
+            publish_controlled_directory(&capability, "generation-empty", &[name], None, || {
                 probes += 1;
                 true
             })
@@ -2114,6 +2229,7 @@ mod tests {
                 sha256: hex::encode(Sha256::digest(&bytes)),
             }],
             manifest_digest: String::new(),
+            producer_health: None,
         };
         let budget = RESPONSE_MEDIUM_BUDGET
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RESPONSE_MEDIUM_BUDGET_MIB)))
@@ -2131,5 +2247,248 @@ mod tests {
         .expect("admission result must be prompt");
         assert!(matches!(observed, Err(VerifiedObjectError::Capacity)));
         drop(stalled_body);
+    }
+    fn test_receipt(qualification: Qualification) -> ProducerHealthReceipt {
+        ProducerHealthReceipt {
+            receipt_version: PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest: "a".repeat(64),
+            diagnostic_contract: Some("ffmpeg-8.0.1-3ubuntu2-rawvideo-v1".to_owned()),
+            observation_complete: true,
+            video_decode_error_records: 0,
+            contract_qualified_error_records: 0,
+            terminal_fault: None,
+            exit_disposition: ExitDisposition::CleanEnd,
+            qualification,
+        }
+    }
+
+    async fn one_segment_generation() -> (tempfile::TempDir, crate::fs_secure::SecureDirectory) {
+        let directory = generation_tempdir();
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            b"#EXTM3U\nseg00000.ts\n",
+        )
+        .await
+        .expect("playlist");
+        tokio::fs::write(directory.path().join("seg00000.ts"), b"segment")
+            .await
+            .expect("segment");
+        let capability = crate::fs_secure::SecureDirectory::open(directory.path())
+            .await
+            .expect("directory capability");
+        (directory, capability)
+    }
+
+    fn one_segment_names() -> Vec<String> {
+        vec!["index.m3u8".to_owned(), "seg00000.ts".to_owned()]
+    }
+
+    #[tokio::test]
+    async fn a_published_receipt_survives_the_round_trip_and_authenticates() {
+        let (directory, capability) = one_segment_generation().await;
+        let published = publish_controlled_directory(
+            &capability,
+            "generation-health",
+            &one_segment_names(),
+            Some(test_receipt(Qualification::Qualified)),
+            || false,
+        )
+        .await
+        .expect("publish")
+        .expect("manifest");
+        assert_eq!(
+            published.producer_health,
+            Some(test_receipt(Qualification::Qualified))
+        );
+        let loaded = load(directory.path()).await.expect("load manifest");
+        assert_eq!(loaded, published);
+        assert!(loaded
+            .producer_health
+            .as_ref()
+            .expect("receipt")
+            .permits_reuse());
+    }
+
+    #[tokio::test]
+    async fn a_manifest_without_a_receipt_digests_exactly_as_it_did_before_the_field() {
+        // The compatibility contract, stated as the thing that actually
+        // matters: a generation published by an earlier build has no
+        // `producer_health` key, and its stored digest was computed over a
+        // body that had no such field. If adding the field changed either the
+        // encoding or the digest of a receipt-less manifest, every cached
+        // generation on every deployed box would fail validation at once.
+        #[derive(Serialize)]
+        struct BodyBeforeTheField<'a> {
+            format_version: u16,
+            generation_id: &'a str,
+            object_count: usize,
+            objects: &'a [GenerationObject],
+        }
+
+        let (directory, capability) = one_segment_generation().await;
+        let published = publish_controlled_directory(
+            &capability,
+            "generation-legacy",
+            &one_segment_names(),
+            None,
+            || false,
+        )
+        .await
+        .expect("publish")
+        .expect("manifest");
+        let legacy = serde_json::to_vec(&BodyBeforeTheField {
+            format_version: FORMAT_VERSION,
+            generation_id: "generation-legacy",
+            object_count: published.objects.len(),
+            objects: &published.objects,
+        })
+        .expect("serialize the pre-field body");
+        assert_eq!(
+            published.manifest_digest,
+            hex::encode(Sha256::digest(&legacy)),
+            "a receipt-less manifest must digest as it did before this field existed"
+        );
+        let text = tokio::fs::read_to_string(directory.path().join(MANIFEST_FILE))
+            .await
+            .expect("read manifest");
+        assert!(
+            !text.contains("producer_health"),
+            "a receipt-less manifest must not name the field: {text}"
+        );
+        assert!(load(directory.path()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_manifest_digest_authenticates_the_receipt() {
+        // The whole point of putting the receipt inside `ManifestBody`. A
+        // receipt the digest did not cover would be a reuse certificate that
+        // anyone who can write the generation directory may forge, which is
+        // strictly worse than no certificate at all.
+        let (directory, capability) = one_segment_generation().await;
+        publish_controlled_directory(
+            &capability,
+            "generation-tamper",
+            &one_segment_names(),
+            Some(test_receipt(Qualification::Unqualified)),
+            || false,
+        )
+        .await
+        .expect("publish")
+        .expect("manifest");
+        let path = directory.path().join(MANIFEST_FILE);
+        let text = tokio::fs::read_to_string(&path).await.expect("read");
+        let promoted = text.replace("\"unqualified\"", "\"qualified\"");
+        assert_ne!(promoted, text, "the qualification must appear in the file");
+        tokio::fs::write(&path, promoted.as_bytes())
+            .await
+            .expect("write promoted manifest");
+        let error = load(directory.path())
+            .await
+            .expect_err("a promoted receipt must not authenticate");
+        assert!(error.contains("failed validation"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_receipt_dropped_from_a_published_manifest_fails_its_digest() {
+        // The other direction: removing the receipt is also a body change, so
+        // a reader cannot silently downgrade a rejected generation into an
+        // unannotated one and have it validate.
+        let (directory, capability) = one_segment_generation().await;
+        let published = publish_controlled_directory(
+            &capability,
+            "generation-stripped",
+            &one_segment_names(),
+            Some(test_receipt(Qualification::Rejected)),
+            || false,
+        )
+        .await
+        .expect("publish")
+        .expect("manifest");
+        let mut stripped = published.clone();
+        stripped.producer_health = None;
+        let encoded = serde_json::to_vec(&stripped).expect("serialize stripped");
+        tokio::fs::write(directory.path().join(MANIFEST_FILE), &encoded)
+            .await
+            .expect("write stripped manifest");
+        let error = load(directory.path())
+            .await
+            .expect_err("a stripped receipt must not authenticate");
+        assert!(error.contains("failed validation"), "{error}");
+    }
+
+    #[test]
+    fn the_receipt_bounds_refuse_what_a_manifest_must_not_carry() {
+        // These are programming errors, not inputs: the counters are assembled
+        // in one process from one accumulator. Publication treats a violation
+        // as a `debug_assert` and drops the receipt, so the bound itself is
+        // what gets tested here rather than the publication path.
+        assert!(safe_producer_health(&test_receipt(
+            Qualification::Qualified
+        )));
+
+        let mut no_contract = test_receipt(Qualification::Unqualified);
+        no_contract.diagnostic_contract = None;
+        assert!(safe_producer_health(&no_contract));
+
+        let mut oversized = test_receipt(Qualification::Qualified);
+        oversized.diagnostic_contract = Some("c".repeat(MAX_DIAGNOSTIC_CONTRACT_BYTES + 1));
+        assert!(!safe_producer_health(&oversized));
+
+        let mut at_the_bound = test_receipt(Qualification::Qualified);
+        at_the_bound.diagnostic_contract = Some("c".repeat(MAX_DIAGNOSTIC_CONTRACT_BYTES));
+        assert!(safe_producer_health(&at_the_bound));
+
+        let mut punctuated = test_receipt(Qualification::Qualified);
+        punctuated.diagnostic_contract = Some("ffmpeg 8.0.1/rawvideo".to_owned());
+        assert!(!safe_producer_health(&punctuated));
+
+        let mut empty_contract = test_receipt(Qualification::Qualified);
+        empty_contract.diagnostic_contract = Some(String::new());
+        assert!(!safe_producer_health(&empty_contract));
+
+        let mut short_plan = test_receipt(Qualification::Qualified);
+        short_plan.plan_digest = "abc".to_owned();
+        assert!(!safe_producer_health(&short_plan));
+
+        // The qualified count is by construction a subset of the structural
+        // one: every line that increments it increments the other first.
+        let mut impossible = test_receipt(Qualification::Qualified);
+        impossible.video_decode_error_records = 1;
+        impossible.contract_qualified_error_records = 2;
+        assert!(!safe_producer_health(&impossible));
+    }
+
+    #[tokio::test]
+    async fn a_correctly_digested_manifest_with_an_unbounded_receipt_is_still_refused() {
+        // The read side, where the bytes are an input rather than a bug. A
+        // directory an attacker can write can produce a *self-consistent*
+        // manifest, so the digest alone is not the check — the receipt has to
+        // be shaped the way this build writes them before it is believed.
+        let (directory, capability) = one_segment_generation().await;
+        publish_controlled_directory(
+            &capability,
+            "generation-forged",
+            &one_segment_names(),
+            None,
+            || false,
+        )
+        .await
+        .expect("publish")
+        .expect("manifest");
+        let mut manifest = load(directory.path()).await.expect("load manifest");
+        let mut receipt = test_receipt(Qualification::Qualified);
+        receipt.diagnostic_contract = Some("c".repeat(MAX_DIAGNOSTIC_CONTRACT_BYTES + 1));
+        manifest.manifest_digest =
+            body_digest(&manifest.generation_id, &manifest.objects, Some(&receipt))
+                .expect("digest the forged body");
+        manifest.producer_health = Some(receipt);
+        let encoded = serde_json::to_vec(&manifest).expect("serialize forged manifest");
+        tokio::fs::write(directory.path().join(MANIFEST_FILE), &encoded)
+            .await
+            .expect("write forged manifest");
+        let error = load(directory.path())
+            .await
+            .expect_err("an unbounded receipt must not authenticate");
+        assert!(error.contains("failed validation"), "{error}");
     }
 }

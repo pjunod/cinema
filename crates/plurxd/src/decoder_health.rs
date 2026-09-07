@@ -68,6 +68,14 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+// The receipt and its vocabulary live in `plurx-core`, because the generation
+// manifest carries them and the manifest is core's. Re-exported here so every
+// caller keeps naming them where they are produced.
+pub use plurx_core::transcode::health::{
+    DecodeFaultKind, ExitDisposition, ProducerHealthReceipt, Qualification,
+    MAX_DIAGNOSTIC_CONTRACT_BYTES, PRODUCER_HEALTH_RECEIPT_VERSION,
+};
+
 /// How far back the accumulator looks. Errors that fall out of it stop
 /// counting, so a title that fails once a minute for two hours never latches —
 /// which is right, because that is a scratched disc, not a broken decoder.
@@ -101,29 +109,6 @@ const PRIMARY_MESSAGE: &str = "Error submitting packet to decoder:";
 
 /// The subordinate FFmpeg emits after the failure it elaborates on.
 const SUBORDINATE_MESSAGE: &str = "No frame decoded?";
-
-/// What went wrong, at the granularity a recovery decision needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DecodeFaultKind {
-    /// The selected video stream failed to decode often enough, close enough
-    /// together, that the output cannot be trusted.
-    VideoDecodeFailure,
-    /// The decode backend itself said it was finished — a fatal the caller
-    /// does not need five samples to believe. Only a contract that names a
-    /// backend-fault family can produce this: no M0 evidence qualifies one, so
-    /// on the retained builds it is unreachable by construction.
-    DecodeBackendUnavailable,
-}
-
-impl DecodeFaultKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::VideoDecodeFailure => "video_decode_failure",
-            Self::DecodeBackendUnavailable => "decode_backend_unavailable",
-        }
-    }
-}
 
 /// What one line of stderr turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +248,8 @@ pub enum ContractLoadError {
     Malformed(String),
     UnsupportedVersion(u32),
     DuplicateId(String),
+    /// An identifier a published manifest could not carry.
+    UnsafeId(String),
 }
 
 impl std::fmt::Display for ContractLoadError {
@@ -279,6 +266,12 @@ impl std::fmt::Display for ContractLoadError {
                 formatter,
                 "diagnostic contract {id} is defined more than once"
             ),
+            Self::UnsafeId(id) => write!(
+                formatter,
+                "diagnostic contract id {id:?} is not one a generation manifest can carry: \
+                 at most {MAX_DIAGNOSTIC_CONTRACT_BYTES} bytes of ASCII alphanumerics, \
+                 `-`, `_` or `.`"
+            ),
         }
     }
 }
@@ -294,6 +287,14 @@ impl DiagnosticContract {
     /// Two contracts sharing an id are refused for the same reason. Which of
     /// them a caller got would decide whether a session lives, and "whichever
     /// was listed first" is not a decision procedure.
+    ///
+    /// An id a published manifest could not carry is refused here, where the
+    /// table is authored, rather than at publication. A receipt naming it
+    /// would be dropped on the way into the generation manifest — so a fleet
+    /// whose table used, say, a Debian epoch (`ffmpeg-7:6.1.1-…`) would
+    /// publish every generation uncertified with nothing but a log line to
+    /// say why. The bound belongs to the identifier, so it is checked where
+    /// the identifier is introduced.
     pub fn load(table: &str) -> Result<Vec<Self>, ContractLoadError> {
         let parsed: DiagnosticContractFile = toml::from_str(table)
             .map_err(|error| ContractLoadError::Malformed(error.to_string()))?;
@@ -301,6 +302,9 @@ impl DiagnosticContract {
             return Err(ContractLoadError::UnsupportedVersion(parsed.version));
         }
         for (index, contract) in parsed.contracts.iter().enumerate() {
+            if !plurx_core::transcode::health::safe_diagnostic_contract_id(&contract.id) {
+                return Err(ContractLoadError::UnsafeId(contract.id.clone()));
+            }
             if parsed.contracts[..index]
                 .iter()
                 .any(|earlier| earlier.id == contract.id)
@@ -873,6 +877,39 @@ impl HealthAccumulator {
             && self.fault.is_none()
             && self.primary_error_records == 0
     }
+
+    /// Settle this observation into the receipt the manifest carries.
+    ///
+    /// The derivation lives on the accumulator, not on the receipt, because
+    /// the accumulator is the only thing that saw the stream. `plurx-core`
+    /// owns the receipt's *shape* so a cache reader can authenticate it; it
+    /// deliberately owns no way to decide that an attempt was clean.
+    pub fn settle_receipt(
+        &self,
+        plan_digest: String,
+        diagnostic_contract: Option<String>,
+        exit_disposition: ExitDisposition,
+    ) -> ProducerHealthReceipt {
+        let qualification = if self.fault.is_some() {
+            Qualification::Rejected
+        } else if exit_disposition == ExitDisposition::FailedTermination || !self.qualifies_reuse()
+        {
+            Qualification::Unqualified
+        } else {
+            Qualification::Qualified
+        };
+        ProducerHealthReceipt {
+            receipt_version: PRODUCER_HEALTH_RECEIPT_VERSION,
+            plan_digest,
+            diagnostic_contract,
+            observation_complete: self.observation_complete,
+            video_decode_error_records: self.primary_error_records,
+            contract_qualified_error_records: self.contract_qualified_records(),
+            terminal_fault: self.fault,
+            exit_disposition,
+            qualification,
+        }
+    }
 }
 
 /// Reads a child's stderr into classified records without letting the child
@@ -963,155 +1000,6 @@ impl BoundedDiagnosticReader {
 // Everything above decides what a *line* means. Everything below decides who
 // owns the reading of it, and what an attempt is allowed to claim afterwards.
 // ---------------------------------------------------------------------------
-
-/// How this attempt's process ended, as far as observation can tell.
-///
-/// Separate from the exit status because the two disagree in the case this
-/// whole effort exists for: a producer that failed to decode and exited zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExitDisposition {
-    /// Ran to the end of its input and stopped.
-    CleanEnd,
-    /// Stopped early because the caller asked it to — a yield to offline
-    /// production, a preemption. Not a failure, and not end-of-input either:
-    /// §6.2 requires the receipt to say which of the two it was.
-    IntentionalYield,
-    /// Terminated by failure, signal, or a deadline the caller enforced.
-    FailedTermination,
-}
-
-impl ExitDisposition {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::CleanEnd => "clean_end",
-            Self::IntentionalYield => "intentional_yield",
-            Self::FailedTermination => "failed_termination",
-        }
-    }
-}
-
-/// What the attempt's output may be used for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Qualification {
-    /// Complete observation, no selected-video decode record, no fault. The
-    /// bytes may be retained and served as a cache artifact.
-    Qualified,
-    /// Nothing was proved wrong, but something was not observed — a truncated
-    /// stream, an unqualified build, an incomplete drain. The bytes may still
-    /// be served to the viewer who is waiting for them; they may not become a
-    /// durable artifact.
-    Unqualified,
-    /// Something was proved wrong. A decode fault was observed on the selected
-    /// video stream.
-    Rejected,
-}
-
-impl Qualification {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Qualified => "qualified",
-            Self::Unqualified => "unqualified",
-            Self::Rejected => "rejected",
-        }
-    }
-
-    /// Whether this attempt's bytes may be kept as a reusable artifact.
-    pub fn permits_reuse(self) -> bool {
-        matches!(self, Self::Qualified)
-    }
-}
-
-/// The version of the receipt schema. A reader that does not recognize it
-/// refuses the artifact rather than guessing at the fields it can see.
-pub const PRODUCER_HEALTH_RECEIPT_VERSION: u32 = 1;
-
-/// What one producer attempt's observation concluded.
-///
-/// §6.2's field list, and the thing a cache reader has to authenticate before
-/// calling anything reusable. It is deliberately small and flat: it is stored
-/// beside media objects, read on a hot path, and has to survive a build that
-/// predates whatever writes it next.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ProducerHealthReceipt {
-    pub receipt_version: u32,
-    /// Which plan produced these bytes. A receipt that does not name this
-    /// attempt's plan is evidence about some other work.
-    pub plan_digest: String,
-    /// The contract id whose grammar read this stream, when one covered the
-    /// build. `None` means the build was not qualified, which is an
-    /// observation-only attempt however clean its output looked.
-    pub diagnostic_contract: Option<String>,
-    pub observation_complete: bool,
-    /// Structural primary records on the selected video stream. §7.3: isolated
-    /// errors below the fault threshold still make the output unqualified.
-    pub video_decode_error_records: u64,
-    /// The subset of those that also carried the build receipt.
-    pub contract_qualified_error_records: u64,
-    pub terminal_fault: Option<DecodeFaultKind>,
-    pub exit_disposition: ExitDisposition,
-    pub qualification: Qualification,
-}
-
-impl ProducerHealthReceipt {
-    /// Build a receipt from a settled accumulator.
-    ///
-    /// The qualification is derived here and nowhere else, so a caller cannot
-    /// assemble a receipt that says `Qualified` about an attempt whose
-    /// accumulator says otherwise.
-    fn settle(
-        plan_digest: String,
-        diagnostic_contract: Option<String>,
-        accumulator: &HealthAccumulator,
-        exit_disposition: ExitDisposition,
-    ) -> Self {
-        let qualification = if accumulator.fault().is_some() {
-            Qualification::Rejected
-        } else if exit_disposition == ExitDisposition::FailedTermination
-            || !accumulator.qualifies_reuse()
-        {
-            Qualification::Unqualified
-        } else {
-            Qualification::Qualified
-        };
-        Self {
-            receipt_version: PRODUCER_HEALTH_RECEIPT_VERSION,
-            plan_digest,
-            diagnostic_contract,
-            observation_complete: accumulator.observation_complete(),
-            video_decode_error_records: accumulator.primary_error_records(),
-            contract_qualified_error_records: accumulator.contract_qualified_records(),
-            terminal_fault: accumulator.fault(),
-            exit_disposition,
-            qualification,
-        }
-    }
-
-    /// A receipt for work this daemon did not observe at all.
-    ///
-    /// Used where a process exists but no diagnostic stream was owned — the
-    /// paths M3b has not reached yet. It is `Unqualified` by construction, so
-    /// a missing observer can never be mistaken for a clean one.
-    pub fn unobserved(plan_digest: String, exit_disposition: ExitDisposition) -> Self {
-        Self {
-            receipt_version: PRODUCER_HEALTH_RECEIPT_VERSION,
-            plan_digest,
-            diagnostic_contract: None,
-            observation_complete: false,
-            video_decode_error_records: 0,
-            contract_qualified_error_records: 0,
-            terminal_fault: None,
-            exit_disposition,
-            qualification: Qualification::Unqualified,
-        }
-    }
-
-    pub fn permits_reuse(&self) -> bool {
-        self.receipt_version == PRODUCER_HEALTH_RECEIPT_VERSION
-            && self.qualification.permits_reuse()
-    }
-}
 
 /// The facts about the FFmpeg binary that is actually going to run.
 ///
@@ -1455,10 +1343,9 @@ impl ObservedDiagnostics {
                 );
             }
         };
-        ProducerHealthReceipt::settle(
+        accumulator.settle_receipt(
             self.plan_digest.clone(),
             self.contract_id.clone(),
-            &accumulator,
             exit_disposition,
         )
     }
