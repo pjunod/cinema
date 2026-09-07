@@ -199,6 +199,11 @@ struct PreparedReplacementLedger: Equatable {
             ActionAcknowledgement(
                 actionId: active.actionId,
                 state: .committed,
+                // Echoed from the offer, never recomputed from the player: the
+                // server compares it against the staged successor's own origin
+                // and refuses a mismatch, so a value derived here would turn a
+                // rounding difference into a refused commit.
+                committedMediaOriginMs: active.mediaOriginMs,
                 firstFrameUnixMs: firstFrameUnixMs
             )
         )

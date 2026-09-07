@@ -254,7 +254,10 @@ final class PreparedReplacementWireTests: XCTestCase {
     /// server refuses outright.
     func testTerminalAcknowledgementsCarryWhatTheServerRequires() throws {
         let committed = ActionAcknowledgement(
-            actionId: stagingId, state: .committed, firstFrameUnixMs: 1_788_000_000_000
+            actionId: stagingId,
+            state: .committed,
+            committedMediaOriginMs: 600_000,
+            firstFrameUnixMs: 1_788_000_000_000
         )
         XCTAssertTrue(committed.isValid)
         XCTAssertFalse(
@@ -263,7 +266,24 @@ final class PreparedReplacementWireTests: XCTestCase {
         )
         XCTAssertFalse(
             ActionAcknowledgement(
-                actionId: stagingId, state: .committed, firstFrameUnixMs: 0
+                actionId: stagingId,
+                state: .committed,
+                committedMediaOriginMs: 600_000,
+                firstFrameUnixMs: 0
+            ).isValid
+        )
+        XCTAssertFalse(
+            ActionAcknowledgement(
+                actionId: stagingId, state: .committed, firstFrameUnixMs: 1_788_000_000_000
+            ).isValid,
+            "committed also requires committed_media_origin_ms — the server compares it"
+        )
+        XCTAssertFalse(
+            ActionAcknowledgement(
+                actionId: stagingId,
+                state: .committed,
+                committedMediaOriginMs: -1,
+                firstFrameUnixMs: 1_788_000_000_000
             ).isValid
         )
         XCTAssertTrue(
@@ -288,6 +308,7 @@ final class PreparedReplacementWireTests: XCTestCase {
         XCTAssertEqual(encoded?["state"] as? String, "committed")
         XCTAssertEqual(encoded?["action_id"] as? String, stagingId)
         XCTAssertEqual(encoded?["first_frame_unix_ms"] as? Int, 1_788_000_000_000)
+        XCTAssertEqual(encoded?["committed_media_origin_ms"] as? Int, 600_000)
         XCTAssertNil(encoded?["buffered_through_ms"])
         XCTAssertEqual(AcknowledgementState.metadataReady.rawValue, "metadata_ready")
         XCTAssertEqual(AcknowledgementState.bufferReady.rawValue, "buffer_ready")
@@ -296,7 +317,10 @@ final class PreparedReplacementWireTests: XCTestCase {
     /// The forbidden body is not merely unlikely; it cannot be constructed.
     func testACommitIsNeverBuiltOntoTheExchangeThatEndsTheSession() {
         let committed = ActionAcknowledgement(
-            actionId: stagingId, state: .committed, firstFrameUnixMs: 1_788_000_000_000
+            actionId: stagingId,
+            state: .committed,
+            committedMediaOriginMs: 0,
+            firstFrameUnixMs: 1_788_000_000_000
         )
         XCTAssertNil(PlaybackControl.acknowledgement(committed, demand: .end))
         XCTAssertEqual(PlaybackControl.acknowledgement(committed, demand: .active), committed)
@@ -332,6 +356,15 @@ final class PreparedReplacementLedgerTests: XCTestCase {
 
     /// The same value rides every snapshot until the exchange that carried it
     /// comes back. Coalescing cannot drop a settlement.
+    /// The commit echoes the offer's own origin, whatever the player thinks.
+    func testACommitEchoesTheOffersOriginRatherThanRecomputingIt() {
+        var ledger = PreparedReplacementLedger()
+        ledger.open(preparedAction(mediaOriginMs: 600_000))
+        ledger.noteCommitted(firstFrameUnixMs: 1_788_000_000_000)
+        XCTAssertEqual(ledger.pendingAcknowledgement?.committedMediaOriginMs, 600_000)
+        XCTAssertTrue(ledger.pendingAcknowledgement?.isValid == true)
+    }
+
     func testASettlementStaysPendingUntilItsExchangeReturns() {
         var ledger = PreparedReplacementLedger()
         ledger.open(preparedAction())
@@ -459,6 +492,10 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.pendingAcknowledgement?.state, .committed)
         XCTAssertEqual(
             coordinator.pendingAcknowledgement?.firstFrameUnixMs, 1_788_000_000_000
+        )
+        XCTAssertEqual(
+            coordinator.pendingAcknowledgement?.committedMediaOriginMs, 0,
+            "echoed from the offer, never recomputed — the server refuses a mismatch"
         )
         XCTAssertFalse(coordinator.hasActivePreparation)
         XCTAssertTrue(host.fallbacks.isEmpty)

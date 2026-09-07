@@ -501,6 +501,19 @@ struct ActionAcknowledgement: Codable, Equatable {
     var state: AcknowledgementState
     /// Required by `buffer_ready`, and meaningless elsewhere.
     var bufferedThroughMs: Int? = nil
+    /// Required by `committed`: the source position the successor's timeline
+    /// actually starts at, echoed from the offer being committed to.
+    ///
+    /// This is what a commit is proof *of*. `action_id` says which offer is
+    /// being answered; this says the client built the thing that offer
+    /// described. Between the `prepare` and the commit the server's own intent
+    /// can move — a seek, a quality change, a new recipe — and an
+    /// acknowledgement carrying only an id cannot distinguish a client that
+    /// committed to the current offer from one that committed to a stale one
+    /// and is about to present media nobody asked for. The server compares it
+    /// against the staged successor's own `media_origin_ms` and refuses a
+    /// mismatch, which is the only reason it is worth carrying.
+    var committedMediaOriginMs: Int? = nil
     /// Required by `committed`: the wall clock at the successor's first
     /// qualifying frame, in milliseconds, and greater than zero.
     var firstFrameUnixMs: Int? = nil
@@ -517,8 +530,13 @@ struct ActionAcknowledgement: Codable, Equatable {
             return false
         }
         if let firstFrameUnixMs, firstFrameUnixMs <= 0 { return false }
+        if let committedMediaOriginMs,
+           !(0...PlaybackControl.maximumMediaMs).contains(committedMediaOriginMs) {
+            return false
+        }
         if state == .bufferReady && bufferedThroughMs == nil { return false }
         if state == .committed && firstFrameUnixMs == nil { return false }
+        if state == .committed && committedMediaOriginMs == nil { return false }
         return true
     }
 }
