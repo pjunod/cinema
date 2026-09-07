@@ -2155,11 +2155,26 @@ pub trait TranscodeCacheStore: Send + Sync + 'static {
 
     /// Mark a claim finished and serveable, with its measured size. Until this
     /// runs the entry is invisible to [`TranscodeCacheStore::cache_hit`].
+    ///
+    /// `manifest_digest` is `None` for a generation published without one,
+    /// which is every generation under the unqualified artifact identity.
+    ///
+    /// The two states are not interchangeable, so the parameter is not
+    /// defaulted: a row that records a digest is offered to cluster placement,
+    /// is enrolled in the integrity scrub, and serves offline segments fatally
+    /// rather than leniently on pre-existing bit rot. It is not the reuse
+    /// gate — whether a generation may be reused as a health-qualified
+    /// artifact is read from the manifest file beside its bytes, never from
+    /// this row, because a row can outlive the bytes it describes.
+    ///
+    /// An implementation must treat `None` as "this publication carries no
+    /// digest", never as "clear the digest this row already has".
     async fn complete_cache_entry(
         &self,
         recipe_hash: &str,
         node_id: &str,
         bytes: i64,
+        manifest_digest: Option<&str>,
     ) -> Result<(), StoreError>;
 
     /// Note that somebody watched it — the LRU clock.
@@ -2944,6 +2959,7 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         node_id: &str,
         relative_dir: &str,
         bytes: i64,
+        manifest_digest: Option<&str>,
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<(), StoreError>;

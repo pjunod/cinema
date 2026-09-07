@@ -6540,6 +6540,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "node-a",
                 "contract/fenced-cache/stale",
                 999,
+                None,
                 &first,
                 &stale_replacement,
             ),
@@ -6835,6 +6836,7 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
                 "node-a",
                 "contract/fenced-cache/f2",
                 4242,
+                None,
                 &successor_current,
                 &replacement,
             )
@@ -7501,7 +7503,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: legacy cache claim: {error}")));
         store
-            .complete_cache_entry(legacy_recipe, "node-legacy", 16_384)
+            .complete_cache_entry(legacy_recipe, "node-legacy", 16_384, None)
             .await
             .unwrap_or_else(|error| panic!("{backend}: legacy cache complete: {error}"));
         assert_eq!(
@@ -8856,6 +8858,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
             "clock-node",
             "fc/fenced-cache-clock-recipe",
             4_096,
+            None,
             &lease,
             &replacement,
         )
@@ -20551,7 +20554,7 @@ async fn replaceable_cache_touch_burst_has_one_physical_write_budget() {
 
     store.validation_reset_operation_counts();
     store
-        .complete_cache_entry("replaceable-touch-recipe", "cache-node", 4_096)
+        .complete_cache_entry("replaceable-touch-recipe", "cache-node", 4_096, None)
         .await
         .expect("terminal cache completion");
     assert_eq!(
@@ -23556,6 +23559,131 @@ async fn wait_until_after(second: i64) {
     }
 }
 
+/// `None` says "this publication carries no digest", never "clear the digest
+/// this row already has".
+///
+/// Both matter, and they pull opposite ways. Under the health-qualified
+/// artifact identity the digest is the only thing that identifies a generation
+/// to the integrity scrub, to cluster placement, and to strict offline segment
+/// serving; a later unfenced completion of the same row — a speculative warm
+/// re-completing a row a queue job already settled — must not silently erase
+/// it. And a caller that has no digest must not be forced to invent one.
+///
+/// Four implementations answer this: sqlite and hiqlite, each fenced and
+/// unfenced. All four are exercised here, because a `COALESCE` dropped from
+/// any one of them loses a qualified artifact's identity with no error
+/// anywhere.
+#[tokio::test]
+async fn a_cache_completion_without_a_digest_never_clears_the_one_on_the_row() {
+    for_each_backend(|store, backend| async move {
+        let (_, file) = seed_file(&store, "digest-coalesce").await;
+        let node = "digest-node";
+        let digest_now = |recipe: &'static str| {
+            let store = store.clone();
+            async move {
+                store
+                    .cache_hit(recipe, node)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: cache lookup: {error}"))
+                    .unwrap_or_else(|| panic!("{backend}: completed row"))
+                    .manifest_digest
+            }
+        };
+
+        // Unfenced: the lane speculative warming and offline preparation use.
+        assert!(store
+            .claim_cache_entry("digest-recipe", file, 1, node, "dd/digest-recipe")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}")));
+        store
+            .complete_cache_entry("digest-recipe", node, 4_096, Some("d1"))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first completion: {error}"));
+        assert_eq!(
+            digest_now("digest-recipe").await,
+            Some("d1".to_owned()),
+            "{backend}: a completion that carries a digest records it"
+        );
+        store
+            .complete_cache_entry("digest-recipe", node, 8_192, None)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: digestless completion: {error}"));
+        assert_eq!(
+            digest_now("digest-recipe").await,
+            Some("d1".to_owned()),
+            "{backend}: a completion with no digest must not clear the row's"
+        );
+        store
+            .complete_cache_entry("digest-recipe", node, 8_192, Some("d2"))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replacement completion: {error}"));
+        assert_eq!(
+            digest_now("digest-recipe").await,
+            Some("d2".to_owned()),
+            "{backend}: a completion that carries a different digest replaces it"
+        );
+
+        // Fenced: the lane a cluster publication uses.
+        let lease_clock = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("digest lease clock after epoch")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let mut lease = acquired(
+            store
+                .acquire_lease(
+                    "candidate:digest-fenced",
+                    node,
+                    lease_clock,
+                    lease_clock.saturating_add(90_000),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: lease: {error}")),
+            backend,
+        );
+        let replacement = publication_successor(&lease);
+        assert!(store
+            .claim_cache_entry_fenced(
+                "digest-fenced",
+                file,
+                1,
+                node,
+                "dd/digest-fenced",
+                &lease,
+                &replacement,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fenced claim: {error}")));
+        lease = replacement;
+        for (bytes, written, expected) in [
+            (4_096_i64, Some("f1"), Some("f1")),
+            (8_192, None, Some("f1")),
+            (8_192, Some("f2"), Some("f2")),
+        ] {
+            let replacement = publication_successor(&lease);
+            store
+                .complete_cache_entry_fenced(
+                    "digest-fenced",
+                    node,
+                    "dd/digest-fenced",
+                    bytes,
+                    written,
+                    &lease,
+                    &replacement,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: fenced completion: {error}"));
+            lease = replacement;
+            assert_eq!(
+                digest_now("digest-fenced").await,
+                expected.map(str::to_owned),
+                "{backend}: fenced completion writing {written:?}"
+            );
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn transcode_cache_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
@@ -23614,7 +23742,7 @@ async fn transcode_cache_contract_runs_through_dyn_store() {
         );
         assert_eq!(store.all_cache_rows(node).await.expect("all rows").len(), 1);
         store
-            .complete_cache_entry("recipe", node, 4_096)
+            .complete_cache_entry("recipe", node, 4_096, None)
             .await
             .expect("complete");
         let ownership = store

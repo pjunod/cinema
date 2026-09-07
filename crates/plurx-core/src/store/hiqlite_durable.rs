@@ -859,13 +859,25 @@ impl TranscodeCacheStore for HiqliteAuthStore {
         recipe_hash: &str,
         node_id: &str,
         bytes: i64,
+        manifest_digest: Option<&str>,
     ) -> Result<(), StoreError> {
         let now = self.now()?;
+        // `COALESCE` rather than an unconditional write: a row that already
+        // carries a digest was fenced by a queue completion, and a later
+        // unfenced completion of the same recipe must not blank it. `None`
+        // means "this publication has none", never "clear the one there".
         self.execute(
             "UPDATE transcode_cache_locations SET complete = 1, bytes = $1, \
-                 last_used_at = MAX(last_used_at, $2), last_seen_at = MAX(last_seen_at, $2) \
-             WHERE recipe_hash = $3 AND node_id = $4 AND storage_class = 'local'",
-            params!(bytes, now, recipe_hash, node_id),
+                 manifest_digest = COALESCE($2, manifest_digest), \
+                 last_used_at = MAX(last_used_at, $3), last_seen_at = MAX(last_seen_at, $3) \
+             WHERE recipe_hash = $4 AND node_id = $5 AND storage_class = 'local'",
+            params!(
+                bytes,
+                manifest_digest.map(str::to_owned),
+                now,
+                recipe_hash,
+                node_id
+            ),
         )
         .await?;
         Ok(())

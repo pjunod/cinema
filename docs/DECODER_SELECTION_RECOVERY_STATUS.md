@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3e candidate; M0–M3d, M4 and M5a merged into the effort ·
+**Status:** M3c5 candidate; M0–M3e, M4 and M5a merged into the effort ·
 **Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M3e task base:** effort head
-`a8403e104f8be8a31dba09d184bfa7da983d73da`
+`effort/decoder-selection-recovery` · **M3c5 task base:** effort head
+`c54fb05276c31a5a39e91157f35f1bdb6b049a01`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,14 +20,15 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3e — the wording belongs to the build |
-| Task branch | `codex/decoder-selection-m3e`, based on effort head `a8403e10` |
+| Milestone | M3c5 — every path that produces under the identity files its receipt |
+| Task branch | `codex/decoder-selection-m3c5`, based on effort head `c54fb052` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | This head on pinned 1.97.1: daemon `playback_control::tests::` 225/225 including six new health-barrier contracts, `decoder_health` 38/38, `transcode::tests::` 223/223, `live_tv::tests::` 40/40, core `decoder_selection` 44/44, `make effort-rust-check`, `make lint` and `make validation-lint` clean, the rolling-producer ownership ledger unchanged, `git diff --check` clean |
-| Exact receipt | M3b1's is `de05be04`, merged. M3b2's is the head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
+| Focused validation | This head on pinned 1.97.1: daemon `transcode::tests::` 249/249 including two new, daemon `decoder_health`/`offline`/`cachekeep` 120/120, core `store_contract` 96/96 including one new run through both backends and both fenced arms, `plurx-cluster-check` 79/79, `make lint`, `make validation-lint` and `make history-check` clean, `git diff --check` clean, `tests.operations.test_decoder_diagnostic_qualification` + `tests.validation.test_decoder_recovery_status` 43/43. Core `--lib` is 747 passed and **2 failed**, both inherited — see the row below |
+| Inherited failure | `cargo test -p plurx-core --lib` fails two census tests on the effort head itself, not on this candidate: `every_sqlite_transaction_site_is_classified` (`sessions.rs` has 20 rusqlite transactions, the census says 18) and `v6_rebuild_preserves_everything` (48 migrations, the list says 47). Bisected to `e4632204` — M5a's durable ledger, which shipped `media_session_producer_recovery` and its two session transactions without bumping either deliberate-bump gate. Forgejo `main` at `4a6a0268` passes both. Neither is caused by or repaired in M3c5; both are repaired in their own task PR before promotion, because a census bumped inside an unrelated milestone is exactly the surprise these two tests exist to refuse |
+| Exact receipt | The head this PR carries; the whole-PR adversarial review and the effort gate are what make it a receipt |
 | Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
 | Blocker | The Forgejo `Effort development gate` on this head. Per `AGENTS.md` a task PR into an effort branch defers the full suite to the `Main promotion gate`; the effort's one `make validate-full` is owed at promotion, not here |
 
@@ -38,7 +39,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a–M3d merged; M3e candidate; M3c5 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. Nothing selects it in production yet; the operator control and the paths that cannot yet publish a manifest are M3c5 |
+| M3 · owned observation and health receipts | M3a–M3e merged; M3c5 candidate; M3f not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. Nothing selects it in production yet; the operator control and its `Settings > Developer` enable section are M3f |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -1346,9 +1347,18 @@ decision, not a detail. M3c5 makes them.
 `TranscodeManager::test_publish_artifact_qualification` is the only writer of
 the effective identity, and it is `#[cfg(test)]`. The operator setting, the
 node effective-mode intersection and the `Settings > Developer` enable section
-land with M3c5's manifest work, so a control that rotates a fleet's key space
-never exists before everything behind it works. What is here is the behaviour
-that control will select, complete and exercised.
+land only once everything behind them works, so a control that rotates a
+fleet's key space never exists before the paths it selects are complete. What
+is here is the behaviour that control will select, complete and exercised.
+
+*Amended after M3c5.* This section originally said the control lands with
+M3c5's manifest work. It does not: M3c5 turned out to be a complete reviewable
+change on its own — a publication decision, a store column, and the four
+cluster behaviours a manifest turns on — and bolting a settings key, a node
+mode intersection and a client surface onto it would have made one review
+cover two unrelated risks. The control is M3f, immediately after, and the
+condition it was given here is unchanged and now satisfied: every path behind
+it works.
 
 ### What the whole-PR review found, and what it changed
 
@@ -1647,6 +1657,177 @@ and the owed FFmpeg 8 version convention.
 same capture replayed through the harness with the same numbers, and a
 fabricated five-record burst on an unqualified build that faults and still may
 not act. `make lint`, `make validation-lint` and `make history-check` clean.
+
+## M3c5 working tree — every path that produces under the identity files its receipt
+
+M3c4 left a hole and named it. Only the pretranscode queue published a
+manifest, so speculative warming and offline preparation settled a producer
+receipt and then wrote it nowhere. The retention rule reads the manifest —
+deliberately, because a receipt held only in this process cannot certify
+anything to tomorrow's reader — so under the qualified identity those two paths
+retained nothing at all. An offline package would have failed with
+`decode_unhealthy` even though its own production was clean, and a warm cache
+would have refilled and been thrown away on every pass.
+
+Both paths publish a manifest now, and only under the identity that asks for
+one:
+
+    queue_job.is_some() || plan.enforces_receipt()
+
+### The things a manifest turns on
+
+Publishing a manifest is not a private fact about a directory. A row that
+records its digest is offered to cluster placement, is enrolled in the
+integrity scrub, and has its offline segment serving flip from lenient to fatal
+on pre-existing bit rot. A fourth — shared-cache fanout — is refused outright
+below, under either identity, so it is not on the list.
+
+Extending that to every speculative and offline row would have changed all
+three *for rows that already exist on deployed nodes*, in exchange for a
+receipt nothing on those rows consults. Under the qualified identity none of
+those rows exist yet: the namespace is new and nothing selects it in
+production, so each of those becomes a property of a new key space rather than
+a change to a live one. That is what M3c3 bought by giving qualified production
+its own artifact identity, and this is the first milestone that spends it.
+
+The gate is on the **recorded digest**, not on the manifest's existence, and
+the difference is not cosmetic. `queue_job` is `Some` exactly when
+`pretranscode_fence` is, and the queue settles its completion through its own
+fenced arm four hundred lines earlier — so deriving the digest from "is there a
+manifest" would be correct today and would rest entirely on an invariant
+nowhere near it. It is `plan.enforces_receipt()` instead, checked where the
+value is recorded, with the invariant asserted rather than assumed.
+
+Shared-cache fanout stays queue-only, by an explicit `queue_job.is_some()` in
+its guard. Fanout is a second full copy onto a shared mount, other nodes
+routing work to that copy, and cluster quota — a decision about cluster
+behaviour, which must not arrive as a side effect of carrying a receipt.
+Whether qualified speculative and offline generations should fan out is a real
+question with a real answer; it is not this milestone's, and the guard says so
+out loud rather than leaving it to be inferred from the shape of an `if let`.
+
+### Naming a generation that no job named
+
+The queue names a generation `<job id>:<fence>`. Off the queue there is no job,
+and the value chosen instead has to satisfy something sharper than uniqueness:
+`publish_controlled_directory` hashing a long film is preemptible, and the
+checkpoint it leaves behind is keyed by the generation id. A value that
+differed between the pass that yielded and the pass that resumed would throw
+the checkpoint away and rehash the entire film, every time — on a long title,
+the difference between finishing and never finishing.
+
+So the id is the final directory's own name. `identity_for` extracts it, and
+it replaced a second, subtly different derivation a few lines below that read
+`final_dir.file_name()` — one rule, one function, one test, rather than two
+spellings of the same idea drifting apart. It also *checks* the shape rather
+than asserting it in prose: publication rejects an unsafe generation id, but
+that rejection reaches the caller as an ordinary retryable production error, so
+a name that could never be accepted would retry the title on a backoff forever
+and be reported as an encoder fault.
+
+Unfenced, that name is the recipe hash — stable across the resume passes of one
+production, and stable across *unrelated* productions of the same recipe too.
+That second property is the one worth interrogating, because a checkpoint
+adopted by a later, differently-encoded production would certify bytes that
+never existed. It cannot happen, for three reasons, and they are written into
+the code because the whole argument rests on them: the checkpoint file lives
+inside the generation directory, so it dies with the staging tree it describes;
+its header must carry this same id or it is discarded; and every object digest
+in it is reused only while that file's device, inode, size and mtime still
+match, so re-encoded bytes are rehashed rather than trusted.
+
+### The manifest's own bytes are bytes
+
+The manifest file is charged to `published.bytes` on every path that writes
+one. Charging it on the queue path and not the others would have left the cache
+budget under-counting every generation the other paths made, with nothing
+anywhere to reconcile it against.
+
+### The digest, on the paths that never carried one
+
+`complete_cache_entry` and its fenced twin now take `manifest_digest:
+Option<&str>` — through the `Store` trait, both sqlite implementations, both
+hiqlite implementations and the `PublicationStore` wrapper. The column is
+written as `manifest_digest = COALESCE(?, manifest_digest)`, so passing `None`
+can never blank a digest an earlier write recorded; all twenty-six existing
+call sites pass `None`, so every deployed row records exactly what it recorded
+before.
+
+### The queue's courtesy is the queue's
+
+`publish_controlled_directory` takes a yield predicate, and part of it stands
+down when the node is not idle. Both *background* lanes owe that courtesy — the
+queue and speculative warming exist to be interrupted by people pressing play —
+so the predicate is `offline_package_id.is_none()`, not "is this the queue".
+
+The first draft of this milestone made it queue-only, which would have taken
+the courtesy away from speculative warming: a warm's manifest hash, a second
+full read of every byte of the generation, would have kept running while a
+viewer pressed play. Offline preparation is the one lane genuinely exempt, and
+for a stronger reason than politeness: `pretranscode_worker_idle` is false
+while a package is waiting, so applying it there would yield on the first check
+and every check after it, and the package would never become ready at all.
+
+### What the tests show
+
+`a_manifest_is_written_off_the_queue_only_where_a_receipt_is_enforced` runs a
+real ffmpeg production under both identities. The unqualified arm asserts the
+generation is kept, that no `.generation-manifest.json` was written beside it,
+and that the completed cache row records `manifest_digest = NULL` — the promise
+that no deployed row changes.
+
+The qualified arm cannot use the outcome, and the first draft of this milestone
+did not notice. The refusal quarantines the generation and takes the manifest
+with it, so every on-disk observation afterwards is identical to the one a
+build *without* this milestone would leave: delete `|| plan.enforces_receipt()`
+from the publication condition and the whole test still passes. It keys on a
+`#[cfg(test)]` count of manifests published instead — one under the qualified
+identity, zero under the unqualified — which is the only durable trace a
+refused generation leaves, and which fails on that revert.
+
+It is still refused, and that half is the regression guard. On this host no
+diagnostic contract covers the running build, so nothing FFmpeg printed is
+evidence. Which branch of `generation_permits_reuse` refuses has changed —
+from manifest-absent to receipt-refuses, a branch that off the queue was
+previously unreachable — and the outcome cannot show that either.
+
+`a_cache_completion_without_a_digest_never_clears_the_one_on_the_row` drives
+the `COALESCE` rule through `dyn Store` on every backend and through both the
+fenced and unfenced arms: a digest is recorded, a later digestless completion
+leaves it alone, and a later different digest replaces it. Asserting the SQL
+text says `COALESCE` is a proxy for that; this is the behaviour.
+
+An end-to-end *kept* generation under the qualified identity needs a diagnostic
+contract covering the test host's own build. That is owed evidence, recorded
+below, and inventing one to make a test go green would be precisely the
+confident-but-unmeasured value this effort exists to refuse.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate. It raised two claimed
+blockers, five majors and four minors. Two of the majors and all four minors
+were real; the two blockers were not, and running them down produced two of the
+better repairs anyway — the reasoning they demanded was load-bearing and was
+nowhere written down.
+
+| Finding | Disposition |
+|---|---|
+| **Not a defect.** "The queue lane now stamps `manifest_digest` onto unqualified deployed rows." It does not: `queue_job` is `Some` exactly when `pretranscode_fence` is, and the queue settles through its own fenced arm four hundred lines earlier, so the widened arm is off-queue only | The safety was real and remote. The digest is now gated on `plan.enforces_receipt()` where it is recorded, with the invariant `debug_assert`ed rather than assumed, so the argument is local to the line it protects |
+| **Not a defect.** "The off-queue generation id is the recipe hash, so a checkpoint can be adopted across two different productions and certify bytes that never existed." The checkpoint lives inside the generation directory and dies with the staging tree, its header must carry the same id, and every object digest is reused only while that file's device, inode, size and mtime still match | Correctly identified that the entire safety argument rested on three facts written down nowhere. They are now in the code and in this document |
+| The idle courtesy was made queue-only, which also took it from *speculative warming* — a background lane that exists to be interrupted by people pressing play, and the one M3c4 named as cost-sensitive. The comment justified only the offline lane | The predicate is `offline_package_id.is_none()`: both background lanes owe the courtesy, and offline preparation is exempt because `pretranscode_worker_idle` is false while a package waits, so applying it there would yield forever and the package would never become ready |
+| The new end-to-end test passes with the milestone's central change reverted. The refusal quarantines the generation, so no on-disk observation can tell a manifest that was written and thrown away from one that was never written | A `#[cfg(test)]` count of manifests published: one under the qualified identity, zero under the unqualified. It fails on that revert |
+| `COALESCE` was asserted only as SQL text, and only in the two *unfenced* implementations — the fenced twins, which a cluster actually uses, were checked by nothing | All four are checked, and the behaviour itself is proved through `dyn Store` on every backend and both arms: record, then a digestless completion that must not clear it, then a different digest that must replace it |
+| The `Store` trait doc claimed a row with no digest is "never reused as a qualified artifact". Reuse is decided by the manifest file beside the bytes, never by the row — inventing a coupling that does not exist | Restated as what the digest actually drives, plus the rule an implementer needs: `None` means "carries no digest", never "clear the one on the row" |
+| `identity_for` asserted `safe_generation_id` shape in prose and checked only non-emptiness | It calls the real validator, newly exported from the manifest module, and rejects an input with no shard prefix. A rejected name would otherwise fail production as a *retryable* error and retry the title on a backoff forever |
+| The in-code comment still listed shared-cache fanout among the behaviours a manifest turns on, forty lines above the guard this same change added to prevent exactly that | Three, not four, and it points at the guard |
+| The call-site census asserted `sorted(digests).count("None") == 26`, which moves in one direction only: a new caller writing a digest leaves that count untouched | The whole multiset is asserted |
+| The identity test used hardcoded literals and could not fail if `relative`'s construction changed | It builds the three shapes `produce_normalized` builds, and asserts every one is a name publication will accept |
+
+### What is still owed
+
+The operator setting, the node effective-mode intersection and the
+`Settings > Developer` enable section are M3f, immediately after this. Every
+path behind that control now works, which was the condition M3c4 set for it.
 
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 
@@ -2490,6 +2671,11 @@ lane and focused tests provide earlier feedback.
 
 ## Remaining evidence before release
 
+- Repair the two inherited census failures from M5a (`e4632204`): the
+  `sessions.rs` transaction census and the sqlite migration count. They are
+  invisible to the `Effort development gate` and fail only under
+  `cargo test -p plurx-core --lib`, which no task candidate before M3c5 ran in
+  full — the milestone routine now does.
 - Original #913 media on an Apple VideoToolbox node, compared with software
   decode while retaining the hardware encoder.
 - Qualified FFmpeg diagnostic output from each supported build/backend class.

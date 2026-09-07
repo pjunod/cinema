@@ -229,6 +229,17 @@ fn safe_generation_id(generation_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
 }
 
+/// Whether this build would accept `generation_id` for a publication.
+///
+/// Exported so a caller that *derives* a generation id can reject a bad one
+/// where it is derived. Publication rejects it too, but that rejection reaches
+/// the caller as an ordinary retryable production error, so a name that can
+/// never be accepted retries forever instead of failing once and clearly.
+#[must_use]
+pub fn is_safe_generation_id(generation_id: &str) -> bool {
+    safe_generation_id(generation_id)
+}
+
 async fn open_read_nofollow(path: &Path) -> std::io::Result<tokio::fs::File> {
     crate::fs_secure::open_read_nofollow(path).await
 }

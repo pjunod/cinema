@@ -11853,7 +11853,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         bail!("second replicated cache claim moved an existing owner");
     }
     store
-        .complete_cache_entry(&recipe_hash, &node_id, 800 + ordinal as i64)
+        .complete_cache_entry(&recipe_hash, &node_id, 800 + ordinal as i64, None)
         .await?;
     store.touch_cache_entry(&recipe_hash, &node_id).await?;
     if store.cache_hit(&recipe_hash, &node_id).await?.is_none()
@@ -11884,7 +11884,9 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
     {
         bail!("replicated unpinned cache claim was not accepted");
     }
-    store.complete_cache_entry(&unpinned, &node_id, 123).await?;
+    store
+        .complete_cache_entry(&unpinned, &node_id, 123, None)
+        .await?;
     let expected_cache_bytes = 923 + ordinal as i64;
     let cache_bytes = store.cache_bytes(&node_id).await?;
     if cache_bytes != expected_cache_bytes {

@@ -38,7 +38,16 @@ M3C4_MERGED_HEAD = "86647b37cb9e91d3c043f3e3a0ef4fb5330ef34e"
 M3D_TASK_BASE = M3C4_MERGED_HEAD
 M3D_MERGED_HEAD = "a8403e104f8be8a31dba09d184bfa7da983d73da"
 M3E_TASK_BASE = M3D_MERGED_HEAD
+M3E_MERGED_HEAD = "c54fb05276c31a5a39e91157f35f1bdb6b049a01"
+M3C5_TASK_BASE = M3E_MERGED_HEAD
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
+CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
+SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
+HIQLITE_DURABLE = ROOT / "crates/plurx-core/src/store/hiqlite_durable.rs"
+SQLITE_FENCED = ROOT / "crates/plurx-core/src/store/sqlite/publication.rs"
+HIQLITE_FENCED = ROOT / "crates/plurx-core/src/store/hiqlite_publication.rs"
+STORE_PUBLICATION = ROOT / "crates/plurx-core/src/store/publication.rs"
+STORE_CONTRACT = ROOT / "crates/plurx-core/tests/store_contract.rs"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -195,13 +204,16 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(f"M3e task base:** effort head `{M3E_TASK_BASE}`", self.flat_status)
+        self.assertIn(
+            f"M3c5 task base:** effort head `{M3C5_TASK_BASE}`", self.flat_status
+        )
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C2_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C3_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C4_MERGED_HEAD[:8], self.status)
         self.assertIn(M3D_MERGED_HEAD[:8], self.status)
+        self.assertIn(M3E_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -325,7 +337,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M3e candidate; M0–M3d, M4 and M5a merged into the effort", self.status
+            "M3c5 candidate; M0–M3e, M4 and M5a merged into the effort", self.status
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
@@ -816,6 +828,207 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # fleet is covered.
         self.assertIn("What is still owed", self.status)
         self.assertIn("not fleet evidence", self.status)
+
+    def test_m3c5_every_qualified_path_files_its_receipt_and_no_other_row_moves(
+        self,
+    ) -> None:
+        """A receipt written nowhere certifies nothing tomorrow.
+
+        M3c4 enforced a receipt the manifest carries, and only the queue
+        published a manifest — so speculative warming and offline preparation
+        settled a clean receipt and were refused for having filed it nowhere.
+        This closes that, and the interesting half is what it refuses to
+        change: a manifest is what makes a row eligible for shared-cache
+        fanout, for cluster placement, for the integrity scrub, and for fatal
+        rather than lenient offline segment serving. None of those may move for
+        a row that exists on a deployed node today.
+        """
+        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+
+        # The publication decision, stated once and gated on the identity.
+        self.assertIn(
+            "let manifest = if queue_job.is_some() || plan.enforces_receipt() {", daemon
+        )
+
+        # Off the queue the generation id is the final directory's own name,
+        # which is what makes it stable across the resume passes of one
+        # production — and that stability is the digest checkpoint's key.
+        self.assertIn("fn identity_for(relative: &str)", daemon)
+        self.assertEqual(daemon.count("fn identity_for(relative: &str)"), 1)
+        self.assertIn("None => identity_for(&relative)?.to_owned(),", daemon)
+        # One derivation, not two spellings of it.
+        self.assertNotIn("cache publication has no safe final-directory identity", daemon)
+
+        # Fanout stays queue-owned. Carrying a receipt must not enrol a
+        # speculative or offline generation in a second full copy onto a shared
+        # mount, in other nodes routing work to that copy, or in cluster quota.
+        fanout = daemon.split("if let (Some(shared_cache), Some(manifest), true) = (", 1)[
+            1
+        ].split(") {", 1)[0]
+        self.assertIn("queue_job.is_some()", fanout)
+
+        # The manifest's own bytes are charged wherever one is written, or the
+        # cache budget under-counts every generation the other paths made.
+        self.assertIn(
+            "published.bytes = published.bytes.saturating_add(", daemon
+        )
+
+        # The digest reaches durable storage through both arms of the
+        # publication wrapper. A parameter added only to the fenced one would
+        # be silently dropped for every unfenced caller, which is most of them.
+        publication = STORE_PUBLICATION.read_text(encoding="utf-8")
+        self.assertIn(
+            ".complete_cache_entry(recipe_hash, node_id, bytes, manifest_digest)",
+            publication,
+        )
+
+        # `None` never blanks a digest an earlier write recorded. Four
+        # implementations answer this — sqlite and hiqlite, each fenced and
+        # unfenced — and a `COALESCE` dropped from any one of them loses a
+        # qualified artifact's identity with no error anywhere.
+        for path in (SQLITE_CACHE, HIQLITE_DURABLE, SQLITE_FENCED, HIQLITE_FENCED):
+            with self.subTest(backend=f"{path.parent.name}/{path.name}"):
+                self.assertIn(
+                    "manifest_digest = COALESCE(", path.read_text(encoding="utf-8")
+                )
+        # And the behaviour itself is proved through `dyn Store` on every
+        # backend, rather than inferred from the SQL text above.
+        self.assertIn(
+            "async fn a_cache_completion_without_a_digest_never_clears_the_one_on_the_row",
+            STORE_CONTRACT.read_text(encoding="utf-8"),
+        )
+
+        # Every call site's digest argument, as a whole multiset. Counting
+        # only the `None`s would move in one direction and not the other: a new
+        # caller that starts writing a digest adds a non-`None` element and
+        # leaves that count untouched, which is the change this most needs to
+        # catch.
+        self.assertEqual(
+            sorted(self._manifest_digest_arguments()),
+            sorted(
+                ["None"] * 27
+                + ["digest", "digest", "manifest_digest", "manifest_digest"]
+                + ['Some("d1")', 'Some("d2")', "written"]
+            ),
+        )
+        # The two production writers are the off-queue completion arms, and
+        # both take their value from `digest` — which is `None` unless the
+        # identity enforces a receipt. Reading it off the manifest instead
+        # would work today and would put the safety in an invariant four
+        # hundred lines away: `queue_job` is `Some` exactly when
+        # `pretranscode_fence` is, so a queue job can never reach that arm.
+        self.assertIn("let digest = plan\n                .enforces_receipt()", daemon)
+        self.assertIn(
+            "a queue completion must settle through its own fence", daemon
+        )
+
+        # The trait says what the two states mean, so a future implementer does
+        # not default the parameter.
+        store = CORE_STORE.read_text(encoding="utf-8")
+        self.assertIn(
+            "`manifest_digest` is `None` for a generation published without one",
+            store,
+        )
+
+        # And the test that discriminates is the unqualified arm, because on a
+        # host no contract covers both arms refuse.
+        self.assertIn(
+            "fn a_manifest_is_written_off_the_queue_only_where_a_receipt_is_enforced",
+            daemon,
+        )
+        self.assertIn(
+            "an unqualified row records no digest, so nothing that keys on one changes",
+            daemon,
+        )
+        # The qualified arm keys on a counter, not on the outcome: the refusal
+        # quarantines the generation and takes the manifest with it, so every
+        # on-disk observation afterwards is identical to the one a build
+        # without this milestone would leave.
+        self.assertIn(
+            "the qualified identity publishes a manifest off the queue", daemon
+        )
+        self.assertIn(
+            "the unqualified identity publishes none off the queue", daemon
+        )
+        self.assertIn("fn test_manifests_published(&self) -> usize", daemon)
+        self.assertIn(
+            "fn the_generation_identity_is_the_final_directory_and_survives_a_fence",
+            daemon,
+        )
+        # A derived generation id is checked where it is derived. Publication
+        # rejects a bad one too, but as an ordinary retryable production error
+        # — so a name that can never be accepted would retry the title on a
+        # backoff forever and report it as an encoder fault.
+        self.assertIn(
+            "plurx_core::transcode::manifest::is_safe_generation_id(identity)", daemon
+        )
+        self.assertIn(
+            "pub fn is_safe_generation_id(generation_id: &str) -> bool",
+            CORE_MANIFEST.read_text(encoding="utf-8"),
+        )
+
+        # Both background lanes owe the idle courtesy — the queue and
+        # speculative warming exist to be interrupted by people pressing play.
+        # An offline package does not: a user is waiting on that download, and
+        # the predicate is false while one is waiting, so it would yield on
+        # every check and the package would never become ready.
+        self.assertIn("let owes_idle_courtesy = offline_package_id.is_none();", daemon)
+        self.assertIn(
+            "|| (owes_idle_courtesy && !self.pretranscode_worker_idle())", daemon
+        )
+
+        # The stale claim M3c4 made about where the operator control lands is
+        # corrected in place rather than left to mislead.
+        self.assertIn("*Amended after M3c5.*", self.status)
+        self.assertIn("The control is M3f, immediately after", self.status)
+
+    @staticmethod
+    def _manifest_digest_arguments() -> list[str]:
+        """The digest argument at every `complete_cache_entry` call site."""
+
+        def split_args(text: str) -> list[str]:
+            parts: list[str] = []
+            depth = 0
+            current = ""
+            for character in text:
+                if character in "([{":
+                    depth += 1
+                elif character in ")]}":
+                    depth -= 1
+                if character == "," and depth == 0:
+                    parts.append(current.strip())
+                    current = ""
+                else:
+                    current += character
+            if current.strip():
+                parts.append(current.strip())
+            return parts
+
+        found: list[str] = []
+        for source in sorted((ROOT / "crates").rglob("*.rs")):
+            text = source.read_text(encoding="utf-8")
+            for match in re.finditer(
+                r"\.complete_cache_entry(_fenced)?\s*\(", text
+            ):
+                index = match.end() - 1
+                depth = 0
+                while index < len(text):
+                    if text[index] == "(":
+                        depth += 1
+                    elif text[index] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    index += 1
+                arguments = split_args(text[match.end() : index])
+                # The fenced method takes `relative_dir` before `bytes`; the
+                # publication wrapper takes it too, so position is read off the
+                # argument count rather than the method name.
+                position = 4 if len(arguments) > 4 else 3
+                found.append(
+                    arguments[position] if len(arguments) > position else "??"
+                )
+        return found
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.

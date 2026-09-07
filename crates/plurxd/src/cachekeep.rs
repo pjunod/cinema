@@ -1785,7 +1785,7 @@ mod tests {
     ) -> PathBuf {
         let dir = claim(store, root, file, hash).await;
         store
-            .complete_cache_entry(hash, NODE, bytes)
+            .complete_cache_entry(hash, NODE, bytes, None)
             .await
             .expect("complete");
         dir
@@ -2026,7 +2026,7 @@ mod tests {
             .await
             .expect("corrupt cache row"));
         store
-            .complete_cache_entry(recipe, NODE, 16)
+            .complete_cache_entry(recipe, NODE, 16, None)
             .await
             .expect("complete corrupt row");
         store
@@ -2801,7 +2801,7 @@ mod tests {
                     .await
                     .expect("claim location"));
                 store
-                    .complete_cache_entry(recipe, NODE, 16)
+                    .complete_cache_entry(recipe, NODE, 16, None)
                     .await
                     .expect("complete location");
                 drop(guard);
@@ -2978,7 +2978,7 @@ mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry("aastuck", NODE, 100)
+            .complete_cache_entry("aastuck", NODE, 100, None)
             .await
             .expect("complete");
 
@@ -3170,7 +3170,7 @@ mod tests {
                 .await
                 .expect("cache claim");
             store
-                .complete_cache_entry("aakeep", &cluster_id, 20)
+                .complete_cache_entry("aakeep", &cluster_id, 20, None)
                 .await
                 .expect("complete cache");
 
@@ -3290,7 +3290,7 @@ mod tests {
             .await
             .expect("current cache claim");
         store
-            .complete_cache_entry("bbcurrent", &identity.node_id, 20)
+            .complete_cache_entry("bbcurrent", &identity.node_id, 20, None)
             .await
             .expect("complete current cache");
         assert_eq!(

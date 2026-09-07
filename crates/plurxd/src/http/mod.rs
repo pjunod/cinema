@@ -6760,7 +6760,7 @@ mod tests {
             .expect("cache claim");
         state
             .store
-            .complete_cache_entry("test-recipe", &state.node_id, 24)
+            .complete_cache_entry("test-recipe", &state.node_id, 24, None)
             .await
             .expect("complete cache");
         assert!(state

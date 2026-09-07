@@ -122,15 +122,23 @@ impl TranscodeCacheStore for SqliteStore {
         recipe_hash: &str,
         node_id: &str,
         bytes: i64,
+        manifest_digest: Option<&str>,
     ) -> Result<(), StoreError> {
         let (hash, node) = (recipe_hash.to_owned(), node_id.to_owned());
+        let digest = manifest_digest.map(str::to_owned);
         self.with_conn(move |conn| {
+            // `COALESCE` rather than an unconditional write: a row that already
+            // carries a digest was fenced by a queue completion, and a later
+            // unfenced completion of the same recipe must not blank it. Passing
+            // `None` means "this publication has none", never "clear the one
+            // that is there".
             conn.execute(
                 "UPDATE transcode_cache_locations
                  SET complete = 1, bytes = ?3,
+                     manifest_digest = COALESCE(?4, manifest_digest),
                      last_used_at = unixepoch(), last_seen_at = unixepoch()
                  WHERE recipe_hash = ?1 AND node_id = ?2 AND storage_class = 'local'",
-                params![hash, node, bytes],
+                params![hash, node, bytes, digest],
             )?;
             Ok(())
         })
@@ -553,7 +561,7 @@ mod tests {
         assert_eq!(store.cache_bytes(NODE).await.expect("bytes"), 0);
 
         store
-            .complete_cache_entry("abc123", NODE, 4_000_000)
+            .complete_cache_entry("abc123", NODE, 4_000_000, None)
             .await
             .expect("complete");
         let hit = store.cache_hit("abc123", NODE).await.expect("hit");
@@ -594,7 +602,7 @@ mod tests {
             "the second producer has to be told it lost, or it publishes over the first"
         );
         store
-            .complete_cache_entry("abc", NODE, 10)
+            .complete_cache_entry("abc", NODE, 10, None)
             .await
             .expect("complete");
         let hit = store
@@ -618,7 +626,7 @@ mod tests {
                 .await
                 .expect("claim");
             store
-                .complete_cache_entry(hash, NODE, 100)
+                .complete_cache_entry(hash, NODE, 100, None)
                 .await
                 .expect("complete");
             store
@@ -749,7 +757,7 @@ mod tests {
 
         // …and a completed entry is never a leftover, however old.
         store
-            .complete_cache_entry("fresh", NODE, 1)
+            .complete_cache_entry("fresh", NODE, 1, None)
             .await
             .expect("complete");
         assert!(store
@@ -827,7 +835,7 @@ mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry("flight", NODE, 900)
+            .complete_cache_entry("flight", NODE, 900, None)
             .await
             .expect("complete");
         let package = NewOfflinePackage {
@@ -882,7 +890,7 @@ mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry("gone", NODE, 1)
+            .complete_cache_entry("gone", NODE, 1, None)
             .await
             .expect("complete");
         store.delete_files(&[file]).await.expect("delete");

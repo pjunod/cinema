@@ -1943,7 +1943,7 @@ mod tests {
         fixture
             .state
             .store
-            .complete_cache_entry(id, "test-node", 100)
+            .complete_cache_entry(id, "test-node", 100, None)
             .await
             .expect("complete cache");
         assert!(fixture
@@ -2977,7 +2977,7 @@ mod tests {
         fixture
             .state
             .store
-            .complete_cache_entry("unsafe-cache-row", "test-node", 1)
+            .complete_cache_entry("unsafe-cache-row", "test-node", 1, None)
             .await
             .expect("unsafe cache completion");
         let mut unsafe_path = package;

@@ -10036,6 +10036,28 @@ async fn forget_unfenced_claim_with(
     }
 }
 
+/// The final directory's own name, which is what identifies one production.
+///
+/// `relative` is `<shard>/<identity>`, and the shard prefix is a directory
+/// shared by many recipes, so only the last component identifies anything.
+///
+/// The shape is checked rather than asserted in prose. This value becomes a
+/// manifest `generation_id`, and `publish_controlled_directory` rejects one
+/// that is not `safe_generation_id`-shaped — a rejection its callers treat as
+/// a retryable production error, so a name that can never be accepted would
+/// retry the title on a backoff forever and report it as an encoder fault.
+fn identity_for(relative: &str) -> Result<&str, String> {
+    let (shard, identity) = relative
+        .rsplit_once('/')
+        .ok_or_else(|| format!("cache publication {relative} has no shard prefix"))?;
+    if shard.is_empty() || !plurx_core::transcode::manifest::is_safe_generation_id(identity) {
+        return Err(format!(
+            "cache publication {relative} has no safe generation identity"
+        ));
+    }
+    Ok(identity)
+}
+
 /// Whether a generation may be kept, or reused, under this plan's identity.
 ///
 /// One rule for both directions, and it reads the *manifest* rather than any
@@ -10149,11 +10171,12 @@ async fn publish_from(
 ) -> Result<Option<Published>, String> {
     if let Ok(generation) = temp.open_child_directory(ASSEMBLED_DIR).await {
         if let Some(published) = assembled_publication(&generation, parts, health.clone()).await {
-            // An assembly an earlier pass already placed. Whatever this pass
-            // observed, it observed while making parts — not these bytes — so
-            // the receipt it was handed is dropped rather than attached to
-            // somebody else's work. `assembled_publication` returns
-            // `health: None`, and that is the answer.
+            // An assembly an earlier pass already placed. Whether this pass's
+            // receipt describes it is `assembled_publication`'s question, and
+            // it answers by comparing the on-disk playlist against the one
+            // these parts assemble to — a byte-equal playlist means these
+            // parts, in this order, and the assembled segments are hard links
+            // to their bytes.
             return Ok(Some(published));
         }
     }
@@ -10391,6 +10414,15 @@ pub struct TranscodeManager {
     /// on the strength of a boot probe would rotate an unqualified fleet's
     /// cache for a value nothing yet enforces.
     measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    /// How many generation manifests this manager has published.
+    ///
+    /// The only durable trace a manifest leaves on a refused generation is the
+    /// generation itself, and a refusal quarantines that — so without this
+    /// counter no test can tell a manifest that was written and thrown away
+    /// from one that was never written, and the milestone's central change
+    /// would revert green.
+    #[cfg(test)]
+    manifests_published: std::sync::atomic::AtomicUsize,
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
     decode_facts: crate::decode_facts::DecodeFactCache,
@@ -10750,6 +10782,8 @@ impl TranscodeManager {
             decoders: Vec::new(),
             measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(
             ),
+            #[cfg(test)]
+            manifests_published: std::sync::atomic::AtomicUsize::new(0),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
             #[cfg(test)]
@@ -14050,13 +14084,59 @@ impl TranscodeManager {
             .open_child_directory(ASSEMBLED_DIR)
             .await
             .map_err(|error| format!("opening assembled generation: {error}"))?;
-        let manifest = if let Some(job) = &queue_job {
+        // A queue job publishes a manifest because the queue's readers require
+        // one. Under the qualified identity every publication needs one, for a
+        // different reason: the retention rule reads the manifest, so a
+        // generation without one cannot be kept at all — speculative warming
+        // and offline preparation would settle a clean receipt and then have
+        // it refused for having written it nowhere.
+        //
+        // Deliberately not extended to the unqualified identity. A row that
+        // records a manifest digest is offered to cluster placement, is
+        // enrolled in the integrity scrub, and serves offline segments fatally
+        // rather than leniently on pre-existing bit rot — three behaviour
+        // changes for rows deployed nodes already hold, in exchange for a
+        // receipt nothing there consults. (Shared-cache fanout would have been
+        // a fourth; it is refused outright below, under either identity.)
+        // Under the qualified identity none of those rows exist yet, so each
+        // of those becomes a property of a new key space rather than a change
+        // to a live one.
+        let manifest = if queue_job.is_some() || plan.enforces_receipt() {
+            let generation_id = match &queue_job {
+                Some(job) => format!("{}:{}", job.id, job.fence),
+                // Off the queue there is no job to name it after, so the
+                // final directory's own identity names it. What matters is
+                // that it is *stable across the resume passes of one
+                // production*: the digest checkpoint a preempted manifest hash
+                // leaves behind is keyed by this id, and a value that changed
+                // per pass would silently rehash the whole film every time.
+                //
+                // Unfenced it is the recipe hash, which is also stable across
+                // *unrelated* productions of the same recipe — and that is
+                // safe for three reasons worth writing down, because the whole
+                // argument rests on them. The checkpoint file lives inside the
+                // generation directory, so it dies with the staging tree it
+                // describes. Its header must carry this same id or the
+                // checkpoint is discarded. And every object digest in it is
+                // reused only while that file's device, inode, size and mtime
+                // still match, so re-encoded bytes are rehashed rather than
+                // certified from a record of bytes that no longer exist.
+                None => identity_for(&relative)?.to_owned(),
+            };
             let names = std::iter::once("index.m3u8".to_owned())
                 .chain((0..published.segments).map(|index| format!("seg{index:05}.ts")))
                 .collect::<Vec<_>>();
+            // Which lanes owe the idle courtesy. Both background lanes do —
+            // the queue and speculative warming exist to be interrupted by
+            // people pressing play. An offline package does not: a user is
+            // waiting on that download, and `pretranscode_worker_idle` is
+            // false while one is waiting, so applying it there would yield on
+            // the first check and every check after it, and the package would
+            // never become ready.
+            let owes_idle_courtesy = offline_package_id.is_none();
             let manifest = plurx_core::transcode::manifest::publish_controlled_directory(
                 &generation,
-                &format!("{}:{}", job.id, job.fence),
+                &generation_id,
                 &names,
                 // The join of every contributing part's receipt, and `None`
                 // when this pass adopted an assembly it did not make. This is
@@ -14064,7 +14144,7 @@ impl TranscodeManager {
                 published.health.clone(),
                 || {
                     cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-                        || !self.pretranscode_worker_idle()
+                        || (owes_idle_courtesy && !self.pretranscode_worker_idle())
                         || Instant::now() >= request.deadline
                 },
             )
@@ -14072,11 +14152,18 @@ impl TranscodeManager {
             let Some(manifest) = manifest else {
                 return Ok(OfflineProduceOutcome::Yielded);
             };
+            #[cfg(test)]
+            self.manifests_published
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(expected) = expected_policy_generation.as_deref() {
                 if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
                     return Ok(outcome);
                 }
             }
+            // The manifest file is bytes on disk like any other. Charging it
+            // to the ledger on one path and not the other would leave the cache
+            // budget under-counting every generation the other path made, with
+            // no reconciliation anywhere.
             published.bytes = published.bytes.saturating_add(
                 generation
                     .child_metadata(plurx_core::transcode::manifest::MANIFEST_FILE)
@@ -14093,10 +14180,7 @@ impl TranscodeManager {
         // durable completion. This is intentionally acquired before ensuring
         // the shared fanout parent: the parent guard closes its otherwise
         // empty ensure -> child-install race with orphan cleanup.
-        let identity = final_dir
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .ok_or("cache publication has no safe final-directory identity")?;
+        let identity = identity_for(&relative)?;
         let Some(publication_guard) = self.cache_readers.begin_publication(&hash, identity) else {
             return Ok(OfflineProduceOutcome::Yielded);
         };
@@ -14124,11 +14208,12 @@ impl TranscodeManager {
         // has them: the generation is assembled and renamed into place above,
         // and refusing here declines to *keep* it, never to serve it.
         //
-        // It reads the manifest, so the paths that publish none — speculative
-        // warming and offline preparation — retain nothing under the qualified
-        // identity even when their own receipt was clean. That is the honest
-        // state rather than a gap papered over: a receipt this process never
-        // wrote down cannot certify the bytes to whatever reads them next.
+        // It reads the manifest, never an in-memory value, because the
+        // manifest is what the next request will have to re-read: a receipt
+        // this process never wrote down cannot certify these bytes to anyone
+        // tomorrow. Every path that publishes under this identity now writes
+        // one, so a refusal here is a refusal about what the receipt *says*
+        // rather than about where it was filed.
         if !generation_permits_reuse(plan, manifest.as_ref()) {
             tracing::warn!(
                 recipe = %hash,
@@ -14202,20 +14287,52 @@ impl TranscodeManager {
                 let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
                 return Ok(OfflineProduceOutcome::Yielded);
             }
-        } else if let Some(fence) = publication_fence {
-            PublicationStore::fenced(self.store.as_ref(), fence.clone())
-                .complete_cache_entry(&hash, &cache.node_id, &relative, published.bytes)
-                .await
-                .map_err(|error| error.to_string())?;
         } else {
-            self.store
-                .complete_cache_entry(&hash, &cache.node_id, published.bytes)
-                .await
-                .map_err(|error| error.to_string())?;
+            // Every queue completion is settled by the branch above, because
+            // `queue_job` is `Some` exactly when `pretranscode_fence` is.
+            debug_assert!(
+                queue_job.is_none(),
+                "a queue completion must settle through its own fence"
+            );
+            // A digest only where the identity asks for one. Deriving it from
+            // the manifest alone would work today and would put the safety in
+            // the invariant asserted above rather than here: a queue job that
+            // ever reached this branch would newly stamp a digest onto an
+            // unqualified row, and a row that has one is scrubbed, is offered
+            // to placement, and serves offline segments fatally rather than
+            // leniently. Those must not move for rows deployed nodes already
+            // hold.
+            let digest = plan
+                .enforces_receipt()
+                .then(|| {
+                    manifest
+                        .as_ref()
+                        .map(|manifest| manifest.manifest_digest.as_str())
+                })
+                .flatten();
+            if let Some(fence) = publication_fence {
+                PublicationStore::fenced(self.store.as_ref(), fence.clone())
+                    .complete_cache_entry(&hash, &cache.node_id, &relative, published.bytes, digest)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            } else {
+                self.store
+                    .complete_cache_entry(&hash, &cache.node_id, published.bytes, digest)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
         }
-        if let (Some(shared_cache), Some(manifest)) =
-            (self.shared_cache.as_ref(), manifest.as_ref())
-        {
+        // Queue-owned generations only, exactly as before. A manifest is now
+        // published off the queue too, and that alone must not enrol a
+        // speculative or offline generation in shared-cluster fanout: that is
+        // a second full copy onto a shared mount, other nodes routing work to
+        // it, and cluster quota — a decision of its own, not a side effect of
+        // carrying a receipt.
+        if let (Some(shared_cache), Some(manifest), true) = (
+            self.shared_cache.as_ref(),
+            manifest.as_ref(),
+            queue_job.is_some(),
+        ) {
             match shared_cache
                 .publish_generation(&hash, file.id, CACHE_RECIPE_VERSION, &final_dir, manifest)
                 .await
@@ -15845,6 +15962,13 @@ impl TranscodeManager {
             namespace = qualification.namespace(),
             "published the effective artifact identity"
         );
+    }
+
+    /// How many generation manifests this manager has published.
+    #[cfg(test)]
+    pub(crate) fn test_manifests_published(&self) -> usize {
+        self.manifests_published
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn rate_control_snapshot(&self) -> RateControlSnapshot {
@@ -35227,7 +35351,7 @@ pub(crate) mod tests {
         );
 
         store
-            .complete_cache_entry(&hash, NODE, 1_234)
+            .complete_cache_entry(&hash, NODE, 1_234, None)
             .await
             .expect("complete");
         let hit = look().await.expect("a finished entry serves");
@@ -35277,7 +35401,7 @@ pub(crate) mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry(&hash, NODE, 1_234)
+            .complete_cache_entry(&hash, NODE, 1_234, None)
             .await
             .expect("complete");
 
@@ -35360,7 +35484,7 @@ pub(crate) mod tests {
             .await
             .expect("claim");
         store
-            .complete_cache_entry(&hash, NODE, 1_234)
+            .complete_cache_entry(&hash, NODE, 1_234, None)
             .await
             .expect("complete");
         store
@@ -38659,9 +38783,12 @@ pub(crate) mod tests {
     /// The retention rule, driven through a real production.
     ///
     /// Every other test of it calls the predicate. This one runs the producer:
-    /// a real ffmpeg makes a real generation, the qualified identity refuses to
-    /// keep it because this path publishes no manifest to carry a receipt, and
-    /// the two things that must be true afterwards are checked — nothing is
+    /// a real ffmpeg makes a real generation, and the qualified identity
+    /// refuses to keep it — now for the reason that will still be true on a
+    /// deployed node. The path publishes a manifest, the manifest carries the
+    /// receipt, and the receipt does not permit reuse, because no diagnostic
+    /// contract covers this host's build so nothing it printed is evidence.
+    /// The two things that must be true afterwards are checked: nothing is
     /// left claimed, and nothing is left served.
     ///
     /// The claim half is the one worth having. A refusal that quarantined the
@@ -38861,6 +38988,147 @@ pub(crate) mod tests {
             plan.decode().software_decoder(),
             None,
             "an unmeasured codec must stay unnamed rather than fall back to its family"
+        );
+    }
+
+    /// A manifest is published off the queue too, once the identity enforces a
+    /// receipt — and only then.
+    ///
+    /// Without it, speculative warming and offline preparation settle a
+    /// perfectly clean receipt and then have the generation refused for having
+    /// written it nowhere, because the retention rule reads the manifest. With
+    /// it under the *unqualified* identity, every deployed speculative and
+    /// offline row would newly gain a digest, and with it shared-cluster
+    /// fanout, cluster placement offers, integrity scrubbing, and offline
+    /// segment serving that fails hard where it used to degrade. Four
+    /// behaviour changes to live rows in exchange for a receipt nothing there
+    /// reads.
+    #[tokio::test]
+    async fn a_manifest_is_written_off_the_queue_only_where_a_receipt_is_enforced() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::ArtifactQualification;
+
+        for (qualification, wants_manifest) in [
+            (ArtifactQualification::Unqualified, false),
+            (ArtifactQualification::HealthQualified, true),
+        ] {
+            let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let media = crate::test_tempdir().expect("media");
+            let source = media.path().join("Manifested.mkv");
+            write_real_video(&source, 2);
+            let file_id = seed_real_file(&store, &source).await;
+            let (mgr, _work, cache) = cached_manager(&store);
+            mgr.test_publish_artifact_qualification(qualification);
+            let mgr = Arc::new(mgr);
+            let file = store.get_file(file_id).await.expect("get").expect("file");
+            let hash = recipe_hash_for(&mgr, &file, 240).await;
+
+            let produced = mgr
+                .produce(&file, 240, Instant::now() + Duration::from_secs(120))
+                .await
+                .expect("produce");
+
+            if wants_manifest {
+                // A manifest *was* written, and the counter is the only thing
+                // that can say so: the refusal below quarantines the
+                // generation, taking the manifest with it, so every on-disk
+                // observation afterwards is identical to the one a build
+                // without this milestone would leave. Delete
+                // `|| plan.enforces_receipt()` from the publication condition
+                // and this assertion is what fails.
+                assert_eq!(
+                    mgr.test_manifests_published(),
+                    1,
+                    "the qualified identity publishes a manifest off the queue"
+                );
+                // And it is still refused, for the reason a deployed node will
+                // give: no diagnostic contract covers this host's build, so
+                // nothing FFmpeg printed is evidence and the receipt does not
+                // permit reuse. Which branch of `generation_permits_reuse`
+                // refuses has changed — from manifest-absent to
+                // receipt-refuses, a branch that off the queue was previously
+                // unreachable — and the outcome cannot show that, so the
+                // counter above carries the change and this carries the
+                // invariant it must not break.
+                assert!(produced.is_none(), "an unqualified receipt is not kept");
+                assert!(!cache.path().join(&hash[..2]).join(&hash).exists());
+            } else {
+                assert_eq!(
+                    mgr.test_manifests_published(),
+                    0,
+                    "the unqualified identity publishes none off the queue"
+                );
+                let produced = produced.expect("the unqualified identity keeps its work");
+                let dir = cache
+                    .path()
+                    .join(&produced.recipe[..2])
+                    .join(&produced.recipe);
+                assert!(dir.exists(), "the generation is on disk");
+                assert!(
+                    !dir.join(plurx_core::transcode::manifest::MANIFEST_FILE)
+                        .exists(),
+                    "and carries no manifest, so no deployed row gains one"
+                );
+                let row = store
+                    .cache_hit(&produced.recipe, NODE)
+                    .await
+                    .expect("cache lookup")
+                    .expect("a completed row");
+                assert_eq!(
+                    row.manifest_digest, None,
+                    "an unqualified row records no digest, so nothing that keys on one changes"
+                );
+            }
+        }
+    }
+
+    /// The generation id off the queue is stable across the resume passes of
+    /// one production.
+    ///
+    /// It is the digest checkpoint's key. A value that changed per pass would
+    /// throw away the checkpoint every time and rehash the whole film, which
+    /// on a long title is the difference between finishing and never
+    /// finishing.
+    #[test]
+    fn the_generation_identity_is_the_final_directory_and_survives_a_fence() {
+        // The three shapes `produce_normalized` builds, spelled the way it
+        // spells them, so a change to that formatting fails here.
+        let hash = "a".repeat(64);
+        let unfenced = format!("{}/{hash}", &hash[..2]);
+        let publication_fenced = format!("{}/{hash}-f7", &hash[..2]);
+        let queue_owned = format!("{}/{hash}-j3-f9", &hash[..2]);
+        assert_eq!(identity_for(&unfenced).expect("identity"), hash);
+        assert_eq!(
+            identity_for(&publication_fenced).expect("identity"),
+            format!("{hash}-f7"),
+            "a publication fence renames the staging tree with it, so the \
+             checkpoint a fence bump orphans is one this pass cannot see"
+        );
+        assert_eq!(
+            identity_for(&queue_owned).expect("identity"),
+            format!("{hash}-j3-f9")
+        );
+        // Every shape is one `publish_controlled_directory` will accept.
+        // Deriving a name it rejects would fail the production as a retryable
+        // error, so the title would retry on a backoff forever and be reported
+        // as an encoder fault.
+        for relative in [&unfenced, &publication_fenced, &queue_owned] {
+            assert!(plurx_core::transcode::manifest::is_safe_generation_id(
+                identity_for(relative).expect("identity")
+            ));
+        }
+        assert!(identity_for("").is_err(), "no shard prefix");
+        assert!(identity_for("abcdef").is_err(), "no shard prefix");
+        assert!(identity_for("ab/").is_err(), "no identity");
+        assert!(identity_for("/abcdef").is_err(), "no shard");
+        assert!(
+            identity_for("ab/what a name").is_err(),
+            "a name publication would reject is rejected where it is derived"
+        );
+        assert!(
+            identity_for(&format!("ab/{}", "z".repeat(257))).is_err(),
+            "and so is one publication would reject for length"
         );
     }
 }
