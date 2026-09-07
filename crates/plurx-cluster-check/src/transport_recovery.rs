@@ -32,6 +32,7 @@ pub const TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION: u32 = 1;
 pub const TRANSPORT_RECOVERY_CYCLES_PER_ROLE: u32 = 20;
 pub const TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES: u64 = 88_559_616;
 pub const TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES: u64 = 177_119_232;
+pub const TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES: u32 = 4;
 /// Low enough for qualification, while leaving room for image setup before a
 /// cycle begins. This value is not reachable from plurxd configuration.
 pub const TRANSPORT_RECOVERY_SNAPSHOT_LOGS_SINCE_LAST: u64 = 256;
@@ -339,20 +340,22 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
     let root = tempfile::tempdir().context("transport-recovery campaign root")?;
     let started_at_unix_ms = unix_ms()?;
 
-    println!("cluster-check: 20-cycle learner snapshot recovery campaign");
-    let learner = run_role_campaign(
-        &executable,
-        root.path(),
-        RecoveryRole::Learner,
-        TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
-    )
-    .await?;
     println!("cluster-check: 20-cycle voter snapshot recovery campaign");
     let voter = run_role_campaign(
         &executable,
         root.path(),
         RecoveryRole::Voter,
         TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+        TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+    )
+    .await?;
+    println!("cluster-check: 20-cycle learner snapshot recovery campaign");
+    let learner = run_role_campaign(
+        &executable,
+        root.path(),
+        RecoveryRole::Learner,
+        TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
+        TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
     )
     .await?;
 
@@ -395,11 +398,51 @@ pub async fn run_transport_recovery_campaign(output: &Path) -> Result<()> {
     Ok(())
 }
 
+pub async fn run_transport_recovery_voter_smoke(cycles_required: u32) -> Result<()> {
+    if std::env::consts::OS != "linux" {
+        bail!("transport-recovery voter smoke requires Linux /proc evidence");
+    }
+    if !(1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE).contains(&cycles_required) {
+        bail!(
+            "transport-recovery voter smoke requires 1..={TRANSPORT_RECOVERY_CYCLES_PER_ROLE} cycles"
+        );
+    }
+    let build_sha = resolve_build_sha()
+        .context("resolve transport-recovery candidate SHA before voter smoke")?;
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("transport-recovery voter smoke root")?;
+    println!("cluster-check: {cycles_required}-cycle voter snapshot recovery smoke");
+    let voter = run_role_campaign(
+        &executable,
+        root.path(),
+        RecoveryRole::Voter,
+        TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+        cycles_required,
+    )
+    .await?;
+    if voter.role != RecoveryRole::Voter
+        || voter.cycles_required != cycles_required
+        || voter.cycles.len() != cycles_required as usize
+        || voter
+            .cycles
+            .iter()
+            .enumerate()
+            .any(|(position, cycle)| cycle.cycle != position as u32 + 1)
+    {
+        bail!("transport-recovery voter smoke returned incomplete evidence");
+    }
+    println!(
+        "cluster-check: {cycles_required}/{cycles_required} voter recoveries passed for {build_sha}"
+    );
+    Ok(())
+}
+
 async fn run_role_campaign(
     executable: &Path,
     root: &Path,
     role: RecoveryRole,
     minimum_sqlite_bytes: u64,
+    cycles_required: u32,
 ) -> Result<RecoveryRoleCampaign> {
     let role_root = root.join(role.label());
     let (mut cluster, specs, cluster_root) =
@@ -411,6 +454,7 @@ async fn run_role_campaign(
         &cluster_root,
         role,
         minimum_sqlite_bytes,
+        cycles_required,
     )
     .await;
     match result {
@@ -597,6 +641,7 @@ async fn exercise_role_campaign(
     cluster_root: &Path,
     role: RecoveryRole,
     minimum_sqlite_bytes: u64,
+    cycles_required: u32,
 ) -> Result<RecoveryRoleCampaign> {
     let leader = cluster.leader_among(&[1, 2, 3]).await?;
     let marker = format!("transport-recovery-{}-image-v1", role.label());
@@ -654,13 +699,13 @@ async fn exercise_role_campaign(
         Instant::now() + RECOVERY_DEADLINE,
     )
     .await?;
-    let mut cycles = Vec::with_capacity(TRANSPORT_RECOVERY_CYCLES_PER_ROLE as usize);
+    let mut cycles = Vec::with_capacity(cycles_required as usize);
 
-    for cycle in 1..=TRANSPORT_RECOVERY_CYCLES_PER_ROLE {
+    for cycle in 1..=cycles_required {
         println!(
             "cluster-check: {} recovery cycle {cycle}/{}",
             role.label(),
-            TRANSPORT_RECOVERY_CYCLES_PER_ROLE
+            cycles_required
         );
         let prefix = format!("cluster.transport-recovery.{}.{cycle:02}.", role.label());
         let (mut writer, writer_config) =
@@ -857,7 +902,7 @@ async fn exercise_role_campaign(
 
     Ok(RecoveryRoleCampaign {
         role,
-        cycles_required: TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+        cycles_required,
         minimum_sqlite_bytes,
         worst_durations: worst_durations(&cycles),
         cycles,

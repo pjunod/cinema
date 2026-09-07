@@ -121,7 +121,8 @@ pub use transport_recovery::{
     RecoveryWriteDigest, SnapshotFileEvidence, SourceOutboundTransportEvidence,
     TargetInboundTransportEvidence, TransportRecoveryWorstDurations,
     TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION, TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
-    TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
+    TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES, TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+    TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
 };
 
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
@@ -345,6 +346,21 @@ pub async fn run(args: Vec<String>) -> Result<()> {
                 .read_to_end(&mut bytes)
                 .context("read transport-recovery evidence from stdin")?;
             transport_recovery::validate_transport_recovery_bytes(&bytes)
+        }
+        Some("transport-recovery-voter-smoke") => {
+            if args.get(3).is_some() {
+                bail!("transport-recovery-voter-smoke accepts at most one cycle count");
+            }
+            let cycles = args
+                .get(2)
+                .map(|value| {
+                    value
+                        .parse::<u32>()
+                        .context("parse voter smoke cycle count")
+                })
+                .transpose()?
+                .unwrap_or(TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES);
+            transport_recovery::run_transport_recovery_voter_smoke(cycles).await
         }
         Some("transport-recovery-writer") => {
             let config = args
