@@ -239,6 +239,30 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // A password change and the revocation of that user's tokens are one
+    // boundary because either half alone is a security hole in a different
+    // direction. Commit only the password and the old tokens keep working
+    // after a reset meant to end them; commit only the revocation and the
+    // account is locked out with the old password still valid. Neither is a
+    // state worth being able to crash into.
+    //
+    // `BranchOnRowsAffected` because the answer returned to the caller is
+    // whether the update matched a row -- an id that names nobody reports
+    // false rather than pretending to have reset a password.
+    SqliteTransactionSite {
+        module: "users.rs",
+        method: "reset_password_and_revoke_tokens",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "users.rs",
+        method: "promote_user_and_reset_password",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
     SqliteTransactionSite {
         module: "offline.rs",
         method: "invalidate_ready_offline_package",
@@ -864,13 +888,17 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 67: main's 66 — the last of them `put_settings_if_generation`,
-        // whose generation-fenced write opens its own boundary — plus
-        // `record_desired_selection`, which this branch reintroduces along
-        // with the table it writes. Main does not carry the desired-selection
-        // work, so merging main in deleted the entry and merging this back
-        // restores it; the site is real and classified either way.
-        assert_eq!(methods.len(), 67);
+        // 69: the 67 above plus the two `users.rs` boundaries that pair a
+        // password change with revoking that user's tokens —
+        // `reset_password_and_revoke_tokens` and
+        // `promote_user_and_reset_password`. They existed unclassified, which
+        // is what `every_sqlite_transaction_site_is_classified` was failing on;
+        // registering them is what moved this count.
+        //
+        // The number is written out rather than derived so that adding a
+        // transaction boundary has to be a deliberate edit here. That is the
+        // point of the assertion: the two above reached main without one.
+        assert_eq!(methods.len(), 69);
     }
 
     #[test]

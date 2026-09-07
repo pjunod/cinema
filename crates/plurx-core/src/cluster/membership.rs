@@ -14694,10 +14694,43 @@ mod tests {
                 .to_owned()
         };
 
-        let status = between(
-            "pub async fn status(&self)",
-            "\n    /// Promote one ready learner",
-        );
+        /// One method's body, ending where the method does.
+        ///
+        /// The previous shape sliced from `status(` to the doc comment of a
+        /// method that happened to follow it, which made this assertion depend
+        /// on nothing moving in between. Something did: two cache-revocation
+        /// methods were added after `status`, and one of them reads
+        /// consistently for its own good reasons. The slice swallowed both and
+        /// the test failed for a `query_consistent_map` a hundred lines
+        /// outside the method it is about.
+        ///
+        /// Brace matching from the signature ends at the method's own closing
+        /// brace, so a neighbour can never be read as part of it again.
+        fn method_body(source: &str, signature: &str) -> String {
+            let start = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is missing"));
+            let open = source[start..]
+                .find('{')
+                .unwrap_or_else(|| panic!("{signature} has no body"))
+                + start;
+            let mut depth = 0usize;
+            for (offset, character) in source[open..].char_indices() {
+                match character {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return source[open..=open + offset].to_owned();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("{signature} has an unbalanced body");
+        }
+
+        let status = method_body(&source, "pub async fn status(&self)");
         assert!(
             !status.contains("query_consistent_map"),
             "the roster must stay readable without a quorum"
