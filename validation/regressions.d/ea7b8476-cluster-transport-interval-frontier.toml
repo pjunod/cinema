@@ -1,0 +1,17 @@
+version = 1
+
+[[coverage]]
+commits = ["ea7b8476"]
+points = [
+  "cluster.operations",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "The membership web suite runs all six input permutations of two provably ordered attempt-age intervals plus one broad interval that overlaps both. The non-dominated frontier must retain the certain order instead of letting the uncertain bridge promote the older stalled attempt."

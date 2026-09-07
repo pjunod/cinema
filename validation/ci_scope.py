@@ -44,17 +44,20 @@ SCOPE_KEYS = (
 # `validation/points.toml` is the only routing path a diff touches, the
 # replicated Store lane is forced only when the catalog edit could actually
 # hide it: the `paths` or `checks` list of a cluster point, the presence or
-# absence of one of those points, or any field of the `cluster-auth` check.
+# absence of one of those points, or any field of the `cluster-auth` or
+# `hiqlite-vendor-clippy` checks.
 # A `contract` prose edit, or an edit to an unrelated point, can suppress
 # nothing, and that lane costs 26-29 minutes of queue and runtime. Every other
-# routing path — the two CI workflows, the lint workflow, this selector, and
-# the runner — still forces the lane unconditionally, because a change to the
-# job graph or to selection itself is not reducible to a catalog comparison.
+# routing path — the Makefile that defines the vendored lane, the two CI
+# workflows, the lint workflow, this selector, and the runner — still forces
+# the lane unconditionally, because a change to the job graph or to selection
+# itself is not reducible to a catalog comparison.
 # The narrowing applies to `cluster_auth` alone: `rust` stays forced for every
 # routing path, `points.toml` included. See
 # `catalog_edit_forces_cluster_lanes`, where every uncertainty resolves to
 # forcing the lane.
 CI_ROUTING_PATHS = (
+    "Makefile",
     ".github/workflows/ci.yml",
     ".github/workflows/effort-ci.yml",
     ".github/workflows/lint.yml",
@@ -65,11 +68,11 @@ CI_ROUTING_PATHS = (
 
 # The routing entry whose edits are judged by content, and the catalog
 # selectors a catalog edit could use to hide the replicated Store lane: the
-# three points `scope_for_paths` reads for `cluster_auth`, and the check they
+# three points `scope_for_paths` reads for `cluster_auth`, and the checks they
 # name as that lane's evidence.
 CATALOG_ROUTING_PATH = "validation/points.toml"
 CLUSTER_LANE_POINTS = ("cluster.auth", "cluster.membership", "cluster.page-reads")
-CLUSTER_LANE_CHECK = "cluster-auth"
+CLUSTER_LANE_CHECKS = ("cluster-auth", "hiqlite-vendor-clippy")
 
 FFMPEG_ACTION_PATHS = (".github/actions/ffmpeg/**",)
 PLAYWRIGHT_ACTION_PATHS = (".github/actions/playwright/**",)
@@ -283,9 +286,9 @@ def _cluster_lane_selectors(catalog: Catalog) -> tuple[object, object]:
     The points map deliberately carries `paths` and `checks` only. A point's
     `contract` is prose that documents the lane rather than selecting it, and a
     point that disappears drops out of the mapping, so both the content and the
-    presence of the three cluster points are compared. The check is compared as
-    a whole record because every field on it — command, profiles, platforms,
-    requires, timeout — can decide whether that evidence runs.
+    presence of the three cluster points are compared. Both checks are compared
+    as whole records because every field on either — command, profiles,
+    platforms, requires, timeout — can decide whether that evidence runs.
     """
 
     points = {
@@ -296,7 +299,10 @@ def _cluster_lane_selectors(catalog: Catalog) -> tuple[object, object]:
     check_map = catalog.check_map
     return (
         tuple(sorted(points.items())),
-        check_map.get(CLUSTER_LANE_CHECK),
+        tuple(
+            (check_id, check_map.get(check_id))
+            for check_id in CLUSTER_LANE_CHECKS
+        ),
     )
 
 

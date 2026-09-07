@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["de84cf86"]
+reason = "This commit only added regression-history metadata for rebased M4 commits and corrected the live status page; it changed no runtime behavior."
+ignore = true

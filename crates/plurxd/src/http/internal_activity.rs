@@ -775,6 +775,7 @@ mod tests {
             client,
             ActivityPeer {
                 node_id: "legacy-node".to_owned(),
+                raft_id: 2,
                 http_base: None,
                 reachable: true,
             },
@@ -1273,6 +1274,7 @@ mod tests {
         let peers = (0..9)
             .map(|index| ActivityPeer {
                 node_id: format!("node-{index}"),
+                raft_id: index as u64,
                 http_base: Some(format!("http://node-{index}:32400")),
                 reachable: true,
             })

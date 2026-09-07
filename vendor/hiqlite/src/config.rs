@@ -3,6 +3,7 @@ use crate::{Error, Node, NodeId};
 use openraft::SnapshotPolicy;
 use std::borrow::Cow;
 use std::env;
+use std::time::Duration;
 use tracing::{debug, warn};
 
 #[cfg(feature = "backup")]
@@ -12,6 +13,15 @@ use crate::backup;
 use crate::dashboard::DashboardState;
 
 pub use openraft::Config as RaftConfig;
+
+pub const DEFAULT_SNAPSHOT_CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(1_200);
+const MIN_SNAPSHOT_CHUNK_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_SNAPSHOT_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
+const MIN_SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(14_400);
+const MIN_SNAPSHOT_INSTALL_TIMEOUT_MILLIS: u64 = 10_000;
+const MAX_SNAPSHOT_INSTALL_TIMEOUT_MILLIS: u64 = 3_600_000;
 
 #[derive(Debug)]
 pub struct RateLimitConfig {
@@ -101,6 +111,10 @@ pub struct NodeConfig {
     /// The internal Raft config. This must be the same on each node.
     /// You will get good defaults with `NodeConfig::default_raft_config(_)`.
     pub raft_config: RaftConfig,
+    /// Deadline for one non-final snapshot chunk RPC.
+    pub snapshot_chunk_timeout: Duration,
+    /// Absolute transfer-stage deadline for one snapshot attempt.
+    pub snapshot_transfer_timeout: Duration,
     /// Specific TLS certificates for the Raft traffic. Overwrites `tls_auto_certificates`.
     pub tls_raft: Option<ServerTlsConfig>,
     /// Specific TLS certificates for the API traffic. Overwrites `tls_auto_certificates`.
@@ -161,6 +175,8 @@ impl Default for NodeConfig {
             #[cfg(feature = "cache")]
             cache_storage_disk: true,
             raft_config: Self::default_raft_config(10_000),
+            snapshot_chunk_timeout: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
+            snapshot_transfer_timeout: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
             tls_raft: None,
             tls_api: None,
             secret_raft: String::default(),
@@ -329,6 +345,8 @@ impl NodeConfig {
             #[cfg(feature = "cache")]
             cache_storage_disk,
             raft_config: Self::default_raft_config(logs_keep),
+            snapshot_chunk_timeout: DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
+            snapshot_transfer_timeout: DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
             tls_raft: ServerTlsConfig::from_env("RAFT"),
             tls_api: ServerTlsConfig::from_env("API"),
             secret_raft: env::var("HQL_SECRET_RAFT").expect("HQL_SECRET_RAFT not found"),
@@ -423,6 +441,34 @@ impl NodeConfig {
         if self.secret_raft.len() < 16 || self.secret_api.len() < 16 {
             return Err(Error::Config(
                 "'secret_raft' and 'secret_api' should be at least 16 characters long".into(),
+            ));
+        }
+
+        if !(MIN_SNAPSHOT_CHUNK_TIMEOUT..=MAX_SNAPSHOT_CHUNK_TIMEOUT)
+            .contains(&self.snapshot_chunk_timeout)
+        {
+            return Err(Error::Config(
+                "'snapshot_chunk_timeout' must be between 5 and 300 seconds".into(),
+            ));
+        }
+        if !(MIN_SNAPSHOT_TRANSFER_TIMEOUT..=MAX_SNAPSHOT_TRANSFER_TIMEOUT)
+            .contains(&self.snapshot_transfer_timeout)
+        {
+            return Err(Error::Config(
+                "'snapshot_transfer_timeout' must be between 60 and 14400 seconds".into(),
+            ));
+        }
+        if self.snapshot_transfer_timeout < self.snapshot_chunk_timeout {
+            return Err(Error::Config(
+                "'snapshot_transfer_timeout' must be at least 'snapshot_chunk_timeout'".into(),
+            ));
+        }
+        if !(MIN_SNAPSHOT_INSTALL_TIMEOUT_MILLIS..=MAX_SNAPSHOT_INSTALL_TIMEOUT_MILLIS)
+            .contains(&self.raft_config.install_snapshot_timeout)
+        {
+            return Err(Error::Config(
+                "'raft_config.install_snapshot_timeout' must be between 10000 and 3600000 milliseconds"
+                    .into(),
             ));
         }
 
@@ -522,6 +568,51 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use crate::{Node, NodeConfig};
+    use std::time::Duration;
+
+    fn valid_config() -> NodeConfig {
+        NodeConfig {
+            node_id: 1,
+            nodes: vec![Node {
+                id: 1,
+                addr_raft: "localhost:8100".to_owned(),
+                addr_api: "localhost:8200".to_owned(),
+            }],
+            secret_raft: "snapshot-test-raft-secret".to_owned(),
+            secret_api: "snapshot-test-api-secret".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn snapshot_deadline_durations_are_bounded_before_instant_arithmetic() {
+        let mut config = valid_config();
+        config.snapshot_chunk_timeout = Duration::MAX;
+        assert!(config.is_valid().is_err());
+
+        let mut config = valid_config();
+        config.snapshot_transfer_timeout = Duration::MAX;
+        assert!(config.is_valid().is_err());
+
+        let mut config = valid_config();
+        config.raft_config.install_snapshot_timeout = u64::MAX;
+        assert!(config.is_valid().is_err());
+
+        let mut config = valid_config();
+        config.snapshot_chunk_timeout = Duration::from_secs(5);
+        config.snapshot_transfer_timeout = Duration::from_secs(60);
+        config.raft_config.install_snapshot_timeout = 10_000;
+        config
+            .is_valid()
+            .expect("minimum snapshot budgets are valid");
+
+        config.snapshot_chunk_timeout = Duration::from_secs(300);
+        config.snapshot_transfer_timeout = Duration::from_secs(14_400);
+        config.raft_config.install_snapshot_timeout = 3_600_000;
+        config
+            .is_valid()
+            .expect("maximum snapshot budgets are valid");
+    }
 
     #[test]
     fn test_config_from_env() {
@@ -539,7 +630,7 @@ mod tests {
         );
         assert_eq!(c.data_dir, "data");
         assert_eq!(c.filename_db, "hiqlite.db");
-        assert_eq!(c.log_statements, true);
+        assert!(c.log_statements);
 
         assert_eq!(c.secret_raft, "SuperSecureSecret1337");
         assert_eq!(c.secret_api, "SuperSecureSecret1337");

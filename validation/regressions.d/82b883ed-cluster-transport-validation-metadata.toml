@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["82b883ed"]
+reason = "This commit only maps the preceding runtime and documentation commits into the retained regression ledger; it changes no runtime behavior."
+ignore = true

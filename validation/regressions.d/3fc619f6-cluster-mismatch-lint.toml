@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3fc619f6"]
+points = ["cluster.auth"]
+checks = ["hiqlite-vendor-clippy"]
+reason = "The persistent vendored-Hiqlite denied-warning Clippy lane compiles the production SQLite-plus-cache snapshot transport and rejects restoring the oversized Result helper that this lint-driven refactor removed."

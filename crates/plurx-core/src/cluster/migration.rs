@@ -32,7 +32,10 @@ use crate::error::StoreError;
 use crate::store::SQLITE_SCHEMA_VERSION;
 
 #[cfg(feature = "hiqlite-store")]
-use crate::config::{Config, DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS};
+use crate::config::{
+    Config, DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS, DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
+    DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+};
 #[cfg(feature = "hiqlite-store")]
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
@@ -43,7 +46,7 @@ use crate::store::{
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
 #[cfg(feature = "hiqlite-store")]
-use hiqlite::{Client, Node, NodeConfig};
+use hiqlite::{Client, LocalSnapshotTransportStatus, Node, NodeConfig};
 #[cfg(feature = "hiqlite-store")]
 use serde::{Deserialize, Serialize};
 
@@ -1673,7 +1676,7 @@ async fn acquire_daemon_lock_within(data_dir: &Path, window: Duration) -> Result
                 ));
             }
             Err(std::fs::TryLockError::Error(error)) => {
-                return Err(migration_io("locking", &path, error))
+                return Err(migration_io("locking", &path, error));
             }
         }
     }
@@ -2002,26 +2005,11 @@ async fn start_voter(
     // target-local applied watch. The deadline allows an abandoned in-flight
     // snapshot RPC to reach its configured soft cancellation point, reconnect,
     // and complete one clean transfer.
-    let catchup_timeout = Duration::from_secs(config.cluster.install_snapshot_timeout_secs)
-        .saturating_add(SNAPSHOT_CATCHUP_GRACE);
+    let catchup_timeout = snapshot_catchup_timeout(
+        config.cluster.snapshot_transfer_timeout_secs,
+        config.cluster.install_snapshot_timeout_secs,
+    );
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
-    let catchup_target = loop {
-        match client.db_quorum_watermark().await {
-            Ok(watermark) => break watermark.committed_index,
-            Err(error) if tokio::time::Instant::now() < catchup_deadline => {
-                tracing::debug!(%error, "waiting for startup quorum watermark");
-            }
-            Err(error) => {
-                let _ = shutdown_voter(&client, active_transport).await;
-                return Err(StoreError::Database(format!(
-                    "node {} could not obtain a startup quorum watermark within \
-                     {catchup_timeout:?}: {error}",
-                    identity.node_id
-                )));
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
     let local_metrics = match client.local_db_raft_metrics() {
         Ok(metrics) => metrics,
         Err(error) => {
@@ -2030,6 +2018,61 @@ async fn start_voter(
                 "reading target-local startup progress: {error}"
             )));
         }
+    };
+    let local_transport = client.local_snapshot_transport_status().ok();
+    let mut next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
+    let catchup_target = loop {
+        if startup_wait_log_is_due(&mut next_wait_log) {
+            log_startup_transport_wait(
+                &identity.node_id,
+                identity.raft_id,
+                None,
+                local_metrics.snapshot().last_applied_index,
+                local_transport.as_ref(),
+            );
+        }
+        let watermark = tokio::time::timeout_at(catchup_deadline, client.db_quorum_watermark());
+        tokio::pin!(watermark);
+        let watermark = loop {
+            tokio::select! {
+                biased;
+                result = &mut watermark => break result,
+                () = tokio::time::sleep_until(next_wait_log) => {
+                    if startup_wait_log_is_due(&mut next_wait_log) {
+                        log_startup_transport_wait(
+                            &identity.node_id,
+                            identity.raft_id,
+                            None,
+                            local_metrics.snapshot().last_applied_index,
+                            local_transport.as_ref(),
+                        );
+                    }
+                }
+            }
+        };
+        match watermark {
+            Ok(Ok(watermark)) => break watermark.committed_index,
+            Ok(Err(error)) if tokio::time::Instant::now() < catchup_deadline => {
+                tracing::debug!(%error, "waiting for startup quorum watermark");
+            }
+            Ok(Err(error)) => {
+                let _ = shutdown_voter(&client, active_transport).await;
+                return Err(StoreError::Database(format!(
+                    "node {} could not obtain a startup quorum watermark within \
+                     {catchup_timeout:?}: {error}",
+                    identity.node_id
+                )));
+            }
+            Err(_) => {
+                let _ = shutdown_voter(&client, active_transport).await;
+                return Err(StoreError::Database(format!(
+                    "node {} could not obtain a startup quorum watermark within \
+                     {catchup_timeout:?}: deadline expired",
+                    identity.node_id
+                )));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     };
     loop {
         let applied = local_metrics
@@ -2047,6 +2090,15 @@ async fn start_voter(
                 identity.node_id
             )));
         }
+        if startup_wait_log_is_due(&mut next_wait_log) {
+            log_startup_transport_wait(
+                &identity.node_id,
+                identity.raft_id,
+                Some(catchup_target),
+                Some(applied),
+                local_transport.as_ref(),
+            );
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     if role.is_learner() {
@@ -2058,6 +2110,86 @@ async fn start_voter(
         );
     }
     Ok((client, local))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn startup_wait_log_is_due(next_wait_log: &mut tokio::time::Instant) -> bool {
+    let now = tokio::time::Instant::now();
+    if now < *next_wait_log {
+        return false;
+    }
+    *next_wait_log = now + Duration::from_secs(10);
+    true
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn log_startup_transport_wait(
+    node_id: &str,
+    raft_id: u64,
+    startup_target: Option<u64>,
+    local_applied_index: Option<u64>,
+    transport: Option<&LocalSnapshotTransportStatus>,
+) {
+    let observation = transport
+        .map(LocalSnapshotTransportStatus::snapshot)
+        .and_then(|snapshot| {
+            snapshot
+                .observations
+                .into_iter()
+                .filter(|observation| observation.raft_group == "sqlite")
+                .min_by_key(|observation| observation.sample_age_ms)
+        });
+    tracing::info!(
+        node_id,
+        raft_id,
+        startup_target,
+        local_applied_index,
+        observing_node_id = observation
+            .as_ref()
+            .map(|observation| observation.observing_node_id),
+        peer_node_id = observation
+            .as_ref()
+            .map(|observation| observation.peer_node_id),
+        snapshot_id = observation
+            .as_ref()
+            .and_then(|observation| observation.snapshot_id.as_deref()),
+        phase = ?observation.as_ref().map(|observation| observation.phase),
+        attempted_offset = observation
+            .as_ref()
+            .and_then(|observation| observation.attempted_offset),
+        acknowledged_offset = observation
+            .as_ref()
+            .and_then(|observation| observation.acknowledged_offset),
+        locally_received_bytes = observation
+            .as_ref()
+            .and_then(|observation| observation.locally_received_bytes),
+        sample_age_ms = observation
+            .as_ref()
+            .map(|observation| observation.sample_age_ms),
+        "waiting for cluster startup catch-up"
+    );
+}
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod startup_wait_logging_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn immediate_watermark_errors_cannot_starve_due_startup_log() {
+        let mut next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut due_logs = 0;
+        for _ in 0..100 {
+            due_logs += usize::from(startup_wait_log_is_due(&mut next_wait_log));
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        due_logs += usize::from(startup_wait_log_is_due(&mut next_wait_log));
+
+        assert_eq!(
+            due_logs, 1,
+            "the due ten-second log must survive fast errors"
+        );
+        assert!(!startup_wait_log_is_due(&mut next_wait_log));
+    }
 }
 
 /// The Raft, WAL, and read-pool settings every plurx voter runs with.
@@ -2079,6 +2211,10 @@ pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> Node
         health_check_delay_secs: 0,
         wal_size: HIQLITE_WAL_SIZE_BYTES,
         read_pool_size,
+        snapshot_chunk_timeout: snapshot_timeout_duration(DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS),
+        snapshot_transfer_timeout: snapshot_timeout_duration(
+            DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+        ),
         // Snapshot frequency, disaster-recovery retention, and WAL sync retain
         // Hiqlite's established values. The heartbeat/election window above
         // admits measured durable recovery responses; the snapshot transfer
@@ -2096,10 +2232,30 @@ fn install_snapshot_timeout_ms(seconds: u64) -> u64 {
 }
 
 #[cfg(feature = "hiqlite-store")]
+fn snapshot_catchup_timeout(transfer_seconds: u64, install_seconds: u64) -> Duration {
+    Duration::from_secs(transfer_seconds)
+        .saturating_add(Duration::from_secs(install_seconds))
+        .saturating_add(SNAPSHOT_CATCHUP_GRACE)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn snapshot_timeout_duration(seconds: u64) -> Duration {
+    Duration::from_millis(
+        seconds
+            .checked_mul(1_000)
+            .expect("validated snapshot timeout seconds must fit milliseconds"),
+    )
+}
+
+#[cfg(feature = "hiqlite-store")]
 fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
     let mut defaults = production_hiqlite_defaults_with_read_pool(config.cluster.read_pool_size);
     defaults.raft_config.install_snapshot_timeout =
         install_snapshot_timeout_ms(config.cluster.install_snapshot_timeout_secs);
+    defaults.snapshot_chunk_timeout =
+        snapshot_timeout_duration(config.cluster.snapshot_chunk_timeout_secs);
+    defaults.snapshot_transfer_timeout =
+        snapshot_timeout_duration(config.cluster.snapshot_transfer_timeout_secs);
     defaults
 }
 
@@ -3426,6 +3582,18 @@ mod tests {
         assert_eq!(defaults.raft_config.max_in_snapshot_log_to_keep, 1);
         assert_eq!(defaults.raft_config.purge_batch_size, 1);
         assert_eq!(defaults.raft_config.install_snapshot_timeout, 120_000);
+        assert_eq!(defaults.snapshot_chunk_timeout, Duration::from_secs(30));
+        assert_eq!(
+            defaults.snapshot_transfer_timeout,
+            Duration::from_secs(1_200)
+        );
+        assert_eq!(
+            snapshot_catchup_timeout(
+                config.cluster.snapshot_transfer_timeout_secs,
+                config.cluster.install_snapshot_timeout_secs,
+            ),
+            Duration::from_secs(1_365)
+        );
         assert!(
             format!("{:?}", defaults.raft_config.snapshot_policy).contains("10000"),
             "snapshot policy must stay at 10,000 entries"
@@ -3436,9 +3604,20 @@ mod tests {
             "read-pool tuning must not change immediate-async WAL sync"
         );
 
+        config.cluster.snapshot_chunk_timeout_secs = 45;
+        config.cluster.snapshot_transfer_timeout_secs = 900;
         config.cluster.install_snapshot_timeout_secs = 300;
         let tuned = production_hiqlite_defaults(&config);
         assert_eq!(tuned.raft_config.install_snapshot_timeout, 300_000);
+        assert_eq!(tuned.snapshot_chunk_timeout, Duration::from_secs(45));
+        assert_eq!(tuned.snapshot_transfer_timeout, Duration::from_secs(900));
+        assert_eq!(
+            snapshot_catchup_timeout(
+                config.cluster.snapshot_transfer_timeout_secs,
+                config.cluster.install_snapshot_timeout_secs,
+            ),
+            Duration::from_secs(1_245)
+        );
     }
 
     /// Once the active voter exists, every later initialization error must
@@ -5748,11 +5927,13 @@ pub mod status {
 
     pub use hiqlite::{
         BoundedWalError, DbSnapshotHistogram, DbSnapshotLastOutcome, DbSnapshotMetricsSnapshot,
+        SnapshotTransportObservation, SnapshotTransportPhase, SnapshotTransportStatus,
         WalRecoveryObservation, WalRuntimeState, WalStatusSnapshot,
         DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS,
     };
     use hiqlite::{
         Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
+        LocalSnapshotTransportStatus,
     };
     use std::sync::{Arc, Mutex};
 
@@ -6750,6 +6931,7 @@ pub mod status {
         local_metrics: Option<LocalDbRaftMetrics>,
         wal_status: Option<hiqlite::WalStatusHandle>,
         passive_metrics: PassiveRaftMetrics,
+        local_transport: Option<LocalSnapshotTransportStatus>,
         previous: Arc<Mutex<Option<ReplicationStatus>>>,
     }
 
@@ -6763,6 +6945,7 @@ pub mod status {
                 local_metrics: None,
                 wal_status: None,
                 passive_metrics: PassiveRaftMetrics::new(false),
+                local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6773,6 +6956,7 @@ pub mod status {
             let local_metrics = client.local_db_raft_metrics().ok();
             let snapshot_metrics = client.local_db_snapshot_metrics().ok();
             let wal_status = client.local_db_wal_status().ok();
+            let local_transport = client.local_snapshot_transport_status().ok();
             let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
                 .with_snapshot_metrics(snapshot_metrics);
             Self {
@@ -6781,6 +6965,7 @@ pub mod status {
                 local_metrics,
                 wal_status,
                 passive_metrics,
+                local_transport,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6798,6 +6983,7 @@ pub mod status {
                 local_metrics: None,
                 wal_status: None,
                 passive_metrics: PassiveRaftMetrics::remote_authority(),
+                local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6814,6 +7000,32 @@ pub mod status {
             self.wal_status
                 .as_ref()
                 .map(hiqlite::WalStatusHandle::snapshot)
+        }
+
+        /// Copy the embedded node's bounded process-local snapshot transport
+        /// observations without Store, filesystem, or network IO.
+        #[must_use]
+        pub fn transport_status_snapshot(&self) -> Option<SnapshotTransportStatus> {
+            self.local_transport
+                .as_ref()
+                .map(LocalSnapshotTransportStatus::snapshot)
+        }
+
+        /// Read a peer's node-owned transport status through the authenticated
+        /// private Hiqlite listener. This remains available when the peer's
+        /// public daemon listener is intentionally closed during recovery.
+        pub async fn peer_transport_status(
+            &self,
+            peer_node_id: u64,
+        ) -> Result<Option<SnapshotTransportStatus>, String> {
+            let client = self
+                .client
+                .as_ref()
+                .ok_or_else(|| "peer transport status requires replicated storage".to_owned())?;
+            client
+                .snapshot_transport_status_sqlite(peer_node_id)
+                .await
+                .map_err(|error| error.to_string())
         }
 
         /// Keep the atomics-only metrics projection fresh from the local Raft

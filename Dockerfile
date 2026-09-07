@@ -120,6 +120,12 @@ RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \
 # cold qualification exceed the Docker job's one-hour bound before these
 # runtime assertions could report a result.
 FROM runtime-assets AS runtime
+ARG PLURX_BUILD_SHA=""
+# The fleet rollout inspects this label on the pulled image ID before it trusts
+# checkout-owned deployment policy. Redeclare the build arg in this final stage:
+# Docker build args are stage-scoped, and a label inherited only by the build
+# stage would leave the shipped runtime unverifiable.
+LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"
 COPY --from=build /plurxd /usr/local/bin/plurxd
 # Stopped-node recovery and cluster validation tooling. The WAL inspector is
 # read-only, refuses a live lock, and lets an operator diagnose the same image
@@ -141,12 +147,13 @@ VOLUME ["/var/lib/plurx"]
 USER plurx
 
 # The default replicated startup may spend 45s reaching Hiqlite health, 45s
-# awaiting admission, then the 120s snapshot timeout plus another 45s reaching
-# its quorum watermark. Five minutes covers that 255s budget with margin while
-# still exposing a broken build promptly. Compose can lengthen the grace when
-# an operator lengthens the snapshot timeout; a successful probe ends startup
-# grace immediately and later failures use the normal retry cadence.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5m \
+# awaiting admission, then a 1,200s snapshot transfer plus a 120s final install
+# and 45s reaching its quorum watermark. Twenty-five minutes covers that 1,455s
+# budget with margin while still exposing a broken build promptly. Compose can
+# lengthen the grace when an operator lengthens either snapshot stage; a
+# successful probe ends startup grace immediately and later failures use the
+# normal retry cadence.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=25m \
     CMD ["plurxd", "healthcheck"]
 
 ENTRYPOINT ["plurxd"]

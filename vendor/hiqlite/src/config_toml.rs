@@ -394,6 +394,8 @@ impl NodeConfig {
             #[cfg(feature = "cache")]
             cache_storage_disk,
             raft_config: NodeConfig::default_raft_config(logs_until_snapshot),
+            snapshot_chunk_timeout: crate::config::DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
+            snapshot_transfer_timeout: crate::config::DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
             tls_raft,
             tls_api,
             secret_raft,

@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["ac3bd804", "3df22620", "d344df1b", "0fc907b7", "f7671683", "2cabf2d1"]
+points = []
+checks = []
+reason = "These commits only correct the live recovery status page, PR links, review state, and recorded test counts; they change no runtime, deployment, validation, or user-facing product behavior."
+ignore = true

@@ -266,6 +266,9 @@ if [ "$DO_STATUS" -eq 1 ]; then
     [ -n "$version" ] || version="unknown"
     [ -n "$serving" ] || serving="n/a"
     if [ -n "$waiting" ] && [ -n "$cap" ]; then waiting="$waiting/$cap"; else waiting="n/a"; fi
+    if [ "$version" = "unknown" ]; then
+      probe_failed=1
+    fi
 
     case "$ready" in
       ready) printf '    %-16s \033[32m%-10s\033[0m %-22s %-9s %s\n' "$node" ready "$version" "$serving" "$waiting" ;;
@@ -280,10 +283,11 @@ if [ "$DO_STATUS" -eq 1 ]; then
   # probe exists to catch, and it is invisible in a per-node list nobody adds up.
   distinct="$(
     for node in "${NODES[@]}"; do
-      case "$node" in
-        *:*) probe_base="http://$node" ;;
-        *)   probe_base="http://$node:$PORT" ;;
-      esac
+      if [[ "$node" == *:* ]]; then
+        probe_base="http://$node"
+      else
+        probe_base="http://$node:$PORT"
+      fi
       curl -fsS --max-time 5 "$probe_base/metrics" 2>/dev/null \
         | sed -n 's/^plurx_build_info{version="\([^"]*\)",build="\([^"]*\)"}.*/\1+\2/p' | head -1
     done | sort -u | grep -c . || true
@@ -299,6 +303,7 @@ if [ "$DO_STATUS" -eq 1 ]; then
   if [ "$probe_failed" -eq 1 ]; then
     printf '\n'
     note "at least one node is not ready, not answering, or not on the same build"
+    exit 1
   fi
 fi
 

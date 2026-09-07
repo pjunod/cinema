@@ -15,10 +15,12 @@ pub use raft_client::NetworkStreaming;
 
 pub(crate) mod api;
 mod challenge_response;
+pub(crate) mod frame_io;
 pub(crate) mod handshake;
 pub(crate) mod management;
 pub(crate) mod raft_client;
 pub(crate) mod raft_server;
+pub(crate) mod snapshot_executor;
 pub(crate) mod web_socket_connect;
 
 pub(crate) type AppStateExt = axum::extract::State<Arc<AppState>>;
@@ -61,15 +63,20 @@ pub fn serialize_network<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 #[inline(always)]
-fn validate_secret(state: &AppStateExt, headers: &HeaderMap) -> Result<(), Error> {
+fn validate_secret_value(secret_api: &str, headers: &HeaderMap) -> Result<(), Error> {
     match headers.get(HEADER_NAME_SECRET) {
         None => Err(Error::Token("API Secret missing".into())),
         Some(secret) => {
-            if state.secret_api.as_bytes() != secret.as_bytes() {
+            if secret_api.as_bytes() != secret.as_bytes() {
                 Err(Error::Token("Invalid API Secret".into()))
             } else {
                 Ok(())
             }
         }
     }
+}
+
+#[inline(always)]
+fn validate_secret(state: &AppStateExt, headers: &HeaderMap) -> Result<(), Error> {
+    validate_secret_value(&state.secret_api, headers)
 }

@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["bb84e9df"]
+reason = "This commit only updates the live implementation status with the prior exact-candidate review and focused evidence; it changes no runtime or validation behavior."
+ignore = true

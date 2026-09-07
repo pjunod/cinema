@@ -98,9 +98,7 @@ pub fn inspect_lock(base_path: &Path) -> Result<WalLockState, Error> {
 /// Decode only the leading state-machine `last_applied_log_id` field. The
 /// remaining SQLite metadata contains membership addresses and is never
 /// returned by the diagnostic surface.
-pub fn decode_state_machine_last_applied(
-    bytes: &[u8],
-) -> Result<Option<InspectedLogId>, Error> {
+pub fn decode_state_machine_last_applied(bytes: &[u8]) -> Result<Option<InspectedLogId>, Error> {
     let value: Option<LogId<u64>> = deserialize_legacy(bytes)?;
     Ok(value.map(Into::into))
 }
@@ -108,7 +106,9 @@ pub fn decode_state_machine_last_applied(
 /// Inspect a stopped Hiqlite `logs/` directory without changing it.
 pub fn inspect_logs_dir(base_path: &Path) -> Result<WalInspection, Error> {
     if inspect_lock(base_path)? == WalLockState::Locked {
-        return Err(Error::Locked("refusing to inspect a live-locked WAL directory"));
+        return Err(Error::Locked(
+            "refusing to inspect a live-locked WAL directory",
+        ));
     }
 
     let metadata = inspect_metadata(base_path)?;
@@ -150,8 +150,12 @@ pub fn inspect_logs_dir(base_path: &Path) -> Result<WalInspection, Error> {
         }
 
         let (first, last) = inspect_file_boundaries(&wal)?;
-        if first.as_ref().is_some_and(|value| value.index != wal.id_from)
-            || last.as_ref().is_some_and(|value| value.index != wal.id_until)
+        if first
+            .as_ref()
+            .is_some_and(|value| value.index != wal.id_from)
+            || last
+                .as_ref()
+                .is_some_and(|value| value.index != wal.id_until)
         {
             push_once(&mut verdicts, "wal_header_payload_mismatch");
         }
@@ -321,9 +325,7 @@ fn inspect_file_boundaries(
         if bytes[offset + 8..offset + 12] != CHKSUM.checksum(payload).to_le_bytes() {
             return Err(Error::Integrity("Invalid CRC for WAL Record".into()));
         }
-        if previous_log_id
-            .is_some_and(|previous| record_log_id != previous.saturating_add(1))
-        {
+        if previous_log_id.is_some_and(|previous| record_log_id != previous.saturating_add(1)) {
             return Err(Error::FileCorrupted(
                 "WAL records are not logically contiguous".into(),
             ));
@@ -411,7 +413,10 @@ mod tests {
         let report = inspect_logs_dir(&root)?;
         assert_eq!(report.invariant_verdicts, ["clean"]);
         assert_eq!(report.metadata.last_purged_log_id, Some(purged.into()));
-        assert_eq!(report.wal_files[0].first_decodable_log_id, Some(retained.into()));
+        assert_eq!(
+            report.wal_files[0].first_decodable_log_id,
+            Some(retained.into())
+        );
         assert_eq!(
             report.observations,
             ["wal_number_one_reused_above_initial_range"]

@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = ["3f7530e8"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "core.media",
+  "identity.access",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "Paused-time vendor coverage proves repeated reads preserve a deadline-less stalled observation's zero-remaining boundary. Browser membership coverage proves a fresh restarted attempt wins over a sub-five-second stalled predecessor with the same semantic fingerprint in either input order, while causal completion remains the only validated cross-attempt override."

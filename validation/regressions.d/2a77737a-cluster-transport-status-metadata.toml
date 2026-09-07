@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["2a77737a"]
+reason = "This commit only updates the live project status and autonomous decision record for the preceding M4 runtime correction; it changes no runtime behavior."
+ignore = true

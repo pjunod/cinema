@@ -1,4 +1,4 @@
-use crate::{log, Cache};
+use crate::{Cache, log};
 use hiqlite::{Client, Error};
 use std::string::ToString;
 use std::time::Duration;

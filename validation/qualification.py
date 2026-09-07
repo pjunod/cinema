@@ -23,6 +23,7 @@ REQUIRED_JOBS = frozenset(
         "rust",
         "cluster_store",
         "cluster_topology",
+        "cluster_transport_recovery",
         "cluster_wal",
         "cluster_daemon",
         "web_layout",
@@ -33,6 +34,7 @@ REQUIRED_JOBS = frozenset(
         "package_smoke",
     }
 )
+FIRST_WORKFLOW_RUN_ATTEMPT = "1"
 
 
 def build_receipt(
@@ -59,6 +61,12 @@ def build_receipt(
         raise QualificationError(
             "qualification metadata is missing: "
             + ", ".join(missing_metadata)
+        )
+    if environment["GITHUB_RUN_ATTEMPT"] != FIRST_WORKFLOW_RUN_ATTEMPT:
+        raise QualificationError(
+            "qualification must come from workflow run attempt "
+            f"{FIRST_WORKFLOW_RUN_ATTEMPT}; found "
+            f"{environment['GITHUB_RUN_ATTEMPT']!r}"
         )
 
     head_ref = environment.get("GITHUB_HEAD_REF", "")

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["503eba2f"]
+points = ["core.media", "persistence.upgrades", "cluster.auth", "server.api"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The current Rust and cluster gates retain distinct chunk, transfer, and final-install deadlines, one absolute snapshot-attempt budget, checked configuration bounds, startup recovery timing, and typed mismatch semantics across the production Hiqlite transport."

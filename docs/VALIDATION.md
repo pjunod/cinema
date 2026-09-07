@@ -450,6 +450,7 @@ host it runs on is part of the experiment:
 
 | Check | Point | What the host can change |
 |---|---|---|
+| `hiqlite-vendor-clippy` (`make hiqlite-vendor-clippy`) | `cluster.auth` | Compiles the excluded vendored Hiqlite production snapshot-transport matrix with warnings denied. It runs in the effort Rust compile job and the main topology job, so a vendored refactor cannot bypass Clippy merely because the crate is outside the root workspace. |
 | `cluster-auth` (`make cluster-check`) | `cluster.auth` · `persistence.upgrades` | Three voters run as separate processes and every call carries a three-second per-operation deadline (`STORE_TIMEOUT` in `crates/plurx-core/src/store/hiqlite.rs`). Under a full `make validate` those voters compete with every other check for the same cores, and that deadline is reachable by scheduling pressure alone |
 
 **What a timeout there means.** `Database("replicated store operation timed out")`

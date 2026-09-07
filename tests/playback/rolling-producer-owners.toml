@@ -1208,6 +1208,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and the task starts no worker or process.
 # 391 -> 393: the serving-loss regression owns and joins/cancels its HTTP
 # waiter and serving-loss task. No new production task owner is introduced.
+# 393 -> 408 with M4 transport status and cache-recovery safety. Three shipped
+# node-owned tasks refresh the two bounded status projections and perform the
+# one-time exact-roster activation; a fourth shipped task owns a cancellation-
+# safe Store result. The remaining eleven are joined Rust test tasks (including
+# two std::thread fixtures) that drive cancellation, publication, and poisoned-
+# cache races. Every shipped loop has an explicit shutdown token and every
+# fixture handle is awaited or cancelled before its test returns.
 # 389 -> 392 with HDHomeRun document-boundary fixtures: the one-response
 # redirect/size server, stalled-body server, and stalled fetch are test-only.
 # The first is joined by each caller; the stall pair is explicitly aborted or
@@ -1241,7 +1248,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # each running one `create` concurrently so the other side can move the ask
 # underneath it. Both are joined before the test ends, so neither outlives
 # its test and neither owns a producer.
-expected_occurrences = 424
+expected_occurrences = 439
 
 [[module_structures]]
 id = "method-spawn"
@@ -1252,6 +1259,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # +1: `run_chapter_probe` spawns one bounded ffprobe child. Its caller owns a
 # cancellation token and deadline; the child is kill-on-drop and always reaped
 # on the explicit oversize and ordinary completion paths.
+# 41 -> 43 with M4: planned-outage and cache-revocation Drop each hand an exact
+# replicated cleanup claim plus its process gate to the node runtime. Retry is
+# shutdown-aware and bounded; the gate remains owned until cleanup is definitive.
 # +1 HDHomeRun M2: spawn_live_ffmpeg launches the sole per-session encoder.
 # The session retains child and foreground admission through confirmed reap;
 # shutdown closes registry insertion before collecting existing owners.
@@ -1266,7 +1276,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # and live_tv.rs's per-session encoder on main's. Neither side's total
 # describes the merged tree, so the count is measured off it rather than
 # carried across from one parent.
-expected_occurrences = 43
+expected_occurrences = 45
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1393,6 +1403,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 571 -> 577: admission capacity gets one inherited-deadline timeout;
 # takeover cleanup gets one existing-reconciliation-deadline timeout. The
 # remaining net four constructors belong to bounded settlement regressions.
+# 577 -> 602 with M4. Shipped timers bound peer-directory/status reads, status
+# refresh cadence, exact-claim apply, activation retry, and replicated cleanup;
+# none launches a process. Test-only paused-time waits exercise those deadlines,
+# cancellation, chronology, and cache expiry, and remain owned by their tests.
 # Both efforts moved the count from 550 independently, so the merged total is
 # 550 + 4 + 7 rather than either branch's value.
 # +28 HDHomeRun M2: nineteen production Live TV sites bound startup, drain,
@@ -1436,7 +1450,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # in `mod tests`, each bounding a wait on a control seam so a test that never
 # reaches it fails instead of hanging the suite. Neither is a production
 # timer and neither owns anything.
-expected_occurrences = 619
+expected_occurrences = 644
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1560,6 +1574,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 after the second adversarial review: the internal-relay preparation replay
 # regression reads the in-process response status before asserting its retained
 # canonical body. It launches no child and owns no process.
+# 217 -> 226 with M4: seven net additions are in-process membership or HTTP
+# response `status()` reads used by maintenance/status handlers and acceptance
+# tests. The other two are the node-runtime cleanup spawns inventoried under
+# `method-spawn` above. None constructs, launches, or owns an
+# operating-system process.
 # +3 for HDHomeRun: two HTTP status reads enforce the no-redirect/success
 # contract and one `.output()` awaits the bounded synthetic FFmpeg graph.
 # 219 -> 220 with the quorum-fence regression reading `Response::status()` on
@@ -1622,7 +1641,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # process, no producer, nothing owned. The emit they feed does spawn, but it
 # goes through `telemetry::emit`, which already owns that task and is already
 # counted where it lives.
-expected_occurrences = 265
+expected_occurrences = 274
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1647,6 +1666,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # calls coordinate test tasks before the leading fetch is released. They are
 # in-process synchronization and do not address or reap an operating-system
 # process.
+# 306 -> 310 with M4: four Barrier::wait calls coordinate the test-only
+# in-flight authentication publication race. They are joined in-process test
+# synchronization and are not child-process lifecycle actions.
 # +4 HDHomeRun M2: cleanup_session calls start_kill and bounded wait while
 # retaining child/admission on failure; the session observer calls try_wait;
 # the real video-only fixture awaits its production-graph child.
@@ -1669,7 +1691,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # neither parent's value describes the merged tree. Every ownership
 # obligation recorded above is retained on both sides; the total is read
 # off the merge rather than added up.
-expected_occurrences = 326
+expected_occurrences = 330
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

@@ -105,6 +105,7 @@ class ShipStatusProbeCase(unittest.TestCase):
         )
         self.assertIn("7", result.stdout, "cache-hit GETs in flight")
         self.assertIn("2/64", result.stdout, "blocked GETs against the cap they are admitted to")
+        self.assertEqual(result.returncode, 0)
 
     def test_a_node_that_does_not_answer_is_named_not_skipped(self) -> None:
         """Silence is the failure mode a probe most needs to report.
@@ -117,6 +118,7 @@ class ShipStatusProbeCase(unittest.TestCase):
         self.assertIn("127.0.0.1", result.stdout)
         self.assertIn("no answer", result.stdout)
         self.assertIn("not ready, not answering, or not on the same build", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
 
     def test_an_unready_node_still_reports_its_build(self) -> None:
         """Up-and-unready is a different state from down, and stays different.
@@ -129,6 +131,15 @@ class ShipStatusProbeCase(unittest.TestCase):
             result = run_status("127.0.0.1", node.port)
         self.assertIn("quorum unavailable", result.stdout)
         self.assertIn("0.3.0+6e225342", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_ready_without_build_metrics_fails_verification(self) -> None:
+        """Readiness without a build identity is not a verified deployment."""
+        with FakeNode(metrics="") as node:
+            result = run_status("127.0.0.1", node.port)
+        self.assertIn("unknown", result.stdout)
+        self.assertIn("not ready, not answering, or not on the same build", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
 
     def test_a_split_fleet_is_called_out_rather_than_left_to_be_noticed(self) -> None:
         """Two builds serving at once is a partial deploy.
@@ -145,6 +156,7 @@ class ShipStatusProbeCase(unittest.TestCase):
         self.assertIn("0.3.0+0aaaaaaa", result.stdout)
         self.assertIn("2 different builds are serving", result.stdout)
         self.assertIn("mid-deploy or a node was missed", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
 
     def test_one_build_across_the_fleet_raises_nothing(self) -> None:
         """The warning has to stay quiet when the fleet agrees.
@@ -156,6 +168,7 @@ class ShipStatusProbeCase(unittest.TestCase):
             result = run_status(f"127.0.0.1:{first.port} 127.0.0.1:{second.port}", 1)
         self.assertNotIn("different builds", result.stdout)
         self.assertNotIn("not ready, not answering", result.stdout)
+        self.assertEqual(result.returncode, 0)
 
     def test_the_probe_changes_nothing(self) -> None:
         """Read-only by construction, so it is safe mid-deploy.

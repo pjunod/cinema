@@ -1,0 +1,41 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "3684d942",
+  "bf04da1c",
+  "7d65ea9b",
+  "db54d3a0",
+  "edfd3ed9",
+  "fece3368",
+  "f43cbae9",
+  "72ce68aa",
+  "c8c521dc",
+  "a5cb621a",
+  "f601a972",
+  "8d92b184",
+  "af82019f",
+  "8da42f73",
+  "d24e898d",
+  "58fbebd1",
+  "37cc817c",
+  "8215e790",
+  "51ed635a",
+  "fbc99c52",
+]
+points = [
+  "cluster.auth",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "cluster-transport-recovery",
+  "operations-contract",
+  "catalog-contract",
+  "history-regressions",
+]
+reason = "The Linux transport-recovery qualification launches separate-process TLS clusters and requires twenty voter plus twenty learner snapshot recoveries on the exact candidate SHA; its explicit voter-only smoke command can establish a smaller pre-promotion confidence sample without weakening that retained artifact. The one absolute recovery window begins before the target is killed and snapshot creation starts, while its wall-clock handoff is monotonic-bounded and supervises early writer exit. Source attempt/retry counts advance only for work OpenRaft actually issues, including across a reconnect that changes the displayed phase. Its receipt feeds one immutable read of the retained bytes through the Rust closed-schema and semantic validator resolved from the active Cargo target directory before binding their digest, image identity, acknowledged writes, bounded duration, attempt chronology, and stable resource counts; static operations contracts pin the command, same-workflow first-attempt receipt policy, and promotion integration."
