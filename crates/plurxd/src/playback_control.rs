@@ -4031,6 +4031,13 @@ pub(crate) enum CopyProducerExitClassification {
 pub(crate) enum ProducerStartupKind {
     Hardware,
     Software,
+    /// A hardware encoder fed by software decode and software filters. It
+    /// starts on the software budget rather than the hardware one, because the
+    /// slow part of a start is the decode, not the encoder — and calling it
+    /// `Hardware` would give it twelve seconds to do thirty seconds of work.
+    /// A separate variant rather than a reuse of `Software` so the diagnostics
+    /// surface can say which of the two a session actually is.
+    MixedSoftwareDecode,
     Copy,
 }
 
@@ -4038,7 +4045,7 @@ impl ProducerStartupKind {
     pub(crate) fn startup_budget(self) -> Duration {
         match self {
             Self::Hardware => PREPUBLICATION_HARDWARE_STARTUP_BUDGET,
-            Self::Software => PREPUBLICATION_SOFTWARE_STARTUP_BUDGET,
+            Self::Software | Self::MixedSoftwareDecode => PREPUBLICATION_SOFTWARE_STARTUP_BUDGET,
             Self::Copy => PREPUBLICATION_COPY_STARTUP_BUDGET,
         }
     }
@@ -4047,6 +4054,7 @@ impl ProducerStartupKind {
         match self {
             Self::Hardware => "hardware",
             Self::Software => "software",
+            Self::MixedSoftwareDecode => "mixed-software-decode",
             Self::Copy => "copy",
         }
     }
@@ -4082,13 +4090,20 @@ pub(crate) struct InitialProducerPolicy {
 }
 
 impl InitialProducerPolicy {
-    pub(crate) fn hardware(
+    /// A hardware-encoder policy, told which of the two shapes this is.
+    ///
+    /// A hardware encoder fed by a software decode starts on the software
+    /// budget, because the slow part of that start is the decode: calling it
+    /// `Hardware` gives it twelve seconds to do thirty seconds of work, and it
+    /// is killed for being slow at something it was never going to finish.
+    pub(crate) fn hardware_with_startup(
         presentation_contract_fingerprint: String,
         progress_budget: Duration,
         retry_recipe: ValidatedRetryRecipe,
+        startup_kind: ProducerStartupKind,
     ) -> Self {
         Self {
-            startup_kind: ProducerStartupKind::Hardware,
+            startup_kind,
             progress_budget,
             retry_recipe: Some(retry_recipe),
             presentation_contract_fingerprint,
@@ -4194,7 +4209,7 @@ impl InitialProducerPolicy {
                     self.retry_recipe.is_some(),
                 ),
                 (
-                    ProducerStartupKind::Hardware,
+                    ProducerStartupKind::Hardware | ProducerStartupKind::MixedSoftwareDecode,
                     ProducerExitClassifier::Immediate,
                     ProducerRetryEligibility::AnyPrepublicationFailure,
                     true,
@@ -21096,10 +21111,11 @@ mod tests {
     }
 
     fn hardware_policy(contract: &str, fingerprint: &str) -> InitialProducerPolicy {
-        InitialProducerPolicy::hardware(
+        InitialProducerPolicy::hardware_with_startup(
             contract.to_owned(),
             PRODUCER_PROGRESS_BUDGET,
             retry_recipe(contract, fingerprint),
+            ProducerStartupKind::Hardware,
         )
     }
 

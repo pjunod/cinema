@@ -416,6 +416,22 @@ impl Pipeline {
     /// Whether the renderer requires software-decoded frames. Dolby Vision
     /// metadata is parsed onto AVFrames by the HEVC decoder; an inherited
     /// hardware decode/download path is not allowed to drop it silently.
+    /// Whether every frame stays in vendor surfaces from decode to encode.
+    ///
+    /// Only two graphs manage it: `vpp_qsv` and `scale_vaapi`+`tonemap_vaapi`
+    /// both scale and tone-map on the video-processing block and hand the
+    /// encoder surfaces it reads directly. Everything else touches the CPU on
+    /// every frame, and the amounts are not small — the CPU float tone-map is
+    /// the 0.71x measurement this module's header records, `libplacebo` ends
+    /// with `hwdownload` into system memory, and `tonemap_opencl` leaves the
+    /// scale on the CPU side by construction, at *source* resolution.
+    ///
+    /// Admission reads this, because "the encoder is hardware" says nothing
+    /// about whether the pipeline feeding it is.
+    pub fn keeps_frames_off_the_cpu(self) -> bool {
+        matches!(self, Pipeline::VppQsv | Pipeline::TonemapVaapi)
+    }
+
     pub fn requires_software_decode(self) -> bool {
         matches!(self, Pipeline::DoviTonemapx | Pipeline::DoviPassthrough)
     }

@@ -1,8 +1,8 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3a candidate; M2 merged into the effort · **Updated:**
+**Status:** M4 candidate; M0–M3a merged into the effort · **Updated:**
 2026-09-07 · **Integration branch:** `effort/decoder-selection-recovery` ·
-**M3a task base:** M2 candidate `773ad4888194ad3b2986b60bd8d1bd4d67595b4a`
+**M4 task base:** M3a candidate `de7ca4b65a5c246c986bf9598bcf7a68ea1f54d1`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -19,14 +19,14 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3a — owned diagnostic observation |
-| Task branch | `codex/decoder-selection-m3a`, based on effort head `773ad488` |
+| Milestone | M4 — mixed resource admission |
+| Task branch | `codex/decoder-selection-m4`, based on effort head `de7ca4b6` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | This head on pinned 1.97.1: `decoder_health` 22/22, `make effort-rust-check` (fmt-check plus workspace all-target compile) and `make lint` (workspace Clippy, warnings as errors) clean, `git diff --check` clean, `make history-check` clean. The non-Rust status contract now also pins the Rust grammar's constants and its primary-record rule against the M0 harness |
-| Exact receipt | M2's is `773ad488`, merged. M3a's is the head this PR carries; it is a reviewed and repaired candidate, and the effort gate is what makes it a receipt |
+| Focused validation | This head on pinned 1.97.1: daemon `admission::` 24/24, `transcode::tests::` 220/220, `playback_control::tests::` 219/219, `live_tv::tests::` 40/40, core `decoder_selection` 43/43, `make effort-rust-check` and `make lint` clean, `git diff --check` clean, `make history-check` and `make validation-lint` clean |
+| Exact receipt | M3a's is `de7ca4b6`, merged. M4's is the head this PR carries; it is a reviewed and repaired candidate, and the effort gate is what makes it a receipt |
 | Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
 | Blocker | The Forgejo `Effort development gate` on this head. Per `AGENTS.md` a task PR into an effort branch defers the full suite to the `Main promotion gate`; the effort's one `make validate-full` is owed at promotion, not here |
 
@@ -37,8 +37,8 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a working tree (grammar and accumulator); M3b/M3c not started | The diagnostic grammar, the sliding-window accumulator and the bounded reader exist with their full test suite, replayed against the retained M0 fixtures. Nothing outside those tests calls them yet, by design |
-| M4 · mixed resource admission | Not started | — |
+| M3 · owned observation and health receipts | M3a merged; M3b/M3c not started | [Forgejo #79](http://192.168.4.7:3000/noirr/plurx/pulls/79) fast-forwarded `de7ca4b6` into the effort after one whole-PR adversarial review, its six blockers repaired, and the Forgejo effort gate. Nothing outside its tests calls the grammar yet, by design |
+| M4 · mixed resource admission | Candidate; reviewed and repaired, effort gate pending | Admission reads a `TranscodeResourceEstimate` off the resolved plan rather than off the encoder's name, and takes hardware and CPU as one bundle under the mutex both pools already share |
 | M5 · durable budget and prepublication recovery | Not started | — |
 | M6 · postpublication replacement and client intent | Not started | — |
 | M7 · offline, shared cache, and handoff enforcement | Not started | — |
@@ -332,16 +332,134 @@ package-selected form and 10 for the no-default-features form.
 
 The repository's own gate is `make lint` — `cargo clippy --workspace
 --all-targets -- -D warnings` (Makefile) — and that is what CI runs. It is
-green on this working tree, as is `make effort-rust-check`. M2 therefore
-records the workspace commands as its lint evidence and does not repair
-unrelated pre-existing dead code to satisfy a package-selected invocation the
-repository does not use. §13's list should be corrected to the workspace form.
+green on the M2 working tree, as is `make effort-rust-check`. This effort
+therefore records the workspace commands as its lint evidence throughout, and
+does not repair unrelated pre-existing dead code to satisfy a package-selected
+invocation the repository does not use. §13's list should be corrected to the
+workspace form.
 
-**Pending evidence:** the working tree still needs its complete focused Rust
-suite, pinned compile and lint checks, one whole-candidate adversarial review,
-repair of every finding and failed unit test, the Forgejo effort gate, and one
-final full qualification. Until those finish, every M2 statement in this
-section describes implementation state, not a merge-ready receipt.
+## M4 working tree — a hardware encoder is not evidence of an idle CPU
+
+Admission decided what a session would cost from the encoder's name. A
+software decode feeding a hardware encoder therefore reserved a hardware slot
+and nothing else, while spending most of a box's cores on the decode — so
+several of them could land on one node with every counter reading healthy, each
+running under realtime. Nothing had reserved the CPU they were using, so
+nothing could refuse the next one.
+
+`TranscodeResourceEstimate::of(plan, work)` reads the cost off the resolved
+plan: a hardware slot when the encode needs one, and `Workload::software_threads`
+as the whole pipeline's CPU reservation whenever any stage of that pipeline runs
+on the CPU — the decode, the encode, or the filter chain. It is deliberately the
+same number an all-software pipeline already reserved — adding a second full
+encode estimate on top of it would halve the node's apparent capacity for work
+that has not changed.
+
+The filter chain belongs in that list and was missing from the first draft of
+this milestone. `Pipeline::keeps_frames_off_the_cpu()` is true for exactly two
+graphs, `VppQsv` and `TonemapVaapi`; every other renderer downloads frames and
+spends real cores on them. Two hardware-decode, hardware-encode sessions running
+the CPU float tone-map are the same failure this milestone exists to stop — the
+measurement that made that chain's own header a warning was 0.71x realtime — and
+a subtitle burn is libass on the CPU whatever the rest of the graph does, and on
+the two vendor graphs forces a download of every frame besides. Both now count.
+
+`Admissions::try_admit_bundle` takes both halves or neither. That is not
+defensive coding, it is the whole safety argument: taking the slot and then
+waiting for CPU holds the node's scarcest resource while blocked on its most
+contended one, and two starts doing that in opposite orders is a deadlock.
+There is no lock order to document because there is no second lock — hardware
+and software ownership already live under one `PermitState` mutex, so the
+bundle is one decision. The empty-pool exception is preserved exactly: a box
+whose every session is over budget would otherwise have its budget turned into
+a ban.
+
+The recovery transition is now two transitions, because it always was two:
+
+| Retry shape | What it owes |
+|---|---|
+| GPU pipeline, encoder retained, chain moves to the CPU | The difference between what its plan costs and what the session already holds. The hardware slot stays: releasing it would leave a live hardware encoder running against nothing reserved, and the next hardware start would be admitted onto the same video block — one slot authorizing two encoders |
+| CPU pipeline, encoder replaced by software | The existing demotion. The slot goes back at the transition, and the forced take stands: the viewer is already watching and this is the documented mid-session fallback |
+
+The two are mutually exclusive by construction and a test asserts it, because
+setting both would reserve the pipeline twice. `take_forced` is untouched and
+is not extended to the new path; a delta that does not fit is a bounded
+capacity answer the caller reports.
+
+"Difference" is load-bearing, and the first draft of this milestone got it
+wrong: it reserved the retry's whole estimate on top of what admission had
+already taken, so a session that was to end up owning one pipeline's worth of
+CPU paid for two — and on a box where two did not fit, the retry failed over
+capacity the session itself was holding, by which point the predecessor was
+already terminated and its scratch already cleared. The frozen recipe therefore
+carries `cpu_total`, the whole cost read off the retry's own resolved plan, and
+the executor subtracts `Session::software_threads_held()` at the moment of the
+transition; a difference of zero reserves nothing at all. The new permit lands
+in its own slot (`sw_delta_permit`) rather than overwriting `sw_permit`, because
+overwriting drops the original — the session would have paid for both and owned
+only the second. A recipe cannot carry the difference itself: it is frozen
+before the transition, and what the session holds is only knowable at it.
+
+The wait for that difference is bounded, not instantaneous. The usual reason
+the pool refuses is a background producer holding permits, and a background
+producer yields — but only once a live waiter is registered, and only at its
+next checkpoint. So the executor registers the wait (`SwPool::wait_for_capacity`,
+the same `live_waiting` guard the hardware queue uses, on the same shared state)
+and polls to `MIXED_RECOVERY_CAPACITY_WAIT`, five seconds. A single
+non-blocking try turned "wait two seconds" into "destroy the session"; an
+unbounded wait would leave a viewer watching a stall with no deadline, which is
+what §5's existing startup budget exists to prevent.
+
+A mixed pipeline also gets its own speed bucket (`<class>+swdecode`) and its
+own startup kind (`MixedSoftwareDecode`, on the 30-second software budget
+rather than the 12-second hardware one, because the slow part of such a start
+is the decode). Filing its measurements under either existing bucket would
+poison that bucket's record for the work actually in it — and the measurement
+is what admits the next session.
+
+Both apply to a mixed *start*, not only to a mixed recovery. A hardware encoder
+fed by a software decode is that shape from its first frame, so
+`InitialProducerPolicy::hardware_with_startup` is told which of the two it is
+and the plan's own decode backend decides: calling such a start `Hardware` gives
+it twelve seconds to do thirty seconds of work and then kills it for being slow
+at something it was never going to finish. The class is likewise written once,
+by the one writer that knows which of the three shapes the attempt is —
+software, mixed, or all-hardware — instead of being written twice from the
+encoder's name and then corrected.
+
+Not in M4, and named here so it is not mistaken for done: decoder thread caps.
+`TranscodeResourceEstimate::decoder_threads` exists and is always `None`,
+because the startup inventory names no decoder implementation and a cap for a
+decoder nobody measured is a guess. It gets a value in M3, alongside the
+qualified inventory.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against exact head `d767a0c9`, the whole candidate.
+It found three blockers, all of them in this milestone's own work rather than
+inherited, and all three are repaired in one batch on top of that head.
+
+| Finding | Disposition |
+|---|---|
+| `cpu_delta` was not a delta. The frozen recipe carried the retry's whole estimate and the executor reserved all of it on top of what admission had already taken, so a mixed recovery paid for two pipelines to own one. On a box where two did not fit, the retry failed — over capacity the session itself was holding — and it failed after the predecessor was terminated and its scratch cleared, so the answer to a transient shortage was a destroyed session | The recipe carries `cpu_total`, read off the retry's own resolved plan; the executor subtracts `Session::software_threads_held()` at the transition and reserves nothing when the difference is zero. The new permit lands in `sw_delta_permit` rather than overwriting `sw_permit`, which would have dropped the original |
+| The estimate read only the decode and the encode, so a hardware-decode, hardware-encode session running the CPU float tone-map — measured at 0.71x realtime, and the reason that chain's header carries a warning — reserved no CPU at all. A subtitle burn is libass on the CPU on every graph and was likewise free | `Pipeline::keeps_frames_off_the_cpu()` is true for `VppQsv` and `TonemapVaapi` only; any other renderer, or any subtitle burn, now costs the pipeline's software threads |
+| A single non-blocking `try_take_delta` with no live waiter registered. The pool's usual refusal is a background producer holding permits, and a background producer yields only once a live waiter is registered and only at its next checkpoint — so the one case the wait exists for was the one case it could not survive | The executor registers `SwPool::wait_for_capacity()` — the same `live_waiting` guard the hardware queue uses, on the shared `PermitState` — and polls to `MIXED_RECOVERY_CAPACITY_WAIT`, five seconds, before answering with a capacity refusal |
+
+The review also found the milestone's own tests weaker than their names: the
+bundle suite ran entirely on pools with no background owner, so deleting the
+priority block left it green, and no test pinned the exactly-fits boundary.
+`a_bundle_obeys_the_same_priority_rules_as_the_two_pools_it_replaces`,
+`a_bundle_that_exactly_fills_the_budget_is_admitted`, and
+`the_estimate_reads_the_cost_off_the_plan_and_not_off_the_encoders_name` were
+added, and `a_retry_that_keeps_its_encoder_keeps_its_slot_and_pays_for_its_
+decode` was rewritten: it had asserted the pre-repair accounting, and passed.
+
+**Qualification on the repaired head:** `admission::` 24 passed,
+`transcode::tests::` 220 passed, `playback_control::tests::` 219 passed,
+`live_tv::tests::` 40 passed, `plurx-core --test decoder_selection` 43 passed,
+`make effort-rust-check` green, `make lint` green — all under pinned 1.97.1.
+The Forgejo `Effort development gate` on the pushed head is the remaining
+receipt.
 
 ## M1 exact qualification record
 

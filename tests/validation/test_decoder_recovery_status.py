@@ -25,6 +25,7 @@ FORGEJO_MAIN_LINEAGE = "4a6a0268bd314ad5587cb3037f12ebd992c0074e"
 M1_EFFORT_BASE = "a8bbe574"
 M2_TASK_BASE = "f7f98b013ffe9dcc5414e25e0b2e505df3e7beb7"
 M3A_TASK_BASE = "773ad4888194ad3b2986b60bd8d1bd4d67595b4a"
+M4_TASK_BASE = "de7ca4b65a5c246c986bf9598bcf7a68ea1f54d1"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -170,7 +171,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"M3a task base:** M2 candidate `{M3A_TASK_BASE}`", self.flat_status
+            f"M4 task base:** M3a candidate `{M4_TASK_BASE}`", self.flat_status
         )
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
@@ -294,7 +295,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(surface.get("m2_state"), "migrated")
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
-        self.assertIn("M3a candidate; M2 merged into the effort", self.status)
+        self.assertIn("M4 candidate; M0–M3a merged into the effort", self.status)
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
             "No new compile-time feature gate or hidden runtime enable switch is "

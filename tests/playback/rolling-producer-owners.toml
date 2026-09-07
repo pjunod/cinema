@@ -153,7 +153,18 @@ pattern = "tokio::time::sleep\\("
 # one. `#[cfg(test)]`-only, bounded by a 20s deadline that asserts rather than
 # hangs, and it decides nothing about producer recovery: it waits for a log
 # line that has already been written or is about to be.
-expected_occurrences = 35
+# 35 -> 37 with M4's mixed-pipeline admission. Both are shipped polls of the
+# software pool, both on the existing `ADMISSION_POLL` cadence, and both clamp
+# their final wait to the deadline they already hold rather than overrunning
+# it. One is a live start that has a hardware slot and needs the CPU its
+# software decode will spend; the other is a recovery that keeps its encoder
+# and moves the chain to the CPU. Neither owns a producer or a process — a
+# deadline that expires in either place declines to begin work rather than
+# abandoning any — and both exist because the pool's usual refusal is a
+# background producer that yields only after a live waiter is registered and
+# only at its next checkpoint, so a single non-blocking try turns "wait two
+# seconds" into "destroy the session".
+expected_occurrences = 37
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1406,7 +1417,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 646 -> 647 after mutation-sensitive response bounds: one test-only timeout
 # waits for the supervisor's deadline-exit receipt, preventing outer teardown
 # from masquerading as response-loop evidence. It starts no shipped work.
-expected_occurrences = 647
+# 647 -> 649 with M4's two mixed-pipeline admission polls, which are the same
+# two occurrences `all-async-sleeps` above counts. Both are bounded waits for
+# CPU the pipeline is about to spend, on the existing admission cadence, and
+# both decline rather than detach when their deadline expires.
+expected_occurrences = 649
 
 [[module_structures]]
 id = "bare-time-constructor"

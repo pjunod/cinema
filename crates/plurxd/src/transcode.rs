@@ -34,6 +34,7 @@ use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::admission::Admission;
+use crate::admission::TranscodeResourceEstimate;
 use crate::admission::{
     Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
 };
@@ -68,6 +69,18 @@ const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unava
 /// every other path already uses. The elapsed time is added back to the
 /// production deadline so observing costs the encode nothing.
 const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long a mixed recovery waits for the CPU it newly needs.
+///
+/// Bounded rather than instantaneous because the usual reason the pool refuses
+/// is a background producer holding a permit, and a background producer yields
+/// — but only once a live waiter is registered, and only at its next
+/// checkpoint. A single non-blocking try turns "wait two seconds" into
+/// "destroy the session", because by this point the predecessor is already
+/// terminated and its scratch already cleared. Bounded rather than unlimited
+/// because §5 says to use the existing startup budget, not to invent a new
+/// wait: a viewer is watching a stall while this runs.
+const MIXED_RECOVERY_CAPACITY_WAIT: Duration = Duration::from_secs(5);
 
 /// Give back what observation spent, so a bounded probe cannot shorten the
 /// encode it was meant to inform.
@@ -1758,6 +1771,18 @@ struct PrepublicationTranscodeRetry {
     file: plurx_core::domain::MediaFile,
     target_height: i64,
     software_threads: Option<usize>,
+    /// The whole CPU cost of this retry's pipeline, read off its resolved
+    /// plan. `Some` only when the encoder is retained, which is the mixed
+    /// case; the demotion path uses `software_threads` instead.
+    ///
+    /// A total rather than a difference, because the difference depends on what
+    /// the session holds *at the moment of the retry* and this recipe is
+    /// frozen before then. The executor subtracts.
+    cpu_total: Option<usize>,
+    /// The pool bound this retry will be admitted against, frozen with the
+    /// rest of the recipe so the executor cannot read a different number than
+    /// the one the recipe was validated under.
+    software_budget: usize,
     software_pool: crate::admission::SwPool,
     runtime_cache: PathBuf,
 }
@@ -1876,6 +1901,7 @@ impl PrepublicationTranscodeRetry {
         };
         let software_threads = (retry_encoder == Encoder::Software)
             .then(|| Workload::of(file, opts.target_height).software_threads());
+
         if retry_opts.target_height != opts.target_height
             || retry_opts.pipeline.output_grade() != opts.pipeline.output_grade()
             || retry_opts.audio_index != opts.audio_index
@@ -1906,6 +1932,7 @@ impl PrepublicationTranscodeRetry {
         dir: &std::path::Path,
         presentation_contract_fingerprint: &str,
         software_pool: crate::admission::SwPool,
+        software_budget: usize,
         runtime_cache: PathBuf,
     ) -> Result<Self, String> {
         let PreparedTranscodeRetry {
@@ -1947,6 +1974,8 @@ impl PrepublicationTranscodeRetry {
         );
         let startup_kind = if retry_encoder == Encoder::Software {
             crate::playback_control::ProducerStartupKind::Software
+        } else if plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software {
+            crate::playback_control::ProducerStartupKind::MixedSoftwareDecode
         } else {
             crate::playback_control::ProducerStartupKind::Hardware
         };
@@ -1963,6 +1992,17 @@ impl PrepublicationTranscodeRetry {
             file: file.clone(),
             target_height: retry_opts.target_height,
             software_threads,
+            // Read off the resolved retry plan, not off the encoder's name:
+            // the mixed cost is a property of the pipeline this retry will
+            // actually run, and the estimate is the one type that knows it.
+            cpu_total: (retry_encoder != Encoder::Software).then(|| {
+                crate::admission::TranscodeResourceEstimate::of(
+                    plan,
+                    &Workload::of(file, retry_opts.target_height),
+                )
+                .cpu_threads
+            }),
+            software_budget,
             software_pool,
             runtime_cache,
         })
@@ -3077,6 +3117,9 @@ async fn execute_prepublication_transcode_retry(
             .await;
 
         if let Some(threads) = retry.software_threads {
+            // A real demotion: the encoder becomes software, so the hardware
+            // slot goes back. Forced, because the viewer is already watching
+            // and this is the documented mid-session fallback.
             let work = Workload::of(&retry.file, retry.target_height);
             let permit = retry.software_pool.take_forced(threads);
             if permit.threads() != threads {
@@ -3086,6 +3129,40 @@ async fn execute_prepublication_transcode_retry(
                 ));
             }
             session.demote_to_software(work, permit);
+        } else if let Some(total) = retry.cpu_total {
+            // Not a demotion. The encoder — and its hardware slot — stay
+            // exactly where they are; what changes is how much of the pipeline
+            // runs on the CPU. The session is already paying for what it
+            // reserved at admission, so what it owes is the difference. Asking
+            // for the whole estimate again would make it pay twice to end up
+            // owning once — and on a box where twice does not fit, the retry
+            // would fail over capacity the session already held.
+            let held = session.software_threads_held();
+            if let Some(delta) = total.checked_sub(held).filter(|delta| *delta > 0) {
+                // Registering the wait is what makes a background producer
+                // checkpoint and yield; without it the pool refuses a live
+                // caller outright while background work runs, and this failure
+                // arrives after the predecessor is already gone.
+                let _queued = retry.software_pool.wait_for_capacity();
+                let deadline = Instant::now() + MIXED_RECOVERY_CAPACITY_WAIT;
+                let permit = loop {
+                    if let Some(permit) = retry
+                        .software_pool
+                        .try_take_delta(retry.software_budget, delta)
+                    {
+                        break permit;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(format!(
+                            "no CPU capacity for a {delta}-thread mixed decode retry within {:.1}s",
+                            MIXED_RECOVERY_CAPACITY_WAIT.as_secs_f64()
+                        ));
+                    }
+                    tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
+                };
+                session.add_cpu_decode_reservation(permit);
+            }
         }
 
         session
@@ -3112,14 +3189,18 @@ async fn execute_prepublication_transcode_retry(
             })
             .await?;
         *session.encoder_label.lock().await = retry.encoder.label();
-        *session.class.lock().expect("class mutex") =
-            Workload::of(&retry.file, retry.target_height).class(
-                if retry.encoder == Encoder::Software {
-                    crate::admission::SOFTWARE
-                } else {
-                    retry.encoder.label()
-                },
-            );
+        // One writer for the class, and it knows which of the three shapes
+        // this attempt is. A mixed pipeline filed under the all-hardware
+        // bucket poisons that bucket's measured speed for the work actually in
+        // it, and the measurement is what admits the next session.
+        let work = Workload::of(&retry.file, retry.target_height);
+        *session.class.lock().expect("class mutex") = if retry.encoder == Encoder::Software {
+            work.class(crate::admission::SOFTWARE)
+        } else if retry.cpu_total.is_some() {
+            work.mixed_class(retry.encoder.family_name())
+        } else {
+            work.class(retry.encoder.label())
+        };
         session
             .control
             .decision_applied(decision_sequence, Some(producer_attempt))
@@ -4913,6 +4994,11 @@ struct Session {
     /// released the same two ways as the hardware slot, for the same two
     /// reasons: promptly via `release_software`, completely via drop.
     sw_permit: std::sync::Mutex<Option<crate::admission::SwPermit>>,
+    /// Additional CPU this session reserved *after* admission, when a recovery
+    /// moved more of its pipeline onto the CPU. Held separately rather than
+    /// replacing `sw_permit`, because replacing it drops the original — the
+    /// session would pay for both and end up owning only the second.
+    sw_delta_permit: std::sync::Mutex<Option<crate::admission::SwPermit>>,
     /// Bytes of segment actually handed to this client, and how fast.
     ///
     /// The player cannot measure this for itself on every transport: native
@@ -5904,6 +5990,11 @@ impl Session {
 
     fn release_software_after_confirmed_reap(&self) {
         let _ = self.sw_permit.lock().expect("sw permit mutex").take();
+        let _ = self
+            .sw_delta_permit
+            .lock()
+            .expect("sw delta permit mutex")
+            .take();
     }
 
     /// The bookkeeping half of the hardware→software fallback, split out so a
@@ -5914,6 +6005,44 @@ impl Session {
     /// admission class flips to software, so the speeds measured from here on
     /// are recorded as what they are rather than poisoning the hardware
     /// class's record with a software encoder's numbers.
+    /// The mixed transition: keep the encoder and its hardware slot, add the
+    /// CPU the pipeline has started spending.
+    ///
+    /// Deliberately not [`Self::demote_to_software`]. Releasing the hardware
+    /// slot here would leave a live hardware encoder running with nothing
+    /// reserved for it, and the next hardware start would be admitted onto the
+    /// same block — one slot authorizing two encoders, which is the exact
+    /// contention the cap exists to prevent. The class becomes a mixed one for
+    /// the same reason the demotion changes class: measurements recorded under
+    /// the all-hardware class would make every later hardware admission
+    /// decision from numbers a software decode produced.
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    fn add_cpu_decode_reservation(&self, permit: crate::admission::SwPermit) {
+        *self.sw_delta_permit.lock().expect("sw delta permit mutex") = Some(permit);
+    }
+
+    /// CPU threads this session has reserved, across both slots.
+    ///
+    /// A recovery that moves more of the pipeline onto the CPU owes the
+    /// *difference*, not the whole estimate: the session is already paying for
+    /// what it reserved at admission, and asking for the full amount again
+    /// makes it pay twice to end up owning once.
+    fn software_threads_held(&self) -> usize {
+        let base = self
+            .sw_permit
+            .lock()
+            .expect("sw permit mutex")
+            .as_ref()
+            .map_or(0, crate::admission::SwPermit::threads);
+        let delta = self
+            .sw_delta_permit
+            .lock()
+            .expect("sw delta permit mutex")
+            .as_ref()
+            .map_or(0, crate::admission::SwPermit::threads);
+        base + delta
+    }
+
     #[cfg(any(test, feature = "live-hls-recovery"))]
     fn demote_to_software(&self, work: Workload<'_>, permit: crate::admission::SwPermit) {
         self.release_hardware_after_confirmed_reap();
@@ -12297,6 +12426,7 @@ impl TranscodeManager {
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
+            sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
@@ -15425,6 +15555,7 @@ impl TranscodeManager {
     async fn admit_live(
         &self,
         preferred: Encoder,
+        plan: Option<&ResolvedTranscode>,
         work: Workload<'_>,
         max_wait: Duration,
     ) -> Result<LiveAdmission, String> {
@@ -15434,14 +15565,60 @@ impl TranscodeManager {
 
         if preferred != Encoder::Software {
             let max = self.max_hw_sessions().await;
+            // What this pipeline will actually spend, read off the plan rather
+            // than off the encoder's name. A hardware encoder fed by a software
+            // decode spends most of a box's cores on the decode, and admitting
+            // it as "hardware, therefore no CPU" is how several of them end up
+            // on one node with every counter reading healthy.
+            let estimate = plan.map(|plan| TranscodeResourceEstimate::of(plan, &work));
+            let mixed =
+                estimate.is_some_and(|estimate| estimate.hardware_slot && estimate.cpu_threads > 0);
             loop {
                 let decision = self.admissions.admit(max, work);
                 if let Admission::Hardware(slot) = decision {
-                    return Ok(LiveAdmission {
-                        encoder: preferred,
-                        hw_slot: Some(slot),
-                        sw_permit: None,
-                    });
+                    if !mixed {
+                        return Ok(LiveAdmission {
+                            encoder: preferred,
+                            hw_slot: Some(slot),
+                            sw_permit: None,
+                        });
+                    }
+                    // Release the slot before re-taking both together. The two
+                    // pools are one mutex, so the bundle is granted whole or
+                    // not at all; holding this slot while waiting for CPU is
+                    // the shape that deadlocks against a start doing the same
+                    // in the other order.
+                    drop(slot);
+                    let estimate = estimate.expect("a mixed pipeline has an estimate");
+                    if let Some(bundle) =
+                        self.admissions
+                            .try_admit_bundle(max, sw_budget, &estimate, Priority::Live)
+                    {
+                        let (hw_slot, sw_permit) = bundle.into_parts();
+                        tracing::info!(
+                            threads = estimate.cpu_threads,
+                            "software decode into a hardware encoder; reserving the CPU it will spend"
+                        );
+                        return Ok(LiveAdmission {
+                            encoder: preferred,
+                            hw_slot,
+                            sw_permit,
+                        });
+                    }
+                    // A slot exists but the CPU the decode needs does not.
+                    // Bounded, and answered honestly: the old accounting would
+                    // have started here and simply not reserved the cores.
+                    let now = Instant::now();
+                    if now < deadline {
+                        tokio::time::sleep(ADMISSION_POLL.min(deadline - now)).await;
+                        continue;
+                    }
+                    let why = format!(
+                        "a hardware slot is free but this title decodes in software and the CPU pool is spent ({} of {sw_budget} threads reserved); try again in a moment",
+                        self.admissions.software_in_use()
+                    );
+                    tracing::warn!(class = %work.software_class(), "{why}");
+                    return Err(capacity_error(why));
                 }
 
                 let now = Instant::now();
@@ -15541,7 +15718,9 @@ impl TranscodeManager {
             hdr: Some("hdr"),
             target_height: i64::from(target_height),
         };
-        self.admit_live(preferred, work, max_wait).await
+        // Live TV plans its own command and is never served from the movie
+        // cache, so there is no resolved movie plan to read an estimate from.
+        self.admit_live(preferred, None, work, max_wait).await
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
@@ -15678,7 +15857,9 @@ impl TranscodeManager {
         // (a superseded session, a closed tab), and someone who has pressed
         // play will forgive five seconds far sooner than a hang.
         let work = Workload::of(&file, target_height);
-        let admission = self.admit_live(encoder, work, QUEUE_WAIT).await?;
+        let admission = self
+            .admit_live(encoder, Some(&plan), work, QUEUE_WAIT)
+            .await?;
         encoder = admission.encoder;
         if grade == OutputGrade::Hdr10
             && target_height == HDR10_4K_HEIGHT
@@ -15804,6 +15985,7 @@ impl TranscodeManager {
                         &dir,
                         &presentation_contract_fingerprint,
                         self.admissions.software_pool(),
+                        self.software_budget().await,
                         self.runtime_cache.clone(),
                     ),
                     Err(error) => Err(error),
@@ -15829,10 +16011,15 @@ impl TranscodeManager {
                 });
         let completion_tolerance_ms = (transcode::SEGMENT_SECONDS as i64).saturating_mul(1_000);
         let policy = if let Some(retry) = retry.as_ref() {
-            crate::playback_control::InitialProducerPolicy::hardware(
+            crate::playback_control::InitialProducerPolicy::hardware_with_startup(
                 presentation_contract_fingerprint,
                 PROGRESS_STALL,
                 retry.actor_recipe.clone(),
+                if plan.decode().backend() == plurx_core::transcode::DecodeBackend::Software {
+                    crate::playback_control::ProducerStartupKind::MixedSoftwareDecode
+                } else {
+                    crate::playback_control::ProducerStartupKind::Hardware
+                },
             )
         } else {
             crate::playback_control::InitialProducerPolicy::software(
@@ -15944,6 +16131,7 @@ impl TranscodeManager {
             })),
             hw_slot: std::sync::Mutex::new(hw_slot),
             sw_permit: std::sync::Mutex::new(sw_permit),
+            sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
             readrate: pacing
                 .readrate
@@ -16444,6 +16632,7 @@ impl TranscodeManager {
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
+            sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
             readrate: pacing
                 .readrate
@@ -21910,6 +22099,7 @@ fn test_session(dir: PathBuf) -> Session {
         class: std::sync::Mutex::new(String::new()),
         hw_slot: std::sync::Mutex::new(None),
         sw_permit: std::sync::Mutex::new(None),
+        sw_delta_permit: std::sync::Mutex::new(None),
         delivery: Meter::new(),
         readrate: 0.0,
         suspended: AtomicBool::new(false),
@@ -30263,6 +30453,7 @@ pub(crate) mod tests {
         let error = match mgr
             .admit_live(
                 Encoder::Nvenc,
+                None,
                 Workload {
                     source_height: 1080,
                     codec: "h264",
@@ -30322,6 +30513,7 @@ pub(crate) mod tests {
             tokio::spawn(async move {
                 mgr.admit_live(
                     Encoder::Nvenc,
+                    None,
                     Workload {
                         source_height: 1080,
                         codec: "h264",
@@ -30435,7 +30627,7 @@ pub(crate) mod tests {
         for _ in 0..5 {
             let mgr = Arc::clone(&mgr);
             starts.push(tokio::spawn(async move {
-                mgr.admit_live(Encoder::Nvenc, workload, Duration::ZERO)
+                mgr.admit_live(Encoder::Nvenc, None, workload, Duration::ZERO)
                     .await
             }));
         }
@@ -30461,6 +30653,254 @@ pub(crate) mod tests {
 
         drop(admitted);
         assert_eq!(mgr.admissions.in_use(), 0, "slots come back");
+    }
+
+    /// The other transition, and the one that had no accounting at all: a
+    /// retry that keeps its hardware encoder and moves the rest of the chain
+    /// onto the CPU.
+    ///
+    /// It must not go through the demotion path. Releasing the slot here would
+    /// leave a live hardware encoder running against nothing, and the next
+    /// hardware start would be admitted onto the same video block — one slot
+    /// authorizing two encoders, which is the contention the cap exists to
+    /// prevent. What it must do instead is reserve the CPU the pipeline has
+    /// started spending, which before this milestone it did not do at all.
+    #[tokio::test]
+    async fn a_retry_that_keeps_its_encoder_keeps_its_slot_and_pays_for_its_decode() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps {
+                nvenc: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        );
+        store
+            .put_setting(keys::MAX_HW_SESSIONS, "1")
+            .await
+            .expect("cap");
+
+        let info = mgr
+            .start(file_id, 1080, 0.0, None, None, "paul", "pb-mixed")
+            .await
+            .expect("hardware start");
+        assert_eq!(mgr.admissions.in_use(), 1, "the start holds the only slot");
+        let session = mgr
+            .sessions
+            .lock()
+            .await
+            .get(&info.session_id)
+            .cloned()
+            .expect("session");
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let work_class = Workload::of(&file, session.target_height);
+
+        // This start already reserved CPU at admission, because its renderer
+        // is the CPU chain — which is the point of the estimate. A recovery
+        // that moves more of the pipeline onto the CPU therefore owes the
+        // *difference*, and here there is none.
+        let admitted = session.software_threads_held();
+        assert_eq!(
+            admitted,
+            work_class.software_threads(),
+            "the CPU this pipeline spends was reserved when it was admitted"
+        );
+        assert_eq!(mgr.admissions.software_in_use(), admitted);
+
+        // A retry whose total equals what is already held asks for nothing.
+        assert_eq!(
+            work_class.software_threads().checked_sub(admitted),
+            Some(0),
+            "no delta is owed, so the recovery reserves nothing further"
+        );
+
+        // And when it does owe one, the second reservation is additive rather
+        // than a replacement — replacing would drop the first and leave the
+        // session paying for both to own one.
+        let permit = mgr
+            .admissions
+            .software_pool()
+            .try_take_delta(mgr.software_budget().await + admitted, 2)
+            .expect("an idle pool grants a two-thread delta");
+        session.add_cpu_decode_reservation(permit);
+        assert_eq!(
+            session.software_threads_held(),
+            admitted + 2,
+            "the delta adds to the reservation instead of replacing it"
+        );
+        assert_eq!(mgr.admissions.software_in_use(), admitted + 2);
+
+        assert_eq!(
+            mgr.admissions.in_use(),
+            1,
+            "the encoder is still running, so its slot is still held"
+        );
+        // With the cap at one and this session still encoding on hardware, no
+        // second hardware start may be admitted.
+        assert!(
+            !matches!(
+                mgr.admissions
+                    .admit(1, Workload::of(&file, session.target_height)),
+                Admission::Hardware(_)
+            ),
+            "one slot authorized a second encoder while the first still runs"
+        );
+        assert!(mgr.stop_session(&info.session_id, "test").await);
+    }
+
+    fn execution_file_for_retry() -> plurx_core::domain::MediaFile {
+        plurx_core::domain::MediaFile {
+            id: 91,
+            item_id: 3,
+            path: PathBuf::from("/media/retry.mkv"),
+            size: 12_345,
+            mtime: 67_890,
+            duration_ms: Some(7_200_000),
+            container: Some("matroska".into()),
+            video_codec: Some("hevc".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: None,
+            hdr_format: None,
+            bitrate: Some(20_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
+    }
+
+    fn execution_options_for_retry() -> TranscodeOptions {
+        TranscodeOptions {
+            target_height: 1080,
+            video_bitrate_kbps: 8_000,
+            effective_rate_control: EffectiveRateControl::Vbr,
+            audio_channels: 2,
+            audio_bitrate_kbps: 160,
+            audio_index: None,
+            tone_map: ToneMap::Zscale,
+            pipeline: Pipeline::Cpu,
+            ..TranscodeOptions::default()
+        }
+    }
+
+    /// The derivation this whole milestone rests on, exercised through a real
+    /// resolved plan rather than a hand-built estimate.
+    ///
+    /// Without this, `TranscodeResourceEstimate::of` has no coverage at all:
+    /// every other test constructs the estimate by hand, so `hardware_slot`,
+    /// `cpu_threads` and the filter-chain rule are free to change and stay
+    /// green.
+    #[tokio::test]
+    async fn the_estimate_reads_the_cost_off_the_plan_and_not_off_the_encoders_name() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let work = Workload::of(&file, 1080);
+
+        let mut software = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+        software.pipeline = Pipeline::Cpu;
+        let software_plan = mgr
+            .resolve_movie_plan(&file, &software, Encoder::Software)
+            .await
+            .expect("software plan");
+        let estimate = crate::admission::TranscodeResourceEstimate::of(&software_plan, &work);
+        assert!(!estimate.hardware_slot, "software encoding needs no slot");
+        assert_eq!(estimate.cpu_threads, work.software_threads());
+        assert_eq!(
+            estimate.decoder_threads, None,
+            "no implementation was measured, so no cap is claimed"
+        );
+
+        // A hardware encoder whose decode is in software still spends the
+        // cores the decode uses. This is the case that reserved nothing at all
+        // before this milestone.
+        let mut mixed = software.clone();
+        mixed.pipeline = Pipeline::Cpu;
+        let mixed_plan = mgr
+            .resolve_movie_plan(&file, &mixed, Encoder::VideoToolbox)
+            .await
+            .expect("mixed plan");
+        let estimate = crate::admission::TranscodeResourceEstimate::of(&mixed_plan, &work);
+        assert!(estimate.hardware_slot, "the encode holds a slot");
+        assert!(
+            estimate.cpu_threads > 0,
+            "and the CPU the rest of the pipeline spends is reserved: {estimate:?}"
+        );
+
+        // The two vendor graphs are the only ones that keep every frame off the
+        // CPU, and a subtitle burn takes even them back to system memory.
+        assert!(Pipeline::VppQsv.keeps_frames_off_the_cpu());
+        assert!(Pipeline::TonemapVaapi.keeps_frames_off_the_cpu());
+        for cpu_touching in [
+            Pipeline::Cpu,
+            Pipeline::Libplacebo,
+            Pipeline::TonemapOpencl,
+            Pipeline::Hdr10Passthrough,
+        ] {
+            assert!(
+                !cpu_touching.keeps_frames_off_the_cpu(),
+                "{cpu_touching:?} runs real filter work on the CPU"
+            );
+        }
+    }
+
+    /// A GPU pipeline's one-step retry keeps the encoder and moves to the CPU
+    /// chain, so it owes a CPU delta and not a demotion. A CPU pipeline's
+    /// retry replaces the encoder, so it owes the demotion and no delta. The
+    /// two must never both be set: that would reserve the pipeline twice.
+    #[test]
+    fn a_retry_owes_either_a_demotion_or_a_cpu_delta_and_never_both() {
+        let file = execution_file_for_retry();
+        let mut gpu = execution_options_for_retry();
+        gpu.pipeline = Pipeline::VppQsv;
+        let retained = PrepublicationTranscodeRetry::prepare(
+            &file,
+            &gpu,
+            Encoder::Qsv,
+            EffectiveRateControl::Vbr,
+        )
+        .expect("a GPU pipeline has a color-safe CPU retry");
+        assert_eq!(retained.encoder, Encoder::Qsv, "the encoder is retained");
+        assert_eq!(retained.software_threads, None, "so this is not a demotion");
+
+        let mut cpu = execution_options_for_retry();
+        cpu.pipeline = Pipeline::Cpu;
+        let demoted = PrepublicationTranscodeRetry::prepare(
+            &file,
+            &cpu,
+            Encoder::Qsv,
+            EffectiveRateControl::Vbr,
+        )
+        .expect("a CPU pipeline retries in software");
+        assert_eq!(demoted.encoder, Encoder::Software);
+        assert_eq!(
+            demoted.software_threads,
+            Some(Workload::of(&file, cpu.target_height).software_threads())
+        );
     }
 
     /// The hardware→software fallback must return its slot at the transition,
@@ -30611,12 +31051,22 @@ pub(crate) mod tests {
             .expect("budget");
 
         let first = mgr
-            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload::of(&file, 1080),
+                Duration::ZERO,
+            )
             .await
             .expect("first fits an empty pool");
         assert_eq!(mgr.admissions.software_in_use(), 6);
         let refused = match mgr
-            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload::of(&file, 1080),
+                Duration::ZERO,
+            )
             .await
         {
             Err(why) => why,
@@ -30627,7 +31077,12 @@ pub(crate) mod tests {
         drop(first);
         assert_eq!(mgr.admissions.software_in_use(), 0);
         let second = mgr
-            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
+            .admit_live(
+                Encoder::Software,
+                None,
+                Workload::of(&file, 1080),
+                Duration::ZERO,
+            )
             .await
             .expect("freed weight is grantable again");
         assert_eq!(mgr.admissions.software_in_use(), 6);
@@ -30788,6 +31243,7 @@ pub(crate) mod tests {
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
             sw_permit: std::sync::Mutex::new(None),
+            sw_delta_permit: std::sync::Mutex::new(None),
             delivery: Meter::new(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
@@ -33034,6 +33490,7 @@ pub(crate) mod tests {
             dir,
             fingerprint,
             mgr.admissions.software_pool(),
+            mgr.software_budget().await,
             mgr.runtime_cache.clone(),
         )
     }
@@ -33162,6 +33619,7 @@ pub(crate) mod tests {
             dir.path(),
             "alternative-plan-key",
             mgr.admissions.software_pool(),
+            mgr.software_budget().await,
             mgr.runtime_cache.clone(),
         );
         assert!(
