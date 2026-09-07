@@ -1594,10 +1594,232 @@ async function main() {
   await flush();
   assert.deepEqual(
     declared,
-    ["hold", "retry_resource", "terminal"],
+    ["hold", "retry_resource", "terminal", "prepare_replacement"],
     "the request declares the actions this client accepts",
   );
+  // Asserted on the SERIALIZED body, not the in-memory list: the serializer is
+  // what ships, and `prepare_replacement` is a promise made to the server in
+  // JSON. Declaring it is the whole of Gate B (§C2) — the server stages a
+  // successor and then says nothing about it to a client that never named it.
+  assert.deepEqual(
+    JSON.parse(JSON.stringify({ supported_actions: declared })).supported_actions,
+    ["hold", "retry_resource", "terminal", "prepare_replacement"],
+    "the serialized request carries the declared vocabulary verbatim",
+  );
   declaring.stop();
+
+  // ---- the prepared replacement action ------------------------------------
+  //
+  // A literal-JSON fixture, asserted key by key, because nothing in the tree
+  // pinned the payload before this: the server asserts `["action"]["type"]`
+  // and eight sites read `action_id`, and `playlist_url`, `media_origin_ms`
+  // and `effective_selection` are asserted nowhere. This fixture is what
+  // catches the `prepare` / `prepare_replacement` trap in both directions.
+  const PREPARE_SESSION = "44444444-4444-4444-8444-444444444444";
+  const PREPARE_ACTION_ID = "33333333-3333-4333-8333-333333333333";
+  const PREPARE_FIXTURE = JSON.parse(`{
+    "type":"prepare",
+    "action_id":"${PREPARE_ACTION_ID}",
+    "session_id":"${PREPARE_SESSION}",
+    "playlist_url":"/api/v1/hls/${PREPARE_SESSION}/index.m3u8",
+    "media_origin_ms":0,
+    "effective_selection":{"quality_auto":true,"height":1080,
+      "audio_track":null,"subtitle_burn":null,"audio_offset_ms":0,
+      "codec":"server_selected","dynamic_range":"sdr"}}`);
+  assert.equal(PREPARE_FIXTURE.type, "prepare", "the wire tag is `prepare`");
+  assert.equal(control.PREPARE_REPLACEMENT_ACTION, "prepare_replacement",
+    "the DECLARED name is `prepare_replacement` — the two differ, and only here");
+  assert.equal(control.PREPARE_ACTION_TAG, "prepare");
+  assert.ok(control.SUPPORTED_ACTIONS.includes(control.PREPARE_REPLACEMENT_ACTION));
+  assert.equal(control.validPreparation(PREPARE_FIXTURE), true,
+    "the shipped validator accepts the contract's own fixture");
+  assert.equal(PREPARE_FIXTURE.effective_selection.codec, "server_selected");
+  assert.equal(PREPARE_FIXTURE.media_origin_ms, 0);
+  assert.equal(PREPARE_FIXTURE.playlist_url,
+    `/api/v1/hls/${PREPARE_SESSION}/index.m3u8`);
+  {
+    // A whole exchange, so the fixture is proven through `validResponse` and
+    // not only through the validator it happens to call.
+    const seen = [];
+    const preparing = new control.Reporter({
+      bootstrap: bootstrap(),
+      clientInstanceId: "88888888-8888-4888-8888-888888888888",
+      capture: () => captureSnapshot(snapshot()),
+      send: async (_url, request) =>
+        Object.assign(response(request), { action: PREPARE_FIXTURE }),
+      onExchange: ({ response: answered, error }) => seen.push({ answered, error }),
+      setTimer: () => 0,
+      clearTimer: () => {},
+    }).start();
+    await flush();
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].error, null, "a valid preparation is not a protocol error");
+    assert.equal(seen[0].answered.action.action_id, PREPARE_ACTION_ID);
+    preparing.stop();
+  }
+
+  // The trap, asserted rather than commented: the DECLARED name arriving as a
+  // wire tag is not an action, and an unknown type stays fatal. A client that
+  // switched on `prepare_replacement` here would simply never fire.
+  assert.equal(control.validPreparation(
+    Object.assign({}, PREPARE_FIXTURE, { type: "prepare_replacement" })), false);
+
+  // §C12.4 — a playlist that is not node-relative is refused by the client,
+  // and refused as a protocol error rather than followed. No request is made:
+  // `validPreparation` is a pure predicate over the parsed action, and the
+  // only network this client performs for a preparation is the one the player
+  // makes AFTER this passes.
+  for (const [label, url] of [
+    ["absolute", `https://attacker.example/api/v1/hls/${PREPARE_SESSION}/index.m3u8`],
+    ["protocol-relative", `//attacker.example/api/v1/hls/${PREPARE_SESSION}/index.m3u8`],
+    ["another session", "/api/v1/hls/55555555-5555-4555-8555-555555555555/index.m3u8"],
+    ["traversal", `/api/v1/hls/${PREPARE_SESSION}/../../../etc/index.m3u8`],
+    ["not a playlist", `/api/v1/hls/${PREPARE_SESSION}/segment.ts`],
+  ]) {
+    assert.equal(
+      control.validPreparation(Object.assign({}, PREPARE_FIXTURE, { playlist_url: url })),
+      false,
+      `a ${label} playlist_url is refused`,
+    );
+    assert.equal(control.preparedPlaylistUrl(PREPARE_SESSION, url), null);
+  }
+  assert.equal(
+    control.preparedPlaylistUrl(PREPARE_SESSION, `/api/v1/hls/${PREPARE_SESSION}/master.m3u8`),
+    `/api/v1/hls/${PREPARE_SESSION}/master.m3u8`,
+    "a master playlist is the other legal shape",
+  );
+  assert.equal(
+    control.preparedPlaylistUrl(PREPARE_SESSION, `/api/v1/hls/${PREPARE_SESSION}/index.m3u8?x=1`),
+    `/api/v1/hls/${PREPARE_SESSION}/index.m3u8?x=1`,
+    "a query is allowed and ignored",
+  );
+
+  // Field bounds. Each of these is a 400 the server would answer, and a
+  // preparation this client half-understood is worse than one it refused.
+  for (const [label, patch] of [
+    ["a missing action_id", { action_id: undefined }],
+    ["a non-UUID action_id", { action_id: "not-a-uuid" }],
+    ["an empty session_id", { session_id: "" }],
+    ["a negative media_origin_ms", { media_origin_ms: -1 }],
+    ["a fractional media_origin_ms", { media_origin_ms: 1.5 }],
+    ["a codec name in `codec`", {
+      effective_selection: { ...PREPARE_FIXTURE.effective_selection, codec: "hevc" } }],
+    ["an out-of-range height", {
+      effective_selection: { ...PREPARE_FIXTURE.effective_selection, height: 4321 } }],
+    ["an out-of-range audio offset", {
+      effective_selection: { ...PREPARE_FIXTURE.effective_selection, audio_offset_ms: 15_001 } }],
+    ["an unknown dynamic range", {
+      effective_selection: { ...PREPARE_FIXTURE.effective_selection, dynamic_range: "hdr12" } }],
+    ["no effective_selection", { effective_selection: undefined }],
+  ]) {
+    assert.equal(control.validPreparation(Object.assign({}, PREPARE_FIXTURE, patch)), false,
+      `${label} is refused`);
+  }
+  // …and a key this build has never heard of is tolerated: `ControlAction`
+  // carries no `deny_unknown_fields`, so a later server may add one.
+  assert.equal(control.validPreparation(
+    Object.assign({}, PREPARE_FIXTURE, { a_field_from_next_year: 7 })), true);
+  assert.equal(control.validPreparation(Object.assign({}, PREPARE_FIXTURE, {
+    effective_selection: { ...PREPARE_FIXTURE.effective_selection, later_key: 1 } })), true);
+
+  // §C12.3 — the new vocabulary did not weaken the old rule.
+  {
+    let stopped = null;
+    const unknown = new control.Reporter({
+      bootstrap: bootstrap(),
+      clientInstanceId: "99999999-9999-4999-8999-999999999999",
+      capture: () => captureSnapshot(snapshot()),
+      send: async (_url, request) =>
+        Object.assign(response(request), { action: { type: "commit_replacement" } }),
+      onExchange: ({ error }) => { stopped = error; },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    }).start();
+    await flush();
+    assert.equal(stopped && stopped.name, "PlaybackControlProtocolError",
+      "an action outside the vocabulary is still fatal");
+    assert.equal(unknown.stopped, true);
+  }
+
+  // ---- acknowledgements ---------------------------------------------------
+  //
+  // §C7's rules, and the one that is a client design rule: a `committed` may
+  // not share an exchange with `demand: "end"`.
+  const ack = (state, extra = {}) =>
+    Object.assign({ action_id: PREPARE_ACTION_ID, state }, extra);
+  assert.equal(control.validAcknowledgement(ack("metadata_ready"), "active"), true);
+  assert.equal(control.validAcknowledgement(
+    ack("buffer_ready", { buffered_through_ms: 42_000 }), "active"), true);
+  assert.equal(control.validAcknowledgement(ack("buffer_ready"), "active"), false,
+    "buffer_ready without buffered_through_ms is a 400");
+  assert.equal(control.validAcknowledgement(
+    ack("committed", { first_frame_unix_ms: 1_757_000_000_000 }), "active"), true);
+  assert.equal(control.validAcknowledgement(ack("committed"), "active"), false,
+    "committed without first_frame_unix_ms is a 400");
+  assert.equal(control.validAcknowledgement(
+    ack("committed", { first_frame_unix_ms: 0 }), "active"), false);
+  assert.equal(control.validAcknowledgement(
+    ack("committed", { first_frame_unix_ms: 1_757_000_000_000 }), "end"), false,
+    "a commit may not ride the exchange that ends the session");
+  assert.equal(control.validAcknowledgement(ack("failed"), "active"), true);
+  assert.equal(control.validAcknowledgement(ack("aborted"), "end"), true,
+    "an abort may ride the end — only `committed` may not");
+  assert.equal(control.validAcknowledgement(ack("prepared"), "active"), false,
+    "there is no sixth state");
+  assert.equal(control.validAcknowledgement(
+    Object.assign(ack("failed"), { action_id: "nope" }), "active"), false);
+
+  // Round-tripped through the reporter, on the serialized body, because the
+  // serializer is what ships.
+  for (const [label, state, extra] of [
+    ["metadata", "metadata_ready", {}],
+    ["buffer", "buffer_ready", { buffered_through_ms: 42_000 }],
+    ["commit", "committed", { first_frame_unix_ms: 1_757_000_000_000 }],
+    ["failure", "failed", {}],
+    ["abort", "aborted", {}],
+  ]) {
+    let body = null;
+    const acknowledging = new control.Reporter({
+      bootstrap: bootstrap(),
+      clientInstanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      capture: () => captureSnapshot(
+        Object.assign(snapshot(), { acknowledgement: ack(state, extra) })),
+      send: async (_url, request) => {
+        body = JSON.parse(JSON.stringify(request));
+        return response(request);
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    }).start();
+    await flush();
+    assert.equal(body && body.acknowledgement.state, state, `${label} reaches the wire`);
+    assert.equal(body.acknowledgement.action_id, PREPARE_ACTION_ID);
+    for (const [key, value] of Object.entries(extra)) {
+      assert.equal(body.acknowledgement[key], value, `${label} carries ${key}`);
+    }
+    acknowledging.stop();
+  }
+
+  // …and the combination the server answers 400 to is never CONSTRUCTED: an
+  // end-demand snapshot carrying a commit is not a valid snapshot, so no
+  // request is built from it and nothing is sent.
+  {
+    let sends = 0;
+    const ending = new control.Reporter({
+      bootstrap: bootstrap(),
+      clientInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      capture: () => captureSnapshot(Object.assign(snapshot(), {
+        demand: "end",
+        acknowledgement: ack("committed", { first_frame_unix_ms: 1_757_000_000_000 }),
+      })),
+      send: async (_url, request) => { sends += 1; return response(request); },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    }).start();
+    await flush();
+    assert.equal(sends, 0, "a commit on an ending exchange is never sent");
+    ending.stop();
+  }
 
   // A hold is not a failure and not a reason to stop. This is the whole point:
   // the server is saying production is deliberately not advancing, and a client

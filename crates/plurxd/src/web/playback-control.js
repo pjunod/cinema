@@ -11,12 +11,44 @@
   const EXCHANGE_DEADLINE_MS = 6_000;
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+  // The only action whose declared name and wire tag differ, and the one
+  // mistake in this protocol that fails silently in both directions.
+  // `prepare_replacement` is the transaction (roadmap §3.1) and is what
+  // `supported_actions` must carry: `accepts()` on the server is a literal
+  // string comparison, so a client that declares `prepare` is simply never
+  // offered a successor. `prepare` is the moment, and is what arrives as
+  // `action.type`: a client that switches on `prepare_replacement` never
+  // fires. Neither failure produces an error anywhere.
+  const PREPARE_REPLACEMENT_ACTION = "prepare_replacement";
+  const PREPARE_ACTION_TAG = "prepare";
+  // Bounds the server already enforces, restated here so a malformed
+  // preparation is refused before it reaches a second decode pipeline rather
+  // than after. Sources: crates/plurxd/src/transcode.rs MAX_HEIGHT, and
+  // playback_control.rs MAX_MEDIA_MILLIS / EffectiveSelection / is_node_relative_playlist.
+  const MAX_HEIGHT = 2160;
+  const MAX_MEDIA_MS = 366 * 24 * 60 * 60 * 1_000;
+  const MAX_AUDIO_OFFSET_MS = 15_000;
+  const MAX_TRACK_INDEX = 1_024;
+  const MAX_PLAYLIST_URL_BYTES = 512;
+  // Not codec names. `source` and `server_selected` distinguish
+  // direct-play/remux from transcode — the DeliveryMethod axis — and a client
+  // that renders either to a viewer as a codec is wrong.
+  const DELIVERY_CODECS = Object.freeze(["source", "server_selected"]);
+  const DYNAMIC_RANGES = Object.freeze(["dolby_vision", "hdr10", "hlg", "sdr"]);
+  // Exactly five. A sixth is a serde error on the server, which answers 400
+  // with no `invalid_field` at all, so the client gets no help identifying it.
+  const ACKNOWLEDGEMENT_STATES = Object.freeze([
+    "metadata_ready", "buffer_ready", "committed", "failed", "aborted",
+  ]);
+
   // The actions this client will accept from the server, and the only ones the
   // server will send it. Naming an action here is a promise that receiving it
   // is not a protocol error; it is not yet a promise to act on it. Recovery
   // authority still belongs to this client's own timers until the milestone
   // that moves it.
-  const SUPPORTED_ACTIONS = Object.freeze(["hold", "retry_resource", "terminal"]);
+  const SUPPORTED_ACTIONS = Object.freeze([
+    "hold", "retry_resource", "terminal", PREPARE_REPLACEMENT_ACTION,
+  ]);
 
   function defaultNow() {
     if (typeof performance === "object" && typeof performance.now === "function") {
@@ -30,6 +62,72 @@
     return Number.isSafeInteger(value) && value >= 0 && value <= MAX_EXCHANGE_MS
       ? Math.max(MIN_EXCHANGE_MS, value)
       : fallback;
+  }
+
+  function boundedInteger(value, min, max) {
+    return Number.isSafeInteger(value) && value >= min && value <= max;
+  }
+
+  // A preparation's playlist is node-relative and belongs to the successor
+  // session named in the same action: exactly
+  // `/api/v1/hls/{session_id}/index.m3u8` or `.../master.m3u8`, with a query
+  // or fragment allowed and ignored. Anything else is refused here, without a
+  // request — the relay path already refuses to point a client at another
+  // origin, and a client that resolved an absolute URL would undo that.
+  function preparedPlaylistUrl(sessionId, url) {
+    if (typeof sessionId !== "string" || !sessionId || sessionId.includes("/")) return null;
+    if (typeof url !== "string" || !url || url.length > MAX_PLAYLIST_URL_BYTES) return null;
+    const cut = url.search(/[?#]/);
+    const path = cut === -1 ? url : url.slice(0, cut);
+    const base = `/api/v1/hls/${sessionId}/`;
+    return path === `${base}index.m3u8` || path === `${base}master.m3u8` ? url : null;
+  }
+
+  // What the successor will deliver — the server's answer, not what was asked
+  // for. Unknown keys are tolerated: `ControlAction` carries no
+  // `deny_unknown_fields`, so a later server may add one and this client must
+  // not refuse the preparation over a field it does not read.
+  function validEffectiveSelection(value) {
+    return !!value
+      && typeof value === "object"
+      && typeof value.quality_auto === "boolean"
+      && boundedInteger(value.height, 0, MAX_HEIGHT)
+      && (value.audio_track == null || boundedInteger(value.audio_track, 0, MAX_TRACK_INDEX))
+      && (value.subtitle_burn == null || boundedInteger(value.subtitle_burn, 0, MAX_TRACK_INDEX))
+      && boundedInteger(value.audio_offset_ms, -MAX_AUDIO_OFFSET_MS, MAX_AUDIO_OFFSET_MS)
+      && DELIVERY_CODECS.includes(value.codec)
+      && (value.dynamic_range == null || DYNAMIC_RANGES.includes(value.dynamic_range));
+  }
+
+  // A malformed preparation is fatal, exactly like any other malformed action.
+  // Softening it into an ignore would leave this client half-understanding a
+  // staging the server is holding a real encoder open for.
+  function validPreparation(action) {
+    return !!action
+      && action.type === PREPARE_ACTION_TAG
+      && typeof action.action_id === "string" && UUID_RE.test(action.action_id)
+      && typeof action.session_id === "string" && action.session_id !== ""
+      && preparedPlaylistUrl(action.session_id, action.playlist_url) !== null
+      && boundedInteger(action.media_origin_ms, 0, MAX_MEDIA_MS)
+      && validEffectiveSelection(action.effective_selection);
+  }
+
+  // The three rules a careless client hits as 400s, and one that is a design
+  // rule rather than a field check: a `committed` may not share an exchange
+  // with `demand: "end"`. Switching and then closing is two exchanges — the
+  // commit, then the end — in that order.
+  function validAcknowledgement(value, demand) {
+    return !!value
+      && typeof value === "object"
+      && typeof value.action_id === "string" && UUID_RE.test(value.action_id)
+      && ACKNOWLEDGEMENT_STATES.includes(value.state)
+      && (value.buffered_through_ms == null
+        || boundedInteger(value.buffered_through_ms, 0, MAX_MEDIA_MS))
+      && (value.first_frame_unix_ms == null
+        || (Number.isSafeInteger(value.first_frame_unix_ms) && value.first_frame_unix_ms > 0))
+      && (value.state !== "buffer_ready" || value.buffered_through_ms != null)
+      && (value.state !== "committed" || value.first_frame_unix_ms != null)
+      && (value.state !== "committed" || demand !== "end");
   }
 
   function validBootstrap(value) {
@@ -61,7 +159,9 @@
       && Number.isFinite(value.playback_rate)
       && value.playback_rate >= 0
       && !!value.selection
-      && !!value.capabilities;
+      && !!value.capabilities
+      && (value.acknowledgement == null
+        || validAcknowledgement(value.acknowledgement, value.demand));
   }
 
   function boundedObservation(value) {
@@ -143,6 +243,7 @@
     if (action.type === "terminal") {
       return typeof action.code === "string" && typeof action.message === "string";
     }
+    if (action.type === PREPARE_ACTION_TAG) return validPreparation(action);
     if (action.type === "retry_resource") {
       return typeof action.reason === "string"
         && Number.isSafeInteger(action.after_ms)
@@ -441,5 +542,7 @@
     }
   }
 
-  return Object.freeze({ PROTOCOL, Reporter, capture, sameIntent, validBootstrap, validResponse });
+  return Object.freeze({ PROTOCOL, PREPARE_REPLACEMENT_ACTION, PREPARE_ACTION_TAG,
+    SUPPORTED_ACTIONS, Reporter, capture, sameIntent, validBootstrap, validResponse,
+    validPreparation, validAcknowledgement, preparedPlaylistUrl });
 });
