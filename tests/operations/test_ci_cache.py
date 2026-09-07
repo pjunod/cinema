@@ -73,7 +73,7 @@ class CiCacheContractCase(unittest.TestCase):
         }
         self.assertEqual(failures, {})
 
-    def test_cargo_cache_is_local_only_on_persistent_runners(self):
+    def test_cargo_cache_is_local_on_every_self_hosted_runner(self):
         action = (ROOT / ".github/actions/cargo-cache/action.yml").read_text(
             encoding="utf-8"
         )
@@ -82,10 +82,16 @@ class CiCacheContractCase(unittest.TestCase):
         )
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
+        # The bound cannot be conditional on a rollout flag. It was, and the
+        # flag was never set, so every job took the unbounded hosted path into
+        # a runner cache server that evicts nothing.
         self.assertIn('"${RUNNER_ENVIRONMENT:-}" = github-hosted', action)
-        self.assertIn('"$EXECUTION_MODE" != shadow', action)
-        self.assertIn('"$PERSISTENT_ELIGIBLE" != true', action)
-        self.assertIn('default: "false"', action)
+        self.assertIn('[ -z "${RUNNER_TOOL_CACHE:-}" ]', action)
+        self.assertNotIn('"$EXECUTION_MODE"', action)
+        self.assertNotIn('"$PERSISTENT_ELIGIBLE"', action)
+        self.assertNotIn("inputs.execution-mode", action)
+        self.assertNotIn("inputs.persistent-eligible", action)
+        self.assertIn("scripts/ci-runner-cache-audit", action)
         self.assertIn("scripts/ci-cargo-cache-prepare", action)
         self.assertIn("ensure_child_directory", prepare)
         self.assertIn("plurx-ci", prepare)
@@ -99,7 +105,16 @@ class CiCacheContractCase(unittest.TestCase):
             workflow.count("uses: ./.github/actions/cargo-cache\n"),
             workflow.count("uses: ./.github/actions/cargo-cache-finalize\n"),
         )
-        self.assertNotIn("persistent-eligible: true", workflow)
+        self.assertNotIn("persistent-eligible", workflow)
+        for caller in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/effort-ci.yml",
+            ".github/workflows/store-shards.yml",
+            ".github/workflows/cluster-store-backstop.yml",
+        ):
+            text = (ROOT / caller).read_text(encoding="utf-8")
+            self.assertNotIn("persistent-eligible", text)
+            self.assertNotIn("          execution-mode:", text)
         effort = (ROOT / ".github/workflows/effort-ci.yml").read_text(
             encoding="utf-8"
         )
@@ -459,9 +474,11 @@ class CiCacheContractCase(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         self.assertIn("keep-state: true", action)
-        self.assertIn('"$EXECUTION_MODE" != shadow', action)
-        self.assertIn('"$PERSISTENT_ELIGIBLE" != true', action)
-        self.assertIn('default: "false"', action)
+        self.assertIn('"${RUNNER_ENVIRONMENT:-}" = github-hosted', action)
+        self.assertNotIn('"$EXECUTION_MODE"', action)
+        self.assertNotIn('"$PERSISTENT_ELIGIBLE"', action)
+        self.assertNotIn("inputs.execution-mode", action)
+        self.assertNotIn("inputs.persistent-eligible", action)
         self.assertIn("builder_name=plurx-$runner_name", action)
         self.assertNotIn("plurx-$runner_name-$CACHE_LANE", action)
         self.assertIn("buildkitd-config:", action)
@@ -474,7 +491,7 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertIn("mode=max,scope=package-compile-{0}", workflow)
         self.assertIn("scope=package-runtime-{0}", workflow)
         self.assertIn("mode=min,scope=package-runtime-{0}", workflow)
-        self.assertNotIn("persistent-eligible: true", workflow)
+        self.assertNotIn("persistent-eligible", workflow)
 
     def test_buildkit_pruner_enforces_hostwide_budget_and_reserve(self):
         script = ROOT / "scripts/ci-buildkit-prune"
@@ -700,6 +717,143 @@ class CiCacheContractCase(unittest.TestCase):
         for text in (workflow, effort):
             self.assertIn("vars.CI_EXECUTION_MODE || 'legacy'", text)
             self.assertIn("scripts/ci-execution-mode resolve", text)
+
+    def test_cache_floor_is_satisfiable_on_the_smallest_runner_disk(self):
+        """A reserve larger than the disk is a reserve that can never be met.
+
+        The floor was a flat 100 GiB. Every Incus runner guest in this fleet is
+        a 78-97 GB volume, so on those the pruner deleted every cache it was
+        allowed to delete and then failed the job anyway. The floor is a share
+        of the filesystem now, and this fixture is one of those guests.
+        """
+        script = ROOT / "scripts/ci-cache-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            tool_cache = Path(raw_directory) / "tool"
+            tool_cache.mkdir()
+            fake_bin = tool_cache / "bin"
+            fake_bin.mkdir()
+            fake_df = fake_bin / "df"
+            # 78 GiB total, 40 GiB available: gha-m6-general-01's root volume.
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+                "'fixture 81788928 39845888 41943040 49% /fixture'\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
+            cache_root = tool_cache / "plurx-ci/cargo/runner-01/rust-1.97.1"
+            target = cache_root / "rust-gate/target"
+            target.mkdir(parents=True)
+            (target / "proof").write_bytes(b"cache")
+            summary = tool_cache / "summary.md"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "RUNNER_TOOL_CACHE": str(tool_cache),
+                }
+            )
+
+            result = subprocess.run(
+                [str(script), str(cache_root), "30"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(target.is_dir())
+            report = summary.read_text()
+            self.assertIn("prune decision: `within-budget`", report)
+            # 20 % of 78 GiB, and demonstrably less than the whole filesystem.
+            self.assertIn("filesystem floor: 15 GiB", report)
+
+    def test_runner_cache_server_is_reported_and_never_deleted(self):
+        """The one cache a job can see and must not touch.
+
+        `forgejo-runner` 13.1.0 serves `actions/cache` from a bolt.db index
+        beside a tree of blobs and evicts neither, so the directory only grows.
+        A job cannot safely delete from it — index rows and blobs have to go
+        together, and that needs the runner stopped — so the contract is that
+        the audit reports the number, warns on it, and leaves every byte alone.
+        """
+        script = ROOT / "scripts/ci-runner-cache-audit"
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        with tempfile.TemporaryDirectory() as raw_directory:
+            runner_root = Path(raw_directory) / "forgejo-runner"
+            blobs = runner_root / "cache/cache/0a"
+            blobs.mkdir(parents=True)
+            (runner_root / "cache/bolt.db").write_bytes(b"index")
+            for name in ("11", "12", "13"):
+                (blobs / name).write_bytes(b"x" * 4096)
+            (runner_root / "tool-cache").mkdir()
+            summary = Path(raw_directory) / "summary.md"
+            # A fixture cannot hold 41G, and the size is the whole point, so
+            # `du` is the thing this substitutes — the same way the pruner
+            # tests substitute `df`.
+            fake_bin = Path(raw_directory) / "bin"
+            fake_bin.mkdir()
+            fake_du = fake_bin / "du"
+            fake_du.write_text(
+                "#!/bin/sh\n"
+                "shift $(($# - 1))\n"
+                "printf '%s\\t%s\\n' \"$FIXTURE_USED_KB\" \"$1\"\n",
+                encoding="utf-8",
+            )
+            fake_du.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "RUNNER_NAME": "gha-m6-general-01",
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "FIXTURE_USED_KB": str(41 * 1024 * 1024),
+                }
+            )
+
+            loud = subprocess.run(
+                [str(script), str(runner_root), "20"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            environment["FIXTURE_USED_KB"] = str(3 * 1024 * 1024)
+            quiet = subprocess.run(
+                [str(script), str(runner_root), "20"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(quiet.returncode, 0, quiet.stderr)
+            self.assertEqual(loud.returncode, 0, loud.stderr)
+            report = summary.read_text()
+            self.assertIn("### Runner cache server", report)
+            self.assertIn("gha-m6-general-01", report)
+            self.assertIn("in 3 entries", report)
+            self.assertIn("eviction: none", report)
+            self.assertIn("retained: 41 GiB", report)
+            self.assertIn("retained: 3 GiB", report)
+            # Discriminating in both directions: over the threshold it names
+            # the runner, under it says nothing at all.
+            self.assertIn("::warning::gha-m6-general-01's cache server holds 41G", loud.stdout)
+            self.assertNotIn("::warning::", quiet.stdout)
+            for name in ("11", "12", "13"):
+                self.assertTrue((blobs / name).is_file())
+            self.assertTrue((runner_root / "cache/bolt.db").is_file())
+
+            # A runner whose layout this does not recognize is not an error.
+            for absent in (runner_root / "tool-cache", Path(raw_directory) / "nope"):
+                with self.subTest(absent=str(absent)):
+                    skipped = subprocess.run(
+                        [str(script), str(absent), "1"],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(skipped.returncode, 0, skipped.stderr)
 
 
 if __name__ == "__main__":
