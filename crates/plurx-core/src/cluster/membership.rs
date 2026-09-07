@@ -2063,8 +2063,13 @@ fn live_tv_activation_guard_predicate() -> String {
       OR EXISTS (SELECT 1 FROM settings WHERE key = $4 \
         AND value = CAST($5 AS TEXT) AND CAST(value AS INTEGER) = $5)\
     )";
+    // `role` is written only by `promote_learner`, so a node that joined as a
+    // voter carries NULL here and `role = 'voter'` matched nothing. Ask the
+    // question the way every other predicate in this file asks it: a node that
+    // is not a learner is a voter. `IS NOT` because the value is normally NULL,
+    // and `NULL <> 'learner'` is NULL rather than true.
     let owner_ready = "EXISTS (SELECT 1 FROM cluster_nodes owner \
-      WHERE owner.node_id = $6 AND owner.role = 'voter' \
+      WHERE owner.node_id = $6 AND owner.role IS NOT 'learner' \
         AND owner.removed_at IS NULL \
         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
           WHERE removal.node_id = owner.node_id) \
@@ -10661,28 +10666,17 @@ mod tests {
         // Supplemental wiring guard: the data regression above executes the
         // exact production SQL, while these narrow slices ensure `status()`
         // cannot silently return to the broader lifecycle projection.
-        let source = include_str!("membership.rs");
-        let status = source
-            .split("pub async fn status(&self)")
-            .nth(1)
-            .and_then(|tail| tail.split("/// Promote one ready learner").next())
-            .expect("status source");
+        let source = production_source();
+        let status = method_body(&source, "pub async fn status(&self)");
         assert!(status.contains("protocol_status_for_committed_members(&members_json)"));
         assert!(!status.contains("self.protocol_status().await"));
 
-        let committed_protocol = source
-            .split("async fn protocol_status_for_committed_members(")
-            .nth(1)
-            .and_then(|tail| tail.split("async fn committed_unready_nodes(").next())
-            .expect("committed protocol projection source");
+        let committed_protocol =
+            method_body(&source, "async fn protocol_status_for_committed_members(");
         assert!(committed_protocol
             .contains("committed_unready_nodes(LEARNER_PROTOCOL_CAPABILITY, members_json)"));
 
-        let committed_unready = source
-            .split("async fn committed_unready_nodes(")
-            .nth(1)
-            .and_then(|tail| tail.split("async fn protocol_projection(").next())
-            .expect("committed pending-node source");
+        let committed_unready = method_body(&source, "async fn committed_unready_nodes(");
         assert!(committed_unready.contains("committed_capability_unready_nodes_sql(capability)"));
         assert!(committed_unready.contains("params!(members_json)"));
     }
@@ -10735,7 +10729,7 @@ mod tests {
         connection
             .execute_batch(&format!(
                 "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL); \
-                 CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, role TEXT NOT NULL, removed_at INTEGER, last_seen_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, role TEXT, removed_at INTEGER, last_seen_at INTEGER NOT NULL); \
                  CREATE TABLE cluster_node_capabilities (node_id TEXT NOT NULL, capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability)); \
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
@@ -10748,7 +10742,7 @@ mod tests {
                  {MIRROR_LIVE_TV_ACTIVATION_ON_DELETE_SQL}; \
                  {REQUIRE_LIVE_TV_JOIN_INTENT_ON_RESERVATION_SQL}; \
                  {REQUIRE_LIVE_TV_JOIN_INTENT_ON_STAGING_SQL}; \
-                 INSERT INTO cluster_nodes VALUES ('owner', 'voter', NULL, 1);"
+                 INSERT INTO cluster_nodes (node_id, role, removed_at, last_seen_at) VALUES ('owner', NULL, NULL, 1);"
             ))
             .expect("live-TV membership fixture");
         connection
@@ -11945,6 +11939,58 @@ mod tests {
         );
     }
 
+    /// A voter that joined as one owns Live TV; a learner does not.
+    ///
+    /// `cluster_nodes.role` is written in exactly one place -- `promote_learner`
+    /// -- so a node that joined as a voter carries NULL there. `owner.role =
+    /// 'voter'` therefore matched no row in any real cluster, and the guard was
+    /// unsatisfiable: every visible requirement could be met and the write was
+    /// still refused, with nothing on screen saying which clause said no. The
+    /// fixture hid it by declaring `role TEXT NOT NULL` in a column order
+    /// production does not have, so the test agreed with the bug.
+    #[test]
+    fn a_voter_that_was_never_promoted_can_own_live_tv() {
+        let connection = rusqlite::Connection::open_in_memory().expect("fixture");
+        install_live_tv_membership_fixture(&connection);
+        connection
+            .execute(
+                "INSERT INTO cluster_nodes (node_id, role, removed_at, last_seen_at) \
+                 VALUES ('promoted', 'voter', NULL, 1)",
+                [],
+            )
+            .expect("a node promoted from learner does carry the string");
+        connection
+            .execute(
+                "INSERT INTO cluster_nodes (node_id, role, removed_at, last_seen_at) \
+                 VALUES ('a-learner', 'learner', NULL, 1)",
+                [],
+            )
+            .expect("learner row");
+
+        let owner_ready = |node: &str| -> bool {
+            connection
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM cluster_nodes owner \
+                       WHERE owner.node_id = ?1 AND owner.role IS NOT 'learner' \
+                         AND owner.removed_at IS NULL)",
+                    rusqlite::params![node],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("owner readiness")
+        };
+
+        // `owner` is the fixture's node: joined as a voter, so NULL role.
+        assert!(
+            owner_ready("owner"),
+            "a voter that joined as one carries NULL and must still be able to own Live TV"
+        );
+        assert!(owner_ready("promoted"), "a promoted learner is a voter too");
+        assert!(
+            !owner_ready("a-learner"),
+            "a learner must not own the tuner"
+        );
+    }
+
     #[test]
     fn enabled_live_tv_rejects_old_joins_and_rollback_heartbeats_fail_closed() {
         let mut connection = rusqlite::Connection::open_in_memory().expect("fixture");
@@ -11990,7 +12036,10 @@ mod tests {
             .expect("compatible staging");
         transaction
             .execute(
-                "INSERT INTO cluster_nodes VALUES ('new-node', 'voter', NULL, 1)",
+                // NULL role, like every voter that joined as one rather than
+                // being promoted from a learner.
+                "INSERT INTO cluster_nodes (node_id, role, removed_at, last_seen_at) \
+                 VALUES ('new-node', NULL, NULL, 1)",
                 [],
             )
             .expect("compatible node");
@@ -13860,21 +13909,8 @@ mod tests {
     #[test]
     fn the_learner_operations_name_the_learner_protocol_not_the_newest_one() {
         let source = production_source();
-        let between = |from: &str, to: &str| {
-            source
-                .split_once(from)
-                .unwrap_or_else(|| panic!("{from} is missing"))
-                .1
-                .split_once(to)
-                .unwrap_or_else(|| panic!("{to} is missing after {from}"))
-                .0
-                .to_owned()
-        };
 
-        let projection = between(
-            "async fn protocol_projection(",
-            "\n    /// Narrow the cluster",
-        );
+        let projection = method_body(&source, "async fn protocol_projection(");
         assert!(
             projection.contains("learner_protocol_active: (active_min, active_max)\n                == (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL)"),
             "the status projection must compare against the learner protocol: {projection}"
@@ -13885,17 +13921,11 @@ mod tests {
         for (name, body) in [
             (
                 "activate_learner_protocol",
-                between(
-                    "pub async fn activate_learner_protocol(",
-                    "/// The read-only pass behind",
-                ),
+                method_body(&source, "pub async fn activate_learner_protocol("),
             ),
             (
                 "deactivate_learner_protocol",
-                between(
-                    "pub async fn deactivate_learner_protocol(",
-                    "/// The read-only pass behind",
-                ),
+                method_body(&source, "pub async fn deactivate_learner_protocol("),
             ),
         ] {
             assert!(
@@ -14683,76 +14713,21 @@ mod tests {
     #[test]
     fn the_roster_projection_reads_locally_and_the_decisions_do_not() {
         let source = production_source();
-        let between = |from: &str, to: &str| {
-            source
-                .split_once(from)
-                .unwrap_or_else(|| panic!("{from} is missing"))
-                .1
-                .split_once(to)
-                .unwrap_or_else(|| panic!("{to} is missing after {from}"))
-                .0
-                .to_owned()
-        };
-
-        /// One method's body, ending where the method does.
-        ///
-        /// The previous shape sliced from `status(` to the doc comment of a
-        /// method that happened to follow it, which made this assertion depend
-        /// on nothing moving in between. Something did: two cache-revocation
-        /// methods were added after `status`, and one of them reads
-        /// consistently for its own good reasons. The slice swallowed both and
-        /// the test failed for a `query_consistent_map` a hundred lines
-        /// outside the method it is about.
-        ///
-        /// Brace matching from the signature ends at the method's own closing
-        /// brace, so a neighbour can never be read as part of it again.
-        fn method_body(source: &str, signature: &str) -> String {
-            let start = source
-                .find(signature)
-                .unwrap_or_else(|| panic!("{signature} is missing"));
-            let open = source[start..]
-                .find('{')
-                .unwrap_or_else(|| panic!("{signature} has no body"))
-                + start;
-            let mut depth = 0usize;
-            for (offset, character) in source[open..].char_indices() {
-                match character {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return source[open..=open + offset].to_owned();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            panic!("{signature} has an unbalanced body");
-        }
 
         let status = method_body(&source, "pub async fn status(&self)");
         assert!(
             !status.contains("query_consistent_map"),
             "the roster must stay readable without a quorum"
         );
-        let projection = between(
-            "pub async fn protocol_status(&self)",
-            "\n    async fn protocol_projection",
-        );
+        let projection = method_body(&source, "pub async fn protocol_status(&self)");
         assert!(
             projection.contains("Read::Local") && !projection.contains("Read::Quorum"),
             "the roster's protocol block must read the applied local state"
         );
 
         for decision in [
-            between(
-                "pub async fn activate_learner_protocol",
-                "\n    /// Widen the cluster back",
-            ),
-            between(
-                "pub async fn deactivate_learner_protocol",
-                "\n    /// Restore the durable job-owner fence",
-            ),
+            method_body(&source, "pub async fn activate_learner_protocol("),
+            method_body(&source, "pub async fn deactivate_learner_protocol("),
         ] {
             assert!(
                 !decision.contains("Read::Local"),
@@ -14864,30 +14839,14 @@ mod tests {
         );
 
         let source = production_source();
-        let between = |from: &str, to: &str| {
-            source
-                .split_once(from)
-                .unwrap_or_else(|| panic!("{from} is missing"))
-                .1
-                .split_once(to)
-                .unwrap_or_else(|| panic!("{to} is missing after {from}"))
-                .0
-                .to_owned()
-        };
         for (name, body) in [
             (
                 "activate_learner_protocol",
-                between(
-                    "pub async fn activate_learner_protocol(",
-                    "/// The read-only pass behind",
-                ),
+                method_body(&source, "pub async fn activate_learner_protocol("),
             ),
             (
                 "deactivate_learner_protocol",
-                between(
-                    "pub async fn deactivate_learner_protocol(",
-                    "/// The read-only pass behind",
-                ),
+                method_body(&source, "pub async fn deactivate_learner_protocol("),
             ),
         ] {
             assert!(
@@ -15016,6 +14975,46 @@ mod tests {
             .expect("the test module")
             .0
             .to_owned()
+    }
+
+    /// One method's body, ending where the method does.
+    ///
+    /// Every source-shape assertion in this module used to slice to a landmark
+    /// further down the file — the next method's doc comment, a sibling's
+    /// declaration. Such a slice widens silently the moment anything is
+    /// inserted between the two, and the assertions over it then read code the
+    /// test never meant to cover. That is not hypothetical: two
+    /// cache-revocation methods were added after `status`, one of them reading
+    /// consistently for its own good reasons, and
+    /// `the_roster_projection_reads_locally_and_the_decisions_do_not` failed on
+    /// a `query_consistent_map` a hundred lines outside the method it is about.
+    ///
+    /// Brace matching from the signature ends at the method's own closing
+    /// brace, so a neighbour can never be read as part of it again. Take a
+    /// method's text from here rather than splitting on whatever happens to
+    /// follow it.
+    fn method_body(source: &str, signature: &str) -> String {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} is missing"));
+        let open = source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{signature} has no body"))
+            + start;
+        let mut depth = 0usize;
+        for (offset, character) in source[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[open..=open + offset].to_owned();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{signature} has an unbalanced body");
     }
 
     #[test]

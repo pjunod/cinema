@@ -1290,12 +1290,17 @@ async fn wait_for_stable_idle_resources(
     ceilings: Option<&[(u64, ProcessResourceCount)]>,
     deadline: Instant,
 ) -> Result<Vec<(u64, ProcessResourceCount)>> {
+    const PHASE: &str = "stable idle resource sampling";
     let mut previous = None;
     let mut stable_samples = 0_usize;
+    let mut waiting_on: Option<String> = None;
     loop {
-        let remaining = remaining_before(deadline, "stable idle resource sampling")?;
-        let (idle, current) = tokio::time::timeout(remaining, async {
-            let mut idle = true;
+        let remaining = match remaining_before(deadline, PHASE) {
+            Ok(remaining) => remaining,
+            Err(error) => return Err(annotate_resource_wait(error, waiting_on.as_deref())),
+        };
+        let (busy_nodes, current) = tokio::time::timeout(remaining, async {
+            let mut busy_nodes = Vec::new();
             for &node_id in node_ids {
                 let status = request_status(cluster, node_id).await?;
                 if status
@@ -1304,13 +1309,22 @@ async fn wait_for_stable_idle_resources(
                     .iter()
                     .any(|observation| observation.operation_owns_work)
                 {
-                    idle = false;
+                    busy_nodes.push(node_id);
                 }
             }
-            Ok::<_, anyhow::Error>((idle, request_resources_for_nodes(cluster, node_ids).await?))
+            Ok::<_, anyhow::Error>((
+                busy_nodes,
+                request_resources_for_nodes(cluster, node_ids).await?,
+            ))
         })
         .await
-        .context("stable idle resource sampling exceeded its absolute deadline")??;
+        .with_context(|| {
+            format!(
+                "{PHASE} exceeded its absolute deadline, still waiting on {}",
+                waiting_on.as_deref().unwrap_or("its first complete sample")
+            )
+        })??;
+        let idle = busy_nodes.is_empty();
         let within_limits = ceilings.is_none_or(|limits| resources_within_limits(limits, &current));
         if idle && within_limits && previous.as_ref() == Some(&current) {
             stable_samples = stable_samples.saturating_add(1);
@@ -1322,29 +1336,180 @@ async fn wait_for_stable_idle_resources(
         if stable_samples >= RESOURCE_STABLE_SAMPLES {
             return Ok(current);
         }
+        waiting_on = Some(describe_resource_wait(
+            &busy_nodes,
+            ceilings,
+            &current,
+            previous.as_deref(),
+            stable_samples,
+        ));
         previous = Some(current);
-        let remaining = remaining_before(deadline, "stable idle resource sampling")?;
+        let remaining = match remaining_before(deadline, PHASE) {
+            Ok(remaining) => remaining,
+            Err(error) => return Err(annotate_resource_wait(error, waiting_on.as_deref())),
+        };
         tokio::time::sleep(RESOURCE_SAMPLE_INTERVAL.min(remaining)).await;
     }
+}
+
+/// Say what the sampler was still waiting for when its horizon ran out.
+///
+/// The bare message — "recovery deadline expired before stable idle resource
+/// sampling" — cannot distinguish the two opposite things it means. A node
+/// still owning transport work, or holding resources above its warmed
+/// baseline, is the leak this campaign exists to catch, and must never be
+/// waited out with a longer horizon. Every node already idle and inside its
+/// baseline, with only the repeat-sample requirement outstanding, is a loaded
+/// machine, and a code change would be the wrong answer. This lane has expired
+/// here on `main` and on three pull requests without either reader ever being
+/// able to tell which it was.
+fn annotate_resource_wait(error: anyhow::Error, waiting_on: Option<&str>) -> anyhow::Error {
+    match waiting_on {
+        Some(report) => error.context(format!("still waiting on {report}")),
+        None => error.context("no resource sample completed inside the horizon"),
+    }
+}
+
+fn describe_resource_wait(
+    busy_nodes: &[u64],
+    ceilings: Option<&[(u64, ProcessResourceCount)]>,
+    current: &[(u64, ProcessResourceCount)],
+    previous: Option<&[(u64, ProcessResourceCount)]>,
+    stable_samples: usize,
+) -> String {
+    let mut parts = Vec::new();
+    if !busy_nodes.is_empty() {
+        parts.push(format!(
+            "node(s) {} still owning transport work",
+            busy_nodes
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(limits) = ceilings {
+        let over = resources_over_limits(limits, current);
+        if !over.is_empty() {
+            parts.push(format!("above the warmed baseline: {}", over.join("; ")));
+        }
+    }
+    if parts.is_empty() {
+        let moved = previous.map(|previous| sample_movement(previous, current));
+        let movement = match moved.as_deref() {
+            Some([]) => " (the last two samples were identical)".to_owned(),
+            Some(moved) => format!(" (since the last sample: {})", moved.join("; ")),
+            None => String::new(),
+        };
+        parts.push(format!(
+            "every node idle and within its baseline, with {stable_samples} of \
+             {RESOURCE_STABLE_SAMPLES} consecutive repeated samples{movement}"
+        ));
+    }
+    parts.join(", and ")
+}
+
+/// What moved between two consecutive samples, one resource at a time.
+///
+/// When every node is idle and inside its baseline, the only thing left is the
+/// repeat requirement, and then the whole question is whether the counts are
+/// settling towards a value or jittering forever. A slow settle wants a longer
+/// horizon; persistent jitter means exact equality is the wrong stability
+/// proxy and no horizon will fix it. Naming the deltas is the difference
+/// between those two, and it is the only thing the report still cannot say.
+fn sample_movement(
+    previous: &[(u64, ProcessResourceCount)],
+    current: &[(u64, ProcessResourceCount)],
+) -> Vec<String> {
+    if previous.len() != current.len() {
+        return vec![format!(
+            "node count changed: {} then {}",
+            previous.len(),
+            current.len()
+        )];
+    }
+    let mut moved = Vec::new();
+    for ((previous_id, before), (current_id, after)) in previous.iter().zip(current) {
+        if previous_id != current_id {
+            moved.push(format!(
+                "node order changed: {previous_id} then {current_id}"
+            ));
+            continue;
+        }
+        for (resource, before, after) in [
+            ("threads", before.threads, after.threads),
+            ("sockets", before.sockets, after.sockets),
+            (
+                "owned async tasks",
+                before.owned_async_tasks,
+                after.owned_async_tasks,
+            ),
+        ] {
+            if before != after {
+                moved.push(format!("node {previous_id} {resource} {before} -> {after}"));
+            }
+        }
+    }
+    moved
+}
+
+/// Every way `current` exceeds `limits`, named one resource at a time.
+///
+/// The single source of truth for the ceiling comparison:
+/// `resources_within_limits` is this same question asked for a yes or no, so
+/// the predicate and the message it produces can never disagree about what
+/// counts as over.
+fn resources_over_limits(
+    limits: &[(u64, ProcessResourceCount)],
+    current: &[(u64, ProcessResourceCount)],
+) -> Vec<String> {
+    if limits.len() != current.len() {
+        return vec![format!(
+            "node count changed: {} baselined, {} sampled",
+            limits.len(),
+            current.len()
+        )];
+    }
+    let mut over = Vec::new();
+    for ((limit_id, limit), (current_id, value)) in limits.iter().zip(current) {
+        if limit_id != current_id {
+            over.push(format!(
+                "node order changed: baselined {limit_id}, sampled {current_id}"
+            ));
+            continue;
+        }
+        for (resource, observed, ceiling) in [
+            (
+                "threads",
+                value.threads,
+                limit.threads.saturating_add(THREAD_MARGIN),
+            ),
+            (
+                "sockets",
+                value.sockets,
+                limit.sockets.saturating_add(SOCKET_MARGIN),
+            ),
+            (
+                "owned async tasks",
+                value.owned_async_tasks,
+                limit
+                    .owned_async_tasks
+                    .saturating_add(OWNED_ASYNC_TASK_MARGIN),
+            ),
+        ] {
+            if observed > ceiling {
+                over.push(format!("node {limit_id} {resource} {observed} > {ceiling}"));
+            }
+        }
+    }
+    over
 }
 
 fn resources_within_limits(
     limits: &[(u64, ProcessResourceCount)],
     current: &[(u64, ProcessResourceCount)],
 ) -> bool {
-    limits.len() == current.len()
-        && limits
-            .iter()
-            .zip(current)
-            .all(|((limit_id, limit), (current_id, value))| {
-                limit_id == current_id
-                    && value.threads <= limit.threads.saturating_add(THREAD_MARGIN)
-                    && value.sockets <= limit.sockets.saturating_add(SOCKET_MARGIN)
-                    && value.owned_async_tasks
-                        <= limit
-                            .owned_async_tasks
-                            .saturating_add(OWNED_ASYNC_TASK_MARGIN)
-            })
+    resources_over_limits(limits, current).is_empty()
 }
 
 fn collect_node_resource_evidence(
@@ -2876,6 +3041,120 @@ mod tests {
         value.learner.cycles[0].recovery_millis =
             duration_millis(RECOVERY_DEADLINE).saturating_add(1);
         assert!(validate_transport_recovery_artifact(&value).is_err());
+    }
+
+    fn resource_counts(
+        node: u64,
+        threads: u64,
+        sockets: u64,
+        tasks: u64,
+    ) -> (u64, ProcessResourceCount) {
+        (
+            node,
+            ProcessResourceCount {
+                threads,
+                sockets,
+                owned_async_tasks: tasks,
+            },
+        )
+    }
+
+    /// A leak has to be named, because a longer horizon is the wrong answer to
+    /// it and the right answer to the case below.
+    #[test]
+    fn an_expired_resource_wait_names_the_node_and_resource_over_its_baseline() {
+        let baseline = vec![
+            resource_counts(1, 10, 10, 10),
+            resource_counts(2, 10, 10, 10),
+        ];
+        let current = vec![
+            resource_counts(1, 10, 10, 10),
+            resource_counts(2, 10, 12, 10),
+        ];
+        let report = describe_resource_wait(&[], Some(&baseline), &current, None, 0);
+        assert!(report.contains("node 2 sockets 12 > 10"), "{report}");
+        assert!(!report.contains("node 1"), "{report}");
+
+        let error = annotate_resource_wait(
+            remaining_before(Instant::now(), "stable idle resource sampling")
+                .expect_err("an elapsed deadline"),
+            Some(&report),
+        );
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("node 2 sockets 12 > 10"), "{rendered}");
+    }
+
+    #[test]
+    fn an_expired_resource_wait_names_every_node_still_owning_work() {
+        let baseline = vec![
+            resource_counts(1, 10, 10, 10),
+            resource_counts(3, 10, 10, 10),
+        ];
+        let report = describe_resource_wait(&[1, 3], Some(&baseline), &baseline, None, 0);
+        assert!(
+            report.contains("node(s) 1, 3 still owning transport work"),
+            "{report}"
+        );
+        assert!(!report.contains("above the warmed baseline"), "{report}");
+    }
+
+    /// Whether a longer horizon would help is decided by what moved, so the
+    /// report has to carry the deltas and has to say when there were none.
+    #[test]
+    fn an_unstable_resource_wait_names_what_moved_between_the_two_samples() {
+        let baseline = vec![
+            resource_counts(1, 10, 10, 10),
+            resource_counts(2, 10, 10, 10),
+        ];
+        let previous = vec![
+            resource_counts(1, 10, 9, 10),
+            resource_counts(2, 10, 10, 10),
+        ];
+        let current = vec![
+            resource_counts(1, 10, 10, 10),
+            resource_counts(2, 10, 10, 8),
+        ];
+        let report = describe_resource_wait(&[], Some(&baseline), &current, Some(&previous), 1);
+        assert!(report.contains("node 1 sockets 9 -> 10"), "{report}");
+        assert!(
+            report.contains("node 2 owned async tasks 10 -> 8"),
+            "{report}"
+        );
+        assert!(!report.contains("node 1 threads"), "{report}");
+
+        let settled = describe_resource_wait(&[], Some(&baseline), &baseline, Some(&baseline), 1);
+        assert!(
+            settled.contains("the last two samples were identical"),
+            "{settled}"
+        );
+    }
+
+    /// The case a longer horizon does fix: nothing is wrong, the machine is
+    /// just too loaded for two samples in a row to match.
+    #[test]
+    fn an_expired_resource_wait_that_is_only_unstable_says_exactly_that() {
+        let baseline = vec![resource_counts(1, 10, 10, 10)];
+        let report = describe_resource_wait(&[], Some(&baseline), &baseline, None, 1);
+        assert!(
+            report.contains("every node idle and within its baseline"),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "1 of {RESOURCE_STABLE_SAMPLES} consecutive repeated samples"
+            )),
+            "{report}"
+        );
+
+        let error = annotate_resource_wait(
+            remaining_before(Instant::now(), "stable idle resource sampling")
+                .expect_err("an elapsed deadline"),
+            None,
+        );
+        assert!(
+            format!("{error:#}").contains("no resource sample completed inside the horizon"),
+            "{error:#}"
+        );
     }
 
     #[test]
