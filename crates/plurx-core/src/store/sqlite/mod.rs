@@ -975,6 +975,14 @@ const MIGRATIONS: &[&str] = &[
     // converting one. Empty means whichever identity is next, which is what
     // every row written before this column meant.
     crate::store::fragment_index_cluster::ANALYSIS_REQUEST_IDENTITY_SCHEMA,
+    // v48: the decoder-recovery budget, as a durable ledger rather than a
+    // counter in a process. An automatic recovery has to survive the thing it
+    // is recovering from — the producer dying, the session ending, the node
+    // handing the playback to another node — and an in-memory allowance
+    // survives none of those. Keyed by the server-owned epoch so that a new
+    // request id, a new client session, or a different node cannot present
+    // themselves as a fresh playback and be granted a second attempt.
+    super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

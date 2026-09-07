@@ -276,6 +276,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         MEDIA_SESSION_TERMINAL_ACKS_SCHEMA,
         MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
         super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
+        super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
     ] {
         validate_sql(sql)?;
         for result in timeout_store(client.batch(sql)).await? {
@@ -4019,6 +4020,262 @@ impl MediaSessionStore for HiqliteAuthStore {
             .map(|row| row.0)
             .collect())
     }
+
+    async fn reserve_producer_recovery(
+        &self,
+        request: &crate::domain::ProducerRecoveryRequest,
+        now_ms: i64,
+    ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+        let request = crate::store::validated_recovery_request(request)?;
+        let restriction = crate::store::encoded_recovery_restriction(&request)?;
+        let failed_producer_attempt =
+            crate::store::checked_recovery_counter(request.failed_producer_attempt)?;
+        let decision_sequence = crate::store::checked_recovery_counter(request.decision_sequence)?;
+        // `ON CONFLICT … DO NOTHING` rather than `INSERT OR IGNORE`, matching
+        // the single-node twin: IGNORE also suppresses `CHECK` and `NOT NULL`
+        // violations, so a row the schema rejected would read back as absent
+        // and this method would report a spent budget for a write that never
+        // happened.
+        let sql = "INSERT INTO media_session_producer_recovery (
+                       user_id, playback_id, recovery_epoch, failed_incarnation_id,
+                       failed_producer_attempt, decision_sequence, failed_plan_digest,
+                       alternate_plan_digest, decode_restriction, state,
+                       created_at_ms, updated_at_ms)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $10)
+                   ON CONFLICT (user_id, playback_id, recovery_epoch) DO NOTHING";
+        validate_sql(sql)?;
+        // One conditional insert, then a linearizable read. The affected-row
+        // count cannot be the answer here: a Hiqlite proposal that reports
+        // zero rows may have lost to a competing identity *or* be this
+        // caller's own replay, and there is no rollback available afterwards
+        // to undo a wrong guess.
+        //
+        // Two Raft operations rather than one transaction, and that is safe
+        // for a specific reason rather than by luck. The only mutations that
+        // can land between them are another identity's reserve — a conditional
+        // insert, which cannot alter an existing row — and a settle, which is
+        // fenced on `failed_incarnation_id` and so can only be this caller's
+        // own. `txn` cannot carry the read, because it returns affected rows
+        // rather than result sets.
+        self.client()
+            .execute(
+                sql,
+                params!(
+                    request.user_id,
+                    request.playback_id.clone(),
+                    request.recovery_epoch.clone(),
+                    request.failed_incarnation_id.clone(),
+                    failed_producer_attempt,
+                    decision_sequence,
+                    request.failed_plan_digest.clone(),
+                    request.alternate_plan_digest.clone(),
+                    restriction,
+                    now_ms
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        let Some(existing) = recovery_row(
+            self,
+            request.user_id,
+            &request.playback_id,
+            &request.recovery_epoch,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        // A settled row is a spent budget, not a grant. Returning it because
+        // its failure identity happens to match would let an owner that
+        // already installed an alternative — or already exhausted the attempt
+        // — install a second one, which is the refund this ledger exists to
+        // make impossible.
+        if existing.state != crate::domain::ProducerRecoveryState::Reserved {
+            return Ok(None);
+        }
+        // The row that is there may also be an earlier reservation for a
+        // different failure. Telling this caller yes would hand it somebody
+        // else's decision to install. The restriction is part of that identity:
+        // the conditional insert does not update an existing row, so a request
+        // whose restriction differs from the stored one would be told yes and
+        // handed a restriction the store never accepted.
+        if existing.failed_incarnation_id != request.failed_incarnation_id
+            || existing.failed_producer_attempt != request.failed_producer_attempt
+            || existing.decision_sequence != request.decision_sequence
+            || existing.failed_plan_digest != request.failed_plan_digest
+            || existing.alternate_plan_digest != request.alternate_plan_digest
+            || existing.decode_restriction != request.decode_restriction
+        {
+            return Ok(None);
+        }
+        Ok(Some(existing))
+    }
+
+    async fn settle_producer_recovery(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        recovery_epoch: &str,
+        failed_incarnation_id: &str,
+        state: crate::domain::ProducerRecoveryState,
+        now_ms: i64,
+    ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+        if matches!(state, crate::domain::ProducerRecoveryState::Reserved) {
+            return Err(StoreError::Task(
+                "a recovery cannot be settled back into reserved".to_owned(),
+            ));
+        }
+        crate::store::validated_epoch_key(user_id, playback_id, recovery_epoch)?;
+        if failed_incarnation_id.is_empty() || failed_incarnation_id.len() > 128 {
+            return Err(StoreError::Task("failed_incarnation_id".to_owned()));
+        }
+        // Placeholders must first appear in ascending order: Hiqlite's
+        // `validate_parameter_order` refuses a statement whose SET clause
+        // introduces $4 before the WHERE clause introduces $1, and it refuses
+        // it at execution rather than at review. Numbering follows the text.
+        //
+        // The incarnation predicate is the fence: without it, anything that
+        // knows the three key fields can spend somebody else's live
+        // reservation, and the owner's own settle would then read back a
+        // terminal state it did not write.
+        let sql = "UPDATE media_session_producer_recovery
+                      SET state = $1, updated_at_ms = $2
+                    WHERE user_id = $3 AND playback_id = $4 AND recovery_epoch = $5
+                      AND failed_incarnation_id = $6
+                      AND state = 'reserved'";
+        validate_sql(sql)?;
+        self.client()
+            .execute(
+                sql,
+                params!(
+                    state.as_str().to_owned(),
+                    now_ms,
+                    user_id,
+                    playback_id.to_owned(),
+                    recovery_epoch.to_owned(),
+                    failed_incarnation_id.to_owned()
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(recovery_row(self, user_id, playback_id, recovery_epoch)
+            .await?
+            .filter(|row| row.state == state && row.failed_incarnation_id == failed_incarnation_id))
+    }
+
+    async fn producer_recovery_for_epoch(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        recovery_epoch: &str,
+    ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+        crate::store::validated_epoch_key(user_id, playback_id, recovery_epoch)?;
+        recovery_row(self, user_id, playback_id, recovery_epoch).await
+    }
+
+    async fn validation_corrupt_recovery_restriction(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        recovery_epoch: &str,
+        stored: &str,
+    ) -> Result<bool, StoreError> {
+        let sql = "UPDATE media_session_producer_recovery
+                      SET decode_restriction = $1
+                    WHERE user_id = $2 AND playback_id = $3 AND recovery_epoch = $4";
+        validate_sql(sql)?;
+        let changed = self
+            .client()
+            .execute(
+                sql,
+                params!(
+                    stored.to_owned(),
+                    user_id,
+                    playback_id.to_owned(),
+                    recovery_epoch.to_owned()
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed > 0)
+    }
+}
+
+/// The ledger row as it is stored. Read into this first and validated after,
+/// because a row mapper cannot fail — and a `decode_restriction` that will not
+/// parse has to be a refusal rather than a `None`.
+struct RecoveryRow {
+    failed_incarnation_id: String,
+    failed_producer_attempt: i64,
+    decision_sequence: i64,
+    failed_plan_digest: String,
+    alternate_plan_digest: String,
+    decode_restriction: Option<String>,
+    state: String,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+impl From<&mut Row<'_>> for RecoveryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            failed_incarnation_id: row.get("failed_incarnation_id"),
+            failed_producer_attempt: row.get("failed_producer_attempt"),
+            decision_sequence: row.get("decision_sequence"),
+            failed_plan_digest: row.get("failed_plan_digest"),
+            alternate_plan_digest: row.get("alternate_plan_digest"),
+            decode_restriction: row.get("decode_restriction"),
+            state: row.get("state"),
+            created_at_ms: row.get("created_at_ms"),
+            updated_at_ms: row.get("updated_at_ms"),
+        }
+    }
+}
+
+const RECOVERY_COLS: &str = "failed_incarnation_id, failed_producer_attempt, decision_sequence,
+    failed_plan_digest, alternate_plan_digest, decode_restriction, state,
+    created_at_ms, updated_at_ms";
+
+async fn recovery_row(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    playback_id: &str,
+    recovery_epoch: &str,
+) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+    let sql = format!(
+        "SELECT {RECOVERY_COLS} FROM media_session_producer_recovery
+          WHERE user_id = $1 AND playback_id = $2 AND recovery_epoch = $3"
+    );
+    validate_sql(&sql)?;
+    let Some(row) = store
+        .client()
+        .query_consistent_map::<RecoveryRow, _>(
+            sql,
+            params!(user_id, playback_id.to_owned(), recovery_epoch.to_owned()),
+        )
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    // Converted through the shared reader, so that identical stored bytes
+    // produce an identical typed answer on both backends.
+    crate::store::recovery_reservation_from_row(
+        user_id,
+        playback_id,
+        recovery_epoch,
+        row.failed_incarnation_id,
+        row.failed_producer_attempt,
+        row.decision_sequence,
+        row.failed_plan_digest,
+        row.alternate_plan_digest,
+        row.decode_restriction,
+        &row.state,
+        row.created_at_ms,
+        row.updated_at_ms,
+    )
+    .map(Some)
 }
 
 #[cfg(test)]

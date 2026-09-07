@@ -134,6 +134,196 @@ pub(crate) const MEDIA_SESSION_PREPARATIONS_SCHEMA: &str =
         PRIMARY KEY (user_id, playback_id)
     ) STRICT;";
 
+/// The decoder-recovery budget and decision ledger, shared verbatim by both
+/// backends.
+///
+/// One statement, for the same reason [`MEDIA_SESSION_PREPARATIONS_SCHEMA`] is
+/// one statement: SQLite's append-only migration list keeps one element per
+/// schema version and Hiqlite's `install_schema` keeps one per table, and both
+/// spellings have to stay identical or a replicated import will disagree with
+/// the node it imported from.
+///
+/// The primary key is `(user_id, playback_id, recovery_epoch)` and that is the
+/// budget: one row per logical playback per epoch, so a retry cannot be granted
+/// twice by presenting a new request id, a new client session, or a different
+/// node. The epoch is server-owned and inherited by reopen, seek, track change
+/// and handoff precisely so that none of those mints a fresh allowance.
+///
+/// This is a ledger, not a second session lifecycle. `state` moves
+/// `reserved -> installed | exhausted` and never back; the row is never
+/// deleted while the epoch lives, because deleting it *is* refunding the
+/// budget. A crash between reserving and spawning therefore costs the
+/// playback its one automatic recovery, which is the correct direction to
+/// fail: an unbounded retry loop against a decoder that cannot decode the
+/// file is worse than one lost attempt.
+pub(crate) const MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS media_session_producer_recovery (
+        user_id                 INTEGER NOT NULL,
+        playback_id             TEXT NOT NULL
+            CHECK (length(playback_id) BETWEEN 1 AND 128),
+        recovery_epoch          TEXT NOT NULL
+            CHECK (length(recovery_epoch) BETWEEN 1 AND 128),
+        failed_incarnation_id   TEXT NOT NULL,
+        failed_producer_attempt INTEGER NOT NULL CHECK (failed_producer_attempt > 0),
+        decision_sequence       INTEGER NOT NULL CHECK (decision_sequence > 0),
+        failed_plan_digest      TEXT NOT NULL CHECK (length(failed_plan_digest) = 64),
+        alternate_plan_digest   TEXT NOT NULL CHECK (length(alternate_plan_digest) = 64),
+        decode_restriction      TEXT
+            CHECK (decode_restriction IS NULL OR
+                   length(CAST(decode_restriction AS BLOB)) <= 4096),
+        state                   TEXT NOT NULL
+            CHECK (state IN ('reserved', 'installed', 'exhausted')),
+        created_at_ms           INTEGER NOT NULL,
+        updated_at_ms           INTEGER NOT NULL,
+        PRIMARY KEY (user_id, playback_id, recovery_epoch)
+    ) STRICT;";
+
+/// Field bounds the schema also enforces, checked here so a caller gets a typed
+/// refusal instead of a constraint violation from three layers down — and
+/// checked *once*, in one place both backends call. Two hand-copied copies of
+/// these rules agree on the day they are written and nothing keeps them
+/// agreeing afterwards, which on a dual-backend store is the whole hazard.
+pub(crate) fn validated_recovery_request(
+    request: &crate::domain::ProducerRecoveryRequest,
+) -> Result<crate::domain::ProducerRecoveryRequest, StoreError> {
+    let (user_id, playback_id, recovery_epoch) = validated_epoch_key(
+        request.user_id,
+        &request.playback_id,
+        &request.recovery_epoch,
+    )?;
+    if request.failed_incarnation_id.is_empty() || request.failed_incarnation_id.len() > 128 {
+        return Err(StoreError::Task("failed_incarnation_id".to_owned()));
+    }
+    // The actor counts attempts and sequences in `u64`; the column is a signed
+    // integer. A silent wrap would put a later attempt behind an earlier one.
+    let failed_producer_attempt = checked_recovery_counter(request.failed_producer_attempt)?;
+    let decision_sequence = checked_recovery_counter(request.decision_sequence)?;
+    if failed_producer_attempt <= 0 || decision_sequence <= 0 {
+        return Err(StoreError::Task(
+            "producer attempt and decision sequence are one-based".to_owned(),
+        ));
+    }
+    for (name, digest) in [
+        ("failed_plan_digest", &request.failed_plan_digest),
+        ("alternate_plan_digest", &request.alternate_plan_digest),
+    ] {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(StoreError::Task(name.to_owned()));
+        }
+    }
+    // An alternative that names the same plan is not an alternative.
+    if request.failed_plan_digest == request.alternate_plan_digest {
+        return Err(StoreError::Task(
+            "the alternate plan is the failed plan".to_owned(),
+        ));
+    }
+    Ok(crate::domain::ProducerRecoveryRequest {
+        user_id,
+        playback_id,
+        recovery_epoch,
+        failed_incarnation_id: request.failed_incarnation_id.clone(),
+        failed_producer_attempt: request.failed_producer_attempt,
+        decision_sequence: request.decision_sequence,
+        failed_plan_digest: request.failed_plan_digest.clone(),
+        alternate_plan_digest: request.alternate_plan_digest.clone(),
+        decode_restriction: request.decode_restriction.clone(),
+    })
+}
+
+pub(crate) fn validated_epoch_key(
+    user_id: i64,
+    playback_id: &str,
+    recovery_epoch: &str,
+) -> Result<(i64, String, String), StoreError> {
+    if user_id <= 0 {
+        return Err(StoreError::Task("user_id".to_owned()));
+    }
+    if playback_id.is_empty() || playback_id.len() > 128 {
+        return Err(StoreError::Task("playback_id".to_owned()));
+    }
+    if recovery_epoch.is_empty() || recovery_epoch.len() > 128 {
+        return Err(StoreError::Task("recovery_epoch".to_owned()));
+    }
+    Ok((user_id, playback_id.to_owned(), recovery_epoch.to_owned()))
+}
+
+/// The actor counts in `u64`; the column is signed. Refuse rather than wrap.
+pub(crate) fn checked_recovery_counter(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::Task("recovery counter overflows".to_owned()))
+}
+
+pub(crate) fn encoded_recovery_restriction(
+    request: &crate::domain::ProducerRecoveryRequest,
+) -> Result<Option<String>, StoreError> {
+    request
+        .decode_restriction
+        .as_ref()
+        .map(|restriction| {
+            restriction
+                .encode()
+                .map_err(|error| StoreError::Task(error.to_string()))
+        })
+        .transpose()
+}
+
+/// Turn one stored ledger row into a reservation, or refuse it.
+///
+/// Shared so that the two backends cannot answer differently for the same
+/// bytes. A `decode_restriction` that will not parse is not an absent
+/// restriction — treating it as absent restores automatic hardware selection
+/// for a source that already failed on hardware — so it is a
+/// [`StoreError::Task`] on both, not a `rusqlite` conversion failure on one and
+/// a task error on the other.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recovery_reservation_from_row(
+    user_id: i64,
+    playback_id: &str,
+    recovery_epoch: &str,
+    failed_incarnation_id: String,
+    failed_producer_attempt: i64,
+    decision_sequence: i64,
+    failed_plan_digest: String,
+    alternate_plan_digest: String,
+    stored_restriction: Option<String>,
+    state: &str,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+) -> Result<crate::domain::ProducerRecoveryReservation, StoreError> {
+    let decode_restriction = match stored_restriction {
+        Some(stored) => Some(
+            crate::domain::ContinuationDecodeRestriction::decode(&stored).map_err(|error| {
+                StoreError::Task(format!("stored decode restriction is unreadable: {error}"))
+            })?,
+        ),
+        None => None,
+    };
+    let state = crate::domain::ProducerRecoveryState::parse(state)
+        .ok_or_else(|| StoreError::Task(format!("unknown recovery state {state}")))?;
+    Ok(crate::domain::ProducerRecoveryReservation {
+        user_id,
+        playback_id: playback_id.to_owned(),
+        recovery_epoch: recovery_epoch.to_owned(),
+        failed_incarnation_id,
+        // A negative stored counter is a row this build did not write. The
+        // write path refuses a silent wrap; the read path has to as well, or
+        // the refusal is only half a rule.
+        failed_producer_attempt: u64::try_from(failed_producer_attempt)
+            .map_err(|_| StoreError::Task("stored producer attempt is negative".to_owned()))?,
+        decision_sequence: u64::try_from(decision_sequence)
+            .map_err(|_| StoreError::Task("stored decision sequence is negative".to_owned()))?,
+        failed_plan_digest,
+        alternate_plan_digest,
+        decode_restriction,
+        state,
+        created_at_ms,
+        updated_at_ms,
+    })
+}
+
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
     AFTER UPDATE OF publication_ready_at_ms ON media_sessions
@@ -2988,6 +3178,105 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         request: &crate::domain::MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
+    /// Take this epoch's one automatic decoder recovery, if it has not been
+    /// taken.
+    ///
+    /// `Ok(None)` means the budget is gone: either another identity reserved it
+    /// first, or this playback already spent it. It is deliberately not
+    /// distinguishable from "spent by me on a different failure" at this
+    /// signature, because the caller's response is the same either way — do not
+    /// install an alternative.
+    ///
+    /// An exact replay of the same request returns the existing reservation, so
+    /// an executor that crashed between reserving and spawning can find out
+    /// what it had already decided. A request naming a *different* failure —
+    /// another attempt, another decision, another plan, or a different decode
+    /// restriction — is not a replay and gets `Ok(None)`: that would be a
+    /// second recovery wearing the first one's identity. The restriction is
+    /// part of that comparison because the conditional insert does not update
+    /// an existing row, so returning `Some` for a request whose restriction was
+    /// never persisted would hand the caller a decision the store does not
+    /// hold.
+    ///
+    /// The budget is consumed at reservation and never refunded. Not by
+    /// timeout, not by cancellation, not by a crash, not by a failed spawn.
+    /// That direction is chosen on purpose: an unbounded retry loop against a
+    /// decoder that cannot decode the file is worse for the viewer than one
+    /// lost attempt, and every refund path is a way for the loop to come back.
+    ///
+    /// Implementations must reserve with a single conditional insert. A read
+    /// followed by an insert is a race that grants two nodes the same budget,
+    /// and a Hiqlite affected-row result cannot be rolled back afterwards.
+    async fn reserve_producer_recovery(
+        &self,
+        request: &crate::domain::ProducerRecoveryRequest,
+        now_ms: i64,
+    ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError>;
+
+    /// Record what became of a reserved recovery.
+    ///
+    /// `Installed` or `Exhausted` only, and only from `Reserved`: the states do
+    /// not cycle, because a state that can return to `Reserved` is a refund
+    /// with extra steps.
+    ///
+    /// Fenced on `failed_incarnation_id`, so only the identity that reserved
+    /// can settle. Without it, anything holding the three key fields — a stale
+    /// node that handled this playback before a handoff, say — could exhaust a
+    /// live reservation, and the owner's own later settle would find nothing to
+    /// update and read back somebody else's terminal state.
+    ///
+    /// Idempotent for the same terminal state: an owner that crashed after
+    /// settling and settles again gets its reservation back rather than a
+    /// silence it cannot tell from a loss. `Ok(None)` means this identity has
+    /// no reservation in that state — never reserved, already settled the
+    /// *other* way, or not the reserver.
+    ///
+    /// The restriction is retained through settlement in both directions. An
+    /// exhausted recovery still knows which decoder failed, and every later
+    /// continuation still has to avoid it.
+    async fn settle_producer_recovery(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        recovery_epoch: &str,
+        failed_incarnation_id: &str,
+        state: crate::domain::ProducerRecoveryState,
+        now_ms: i64,
+    ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError>;
+
+    /// What this epoch has already decided, for the paths that must not
+    /// re-plan onto a decoder that already failed.
+    ///
+    /// Read by every ordinary continuation — seek, track change, output
+    /// change, automatic reopen, ownership handoff — before resolving a plan
+    /// or looking up a cached one.
+    async fn producer_recovery_for_epoch(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        recovery_epoch: &str,
+    ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError>;
+
+    /// Validation only: replace one ledger row's stored restriction with an
+    /// arbitrary string, bypassing every check this store makes on the way in.
+    ///
+    /// It is on the trait rather than on one backend because the property it
+    /// exists to prove is a *dual-backend* property: a restriction that a later
+    /// build wrote and this one cannot read must be a refusal on both stores
+    /// and the same kind of refusal, and that state is unreachable through the
+    /// ordinary API by construction — everything this build writes, it can read
+    /// back. A rule only one backend enforces is precisely the failure this
+    /// store's contract suite exists to catch.
+    ///
+    /// `Ok(false)` when there is no such row.
+    async fn validation_corrupt_recovery_restriction(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        recovery_epoch: &str,
+        stored: &str,
+    ) -> Result<bool, StoreError>;
+
     async fn settle_media_session_activation(
         &self,
         activation: &MediaSessionActivation,
@@ -3718,4 +4007,27 @@ impl CatalogueReader {
 #[allow(dead_code)]
 fn assert_arc_dyn_store(store: std::sync::Arc<SqliteStore>) -> std::sync::Arc<dyn Store> {
     store
+}
+
+#[cfg(test)]
+mod producer_recovery_schema_tests {
+    use super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA;
+    use crate::domain::MAX_DECODE_RESTRICTION_BYTES;
+
+    /// The column's `CHECK` and the encoder's bound are one number.
+    ///
+    /// They are written in two places — a SQL literal and a Rust constant —
+    /// and nothing but this stops them drifting. If they drift upward on the
+    /// Rust side, every restriction between the two values encodes cleanly,
+    /// is silently rejected by the constraint, and reports back to the caller
+    /// as "the budget is already spent": a playback permanently loses its one
+    /// automatic recovery with no error recorded anywhere.
+    #[test]
+    fn the_stored_restriction_cap_is_the_constant_the_encoder_enforces() {
+        assert!(
+            MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA
+                .contains(&format!("<= {MAX_DECODE_RESTRICTION_BYTES}")),
+            "the ledger's CHECK must name MAX_DECODE_RESTRICTION_BYTES exactly"
+        );
+    }
 }

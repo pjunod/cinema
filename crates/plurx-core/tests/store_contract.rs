@@ -513,6 +513,10 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "staged_media_session_for_playback",
     "commit_media_session_preparation",
     "abort_media_session_preparation",
+    "reserve_producer_recovery",
+    "settle_producer_recovery",
+    "producer_recovery_for_epoch",
+    "validation_corrupt_recovery_restriction",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "put_setting_fenced",
@@ -9886,6 +9890,158 @@ async fn replicated_v27_store_migrates_the_request_identity_on_daemon_open() {
     );
 }
 
+/// A v27 cluster gains the producer-recovery ledger on the next daemon open.
+///
+/// Every schema bump before this one has such a test, and the reason is that
+/// nothing else executes the migration arm at all: the contract harness
+/// bootstraps a *current* schema, which installs the table directly and stamps
+/// the marker, so the `MigrateFrom` branch is dead code under test until an
+/// upgrading tree is constructed by hand.
+///
+/// This step is `CREATE TABLE IF NOT EXISTS` rather than `ADD COLUMN`, and that
+/// difference is the interesting part. `ADD COLUMN` is not idempotent, so the
+/// existing steps treat "the shape is already there and the marker has not
+/// moved" as an inconsistent tree and refuse. Here that same state is an
+/// ordinary loser-of-the-race and must *succeed*, which the last section
+/// asserts — otherwise a restart mid-migration would leave a cluster that can
+/// never open.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v28 producer-recovery migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v28-producer-recovery-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current producer-recovery schema");
+    current
+        .put_setting("migration.v28.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    // Rewind to v27: no ledger, marker pinned to the literal it is named for.
+    client
+        .txn([
+            (
+                "DROP TABLE IF EXISTS media_session_producer_recovery",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(V27_SCHEMA_VERSION),
+            ),
+        ])
+        .await
+        .expect("construct v27 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit v27 fixture");
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v27 through v28 producer-recovery migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v28.proof")
+            .await
+            .expect("read v27 migration proof")
+            .as_deref(),
+        Some("survives"),
+        "a migration that loses unrelated rows is not a migration"
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master
+              WHERE type = 'table' AND name = 'media_session_producer_recovery'",
+            1,
+        ),
+        // The primary key is what makes the conditional insert one decision
+        // rather than a race, so its presence is part of the migration's
+        // contract and not an implementation detail.
+        (
+            "SELECT COUNT(*) AS value FROM pragma_index_list('media_session_producer_recovery')
+              WHERE origin = 'pk'",
+            1,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect the migrated producer-recovery schema");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+
+    // The migrated store is the working store, not merely a shaped one.
+    let reservation = migrated
+        .reserve_producer_recovery(&recovery_request("migrated-1"), 1_000)
+        .await
+        .expect("reserve on the migrated ledger")
+        .expect("the migrated ledger grants its first budget");
+    assert_eq!(
+        reservation.decode_restriction.as_ref(),
+        Some(&recovery_restriction())
+    );
+
+    // A second open is a no-op: the marker is current, so the step does not
+    // run at all.
+    HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("re-opening an already migrated v28 store");
+
+    // The table present with the marker behind is the case `ADD COLUMN` has to
+    // refuse and this one must not: `CREATE TABLE IF NOT EXISTS` is idempotent,
+    // so the loser of a two-voter race simply finds the work done. Refusing
+    // here would leave a cluster interrupted mid-migration unable to open.
+    client
+        .execute(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(V27_SCHEMA_VERSION),
+        )
+        .await
+        .expect("rewind the marker under an already-migrated shape");
+    let reopened = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("an idempotent step forgives a repeated attempt");
+    let rows: Vec<I64Value> = client
+        .query_consistent_map(
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("inspect the marker after the repeated attempt");
+    assert_eq!(
+        rows[0].value, AUTH_SCHEMA_VERSION,
+        "the repeated attempt moves the marker rather than refusing"
+    );
+    assert_eq!(
+        reopened
+            .producer_recovery_for_epoch(1, "pb-recovery", "migrated-1")
+            .await
+            .expect("read across the repeated attempt")
+            .map(|row| row.state),
+        Some(plurx_core::domain::ProducerRecoveryState::Reserved),
+        "and it keeps every row the table already held"
+    );
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v26_store_migrates_attempt_errors_on_daemon_open() {
@@ -10034,6 +10190,7 @@ const V23_SCHEMA_VERSION: i64 = 23;
 const V24_SCHEMA_VERSION: i64 = 24;
 const V25_SCHEMA_VERSION: i64 = 25;
 const V26_SCHEMA_VERSION: i64 = 26;
+const V27_SCHEMA_VERSION: i64 = 27;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -15035,7 +15192,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 291, "review the Store method count");
+    assert_eq!(declared.len(), 295, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -24643,4 +24800,503 @@ async fn hiqlite_preparation_commit_loser_cannot_mutate_canonical_winner() {
             .expect("read canonical commit receipt"),
         Some(receipt),
     );
+}
+
+fn recovery_restriction() -> plurx_core::domain::ContinuationDecodeRestriction {
+    plurx_core::domain::ContinuationDecodeRestriction {
+        version: plurx_core::domain::CONTINUATION_DECODE_RESTRICTION_VERSION,
+        source_revision_digest: "a".repeat(64),
+        input_video_stream: 0,
+        input_codec: "hevc".to_owned(),
+        failed_backend: "qsv".to_owned(),
+        required_backend: "software".to_owned(),
+        policy_revision: 1,
+    }
+}
+
+const RECOVERY_INCARNATION: &str = "11111111-1111-4111-8111-111111111111";
+
+fn recovery_request(epoch: &str) -> plurx_core::domain::ProducerRecoveryRequest {
+    plurx_core::domain::ProducerRecoveryRequest {
+        user_id: 1,
+        playback_id: "pb-recovery".to_owned(),
+        recovery_epoch: epoch.to_owned(),
+        failed_incarnation_id: RECOVERY_INCARNATION.to_owned(),
+        failed_producer_attempt: 3,
+        decision_sequence: 7,
+        failed_plan_digest: "b".repeat(64),
+        alternate_plan_digest: "c".repeat(64),
+        decode_restriction: Some(recovery_restriction()),
+    }
+}
+
+/// One epoch, one automatic recovery, whoever asks and however often.
+///
+/// The budget has to survive the thing it is recovering from — a producer
+/// dying, a session ending, a node handing the playback on — so it cannot be a
+/// counter in a process. Two identities racing for the same epoch is the case
+/// that matters: a read-then-insert would grant both, and it would pass every
+/// single-threaded test.
+#[tokio::test]
+async fn producer_recovery_grants_one_budget_per_epoch() {
+    for_each_backend(|store, backend| async move {
+        let first = store
+            .reserve_producer_recovery(&recovery_request("epoch-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the first caller takes the budget"));
+        assert_eq!(
+            first.state,
+            plurx_core::domain::ProducerRecoveryState::Reserved
+        );
+        assert_eq!(
+            first.decode_restriction.as_ref(),
+            Some(&recovery_restriction())
+        );
+
+        // An exact replay is the same reservation, because an executor that
+        // crashed between reserving and spawning has to be able to find out
+        // what it had already decided.
+        let replay = store
+            .reserve_producer_recovery(&recovery_request("epoch-1"), 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: an exact replay returns its reservation"));
+        assert_eq!(replay, first, "{backend}: a replay is not a second grant");
+
+        // A different failure is a second recovery wearing the first one's
+        // identity, and there is only one budget.
+        let mut competitor = recovery_request("epoch-1");
+        competitor.failed_producer_attempt = 4;
+        competitor.alternate_plan_digest = "d".repeat(64);
+        assert!(
+            store
+                .reserve_producer_recovery(&competitor, 3_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: competitor: {error}"))
+                .is_none(),
+            "{backend}: a different failure cannot reuse the epoch's budget"
+        );
+
+        // A different epoch is a different playback's allowance.
+        assert!(
+            store
+                .reserve_producer_recovery(&recovery_request("epoch-2"), 4_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: second epoch: {error}"))
+                .is_some(),
+            "{backend}: a new epoch has its own budget"
+        );
+    })
+    .await;
+}
+
+/// Settlement moves one way and never refunds.
+#[tokio::test]
+async fn producer_recovery_settles_once_and_never_returns_the_budget() {
+    for_each_backend(|store, backend| async move {
+        store
+            .reserve_producer_recovery(&recovery_request("settle-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+
+        let installed = store
+            .settle_producer_recovery(
+                1,
+                "pb-recovery",
+                "settle-1",
+                RECOVERY_INCARNATION,
+                plurx_core::domain::ProducerRecoveryState::Installed,
+                2_000,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a reserved recovery settles"));
+        assert_eq!(
+            installed.state,
+            plurx_core::domain::ProducerRecoveryState::Installed
+        );
+        assert_eq!(
+            installed.decode_restriction.as_ref(),
+            Some(&recovery_restriction()),
+            "{backend}: the restriction survives settlement, because every later continuation still has to avoid that decoder"
+        );
+
+        // Settling the other way afterwards finds nothing to settle: the
+        // states do not cycle, and an installed recovery is not exhaustible.
+        assert!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "settle-1",
+                    RECOVERY_INCARNATION,
+                    plurx_core::domain::ProducerRecoveryState::Exhausted,
+                    3_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: re-settle: {error}"))
+                .is_none(),
+            "{backend}: a settled recovery does not settle twice"
+        );
+
+        // Settling the *same* way again is a replay, and a replaying owner is
+        // told what it already did rather than handed a silence it cannot
+        // distinguish from a loss.
+        assert_eq!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "settle-1",
+                    RECOVERY_INCARNATION,
+                    plurx_core::domain::ProducerRecoveryState::Installed,
+                    3_100,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replayed settle: {error}"))
+                .map(|row| row.state),
+            Some(plurx_core::domain::ProducerRecoveryState::Installed),
+            "{backend}: settling the same way twice is idempotent"
+        );
+
+        // And the budget is still spent.
+        assert!(
+            store
+                .reserve_producer_recovery(&recovery_request("settle-1"), 4_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: post-settle reserve: {error}"))
+                .is_none(),
+            "{backend}: an installed recovery does not replenish the budget"
+        );
+
+        // Settling back into `reserved` is a refund with extra steps.
+        assert!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "settle-1",
+                    RECOVERY_INCARNATION,
+                    plurx_core::domain::ProducerRecoveryState::Reserved,
+                    5_000,
+                )
+                .await
+                .is_err(),
+            "{backend}: a recovery cannot be settled back into reserved"
+        );
+    })
+    .await;
+}
+
+/// What every ordinary continuation reads before it plans.
+#[tokio::test]
+async fn producer_recovery_is_readable_by_epoch_and_refuses_a_corrupt_restriction() {
+    for_each_backend(|store, backend| async move {
+        assert!(
+            store
+                .producer_recovery_for_epoch(1, "pb-recovery", "absent")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read absent: {error}"))
+                .is_none(),
+            "{backend}: an epoch with no recovery has none"
+        );
+        store
+            .reserve_producer_recovery(&recovery_request("read-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+        let read = store
+            .producer_recovery_for_epoch(1, "pb-recovery", "read-1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the reservation is readable"));
+        assert_eq!(read.failed_producer_attempt, 3);
+        assert_eq!(read.decision_sequence, 7);
+        assert_eq!(read.decode_restriction, Some(recovery_restriction()));
+    })
+    .await;
+}
+
+/// Two identities, one epoch, at the same time — the case a read-then-insert
+/// gets wrong and every single-threaded test gets right.
+///
+/// The two callers name different failures, because that is the shape that
+/// matters: whoever loses must be told no rather than handed the winner's
+/// decision to install.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn producer_recovery_grants_one_budget_to_two_racing_identities() {
+    for_each_backend(|store, backend| async move {
+        let mine = recovery_request("race-1");
+        let mut theirs = recovery_request("race-1");
+        theirs.failed_incarnation_id = "22222222-2222-4222-8222-222222222222".to_owned();
+        theirs.failed_producer_attempt = 4;
+        theirs.alternate_plan_digest = "d".repeat(64);
+
+        let (left, right) = {
+            let store_a = Arc::clone(&store);
+            let store_b = Arc::clone(&store);
+            let a =
+                tokio::spawn(async move { store_a.reserve_producer_recovery(&mine, 1_000).await });
+            let b = tokio::spawn(
+                async move { store_b.reserve_producer_recovery(&theirs, 1_000).await },
+            );
+            (
+                a.await
+                    .expect("join")
+                    .unwrap_or_else(|error| panic!("{backend}: left: {error}")),
+                b.await
+                    .expect("join")
+                    .unwrap_or_else(|error| panic!("{backend}: right: {error}")),
+            )
+        };
+        assert_eq!(
+            usize::from(left.is_some()) + usize::from(right.is_some()),
+            1,
+            "{backend}: exactly one identity may hold the epoch's budget"
+        );
+
+        // And what the store holds is what the winner was told it holds.
+        let stored = store
+            .producer_recovery_for_epoch(1, "pb-recovery", "race-1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read after race: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the winner's row is there"));
+        let winner = left.or(right).expect("one winner");
+        assert_eq!(
+            stored, winner,
+            "{backend}: the answer the winner got is the row the store kept"
+        );
+    })
+    .await;
+}
+
+/// A stored restriction this build cannot read is a refusal, on both backends,
+/// and the same kind of refusal.
+///
+/// Getting this wrong is silent: "no restriction" and "unreadable restriction"
+/// look identical to every caller downstream, and treating the second as the
+/// first restores automatic hardware selection for a source that already
+/// failed on hardware. Two backends disagreeing about *which* error it is is
+/// the same defect one level up — a caller that wants to tell "the row is
+/// unreadable, refuse the recovery" from "the store is unavailable, retry"
+/// cannot, and gets a different answer per backend.
+#[tokio::test]
+async fn an_unreadable_stored_restriction_is_refused_identically_on_both_backends() {
+    for_each_backend(|store, backend| async move {
+        store
+            .reserve_producer_recovery(&recovery_request("corrupt-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+
+        // Three ways a row can be unreadable, and the third is the one that
+        // actually happens: a build that ships a version this one predates.
+        let mut future = recovery_restriction();
+        future.version = plurx_core::domain::CONTINUATION_DECODE_RESTRICTION_VERSION + 1;
+        let future = serde_json::to_string(&future).expect("serialize a future restriction");
+        for (label, stored) in [
+            ("not json at all", "{".to_owned()),
+            ("a valid shape with an invalid field", {
+                let mut broken = recovery_restriction();
+                broken.required_backend = broken.failed_backend.clone();
+                serde_json::to_string(&broken).expect("serialize")
+            }),
+            ("a later serialization version", future),
+        ] {
+            assert!(
+                store
+                    .validation_corrupt_recovery_restriction(
+                        1,
+                        "pb-recovery",
+                        "corrupt-1",
+                        &stored,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: corrupt {label}: {error}")),
+                "{backend}: {label}: the row to corrupt has to exist"
+            );
+            let error = match store
+                .producer_recovery_for_epoch(1, "pb-recovery", "corrupt-1")
+                .await
+            {
+                Ok(row) => {
+                    panic!("{backend}: {label}: an unreadable restriction read back as {row:?}")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                matches!(error, StoreError::Task(_)),
+                "{backend}: {label}: both backends refuse the same way, not one as a \
+                 database error and the other as a task error: {error:?}"
+            );
+            assert!(
+                error.to_string().contains("unreadable"),
+                "{backend}: {label}: {error}"
+            );
+        }
+    })
+    .await;
+}
+
+/// The restriction is part of the reservation's identity, not a payload.
+///
+/// The conditional insert does not update an existing row. So an executor that
+/// crashed, reloaded its policy, and recomputed a *different* restriction under
+/// the same failure identity must be told no — otherwise it is handed a
+/// reservation carrying a restriction the store never accepted, and every later
+/// continuation reads the old one forever.
+#[tokio::test]
+async fn a_replay_carrying_a_different_restriction_is_not_a_replay() {
+    for_each_backend(|store, backend| async move {
+        store
+            .reserve_producer_recovery(&recovery_request("restriction-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+
+        let mut moved_on = recovery_request("restriction-1");
+        moved_on.decode_restriction = Some(plurx_core::domain::ContinuationDecodeRestriction {
+            policy_revision: 2,
+            ..recovery_restriction()
+        });
+        assert!(
+            store
+                .reserve_producer_recovery(&moved_on, 2_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: moved-on replay: {error}"))
+                .is_none(),
+            "{backend}: a request whose restriction the store never took is not a replay"
+        );
+
+        // And the stored restriction is still the one that was accepted.
+        assert_eq!(
+            store
+                .producer_recovery_for_epoch(1, "pb-recovery", "restriction-1")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                .and_then(|row| row.decode_restriction),
+            Some(recovery_restriction()),
+            "{backend}: the row is what it always was"
+        );
+    })
+    .await;
+}
+
+/// Only the identity that reserved may spend the reservation.
+///
+/// Without the fence, anything that knows `(user, playback, epoch)` — a stale
+/// node that handled this playback before a handoff, say — can exhaust a live
+/// recovery. The owner's own settle then finds nothing to update, reads back a
+/// terminal state it did not write, and the ledger permanently records the
+/// wrong outcome for a recovery that actually installed.
+#[tokio::test]
+async fn only_the_reserving_identity_can_settle_its_recovery() {
+    for_each_backend(|store, backend| async move {
+        store
+            .reserve_producer_recovery(&recovery_request("fence-1"), 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: reserved"));
+
+        assert!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "fence-1",
+                    "33333333-3333-4333-8333-333333333333",
+                    plurx_core::domain::ProducerRecoveryState::Exhausted,
+                    2_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stranger settle: {error}"))
+                .is_none(),
+            "{backend}: a stranger cannot spend this reservation"
+        );
+
+        // The reservation is untouched, so its owner can still install.
+        assert_eq!(
+            store
+                .producer_recovery_for_epoch(1, "pb-recovery", "fence-1")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read after stranger: {error}"))
+                .map(|row| row.state),
+            Some(plurx_core::domain::ProducerRecoveryState::Reserved),
+            "{backend}: a refused settle changes nothing"
+        );
+        assert_eq!(
+            store
+                .settle_producer_recovery(
+                    1,
+                    "pb-recovery",
+                    "fence-1",
+                    RECOVERY_INCARNATION,
+                    plurx_core::domain::ProducerRecoveryState::Installed,
+                    3_000,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: owner settle: {error}"))
+                .map(|row| row.state),
+            Some(plurx_core::domain::ProducerRecoveryState::Installed)
+        );
+    })
+    .await;
+}
+
+/// A restriction that cannot be parsed is not an absent restriction.
+///
+/// Getting this wrong is silent: "no restriction" and "unreadable restriction"
+/// look identical to every caller downstream, and treating the second as the
+/// first restores automatic hardware selection for a source that already
+/// failed on hardware.
+#[test]
+fn a_malformed_decode_restriction_is_refused_rather_than_ignored() {
+    use plurx_core::domain::{ContinuationDecodeRestriction, DecodeRestrictionError};
+
+    let good = recovery_restriction();
+    let encoded = good.encode().expect("a valid restriction encodes");
+    assert_eq!(
+        ContinuationDecodeRestriction::decode(&encoded).expect("round trip"),
+        good
+    );
+
+    assert!(matches!(
+        ContinuationDecodeRestriction::decode("not json"),
+        Err(DecodeRestrictionError::Malformed(_))
+    ));
+
+    let mut future = good.clone();
+    future.version = 99;
+    let encoded_future = serde_json::to_string(&future).expect("serialize");
+    assert_eq!(
+        ContinuationDecodeRestriction::decode(&encoded_future),
+        Err(DecodeRestrictionError::UnsupportedVersion(99))
+    );
+
+    let mut short_digest = good.clone();
+    short_digest.source_revision_digest = "abc".to_owned();
+    assert_eq!(
+        short_digest.encode(),
+        Err(DecodeRestrictionError::InvalidField(
+            "source_revision_digest"
+        ))
+    );
+
+    // A restriction that requires the backend that just failed is a loop, not
+    // a restriction.
+    let mut circular = good.clone();
+    circular.required_backend = circular.failed_backend.clone();
+    assert_eq!(
+        circular.encode(),
+        Err(DecodeRestrictionError::InvalidField("required_backend"))
+    );
+
+    assert!(matches!(
+        ContinuationDecodeRestriction::decode(
+            &"x".repeat(plurx_core::domain::MAX_DECODE_RESTRICTION_BYTES + 1)
+        ),
+        Err(DecodeRestrictionError::TooLarge(_))
+    ));
 }

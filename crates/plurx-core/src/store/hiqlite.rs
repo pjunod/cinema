@@ -73,7 +73,8 @@ const DV_CONVERSIONS_SCHEMA_VERSION: i64 = 24;
 const DV_RECOVERY_GUARDS_SCHEMA_VERSION: i64 = 25;
 const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
 const REQUEST_IDENTITY_SCHEMA_VERSION: i64 = 27;
-pub const AUTH_SCHEMA_VERSION: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
+const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 28;
+pub const AUTH_SCHEMA_VERSION: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -98,6 +99,7 @@ const DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE: i64 = STAGED_GENERATION_SCHEMA_VER
 const DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE: i64 = DV_CONVERSIONS_SCHEMA_VERSION;
 const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
 const REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
+const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2037,6 +2039,38 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // `CREATE TABLE IF NOT EXISTS` is idempotent, so unlike the
+                    // `ADD COLUMN` steps this one is safe for both voters to
+                    // attempt: the loser's transaction still commits, and its
+                    // conditional `UPDATE` simply matches nothing because the
+                    // winner already moved the marker. `settle_migration_attempt`
+                    // is not what makes that safe — it inspects the marker only
+                    // when the transaction *failed* — so the safety here is the
+                    // statement's own idempotence, and it is worth saying so
+                    // rather than borrowing a guarantee from the wrong place.
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    PRODUCER_RECOVERY_SCHEMA_VERSION,
+                                    now,
+                                    PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2221,6 +2255,10 @@ impl HiqliteAuthStore {
             ),
             (
                 "DELETE FROM media_session_terminal_acks".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM media_session_producer_recovery".to_owned(),
                 params!(),
             ),
             ("DELETE FROM media_sessions".to_owned(), params!()),
@@ -3525,7 +3563,8 @@ fn schema_migration_action(
         | DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE
         | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE
         | ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE
-        | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE => {
+        | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE
+        | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(

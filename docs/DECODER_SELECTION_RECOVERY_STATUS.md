@@ -1,8 +1,8 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M4 candidate; M0–M3a merged into the effort · **Updated:**
+**Status:** M5a candidate; M0–M4 merged into the effort · **Updated:**
 2026-09-07 · **Integration branch:** `effort/decoder-selection-recovery` ·
-**M4 task base:** M3a candidate `de7ca4b65a5c246c986bf9598bcf7a68ea1f54d1`
+**M5a task base:** M4 candidate `f0f7aec8254ce7c09221bf4462f2f34905f172ef`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -19,14 +19,14 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M4 — mixed resource admission |
-| Task branch | `codex/decoder-selection-m4`, based on effort head `de7ca4b6` |
+| Milestone | M5a — the durable recovery budget |
+| Task branch | `codex/decoder-selection-m5a`, based on effort head `f0f7aec8` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
-| Focused validation | This head on pinned 1.97.1: daemon `admission::` 24/24, `transcode::tests::` 220/220, `playback_control::tests::` 219/219, `live_tv::tests::` 40/40, core `decoder_selection` 43/43, `make effort-rust-check` and `make lint` clean, `git diff --check` clean, `make history-check` and `make validation-lint` clean |
-| Exact receipt | M3a's is `de7ca4b6`, merged. M4's is the head this PR carries; it is a reviewed and repaired candidate, and the effort gate is what makes it a receipt |
+| Focused validation | This head on pinned 1.97.1: the `store_contract` reservation contracts and the 295-name `Store` method inventory through the SQLite fixtures, the schema-cap unit test, `make effort-rust-check`, `make lint` and `make validation-lint` clean, `git diff --check` clean. The replicated half of the same contracts is owed at promotion |
+| Exact receipt | M4's is `f0f7aec8`, merged. M5a's is the head this PR carries; it is a reviewed and repaired candidate, and the effort gate is what makes it a receipt |
 | Full PR validation | Deferred to the `Main promotion gate`, per `AGENTS.md`. See *Decisions and deviations* — the plan's per-task full-suite instruction and the repository's own pipeline disagree, and the repository's pipeline wins |
 | Blocker | The Forgejo `Effort development gate` on this head. Per `AGENTS.md` a task PR into an effort branch defers the full suite to the `Main promotion gate`; the effort's one `make validate-full` is owed at promotion, not here |
 
@@ -38,8 +38,8 @@ An unchecked item is not implied by a nearby passing check.
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
 | M3 · owned observation and health receipts | M3a merged; M3b/M3c not started | [Forgejo #79](http://192.168.4.7:3000/noirr/plurx/pulls/79) fast-forwarded `de7ca4b6` into the effort after one whole-PR adversarial review, its six blockers repaired, and the Forgejo effort gate. Nothing outside its tests calls the grammar yet, by design |
-| M4 · mixed resource admission | Candidate; reviewed and repaired, effort gate pending | Admission reads a `TranscodeResourceEstimate` off the resolved plan rather than off the encoder's name, and takes hardware and CPU as one bundle under the mutex both pools already share |
-| M5 · durable budget and prepublication recovery | Not started | — |
+| M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
+| M5 · durable budget and prepublication recovery | M5a candidate; reviewed and repaired, effort gate pending; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
 | M7 · offline, shared cache, and handoff enforcement | Not started | — |
 | M8 · fleet qualification and promotion | Not started | — |
@@ -182,7 +182,6 @@ production derivation. Two assertions the recipe suite had dropped during M2
 were restored, and one of them is now stronger than it was: a renderer the
 source cannot feed is refused outright rather than merely given a distinct
 cache entry.
-
 ## M3a working tree — deciding whether a decode worked
 
 A producer that emits segments and exits zero is indistinguishable, from
@@ -273,16 +272,12 @@ of ten thousand records caught it. Only the newest few can ever matter — if
 five records are in the window then the five most recent are, because the
 window is a suffix in time — so the deque is capped at the limit and memory is
 a function of the parser rather than of the stream.
-
 ### What the whole-PR review found, and what it changed
 
-One adversarial review ran against the candidate. It found six blockers, all in
-this milestone's own work; all are repaired in this head, together with eight of
-its non-blocking findings.
+One adversarial review ran against the candidate. It found six blockers, all inthis milestone's own work; all are repaired in this head, together with eight ofits non-blocking findings.
 
 | Finding | Disposition |
-|---|---|
-| `qualifies_reuse` ignored `compressed_log` and `oversized_lines`, so replaying the originating #913 capture certified its output as reusable — the exact artifact this effort exists to stop caching. §7.1 says a truncated or unreadable stream disallows a qualified receipt | Reuse now requires a complete *and* uncompressed observation with no structural record and no fault, and `the_originating_capture_is_diagnosed_and_never_certified_reusable` replays #913 to prove all three answers |
+|---|---|| `qualifies_reuse` ignored `compressed_log` and `oversized_lines`, so replaying the originating #913 capture certified its output as reusable — the exact artifact this effort exists to stop caching. §7.1 says a truncated or unreadable stream disallows a qualified receipt | Reuse now requires a complete *and* uncompressed observation with no structural record and no fault, and `the_originating_capture_is_diagnosed_and_never_certified_reusable` replays #913 to prove all three answers |
 | `oversized_lines` was counted and never consulted. A child emitting three megabytes without a newline had its tail discarded, and the attempt still reported a complete observation | `note_oversized_line` marks the observation incomplete, as does a lossily-decoded non-UTF-8 line — read for the log, never counted as exact |
 | The primary-error rule was `contains("[error]") && contains(error_detail)`, far looser than the qualified M0 grammar. `[vist#0:0/rawvideo @ …] [dec:rawvideo @ …] [error] Error initializing filters: Invalid data found when processing input` matched it, and five such lines would have latched a fault on a filter-graph failure | The Rust grammar now parses what the harness's regex parses: the bracketed contexts and their addresses, the stream pair, the severity, the literal message prefix, and the detail compared for equality. That exact line is asserted `Unrelated` |
 | `covers_build` compared three of thirteen contract fields, and neither `decoder` nor `stderr_mode` was among them. A contract for `h264` still claimed to cover the build after this effort swapped in `h264_qsv`, whose failures the grammar cannot see — a silent permanent all-clear. `stderr_mode` is the same hazard one level up: without `level` there are no severity labels at all | `covers_build` takes an `ObservedBuild` and compares version, binary, buildconf, log flags, codec and decoder. A table-driven test mutates each field alone and asserts the contract stops covering it |
@@ -317,6 +312,158 @@ clean.
 `Cargo.lock` gains one line: `toml` moves from a workspace dependency
 plurx-core already used to one plurxd also declares, for reading the retained
 contract table. No new crate enters the graph.
+
+## M5a working tree — the budget has to outlive what it recovers from
+
+An automatic recovery has to survive the thing it is recovering from. The
+producer dies; the session ends; the node hands the playback to another node.
+An allowance held in a process survives none of those, so a viewer whose file
+cannot be decoded would get a fresh attempt after every one of them, forever,
+and each attempt would fail the same way.
+
+`media_session_producer_recovery` is that allowance as a durable fact, keyed by
+`(user_id, playback_id, recovery_epoch)`. The epoch is the key, and this
+milestone stores it — it does not yet *mint* it. Nothing here writes an epoch
+onto a playback, an incarnation or a preparation record, and the store treats it
+as an opaque caller-supplied string it validates only for length. Presenting an
+unused epoch therefore mints a fresh budget, which the ledger's own test asserts
+as correct behaviour. Making reopen, seek, track change and handoff inherit one
+epoch rather than each minting their own is §8.2's remaining half and is M5b's
+work; until it lands, the durable budget bounds one epoch and not one playback.
+This is said here because the earlier draft of this section stated the
+inheritance as present fact, and it is not.
+
+Four properties are load-bearing, and each has a test on both backends:
+
+**Reservation is one conditional insert.** A read followed by an insert grants
+two racing nodes the same budget, and it passes every single-threaded test —
+so the contract that proves it spawns two identities at the same epoch and
+asserts exactly one is granted. The insert is `INSERT … ON CONFLICT DO NOTHING`
+and the answer comes from the read-back, because a Hiqlite affected-row count
+cannot distinguish "another identity won" from "this is my own replay" and there
+is no rollback available afterwards to undo a wrong guess. Not `INSERT OR
+IGNORE`: that form also suppresses `CHECK` and `NOT NULL` violations, so a row
+the schema rejected would read back as absent and the method would report a
+spent budget for a write that never happened — a playback silently losing its
+one recovery to a constraint nobody was told about.
+
+**Only the identity that reserved may settle.** `settle_producer_recovery` takes
+the `failed_incarnation_id` and both backends carry it as a predicate. Without
+that fence anything holding `(user, playback, epoch)` — a stale node that
+handled this playback before a handoff — could exhaust a live reservation, and
+the real owner's later settle would find nothing to update, read back a terminal
+state it did not write, and leave the ledger permanently recording the wrong
+outcome for a recovery that actually installed. Settling the same way twice is
+idempotent, because a replaying owner needs its answer back rather than a
+silence it cannot tell from a loss; settling the *other* way afterwards finds
+nothing to settle.
+
+**The reservation's identity includes its restriction.** The conditional insert
+does not update an existing row, so an executor that crashed, reloaded its
+policy and recomputed a different restriction under the same failure identity is
+not a replay: it is told no, rather than handed a reservation carrying a
+restriction the store never accepted and would go on serving to every later
+continuation.
+
+**The budget is never refunded.** Not by timeout, cancellation, crash or failed
+spawn. A crash between reserving and spawning therefore costs the playback its
+one automatic recovery, which is the correct direction to fail: an unbounded
+retry loop against a decoder that cannot decode the file is worse for the
+viewer than one lost attempt, and every refund path is a way for that loop to
+come back. `settle_producer_recovery` moves `reserved → installed | exhausted`
+and refuses to move back; settling back into `reserved` is a refund with extra
+steps and returns an error.
+
+**A restriction that will not parse is not an absent restriction.** This is the
+one that would have been silent. "No restriction" and "unreadable restriction"
+look identical to every caller downstream, and treating the second as the first
+restores automatic hardware selection for a source that already failed on
+hardware — invisibly, at the moment the recovery was supposed to be protecting
+it. `ContinuationDecodeRestriction::decode` validates the version, the digest
+shape, every field's bounds — including the stream index and the one-based
+policy revision, which the first draft left unbounded — and the requirement that
+the required backend is not the failed one (a restriction that requires the
+decoder that just failed is a loop). It carries `deny_unknown_fields`, so a
+later build that adds a field while keeping `version = 1` cannot have it
+silently dropped here: a restriction read as a weaker restriction is the same
+failure the version check exists to prevent, one level down.
+
+The row read refuses rather than degrading, and both backends refuse
+*identically*. That took moving the conversion out of the `rusqlite` row mapper:
+a decode failure raised there travels out as `StoreError::Database` while the
+replicated store raises `StoreError::Task`, so a caller trying to tell "the row
+is unreadable, refuse the recovery" from "the store is unavailable, retry" would
+have got a different answer per backend. One shared converter now turns a stored
+row into a reservation for both, and the contract writes three kinds of
+unreadable value — not JSON, a valid shape with an invalid field, and a later
+serialization version — into each store and asserts the same typed refusal.
+
+The contract suite found two defects on its first runs, and both are the kind
+that only a contract finds. A settled reservation still answered
+`reserve_producer_recovery` with itself, because the failure identity matched —
+so an owner that had already installed an alternative, or already exhausted the
+attempt, could have installed a second one; a settled row is now a spent budget
+in both backends. And the replicated `settle` statement introduced `$4` in its
+`SET` clause before `$1` in its `WHERE` clause, which Hiqlite's
+`validate_parameter_order` refuses at execution. That is the same class of
+defect as the placeholder-order fault that stopped the fragment index building
+anything for days: it is invisible on SQLite, which does not care about
+first-appearance order, and it fails on every single call once replicated.
+Only running the same contract against both backends catches it, which is
+exactly what §10.4 asks for. Both statements are now numbered in text order.
+
+`SQLITE_SCHEMA_VERSION` goes to 48 and the Hiqlite cluster schema to 28, with
+the DDL spelled identically in both, as the migration conventions require:
+SQLite keeps one element per schema version and Hiqlite one per table, and a
+divergence between the two spellings makes a replicated import disagree with
+the node it imported from. The Hiqlite step is `CREATE TABLE IF NOT EXISTS`, so
+unlike the `ADD COLUMN` steps it is safe for both voters to attempt — and the
+safety is the statement's own idempotence, not `settle_migration_attempt`, which
+inspects the marker only when the transaction failed. `replicated_v28_store_
+migrates_the_producer_recovery_ledger_on_daemon_open` constructs an upgrading
+v27 tree and runs the migration arm, which nothing else in the suite executes:
+the harness bootstraps a *current* schema, so without that test the branch every
+existing cluster will take on upgrade is dead code. It asserts the marker moves,
+the table and its primary key exist, unrelated rows survive, the migrated store
+actually reserves, and — the case that separates this step from the `ADD COLUMN`
+ones — that a table already present under a stale marker *succeeds* rather than
+being refused, because refusing it would leave a cluster interrupted
+mid-migration unable to open.
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate. It found six blockers, all inthis milestone's own work; all are repaired in this head, together with six ofits non-blocking findings.
+
+| Finding | Disposition |
+|---|---|| The v27→v28 migration arm had no test, though every previous schema version has one. The harness bootstraps a current schema, so the branch every upgrading cluster takes was dead code under test | `replicated_v28_store_migrates_the_producer_recovery_ledger_on_daemon_open`, modelled on the v27 test and extended with the idempotence case that distinguishes this step from the `ADD COLUMN` ones |
+| The corrupt-restriction refusal — the property this milestone leads with — was untested against either backend, and the two backends mapped it to *different* `StoreError` variants | One shared row converter for both backends, and a contract that writes three kinds of unreadable value into each store and asserts the same typed refusal |
+| `INSERT OR IGNORE` suppresses `CHECK` and `NOT NULL` violations, not only the primary-key collision. A rejected row read back as absent, which this method reports as "the budget is already spent" | `ON CONFLICT (user_id, playback_id, recovery_epoch) DO NOTHING` on both backends, so only the collision is silent. A unit test also binds the column's `CHECK` literal to `MAX_DECODE_RESTRICTION_BYTES`, which were two unlinked hand-copied numbers |
+| `settle_producer_recovery` had no owner fence: any holder of the three key fields could exhaust a live reservation, and the real owner's settle would then read back a terminal state it did not write | The trait method takes `failed_incarnation_id` and both `UPDATE`s carry it as a predicate, with the read-back checking it too |
+| The replay-identity comparison omitted the decode restriction, and the conditional insert never updates an existing row — so a "replay" could be answered with a restriction the store had never accepted | The restriction is part of the comparison, and a test asserts a moved-on request is refused and the stored row is unchanged |
+| Hiqlite's reserve was an insert and a read across two Raft operations where SQLite's was one transaction | The remaining interleavings are a competing conditional insert, which cannot alter an existing row, and a settle, which the new fence restricts to this caller. `txn` cannot carry the read — it returns affected rows, not result sets — so the reasoning is written down at the call site rather than left implied |
+
+Also repaired from the non-blocking set: the new table is added to
+`validation_reset_contract_state`, so replicated contract cases no longer leak
+rows into each other; the migration comment no longer credits
+`settle_migration_attempt` with a guarantee it does not provide; the two
+hand-copied validation helpers are one shared copy next to the DDL, where the
+schema already lives so the backends cannot drift; a negative stored counter is
+a typed refusal on the read path rather than a silent clamp to zero, matching
+the write path's refusal to wrap; and the pure read no longer opens a write
+transaction.
+
+Focused evidence, pinned `rustc 1.97.1`:
+`cargo test -p plurx-core --test store_contract` — the reservation contracts
+(one budget per epoch, two racing identities, settlement, the owner fence, the
+replay identity, the readable epoch, and the identical unreadable-restriction
+refusal) and the 295-name `Store` method inventory, run through the SQLite
+fixtures. `cargo test -p plurx-core --lib producer_recovery` pins the schema's
+size cap to the encoder's constant. `make effort-rust-check`, `make lint` and
+`make validation-lint` clean; `git diff --check` clean.
+
+**Owed at promotion:** the replicated half. `--features hiqlite-contract-tests`
+runs these same contracts against a three-voter cluster and the v28 migration
+test against an upgrading one; that run belongs to the `Main promotion gate`'s
+`make validate-full`, and no count for it is claimed here.
 
 ### A correction to the plan's own command list
 
