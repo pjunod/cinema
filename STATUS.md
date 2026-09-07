@@ -45,9 +45,13 @@ That last part is `deploy/runner-janitor/`: a script, a systemd unit, an hourly
 timer and a one-command installer, on the same numbers — 20 G budget, 20 %
 reserve, graceful stop before any delete. It never resets a working runner,
 never leaves one stopped, and refuses any `cache.dir` that is not one; each of
-those is mutation-proven. Installed on nynuc, m6, nuc4 and the runner guests
-reachable from the Incus cluster. **Still to do: rogg16 (five runners, does not
-resolve from the session VM) and `gha-mba-apple-01`.** The `pjunod/ansible`
+those is mutation-proven. Installed and running hourly on nynuc, rogg16, every reachable
+Incus runner guest, and the Lima VM that carries `gha-mbp-linux-arm-01` — which
+was holding 24G of its own and gave all of it back on the first pass.
+`deploy/runner-janitor/macos/` is the launchd equivalent for
+`gha-mba-apple-01`, the one runner with no systemd; it is written and its logic
+is mutation-proven against fakes, but **it has not yet run on that machine**,
+because the deploy key has no sudo there. The `pjunod/ansible`
 repository still describes the retired GitHub `actions-runner` fleet and knows
 nothing about `forgejo-runner`, so the janitor ships from this repository until
 that catches up.

@@ -295,5 +295,197 @@ class JanitorContractCase(unittest.TestCase):
         self.assertIn('exec "$work/install"', bootstrap)
 
 
+class MacosJanitorContractCase(unittest.TestCase):
+    """The Apple runner has no systemd, and launchd will not wait for a job.
+
+    `systemctl stop` drains -- the Linux installer raises TimeoutStopSec to
+    thirty minutes so it can -- and `launchctl bootout` does not: SIGTERM, then
+    SIGKILL about twenty seconds later, which on this runner would be a killed
+    Xcode build. So on macOS the idle check is the entire safety mechanism, and
+    these tests are mostly about it.
+    """
+
+    SCRIPT = ROOT / "deploy/runner-janitor/macos/plurx-ci-janitor"
+    LABEL = "org.forgejo.actions.runner.plurx.gha-mba-apple-01"
+
+    def setUp(self):
+        subprocess.run(["bash", "-n", str(self.SCRIPT)], check=True)
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        fixture = Path(self._directory.name)
+
+        self.runner_root = fixture / "Users/githubrunner/forgejo-runner"
+        self.cache = self.runner_root / "cache"
+        (self.cache / "cache/0a").mkdir(parents=True)
+        (self.cache / "bolt.db").write_bytes(b"index")
+        self.config = self.runner_root / "config.yml"
+        self.config.write_text(
+            f"runner:\n  capacity: 1\ncache:\n  enabled: true\n  dir: {self.cache}\n",
+            encoding="utf-8",
+        )
+
+        self.daemons = fixture / "LaunchDaemons"
+        self.daemons.mkdir()
+        self.plist = self.daemons / f"{self.LABEL}.plist"
+        self.plist.write_text("<plist/>", encoding="utf-8")
+
+        self.bin = fixture / "bin"
+        self.bin.mkdir()
+        self.log = fixture / "launchctl.log"
+        tools = {
+            "plutil": (
+                "#!/bin/sh\n"
+                'printf \'{"Label":"%s","ProgramArguments":'
+                '["/usr/local/bin/forgejo-runner-13.1.0","daemon","-c","%s"]}\\n\' '
+                '"$FIXTURE_LABEL" "$FIXTURE_CONFIG"\n'
+            ),
+            "launchctl": (
+                "#!/bin/sh\n"
+                'if [ "$1" = print ]; then printf \'\\tpid = %s\\n\' '
+                '"$FIXTURE_PID"; exit 0; fi\n'
+                'printf \'%s %s\\n\' "$1" "$2" >> "$FIXTURE_LOG"\n'
+            ),
+            "pgrep": "#!/bin/sh\nexit $FIXTURE_PGREP_STATUS\n",
+            "df": (
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                "printf 'fixture %s 0 %s 50%% /fixture\\n' "
+                '"$FIXTURE_FS_KB" "$FIXTURE_AVAIL_KB"\n'
+            ),
+            "du": (
+                "#!/bin/sh\nshift $(($# - 1))\n"
+                'printf \'%s\\t%s\\n\' "$FIXTURE_USED_KB" "$1"\n'
+            ),
+        }
+        for name, body in tools.items():
+            path = self.bin / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o755)
+
+        self.state = fixture / "state"
+        self.environment = os.environ.copy()
+        self.environment.update(
+            {
+                "PATH": f"{self.bin}{os.pathsep}{self.environment['PATH']}",
+                "PLURX_JANITOR_STATE_DIR": str(self.state),
+                "PLURX_JANITOR_DAEMON_DIR": str(self.daemons),
+                "FIXTURE_LABEL": self.LABEL,
+                "FIXTURE_CONFIG": str(self.config),
+                "FIXTURE_LOG": str(self.log),
+                "FIXTURE_PID": "4242",
+                "FIXTURE_PGREP_STATUS": "1",
+                "FIXTURE_FS_KB": str(460 * 1024 * 1024),
+                "FIXTURE_AVAIL_KB": str(119 * 1024 * 1024),
+                "FIXTURE_USED_KB": str(4 * 1024 * 1024),
+            }
+        )
+
+    def run_janitor(self, *arguments):
+        return subprocess.run(
+            [str(self.SCRIPT), *arguments],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+        )
+
+    def launchctl_calls(self):
+        if not self.log.exists():
+            return []
+        return self.log.read_text(encoding="utf-8").split()
+
+    def last_run(self):
+        return json.loads((self.state / "last-run.json").read_text(encoding="utf-8"))
+
+    def test_a_cache_inside_its_budget_is_left_alone(self):
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("within budget", result.stdout)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+        self.assertEqual(self.last_run()["reset"], 0)
+
+    def test_an_over_budget_cache_is_reset_and_the_daemon_comes_back(self):
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.launchctl_calls(),
+            ["bootout", f"system/{self.LABEL}", "bootstrap", "system"],
+        )
+        self.assertFalse(self.cache.exists())
+        self.assertEqual(self.last_run()["reclaimed_gb"], 41)
+
+    def test_a_daemon_with_child_processes_keeps_its_cache(self):
+        # The whole safety mechanism: launchd will not wait for the job, so a
+        # daemon with children must never be unloaded.
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_PGREP_STATUS"] = "0"
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("running a job", result.stdout)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+        self.assertEqual(self.last_run()["over_budget"], 1)
+        self.assertEqual(self.last_run()["reset"], 0)
+
+    def test_a_daemon_with_no_pid_keeps_its_cache(self):
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_PID"] = ""
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+
+    def test_a_cache_dir_the_plist_points_elsewhere_is_refused(self):
+        elsewhere = Path(self._directory.name) / "Users/githubrunner/Library"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "bolt.db").write_bytes(b"not a runner cache")
+        self.config.write_text(
+            f"cache:\n  enabled: true\n  dir: {elsewhere}\n", encoding="utf-8"
+        )
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertTrue((elsewhere / "bolt.db").is_file())
+        self.assertEqual(self.last_run()["instances"], 0)
+
+    def test_dry_run_decides_out_loud_and_deletes_nothing(self):
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+
+        result = self.run_janitor("--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("would reset", result.stdout)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+
+    def test_the_daemon_plist_and_installer_agree_with_the_script(self):
+        plist = (
+            ROOT / "deploy/runner-janitor/macos/tv.plurx.ci-janitor.plist"
+        ).read_text(encoding="utf-8")
+        installer = (ROOT / "deploy/runner-janitor/macos/install").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("<string>/usr/local/bin/plurx-ci-janitor</string>", plist)
+        self.assertIn("<integer>3600</integer>", plist)
+        self.assertIn("bootstrap system /Library/LaunchDaemons", installer)
+        self.assertIn("--dry-run", installer)
+        # The Linux installer must not be run here and vice versa: the Linux one
+        # writes systemd drop-ins that do not exist on a Mac.
+        self.assertIn('[ "$(uname -s)" = Darwin ]', installer)
+
+
 if __name__ == "__main__":
     unittest.main()

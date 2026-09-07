@@ -164,7 +164,25 @@ sudo deploy/runner-janitor/install   # copies, enables the timer, ends in --dry-
 Run it on every runner host, and inside every runner guest — an Incus guest is
 reachable from any cluster member as
 `incus exec --project github-runners <guest> -- …`. It is idempotent; running
-it again upgrades the script in place.
+it again upgrades the script in place. The ARM runner is a Lima VM on a Mac and
+runs systemd, so this is the right installer for it too:
+`limactl shell plurx-ci-arm -- sudo bash …`.
+
+**The Apple runner has its own**, in
+[`deploy/runner-janitor/macos/`](../../deploy/runner-janitor/macos/): same
+numbers, same three invariants, launchd instead of systemd.
+
+```bash
+sudo deploy/runner-janitor/macos/install
+```
+
+One difference there is not cosmetic. `systemctl stop` drains — the Linux
+installer raises `TimeoutStopSec` to thirty minutes so that it can — and
+`launchctl bootout` does not: SIGTERM, then SIGKILL about twenty seconds later,
+which on that runner is a killed Xcode build. So on macOS the idle check is the
+whole safety mechanism rather than a courtesy, and it is stricter: the daemon
+must have no child processes **and** its work root must have been untouched for
+two minutes.
 
 **What a pass does.** For every `forgejo-runner*.service` on the host it reads
 that runner's own `config.yml` for its `cache.dir`, and if the directory is
@@ -182,8 +200,9 @@ the other promises the next job an entry it cannot download. The cost is a cold
 cache for the next few jobs, and nothing in that directory is not reproducible.
 
 **Three invariants, each with a test.** It never resets a runner that is
-working — idleness is "the unit's cgroup holds nothing but the daemon", a local
-answer that needs no API token. It never leaves a runner stopped: the restart
+working — idleness is "the unit's cgroup holds nothing but the daemon" on Linux
+and "the daemon has no child processes" on macOS, a local answer either way
+that needs no API token. It never leaves a runner stopped: the restart
 is on a `RETURN` trap, so a failed stop or a failed delete still ends with the
 runner up. And it refuses any `cache.dir` that is not a runner root ending in
 `cache` and holding `bolt.db` — the delete is a whole directory, so the path

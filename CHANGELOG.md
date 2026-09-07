@@ -118,7 +118,12 @@ bump may break compatibility and a **patch** bump never does.
   `/var/lib/plurx-ci-janitor/last-run.json`, with `over_budget` and `reset`
   counted separately so a runner that is never idle enough to reset is visible
   instead of silently skipped. All three invariants are mutation-proven in
-  `tests/operations/test_ci_janitor.py`.
+  `tests/operations/test_ci_janitor.py`. `deploy/runner-janitor/macos/` is the
+  same thing for the Apple runner, which has no systemd — and where the idle
+  check is not a courtesy but the whole safety mechanism, because
+  `launchctl bootout` does not drain a running job the way `systemctl stop`
+  does, so it additionally requires the work root to have been quiet for two
+  minutes.
 
 ### Changed
 
