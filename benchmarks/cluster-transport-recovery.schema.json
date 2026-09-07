@@ -33,7 +33,7 @@
     "resource_thread_margin": { "const": 0 },
     "resource_socket_margin": { "const": 0 },
     "resource_owned_async_task_margin": { "const": 0 },
-    "resource_cleanup_horizon_millis": { "const": 3000 },
+    "resource_cleanup_horizon_millis": { "const": 60000 },
     "resource_stable_samples": { "const": 2 },
     "learner": { "$ref": "#/$defs/roleCampaign" },
     "voter": { "$ref": "#/$defs/roleCampaign" }

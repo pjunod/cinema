@@ -48,7 +48,8 @@ const MIN_ACKNOWLEDGED_WRITES_DURING_RECOVERY: usize = 2;
 const WRITER_MAX_ACK_GAP: Duration = Duration::from_secs(35);
 const WRITER_PROGRESS_POLL: Duration = Duration::from_millis(100);
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(1_500);
-const RESOURCE_CLEANUP_HORIZON: Duration = Duration::from_secs(3);
+const RESOURCE_CLEANUP_HORIZON: Duration = Duration::from_secs(60);
+const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
 const RESOURCE_STABLE_SAMPLES: usize = 2;
 const THREAD_MARGIN: u64 = 0;
 const SOCKET_MARGIN: u64 = 0;
@@ -731,6 +732,7 @@ async fn exercise_role_campaign(
     let baseline_resources = wait_for_stable_idle_resources(
         cluster,
         &[1, 2, 3, TARGET_NODE],
+        None,
         Instant::now() + RECOVERY_DEADLINE,
     )
     .await?;
@@ -921,7 +923,8 @@ async fn exercise_role_campaign(
         let post_resources = wait_for_stable_idle_resources(
             cluster,
             &[1, 2, 3, TARGET_NODE],
-            Instant::now() + RECOVERY_DEADLINE,
+            Some(&baseline_resources),
+            Instant::now() + RESOURCE_CLEANUP_HORIZON,
         )
         .await?;
         let node_resources = collect_node_resource_evidence(&baseline_resources, &post_resources)?;
@@ -1269,6 +1272,7 @@ async fn wait_for_applied_index(
 async fn wait_for_stable_idle_resources(
     cluster: &mut ClusterProcesses,
     node_ids: &[u64],
+    ceilings: Option<&[(u64, ProcessResourceCount)]>,
     deadline: Instant,
 ) -> Result<Vec<(u64, ProcessResourceCount)>> {
     let mut previous = None;
@@ -1287,9 +1291,10 @@ async fn wait_for_stable_idle_resources(
             }
         }
         let current = request_resources_for_nodes(cluster, node_ids).await?;
-        if idle && previous.as_ref() == Some(&current) {
+        let within_limits = ceilings.is_none_or(|limits| resources_within_limits(limits, &current));
+        if idle && within_limits && previous.as_ref() == Some(&current) {
             stable_samples = stable_samples.saturating_add(1);
-        } else if idle {
+        } else if idle && within_limits {
             stable_samples = 1;
         } else {
             stable_samples = 0;
@@ -1299,8 +1304,27 @@ async fn wait_for_stable_idle_resources(
         }
         previous = Some(current);
         let remaining = remaining_before(deadline, "stable idle resource sampling")?;
-        tokio::time::sleep(RESOURCE_CLEANUP_HORIZON.min(remaining)).await;
+        tokio::time::sleep(RESOURCE_SAMPLE_INTERVAL.min(remaining)).await;
     }
+}
+
+fn resources_within_limits(
+    limits: &[(u64, ProcessResourceCount)],
+    current: &[(u64, ProcessResourceCount)],
+) -> bool {
+    limits.len() == current.len()
+        && limits
+            .iter()
+            .zip(current)
+            .all(|((limit_id, limit), (current_id, value))| {
+                limit_id == current_id
+                    && value.threads <= limit.threads.saturating_add(THREAD_MARGIN)
+                    && value.sockets <= limit.sockets.saturating_add(SOCKET_MARGIN)
+                    && value.owned_async_tasks
+                        <= limit
+                            .owned_async_tasks
+                            .saturating_add(OWNED_ASYNC_TASK_MARGIN)
+            })
 }
 
 fn collect_node_resource_evidence(
@@ -2836,6 +2860,19 @@ mod tests {
 
     #[test]
     fn owned_async_task_growth_has_no_resource_slack() {
+        let limits = vec![(
+            1,
+            ProcessResourceCount {
+                threads: 10,
+                sockets: 10,
+                owned_async_tasks: 10,
+            },
+        )];
+        assert!(resources_within_limits(&limits, &limits));
+        let mut over_limit = limits.clone();
+        over_limit[0].1.owned_async_tasks += 1;
+        assert!(!resources_within_limits(&limits, &over_limit));
+
         let mut value = artifact();
         value.voter.cycles[0].node_resources[0]
             .post_quiescence
