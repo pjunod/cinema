@@ -238,7 +238,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
 test("Developer is where the switches that cost something live", () => {
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("liveTvSettingsCard")}${shippedSource("developerPanel")} return developerPanel;`,
+    `${shippedSource("preparedHandoffEnabled")}${shippedSource("preparedHandoffReadiness")}
+     ${shippedSource("readinessRow")}
+     ${shippedSource("liveTvSettingsCard")}${shippedSource("developerPanel")} return developerPanel;`,
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
@@ -268,6 +270,20 @@ test("Developer is where the switches that cost something live", () => {
   // transport is always compiled and automatic; this must not imply a gate.
   assert.match(html, /compiled in and activates automatically/);
   assert.doesNotMatch(html, /special build/);
+  // The prepared-handoff card carries an enable switch, and the readiness list
+  // beside it is advisory: it says what enabling costs, and it does not gate
+  // the switch. A page that refuses to let an operator turn something on tells
+  // them less than one that says exactly what will happen if they do.
+  assert.match(html, /TOG:pdp\|/, "Developer is missing the prepared-handoff switch");
+  assert.match(html, /dual_player_preparation/);
+  assert.match(html, /advisory and does not block this switch/);
+  assert.match(html, /503 media_owner_transition/,
+    "the card says what a staged playlist actually answers today");
+  assert.match(html, /not met/, "an unmet requirement says so beside the switch");
+  assert.match(html, /not measured here/,
+    "…and a question this page cannot answer is not rendered as a refusal");
+  assert.match(html, /met<\/span>/);
+  assert.match(html, /cannot fire on VOD/);
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
 });
