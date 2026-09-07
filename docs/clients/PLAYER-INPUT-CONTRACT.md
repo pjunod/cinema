@@ -269,6 +269,93 @@ the ±30 s vertical seek with something a held key discovers by itself.
 
 ---
 
+## 4a. Live TV — the same rulings on a surface with no timeline
+
+Live television is the finite player's contract with everything that assumes
+a timeline removed and one thing added. There is nothing to seek, nothing to
+scrub, no menu and no info panel; there is a channel. So the live table is a
+sibling of §2's, generated from the `live` section of the same fixture, and
+every client routes it through the same one-table reducer:
+`PlaybackPolicy.routeLiveInput`, `PlayerInputRouting.routeLive`, and
+`PlayerInputPolicy.routeLive`.
+
+It is a second table rather than a fourth surface in §2 because the fixture's
+own well-formedness test requires every surface to answer all seven finite
+states. A `live` surface would have to invent a `timeline`, a `scrub`, a
+`menu` and an `info` state that a live stream can never enter — a lie in the
+place the clients are tested against. One fixture, two tables, three clients
+keeps the property that mattered without the lie.
+
+The two rulings that carry over unchanged, from 2026-09-02: a directional
+press on a hidden overlay only reveals it, and a ten-foot channel list is
+preview-then-commit. The one that does not: on the desktop, `up`/`down` tune
+directly, because a keyboard user has no focus ring to preview with and the
+mouse already drives the neighbour strip.
+
+<!-- contract:live:begin -->
+
+_Generated from the `live` section of [`tests/playback/player-input-contract.json`](../../tests/playback/player-input-contract.json) by `scripts/player-contract-table`; do not edit by hand._
+
+**Surface `ten-foot`** — Siri Remote (tvOS) and D-pad (Android TV / Google TV) over a live stream that is always fullscreen. Directional input moves focus; it never changes channel on its own.
+
+| state \ input | `left` | `right` | `up` | `down` | `select` | `back` | `play_pause` | `tap_surface` | `idle` |
+|---|---|---|---|---|---|---|---|---|---|
+| `hidden` | `reveal` | `reveal` | `reveal` | `reveal` | `reveal` | `exit` | `toggle_play` | `reveal` | `ignore` |
+| `overlay` | `focus_row` | `focus_row` | `focus_row` | `focus_row` | `activate` | `hide` | `toggle_play` | `ignore` | `hide` |
+| `page` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` |
+
+**Surface `desktop`** — Pointer plus keyboard on the web while the Live TV host is fullscreen or focused. A keyboard user has no focus ring to preview with, so vertical tunes directly.
+
+| state \ input | `left` | `right` | `up` | `down` | `select` | `back` | `play_pause` | `tap_surface` | `idle` |
+|---|---|---|---|---|---|---|---|---|---|
+| `hidden` | `strip_prev` | `strip_next` | `channel_up` | `channel_down` | `ignore` | `exit` | `toggle_play` | `reveal` | `ignore` |
+| `overlay` | `strip_prev` | `strip_next` | `channel_up` | `channel_down` | `tune` | `exit` | `toggle_play` | `ignore` | `hide` |
+| `page` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `toggle_play` | `ignore` | `ignore` |
+
+**Surface `touch`** — iPhone/iPad and Android phones/tablets. Focus states do not apply; tapping the picture is the whole contract.
+
+| state \ input | `left` | `right` | `up` | `down` | `select` | `back` | `play_pause` | `tap_surface` | `idle` |
+|---|---|---|---|---|---|---|---|---|---|
+| `hidden` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `exit` | `ignore` | `toggle_chrome` | `ignore` |
+| `overlay` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `exit` | `ignore` | `toggle_chrome` | `hide` |
+| `page` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` |
+
+| Outcome | What the client does |
+|---|---|
+| `reveal` | Draw the overlay and restart the auto-hide timer. Nothing else happens — the press that reveals never also acts. |
+| `hide` | Hide the overlay and drop focus back to the picture. |
+| `focus_row` | Move focus within the overlay: vertically through the channel list, horizontally across the control row. |
+| `activate` | Activate the focused overlay control. On a focused channel row that means tune it. |
+| `strip_prev` | Move the neighbour strip's preview one channel earlier and reveal the overlay if it was hidden. Previewing never opens a tuner. |
+| `strip_next` | Move the neighbour strip's preview one channel later and reveal the overlay if it was hidden. |
+| `tune` | Open the previewed channel: release the current lease and start one session on the new channel. |
+| `channel_up` | Tune the previous channel in the visible order directly, subject to the 350 ms coalescing rule. |
+| `channel_down` | Tune the next channel in the visible order directly, subject to the 350 ms coalescing rule. |
+| `toggle_play` | Pause or resume the live picture. Pausing does not rewind and does not hold the tuner past the no-progress release. |
+| `toggle_chrome` | Show the overlay if it is hidden, hide it if it is shown. |
+| `exit` | Leave the presentation: exit fullscreen on the desktop, leave the live surface on a television. |
+| `ignore` | Do nothing. The input belongs to another owner in this state. |
+
+| Timing | Value |
+|---|---|
+| `hide_after_ms` | 4000 |
+| `hidden_only_while_playing` | true |
+| `channel_coalesce_ms` | 350 |
+| `preview_auto_commit_ms` | none |
+
+**Hotkeys** (desktop, only while the live host is fullscreen or focused): `f` fullscreen · `m` mute · `p` picture_in_picture · `g` guide_sheet · `escape` exit.
+
+- This table is the finite player's ten-foot/desktop/touch tables with `skip`, `preview`, `commit` and every timeline state removed, and `channel` added. A live stream has no timeline, so no row here seeks.
+- A directional press on a hidden ten-foot overlay only reveals it. This is the 2026-09-02 ruling applied unchanged.
+- The channel list inside the overlay is preview-then-commit on the ten-foot surface: move focus, `select` tunes, `back` hides.
+- `ten-foot`: A television never shows an inline player, so `page` exists only to keep the three surfaces one shape; every row in it is `ignore`.
+- `desktop`: `up`/`down` tune directly because a keyboard user has no focus ring to preview with and the mouse already drives the neighbour strip. On the ten-foot surface the same keys only move focus — the 2026-09-02 ruling, unchanged.
+- `touch`: `play_pause` is `ignore`: a phone has no hardware transport key over this surface and the tap answer is the whole contract.
+
+<!-- contract:live:end -->
+
+---
+
 ## 5. How a client implements it
 
 Three layers, and the middle one is the only one allowed to think.

@@ -347,6 +347,20 @@ feature needs SiliconDust cloud authorization, so plurx neither stores nor
 logs it. Full tuner URLs and session capabilities are replaced by route-shaped
 redactions in traces and support bundles.
 
+**Amended 2026-09-07 by one clause, for the programme guide**
+([LIVE-TV-GUIDE-AND-UI-PLAN.md](LIVE-TV-GUIDE-AND-UI-PLAN.md) §2.2). The
+HDHomeRun guide service authenticates with the device's own `DeviceAuth`, so
+one reader now exists: **the owner reads `DeviceAuth` from `discover.json` at
+the moment of each guide refresh, sends it to the pinned guide host over TLS,
+and forgets it.** Everything that made the original rule safe is kept
+unchanged — it is never written to the store, never in a snapshot, never in an
+internal relay body, never in a log line, a metric label, an error message or
+an API response, and it never crosses to a non-owner node; the guide *result*
+is relayed, not the credential. Reading it fresh on every refresh is also why
+the guide keeps working after Silicondust rotates it. Nothing else about the
+paragraph above changes: capabilities and tuner URLs still never cross the
+browser boundary, and no other feature may read the field.
+
 The public channel list and admin readiness response may include device id,
 model, firmware, tuner count, and friendly name. These are operator facts, not
 credentials.
@@ -601,9 +615,14 @@ signal, or channel authorization—not permission to raise the cap blindly.
 
 - **No DRM playback or circumvention.** plurx has no licensed protected-media
   path, and a retry loop does not create one.
-- **No DVR, recording schedule, pause/rewind buffer, EPG, or guide-data
-  subscription.** `lineup.json` is a channel list, not a program guide. Each is
-  a separate storage/product contract.
+- **No DVR, recording schedule, or pause/rewind buffer.** Each is a separate
+  storage and product contract that this tuner contract deliberately avoids.
+  **Amended 2026-09-07:** the "no EPG" half of this non-goal is lifted and
+  scoped by [LIVE-TV-GUIDE-AND-UI-PLAN.md](LIVE-TV-GUIDE-AND-UI-PLAN.md).
+  `lineup.json` is still a channel list and never a programme guide; the guide
+  is a separate, read-only feed the tuner contract never depends on, off until
+  an admin turns it on, and it adds no recording, no reminders and no "tune at
+  9" — a future programme has a details popover and nothing else.
 - **No channel scan control.** Scan from the HDHomeRun application; plurx reads
   the resulting lineup and cannot strand the household in a retune.
 - **No same-multiplex sharing.** One HTTP GET is one tuner lease. Sharing needs
