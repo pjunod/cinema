@@ -365,15 +365,54 @@ a settled contract instead of three guesses.
   draw: `Committed` is the server's transaction, `Switched` is the client's
   display. A client that commits and then fails to present must be
   distinguishable from one that succeeded, and today it is not.
-- **The drain seam is `settle_activation_predecessor`**
-  (`http/hls.rs:3083`), already bounded by
-  `PREDECESSOR_PROJECTION_FAST_WINDOW` (5 s) with
-  `PREDECESSOR_PROJECTION_RETRY_DELAY` behind it, and already able to report
-  `PredecessorAcknowledged`. What it is missing is not the bound but the
-  trigger: it runs from *activation*, so a prepared transaction that reused it
-  would retire the predecessor at commit, before the viewer has seen a frame
-  of the successor. Gate it on `Switched` and the existing bound becomes the
-  drain §4 asks for, rather than a second mechanism competing with it.
+- **The predecessor is retired by the commit's own SQL, and that is the real
+  obstacle.** `commit_media_session_preparation`
+  (`plurx-core/src/store/sqlite/sessions.rs:2084`, replicated twin at
+  `hiqlite_sessions.rs:2352`) sets the predecessor to `state = 'ended',
+  terminal_reason = 'superseded'`, deletes its `cache_consumer_pins` and
+  collapses its `job_leases` — **inside the same transaction that advances the
+  pointer**. So "retire the predecessor after the client switches" is not a
+  new directive layered on top; it requires that transaction to stop ending
+  the predecessor, and something else to end it later.
+
+  This was attempted on 2026-09-07 as a `Switched` acknowledgement state plus
+  a `ReleasePredecessor` directive, and **withdrawn before commit** because it
+  released nothing. Recorded so it is not attempted the same way again:
+
+  - The commit SQL above already did the retirement, so the new directive
+    changed no behaviour at all while its doc comments claimed it did.
+  - The guard was inverted. `PreparationSlot::Committing` means the CAS has
+    *not* yet decided; after a successful commit `settle_preparation` sets the
+    slot to `Empty`, so the directive was unreachable in production and the
+    test passed only by parking the slot artificially.
+  - A post-commit `Switched` cannot arrive anyway: the predecessor route is
+    `ended`, so `control_inner` answers 410 before the actor sees it, and the
+    successor's actor has no `prepared_action` to bind it to.
+  - `AcknowledgementState` has no `#[serde(other)]` fallback and
+    `PROTOCOL_V1` was not bumped, so an older owner rejects `"switched"`,
+    returns an empty 400, and the ingress maps that to a 503 with
+    `retry_after_ms` — a client wedged in a retry loop that never converges.
+    Whatever adds a state needs the negotiation `supported_actions` already
+    does for the server-to-client direction.
+  - The `demand == End` fence at `playback_control.rs:278` covers `Committed`
+    only, and a new terminal-ish state needs adding there.
+  - `first_frame_unix_ms` is required on `Committed`, which by this design is
+    the state where nothing has reached the screen yet. It belongs on the
+    state that means a frame was displayed.
+
+  So the order is: change what the commit transaction retires **first**, then
+  add the client state that gates the later retirement. Adding the state first
+  produces a protocol change that reads as progress and does nothing.
+
+- **The bounded-drain machinery already exists at
+  `settle_activation_predecessor`**
+  (`http/hls.rs:3083`), bounded by `PREDECESSOR_PROJECTION_FAST_WINDOW` (5 s)
+  with `PREDECESSOR_PROJECTION_RETRY_DELAY` behind it, and able to report
+  `PredecessorAcknowledged`. It has exactly one caller,
+  `activate_session_under_authority` (`:2891`) — the activation path — so it
+  is not currently reachable from a prepared transaction at all. It is the
+  right machinery to reuse once the commit stops doing the retirement itself;
+  it is not a seam that can simply be gated differently today.
 - **`activate_media_session` must stay out of this path.** It reaps the
   predecessor and advances the pointer unconditionally;
   `a_prepared_transition_stages_a_successor_and_leaves_the_pointer_alone`
