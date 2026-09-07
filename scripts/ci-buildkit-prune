@@ -40,6 +40,44 @@ read_disk() {
   df -Pk "$docker_root" | awk 'NR == 2 { print $2, $4 }'
 }
 
+# buildx changed what `Size` means in its JSON. It was a byte count; on 0.30.1,
+# which is what this fleet runs, it is a human-readable string --
+# `"Size":"8.192kB"` -- and the old byte-count check rejected every record with
+# `BuildKit returned an invalid disk-usage size`, which is how the arm64 package
+# lane failed after its build had succeeded. Nothing caught it because this
+# script had never run: the step is skipped unless the builder is named, and
+# until now no builder ever was.
+#
+# So both spellings are read, and the units are buildx's own -- decimal for kB
+# through TB, binary only for the explicit KiB/MiB/GiB forms.
+size_to_bytes() {
+  local raw factor value
+  raw=$1
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$raw"
+    return
+  fi
+  [[ "$raw" =~ ^([0-9]+(\.[0-9]+)?)[[:space:]]*([kKMGTP]?i?B)$ ]] \
+    || die "BuildKit returned an invalid disk-usage size: $raw"
+  value=${BASH_REMATCH[1]}
+  case "${BASH_REMATCH[3]}" in
+    B) factor=1 ;;
+    kB|KB) factor=1000 ;;
+    MB) factor=1000000 ;;
+    GB) factor=1000000000 ;;
+    TB) factor=1000000000000 ;;
+    PB) factor=1000000000000000 ;;
+    KiB) factor=1024 ;;
+    MiB) factor=1048576 ;;
+    GiB) factor=1073741824 ;;
+    TiB) factor=1099511627776 ;;
+    PiB) factor=1125899906842624 ;;
+    *) die "BuildKit returned an unrecognized disk-usage unit: $raw" ;;
+  esac
+  awk -v value="$value" -v factor="$factor" \
+    'BEGIN { printf "%.0f", (value * factor) }'
+}
+
 read_builder_bytes() {
   local line size usage_json
   local total=0
@@ -49,10 +87,10 @@ read_builder_bytes() {
     [ -n "$line" ] || continue
     case "$line" in
       *'"Size":"'*) size=${line#*'"Size":"'}; size=${size%%\"*} ;;
+      *'"Size":'*) size=${line#*'"Size":'}; size=${size%%,*}; size=${size%\}} ;;
       *) die "BuildKit returned an unrecognized disk-usage record" ;;
     esac
-    [[ "$size" =~ ^[0-9]+$ ]] \
-      || die "BuildKit returned an invalid disk-usage size"
+    size=$(size_to_bytes "$size")
     total=$((total + size))
   done <<< "$usage_json"
   echo "$total"

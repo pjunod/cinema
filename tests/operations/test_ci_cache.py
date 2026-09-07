@@ -597,6 +597,97 @@ class CiCacheContractCase(unittest.TestCase):
             self.assertNotEqual(unsafe.returncode, 0)
             self.assertIn("unsafe builder name", unsafe.stderr)
 
+    def test_buildkit_usage_reads_the_units_buildx_actually_prints(self):
+        """buildx 0.30.1 prints `"Size":"8.192kB"`, not a byte count.
+
+        The parser wanted digits, so every record was rejected with `BuildKit
+        returned an invalid disk-usage size` and the arm64 package lane failed
+        after its build had succeeded. Both spellings are read now, and the
+        totals still have to decide the budget correctly.
+        """
+        script = ROOT / "scripts/ci-buildkit-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            docker_root = fixture / "docker-root"
+            docker_root.mkdir()
+            fake_bin = fixture / "bin"
+            fake_bin.mkdir()
+            marker = fixture / "pruned"
+            log = fixture / "docker.log"
+
+            fake_docker = fake_bin / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = info ]; then\n"
+                "  printf '%s\\n' \"$DOCKER_ROOT_FIXTURE\"\n"
+                "elif [ \"$1 $2\" = 'buildx du' ]; then\n"
+                "  if [ -f \"$DOCKER_PRUNED\" ]; then printf '%s\\n' "
+                "\"$DU_AFTER\"; else printf '%s\\n' \"$DU_BEFORE\"; fi\n"
+                "elif [ \"$1 $2\" = 'buildx prune' ]; then\n"
+                "  printf '%s\\n' \"$@\" > \"$DOCKER_LOG\"\n"
+                "  touch \"$DOCKER_PRUNED\"\n"
+                "else\n"
+                "  exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            fake_df = fake_bin / "df"
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted'\n"
+                "printf 'fixture 1073741824 1 838860800 1%% /fixture\\n'\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
+
+            summary = fixture / "summary.md"
+            record = '{{"Description":"[build 2/4]","Size":"{0}","Type":"regular"}}'
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DOCKER_LOG": str(log),
+                    "DOCKER_PRUNED": str(marker),
+                    "DOCKER_ROOT_FIXTURE": str(docker_root),
+                    # 30 GB + 31 GB decimal = 61e9 bytes, over a 50 GiB budget.
+                    "DU_BEFORE": "\n".join(
+                        (record.format("30GB"), record.format("31GB"))
+                    ),
+                    # 8.192kB is verbatim what buildx 0.30.1 printed on nynuc.
+                    "DU_AFTER": "\n".join(
+                        (record.format("20GB"), record.format("8.192kB"))
+                    ),
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                }
+            )
+
+            result = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = summary.read_text()
+            # 61e9 bytes is 58174 MiB; 20000008192 is 19073 MiB.
+            self.assertIn("before: 58174 MiB cache", report)
+            self.assertIn("after: 19073 MiB cache", report)
+
+            # And a builder still over budget in those units still fails.
+            marker.unlink()
+            environment["DU_AFTER"] = record.format("60GB")
+            failed = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("remains over", failed.stderr)
+
     def test_buildkit_budget_holds_when_the_docker_root_is_unreadable(self):
         """The runner can talk to the daemon and still not enter its directory.
 
