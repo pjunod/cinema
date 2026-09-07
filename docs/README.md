@@ -30,6 +30,7 @@ row and a doc's own `**Status:**` header disagree, the doc wins.
 | How do I run it, and what does this output mean? | [OPERATIONS.md](OPERATIONS.md) |
 | What do I type? | [CHEATSHEET.md](CHEATSHEET.md) |
 | How is it built, and why that way? | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| What endpoint do I call, and what authorizes it? | [API.md](API.md) |
 | How does a file become a stream? | [PLAYBACK.md](PLAYBACK.md) |
 | Why is this title playing badly? | [PLAYBACK-TESTING.md](PLAYBACK-TESTING.md), then [streaming/](streaming/) |
 | Why is a Dolby Vision title arriving as HDR10? | [streaming/DV-DELIVERY-FINDINGS.md](streaming/DV-DELIVERY-FINDINGS.md) |
@@ -50,6 +51,7 @@ Maintained documents describing the current system. Everything here is
 | File | The question it answers |
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How plurx is built, and why — the diagrams and the founding decisions. |
+| [API.md](API.md) | Every HTTP endpoint, the credential it takes, and what comes back. There is no OpenAPI document; this is the specification. |
 | [FEATURES.md](FEATURES.md) | Everything plurx does, exhaustively, including what it deliberately refuses to do. |
 | [OPERATIONS.md](OPERATIONS.md) | Running it day to day, and what every output means. |
 | [CHEATSHEET.md](CHEATSHEET.md) | What to type, in what order. |
