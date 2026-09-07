@@ -14,8 +14,16 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). Every path
-below is absolute; the native API is the only one under a version prefix.
+One binary serves everything on one port (`:32400` by default). plurx has 169
+routes across the four surfaces below. Every path here is absolute; the native
+API is the only one under a version prefix, and §7-§18 state that prefix once
+per section rather than repeating it in every row.
+
+A test keeps that number and this inventory honest:
+`tests/operations/test_api_doc_routes.py` parses the router and fails the
+build when a route registered there has no entry here, when a path named here
+is not a route and is not listed in §23 as deliberately absent, or when the
+count above stops matching.
 
 ---
 
@@ -2452,11 +2460,11 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/api/v1/internal/media/shared-cache-canary` | 1 KiB | Proves shared-cache identity and generation |
 | GET | `/internal/media/fragment-index/{cache_key}` | — | Streams the verified local fragment index |
 | POST | `/_internal/v1/live-tv/snapshot` | 16 KiB | Tuner readiness and lineup for the current generation |
-| POST | `/_internal/v1/live-tv/start` · `/activate` | 16 KiB | Starts and activates a tuner session on the owner |
+| POST | `/_internal/v1/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
-| POST | `/_internal/v1/live-tv/stop` · `/drain` | 16 KiB | Releases a capability; drains below a generation |
-| POST | `/internal/cluster/media/sessions/start` · `/activate` | 96 / 128 KiB | Starts and confirms a remote media session |
-| POST | `/internal/cluster/media/sessions/abort` · `/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
+| POST | `/_internal/v1/live-tv/stop`, `/_internal/v1/live-tv/drain` | 16 KiB | Releases a capability; drains below a generation |
+| POST | `/internal/cluster/media/sessions/start`, `/internal/cluster/media/sessions/activate` | 96 / 128 KiB | Starts and confirms a remote media session |
+| POST | `/internal/cluster/media/sessions/abort`, `/internal/cluster/media/sessions/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
 | POST | `/internal/cluster/media/sessions/control` | 20 KiB | Relays one playback-control exchange |
 
 The five path prefixes are historical, not a versioning scheme. In particular,
@@ -2478,7 +2486,7 @@ returns `learner_route_ineligible` (§3.2).
 | GET | `/assets/hls.min.js` | none | `public, max-age=604800` |
 | GET | `/assets/{cluster-panel,playback-policy,playback-control,live-tv,reader}.js` | none | `no-cache` |
 | GET | `/assets/reader.css` | none | `no-cache` |
-| GET | `/connect.svg?origin=` | none | QR code of the server origin. Refuses anything that is not a bare `http`/`https` origin, and carries no credential |
+| GET | `/connect.svg` | none | QR code of the server origin, taken from `?origin=`. Refuses anything that is not a bare `http`/`https` origin, and carries no credential |
 | GET | `/manifest.webmanifest` | none | `public, max-age=86400` |
 | GET | `/icons/{file}` | none | An allow-list of exactly four PNGs; anything else 404s |
 | GET | `/download/plurx-android.apk` | none | The sideloadable APK |
