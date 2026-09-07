@@ -597,6 +597,93 @@ class CiCacheContractCase(unittest.TestCase):
             self.assertNotEqual(unsafe.returncode, 0)
             self.assertIn("unsafe builder name", unsafe.stderr)
 
+    def test_buildkit_budget_holds_when_the_docker_root_is_unreadable(self):
+        """The runner can talk to the daemon and still not enter its directory.
+
+        `/var/lib/docker` is root:root 0710 on a stock engine, so a runner in
+        the `docker` group cannot `cd` into it. `gha-mbp-linux-arm-01` failed
+        the arm64 package lane on exactly that, after its build had already
+        succeeded. The budget does not need the filesystem — only the reserve
+        does — so the budget is still enforced and the reserve is reported as
+        unmeasured rather than guessed at or made fatal.
+        """
+        script = ROOT / "scripts/ci-buildkit-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            fixture = Path(raw_directory)
+            fake_bin = fixture / "bin"
+            fake_bin.mkdir()
+            marker = fixture / "pruned"
+            log = fixture / "docker.log"
+
+            fake_docker = fake_bin / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = info ]; then\n"
+                "  printf '%s\\n' \"$DOCKER_ROOT_FIXTURE\"\n"
+                "elif [ \"$1 $2\" = 'buildx du' ]; then\n"
+                "  if [ -f \"$DOCKER_PRUNED\" ]; then size=$DU_AFTER_BYTES; "
+                "else size=$DU_BEFORE_BYTES; fi\n"
+                "  printf '{\"Size\":\"%s\"}\\n' \"$size\"\n"
+                "elif [ \"$1 $2\" = 'buildx prune' ]; then\n"
+                "  printf '%s\\n' \"$@\" > \"$DOCKER_LOG\"\n"
+                "  touch \"$DOCKER_PRUNED\"\n"
+                "else\n"
+                "  exit 97\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+
+            summary = fixture / "summary.md"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DOCKER_LOG": str(log),
+                    "DOCKER_PRUNED": str(marker),
+                    # A path this process cannot enter, exactly as the runner
+                    # cannot enter the real one.
+                    "DOCKER_ROOT_FIXTURE": str(fixture / "unreadable/docker"),
+                    "DU_AFTER_BYTES": str(40 * 1024**3),
+                    "DU_BEFORE_BYTES": str(60 * 1024**3),
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                }
+            )
+
+            result = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            arguments = log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--max-used-space", arguments)
+            self.assertEqual(
+                arguments[arguments.index("--max-used-space") + 1],
+                str(50 * 1024**3),
+            )
+            # No reserve, because no reserve could be measured. Passing a
+            # guessed one would be worse than passing none.
+            self.assertNotIn("--min-free-space", arguments)
+            report = summary.read_text()
+            self.assertIn("not enforced", report)
+            self.assertIn("not readable by this user", report)
+
+            # The budget still discriminates: a builder that stays over it
+            # fails, unreadable filesystem or not.
+            marker.unlink()
+            environment["DU_AFTER_BYTES"] = str(60 * 1024**3)
+            failed = subprocess.run(
+                [str(script), "plurx-runner-01", "50"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("remains over", failed.stderr)
+
     def test_external_cargo_targets_reach_browser_harnesses(self):
         ui = (ROOT / "scripts/ui-baseline").read_text(encoding="utf-8")
         playback = (ROOT / "scripts/playback-lab").read_text(encoding="utf-8")

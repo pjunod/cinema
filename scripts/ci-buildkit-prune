@@ -20,8 +20,21 @@ canonical_directory() {
 
 docker_root_raw=$(docker info --format '{{.DockerRootDir}}') \
   || die "cannot read the Docker root directory"
-docker_root=$(canonical_directory "$docker_root_raw") \
-  || die "cannot resolve Docker root directory: $docker_root_raw"
+# The Docker root is root:root 0710 on a stock engine, so a runner that is in
+# the `docker` group can talk to the daemon and still not enter its directory.
+# `gha-mbp-linux-arm-01` proved it: `cannot resolve Docker root directory:
+# /var/lib/docker`, and the package lane failed after its build had succeeded.
+#
+# Failing there would be the wrong trade. The budget is the bound that matters
+# and BuildKit enforces it without anyone reading the filesystem; only the
+# free-space reserve needs `df`, and a reserve that cannot be measured is
+# reported as unmeasured rather than guessed or fatal.
+if docker_root=$(canonical_directory "$docker_root_raw"); then
+  filesystem_readable=true
+else
+  filesystem_readable=false
+  docker_root=$docker_root_raw
+fi
 
 read_disk() {
   df -Pk "$docker_root" | awk 'NR == 2 { print $2, $4 }'
@@ -45,11 +58,16 @@ read_builder_bytes() {
   echo "$total"
 }
 
-read -r filesystem_kb before_available_kb < <(read_disk)
-[[ "$filesystem_kb" =~ ^[1-9][0-9]*$ ]] \
-  || die "cannot determine the Docker filesystem size"
-[[ "$before_available_kb" =~ ^[0-9]+$ ]] \
-  || die "cannot determine free space on the Docker filesystem"
+if [ "$filesystem_readable" = true ]; then
+  read -r filesystem_kb before_available_kb < <(read_disk)
+  [[ "$filesystem_kb" =~ ^[1-9][0-9]*$ ]] \
+    || die "cannot determine the Docker filesystem size"
+  [[ "$before_available_kb" =~ ^[0-9]+$ ]] \
+    || die "cannot determine free space on the Docker filesystem"
+else
+  filesystem_kb=0
+  before_available_kb=0
+fi
 
 # The floor is a share of the filesystem, never a fixed size.
 #
@@ -79,13 +97,22 @@ floor_bytes=$((floor_kb * 1024))
 budget_bytes=$((budget_gb * 1024 * 1024 * 1024))
 before_bytes=$(read_builder_bytes)
 
-docker buildx prune --builder "$builder_name" --force \
-  --max-used-space "$budget_bytes" --min-free-space "$floor_bytes"
+if [ "$filesystem_readable" = true ]; then
+  docker buildx prune --builder "$builder_name" --force \
+    --max-used-space "$budget_bytes" --min-free-space "$floor_bytes"
+else
+  docker buildx prune --builder "$builder_name" --force \
+    --max-used-space "$budget_bytes"
+fi
 
 after_bytes=$(read_builder_bytes)
-read -r _ after_available_kb < <(read_disk)
-[[ "$after_available_kb" =~ ^[0-9]+$ ]] \
-  || die "cannot determine post-prune Docker filesystem free space"
+if [ "$filesystem_readable" = true ]; then
+  read -r _ after_available_kb < <(read_disk)
+  [[ "$after_available_kb" =~ ^[0-9]+$ ]] \
+    || die "cannot determine post-prune Docker filesystem free space"
+else
+  after_available_kb=0
+fi
 
 {
   echo "### BuildKit cache"
@@ -93,12 +120,20 @@ read -r _ after_available_kb < <(read_disk)
   echo "- builder: \`$builder_name\`"
   echo "- Docker root: \`$docker_root\`"
   echo "- budget: ${budget_gb} GiB"
-  echo "- filesystem floor: ${floor_kb} KiB"
-  echo "- before: $((before_bytes / 1024 / 1024)) MiB cache, $((before_available_kb / 1024 / 1024)) GiB free"
-  echo "- after: $((after_bytes / 1024 / 1024)) MiB cache, $((after_available_kb / 1024 / 1024)) GiB free"
+  if [ "$filesystem_readable" = true ]; then
+    echo "- filesystem floor: ${floor_kb} KiB"
+    echo "- before: $((before_bytes / 1024 / 1024)) MiB cache, $((before_available_kb / 1024 / 1024)) GiB free"
+    echo "- after: $((after_bytes / 1024 / 1024)) MiB cache, $((after_available_kb / 1024 / 1024)) GiB free"
+  else
+    echo "- filesystem floor: not enforced — the Docker root is not readable by this user"
+    echo "- before: $((before_bytes / 1024 / 1024)) MiB cache"
+    echo "- after: $((after_bytes / 1024 / 1024)) MiB cache"
+  fi
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 [ "$after_bytes" -le "$budget_bytes" ] \
   || die "BuildKit cache remains over its ${budget_gb} GiB budget"
-[ "$after_available_kb" -ge "$floor_kb" ] \
-  || die "Docker filesystem remains below its required reserve"
+if [ "$filesystem_readable" = true ]; then
+  [ "$after_available_kb" -ge "$floor_kb" ] \
+    || die "Docker filesystem remains below its required reserve"
+fi
