@@ -232,6 +232,7 @@ struct Observation {
     attempt_count: u64,
     connection_attempt_count: u64,
     retry_count: u64,
+    outbound_retry_pending: bool,
     last_error_category: Option<&'static str>,
     operation_owns_work: bool,
     outbound_connection_id: Option<u64>,
@@ -623,6 +624,7 @@ impl LocalSnapshotTransportStatus {
                     SnapshotTransportPhase::Connecting
                 };
                 observation.last_error_category = None;
+                observation.outbound_retry_pending = false;
                 observation.operation_owns_work = true;
                 observation.outbound_connection_id = Some(attempt.connection_id);
                 observation.outbound_connection_attempt_sequence =
@@ -645,7 +647,7 @@ impl LocalSnapshotTransportStatus {
             // OpenRaft actually issues the next chunk: the final failure in
             // its bounded retry loop has no following call and must not
             // manufacture an attempt that never happened.
-            if observation.phase == SnapshotTransportPhase::Retrying {
+            if std::mem::take(&mut observation.outbound_retry_pending) {
                 observation.attempt_count = observation.attempt_count.saturating_add(1);
                 observation.retry_count = observation.retry_count.saturating_add(1);
             }
@@ -692,6 +694,7 @@ impl LocalSnapshotTransportStatus {
             };
             observation.operation_owns_work = !done;
             observation.last_error_category = None;
+            observation.outbound_retry_pending = false;
             observation.last_update = now;
         });
     }
@@ -703,6 +706,7 @@ impl LocalSnapshotTransportStatus {
         deadline: Option<Instant>,
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
+            observation.outbound_retry_pending = true;
             observation.phase = SnapshotTransportPhase::Retrying;
             observation.deadline = deadline;
             observation.last_error_category = Some(category);
@@ -717,6 +721,7 @@ impl LocalSnapshotTransportStatus {
         category: &'static str,
     ) {
         self.update_outbound_attempt(attempt, |observation, now| {
+            observation.outbound_retry_pending = false;
             observation.phase = SnapshotTransportPhase::Failed;
             observation.deadline = None;
             if category != "snapshot_attempt_ended" || observation.last_error_category.is_none() {
@@ -1348,6 +1353,7 @@ fn empty_observation(now: Instant) -> Observation {
         attempt_count: 0,
         connection_attempt_count: 0,
         retry_count: 0,
+        outbound_retry_pending: false,
         last_error_category: None,
         operation_owns_work: false,
         outbound_connection_id: None,
@@ -2182,6 +2188,11 @@ mod tests {
         assert_eq!(eligible.attempt_count, 1);
         assert_eq!(eligible.retry_count, 0);
 
+        status.connecting_owned("sqlite", 2, 1, 2, 2);
+        assert_eq!(
+            status.snapshot().observations[0].phase,
+            SnapshotTransportPhase::Connecting
+        );
         status.outbound_chunk_owned(&attempt, 0, 64, false, deadline);
         let issued = &status.snapshot().observations[0];
         assert_eq!(issued.attempt_count, 2);
