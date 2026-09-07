@@ -1356,6 +1356,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "a process can exit long before its stderr reaches EOF",
             self.flat_status,
         )
+        # And the second finding, which came from building the first answer
+        # and watching it lose the race: the deadline decision commits before
+        # the receipt settles, so moving to the barrier is necessary and not
+        # sufficient. Three candidate resolutions are named; none is assumed.
+        self.assertIn("The second ordering finding", self.status)
+        self.assertIn("was reverted rather than merged", self.status)
+        # The case no in-session decision can help is stated rather than
+        # quietly folded into the ones that can.
+        self.assertIn("The live session is not recoverable", self.status)
         # The claim about what the epoch buys is the corrected one: it does not
         # bound a client that varies `playback_id`, because the ledger key
         # contains `playback_id`.

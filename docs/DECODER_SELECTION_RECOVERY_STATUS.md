@@ -2314,6 +2314,62 @@ So M5c's shape is:
    the mixed transition — the encoder and its hardware slot stay, the CPU
    reservation grows by the difference.
 
+### The second ordering finding: the deadline gets there first
+
+Moving the decision to the diagnostics barrier is necessary and not
+sufficient, and this was found by building it rather than by reading it.
+
+A first draft of M5c1 did exactly what the section above prescribes: it carried
+the action gate beside the settled receipt (rather than inside it, which would
+have rotated every health-qualified cache key on the node for a value no reader
+of a stored receipt consults), added a `SourceDecodeFailed` reason that is
+permanent, and committed it from `observe_producer_diagnostics_complete`. It
+compiles, it is coherent, and in production it would almost never fire.
+
+`commit_producer_decision_at` refuses when a decision is already pending, when
+a failure has been applied, or when the producer's completion state is anything
+but `Incomplete`. In the case this effort is named after, the producer drops
+every frame and therefore writes no segments — so the progress or startup
+deadline expires and commits a *timing* decision, or the process-exit
+observation commits one, well before the child's stderr reaches EOF and the
+receipt is settled. The decode-fault decision then arrives at a door that is
+already shut, and the viewer gets the same "try again" verdict they get today.
+
+So there are three candidate resolutions, and choosing between them is the
+first thing M5c has to do:
+
+1. **Act on the barrier, not on the settled receipt.** This is what §7.4's
+   ordering is for — the barrier arrives *before* the success facts precisely
+   so a decision can use it. It requires an action gate that is answerable at
+   latch time, and today's is not: `automatic_action_allowed` includes a
+   complete observation and an uncompressed log, which are facts about having
+   finished reading. Taking this route means splitting the gate into the part
+   that is knowable at latch (the triggering window matched a contract
+   qualified for this build, and that contract qualifies a windowed action) and
+   the part that is not, and justifying the split against §7.3 rather than
+   assuming it.
+2. **Let the settled fault relabel a decision that has not yet been applied.**
+   Narrower, but it introduces a second writer of a decision's reason and has
+   to answer what the executor does with a decision whose reason changed under
+   it.
+3. **Hold the timing decision when a fault has latched**, for a bounded wait,
+   and let the receipt settle. Smallest change to the vocabulary, but it delays
+   every faulted session's failure by the drain budget, and the drain budget
+   exists precisely because a stderr can outlive its process.
+
+None of these is obviously right, and the draft that assumed the question away
+was reverted rather than merged: a milestone that looks finished and fires in
+almost no real case is worse than an unstarted one, because the next person
+reads the tests as coverage.
+
+One case is out of scope for all three and should be said plainly: a producer
+that emits a *complete* playlist of corrupted segments reaches
+`ProducerCompletionState::Complete` legitimately, and no in-session decision
+can help a viewer who has already been served those bytes. That case is M3c's,
+and M3c already handles it — the artifact is refused, so the next request
+re-produces rather than re-serving. The live session is not recoverable and
+this document does not claim it is.
+
 ### What must not be assumed on the way
 
 The restriction is durable and applies to *every* later continuation, so the
