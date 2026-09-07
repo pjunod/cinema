@@ -707,7 +707,7 @@ pub(crate) struct DeliveryView {
     pub hold_reason: Option<String>,
     /// Why the producer stopped, when it stopped for a reason this server has
     /// named. `producer_state` says only `failed`; this says which of the
-    /// fourteen decisions that was, and therefore whether trying again could
+    /// fifteen decisions that was, and therefore whether trying again could
     /// ever work. Optional: an older peer relaying a response has no such
     /// field, and absence means "not classified here", never "healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1641,7 +1641,7 @@ pub(crate) enum ControlAction {
     },
     /// Production stopped for a reason that may not recur.
     ///
-    /// Twelve of the fourteen producer decisions are timing, process or
+    /// Twelve of the fifteen producer decisions are timing, process or
     /// executor facts. The client should try again on the server's own
     /// cadence rather than deciding for itself how hard to retry, which is
     /// what every client does today.
@@ -1996,6 +1996,9 @@ fn terminal_message(decision: ProducerDecisionReason) -> String {
         }
         ProducerDecisionReason::InvalidConfiguration => {
             "the requested delivery configuration is not a legal one"
+        }
+        ProducerDecisionReason::SourceDecodeFailed => {
+            "this source did not decode, and trying again will not change that"
         }
         // Only permanent decisions reach here today; a future permanent
         // variant without its own sentence gets the reason and no invention.
@@ -3898,14 +3901,15 @@ impl ProducerDecisionReason {
 
     /// Whether retrying this source, unchanged, can ever succeed.
     ///
-    /// Twelve of these fourteen reasons are timing, process, or executor
+    /// Twelve of these fifteen reasons are timing, process, or executor
     /// facts: the same file on the same pipeline may well work on the next
-    /// attempt. Two are verdicts about the source itself — this container
-    /// cannot be carried by this pipeline, or the recipe that was asked for is
-    /// not a legal one — and no amount of retrying changes either.
+    /// attempt. Three are verdicts about the source itself — this container
+    /// cannot be carried by this pipeline, the recipe that was asked for is
+    /// not a legal one, or the decoder's own diagnostics said the source did
+    /// not decode — and no amount of retrying changes any of them.
     ///
     /// The distinction is the whole reason a client cannot decide for itself.
-    /// `producer_state` flattens all fourteen to the word `failed`, so a
+    /// `producer_state` flattens all fifteen to the word `failed`, so a
     /// client seeing a failure has no way to tell "try again" from "this will
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
@@ -3913,6 +3917,30 @@ impl ProducerDecisionReason {
         matches!(
             self,
             Self::Unsupported | Self::InvalidConfiguration | Self::SourceDecodeFailed
+        )
+    }
+
+    /// Whether a qualified decode fault may replace this verdict.
+    ///
+    /// The four reasons that say *the producer stopped without producing*, and
+    /// nothing else. Each exclusion is deliberate:
+    ///
+    /// * `PartialSuccessExit` is reached only with a published frontier, so
+    ///   the source demonstrably decoded.
+    /// * `ReaderFailed` already names a more specific fault than "it did not
+    ///   decode", and trading it away tells the operator less.
+    /// * `FlowStopFailed`, `FlowResumeFailed`, `FlowStopDeadline`,
+    ///   `FlowResumeDeadline`, `InstallDeadline` and `ExecutorLost` are facts
+    ///   about this server, not about the file. Relabelling them would make a
+    ///   permanent claim about a source over an outage that will pass.
+    /// * The three permanent reasons already know at least as much.
+    fn yields_to_decode_evidence(self) -> bool {
+        matches!(
+            self,
+            Self::StartupDeadline
+                | Self::ProgressDeadline
+                | Self::ExitClassificationDeadline
+                | Self::ProcessExit
         )
     }
 
@@ -8397,37 +8425,11 @@ impl RollingControlActor {
         let decision_sequence = control.next_decision_sequence;
         control.next_decision_sequence = control.next_decision_sequence.saturating_add(1);
 
-        // A qualified fault replaces a timing verdict, and only a timing
-        // verdict.
-        //
-        // This is the seam the whole effort is named after. Every reason
-        // outside `is_permanent` tells the client the same thing — try again —
-        // and a source the decoder could not decode answers a retry with the
-        // identical failure, which is the reopen loop. The decoder's own
-        // diagnostics are the only evidence that distinguishes the two, and
-        // they arrive here as a latched fault.
-        //
-        // Two clauses, each load-bearing:
-        //
-        // * `action_qualified` is §7.3's gate, answered about the window that
-        //   latched rather than about the settled attempt, because the settle
-        //   happens at stderr EOF — after this decision. A producer that
-        //   decodes nothing writes no segments, so a timing verdict is always
-        //   already on its way. See `HealthAccumulator::latched_action_qualified`.
-        // * `!reason.is_permanent()` keeps a verdict that already knows more.
-        //   `Unsupported` says this pipeline cannot carry this source at all;
-        //   overwriting it with `SourceDecodeFailed` would trade a specific
-        //   answer for a general one and tell the operator less. The client
-        //   sees the same permanence either way, so there is nothing to gain.
-        //
-        // Overriding here rather than at the fault's own arrival is what makes
-        // it beat the timing verdict: the reason is rewritten inside the
-        // commit that the timing deadline triggered, so there is no race to
-        // lose. It is read below by `retry_eligibility.allows`, which is how a
-        // rewritten reason also cancels the retry it would otherwise have
-        // authorised.
-        if let Some((fault, records, plan_digest, action_qualified)) = latched_fault {
-            let overrides = action_qualified && !reason.is_permanent();
+        // §7.4: classifying an exit must observe every preceding health
+        // barrier, whatever the decision turns out to be. The record is
+        // unconditional; acting on it is not, and that happens on the failing
+        // branch below.
+        if let Some((fault, records, plan_digest, action_qualified)) = latched_fault.as_ref() {
             tracing::warn!(
                 producer_attempt = failed_attempt,
                 decision_sequence,
@@ -8436,12 +8438,8 @@ impl RollingControlActor {
                 plan = %plan_digest,
                 observed_reason = ?reason,
                 action_qualified,
-                overrides,
                 "producer decision observes a latched decode fault"
             );
-            if overrides {
-                reason = ProducerDecisionReason::SourceDecodeFailed;
-            }
         }
 
         let producer_media_published = control.producer_media_published;
@@ -8478,6 +8476,56 @@ impl RollingControlActor {
         } else {
             if matches!(&control.retry_state, PrepublicationRetryState::Available(_)) {
                 control.retry_state = PrepublicationRetryState::Consumed;
+            }
+            // A qualified decode fault names the verdict the client is about
+            // to be given — and only that one.
+            //
+            // This is the seam the effort is named after. A source the decoder
+            // could not decode answers a retry with the identical failure, and
+            // every reason outside `is_permanent` tells the client to retry,
+            // so the reopen loop is the default. The decoder's own diagnostics
+            // are the only evidence that separates "this attempt was unlucky"
+            // from "this source will never decode".
+            //
+            // Three things bound it, and each was a defect in the first draft:
+            //
+            // * **Only on the failing branch.** The reason on a `Retry` is not
+            //   private to the server: it reaches `DeliveryView`, and
+            //   `resolve_action` turns any permanent reason into
+            //   `ControlAction::Terminal`. Rewriting before the retry was
+            //   chosen told the client the source was dead while the server was
+            //   still bringing up its software fallback — which, on a source
+            //   the hardware decoder alone refused, would very likely have
+            //   played. `last_decision` is never cleared, so that was not a
+            //   race window but the rest of the session.
+            // * **Only when nothing was published.** `PartialSuccessExit` is
+            //   reached only after a completion probe found a published
+            //   frontier that fell short. A long title with one corrupt region
+            //   latches a fault, publishes most of itself and exits zero;
+            //   calling that permanent tears down a player that is still
+            //   holding good buffer.
+            // * **Only over a verdict that says the producer stopped without
+            //   producing.** Named rather than `!is_permanent()`, because that
+            //   test also swept up `ExecutorLost` and the flow and install
+            //   deadlines — facts about this server, not about the source —
+            //   and relabelled them as a permanent property of the file.
+            if !producer_media_published && reason.yields_to_decode_evidence() {
+                if let Some((fault, records, plan_digest, true)) = latched_fault.as_ref().map(
+                    |(fault, records, plan_digest, qualified)| {
+                        (*fault, *records, plan_digest.clone(), *qualified)
+                    },
+                ) {
+                    tracing::warn!(
+                        producer_attempt = failed_attempt,
+                        decision_sequence,
+                        fault = fault.name(),
+                        primary_error_records = records,
+                        plan = %plan_digest,
+                        replaced_reason = ?reason,
+                        "a qualified decode fault names this producer decision"
+                    );
+                    reason = ProducerDecisionReason::SourceDecodeFailed;
+                }
             }
             ProducerDecision::Fail {
                 decision_sequence,
@@ -24904,17 +24952,22 @@ mod tests {
         );
     }
 
-    /// A rewritten reason does not steal the server's own fallback.
+    /// A retry keeps its own reason, because the client is watching.
     ///
-    /// `SourceDecodeFailed` is permanent to a *client*: no reopen of this
-    /// session changes the answer. It is not permanent to the server, which
-    /// may still hold a validated recipe on a different pipeline — the
-    /// hardware-to-software fallback is exactly that, and a source one decoder
-    /// refuses may well decode on another. `AnyPrepublicationFailure` allows
-    /// it through for that reason, and the client never sees a decision the
-    /// retry consumes.
+    /// The reason on a `Retry` is not private to the server. It reaches
+    /// `DeliveryView::producer_decision`, and `resolve_action` turns any
+    /// permanent reason into `ControlAction::Terminal` — so a `Retry` carrying
+    /// `SourceDecodeFailed` tells the viewer the file is dead while the server
+    /// is still bringing up its software fallback, which on a source only the
+    /// hardware decoder refused would very likely have played. `last_decision`
+    /// is never cleared, so that is not a race window; it is the rest of the
+    /// session.
+    ///
+    /// The first draft of this milestone rewrote the reason before the retry
+    /// was chosen and shipped a test named for this property that asserted the
+    /// opposite of it. This is the assertion that draft needed.
     #[test]
-    fn a_qualified_fault_renames_the_reason_without_consuming_the_servers_fallback() {
+    fn a_retry_is_never_handed_a_permanent_reason_while_the_fallback_is_still_coming() {
         let started = Instant::now();
         let mut actor = registered_prepublication_actor(started);
         assert_eq!(
@@ -24927,15 +24980,109 @@ mod tests {
         assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
         let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
         assert!(actor.settle_due_deadlines_at(deadline).is_some());
+        let Some(decision) = actor.pending_decision.as_deref() else {
+            panic!("the startup deadline must commit a decision");
+        };
         assert!(
-            matches!(
-                actor.pending_decision.as_deref(),
-                Some(ProducerDecision::Retry {
-                    reason: ProducerDecisionReason::SourceDecodeFailed,
-                    ..
-                })
+            matches!(decision, ProducerDecision::Retry { .. }),
+            "a latched fault must not consume a fallback on another pipeline"
+        );
+        assert_eq!(
+            decision.reason(),
+            ProducerDecisionReason::StartupDeadline,
+            "the retry keeps the verdict that actually ended the attempt"
+        );
+        assert!(
+            !decision.reason().is_permanent(),
+            "a permanent reason on a retry reaches the client as Terminal"
+        );
+    }
+
+    /// A producer that published is a producer that decoded.
+    ///
+    /// Five contract-qualified decode errors inside two seconds is an ordinary
+    /// property of a slightly damaged source, not proof that nothing decoded.
+    /// A long title with one corrupt region latches a fault, skips the bad
+    /// GOPs, publishes most of itself and exits — and calling that permanent
+    /// tears down a player that is still holding good buffer for a title that
+    /// mostly plays.
+    #[test]
+    fn a_fault_on_a_producer_that_published_is_recorded_and_not_acted_on() {
+        let started = Instant::now();
+        let published_at = started + Duration::from_secs(1);
+        let exited_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-published", "recipe-m5c-published"),
             ),
-            "the fault names the reason; it does not cancel a fallback on another pipeline"
+            Ok(1)
+        );
+        assert!(actor
+            .authorize_response_publication_at(
+                published_at,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(1),
+                ),
+            )
+            .is_ok());
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exited_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                    observed_at: exited_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(actor.maybe_commit_producer_decision_at(exited_at));
+        let Some(decision) = actor.pending_decision.as_deref() else {
+            panic!("a non-zero exit must commit a decision");
+        };
+        assert_eq!(
+            decision.reason(),
+            ProducerDecisionReason::ProcessExit,
+            "published media is proof the source decoded; the fault stays a record"
+        );
+    }
+
+    /// The server's own outages are not verdicts about the file.
+    ///
+    /// `ExecutorLost` says this node lost the process that was doing the work.
+    /// Relabelling it `SourceDecodeFailed` because a fault happened to be
+    /// latched makes a permanent claim about a source over an outage that will
+    /// pass, and the client cannot recover from a permanent claim by trying
+    /// again. The same argument covers the flow and install deadlines, which
+    /// is why the gate is a named list rather than `!is_permanent()`.
+    #[test]
+    fn a_server_side_loss_is_never_relabelled_as_a_verdict_about_the_source() {
+        let started = Instant::now();
+        let lost_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-m5c-executor", "recipe-m5c-executor"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        actor.mark_executor_lost(lost_at);
+        let Some(decision) = actor.pending_decision.as_deref() else {
+            panic!("executor loss must commit a decision");
+        };
+        assert_eq!(
+            decision.reason(),
+            ProducerDecisionReason::ExecutorLost,
+            "a lost executor is a fact about this server, not about the file"
         );
     }
 
