@@ -13,6 +13,7 @@
 //! not by version (PERF-PLAN §5).
 
 mod decode;
+pub mod decoder_inventory;
 pub mod dvconvert;
 mod encoder;
 pub mod health;
@@ -21,15 +22,15 @@ mod pipeline;
 mod recipe;
 
 pub use decode::{
-    resolve_transcode, ArtifactQualification, AttemptRestrictions, CapabilityStatus, DecodeBackend,
-    DecodeCacheIdentity, DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity,
-    DecodeCatalogMetadata, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
-    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, DynamicRangeClass, FrameDomain,
-    FrameRate, FrameRateProvenance, OutputWidthRule, PlanError, PlanSourceBinding,
-    PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
-    StreamSelectionProvenance, SubtitleRendering, TranscodeMediaOptions, TranscodeRequest,
-    HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
-    UNQUALIFIED_ARTIFACT_NAMESPACE,
+    plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
+    CapabilityStatus, DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
+    DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
+    DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
+    DecodeSurfaceContract, DynamicRangeClass, FrameDomain, FrameRate, FrameRateProvenance,
+    OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract, Rational, ResolvedDecode,
+    ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering,
+    TranscodeMediaOptions, TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
+    RESOLVED_TRANSCODE_PLAN_VERSION, UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
     detect_encoders, detect_video_decoders, validate_quality_rate_control,

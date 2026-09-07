@@ -10383,6 +10383,14 @@ pub struct TranscodeManager {
     caps: EncoderCaps,
     /// Portable decoder names inventoried from this exact ffmpeg at boot.
     decoders: Vec<String>,
+    /// Which decoder this build was measured to select, per codec.
+    ///
+    /// Empty until the boot probe runs, and empty forever on a build whose
+    /// codecs cannot be probed. Read only by qualified planning: naming a
+    /// decoder changes an artifact's identity, and doing that for every node
+    /// on the strength of a boot probe would rotate an unqualified fleet's
+    /// cache for a value nothing yet enforces.
+    measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
     decode_facts: crate::decode_facts::DecodeFactCache,
@@ -10740,6 +10748,8 @@ impl TranscodeManager {
             rate_control_update: Mutex::new(()),
             caps,
             decoders: Vec::new(),
+            measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(
+            ),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
             #[cfg(test)]
@@ -10859,6 +10869,15 @@ impl TranscodeManager {
 
     pub fn with_decoders(mut self, decoders: Vec<String>) -> Self {
         self.decoders = decoders;
+        self
+    }
+
+    /// Install the boot measurement of which decoder this build selects.
+    pub fn with_measured_decoders(
+        mut self,
+        measured: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    ) -> Self {
+        self.measured_decoders = measured;
         self
     }
 
@@ -11536,6 +11555,8 @@ impl TranscodeManager {
             None,
         )
         .map_err(|error| error.to_string())?;
+        let qualification = self.artifact_qualification();
+        let qualifying = qualification.enforces_receipt();
         #[allow(unused_mut)]
         let mut decoders = self.decoders.clone();
         #[cfg(test)]
@@ -11549,23 +11570,33 @@ impl TranscodeManager {
             Vec::new(),
             decoders
                 .into_iter()
-                // Availability, not an implementation claim: `ffmpeg
-                // -decoders` lists codec families, and this node has measured
-                // nothing about which decoder FFmpeg will pick for one. Naming
-                // the family here would force `-c:v av1` where FFmpeg would
-                // otherwise choose `libdav1d`, and bake that slower choice into
-                // the artifact's identity. M3's qualified inventory is where an
-                // implementation gets measured and named.
+                // A measured name, or none — never the family. This node's
+                // advertised inventory is family names, and a family is not an
+                // implementation: naming `av1` here would force `-c:v av1`
+                // where FFmpeg would otherwise choose `libdav1d`, and bake
+                // that different, slower decoder into the artifact's identity.
+                //
+                // The measurement is read only under the qualified identity.
+                // Naming a decoder changes an artifact's name, so letting a
+                // boot probe do it for every node would rotate an unqualified
+                // fleet's whole cache in exchange for a value nothing there
+                // enforces. Under the qualified identity it is the point: a
+                // diagnostic contract is qualified against a *named* decoder,
+                // so a plan that names none can never be matched to one, and
+                // an attempt nothing can classify can never be certified.
                 .map(|codec| SoftwareDecoder {
+                    implementation: qualifying
+                        .then(|| self.measured_decoders.implementation(&codec))
+                        .flatten()
+                        .map(str::to_owned),
                     codec,
-                    implementation: None,
                 })
                 .collect(),
         )
         .map_err(|error| format!("decoder capability snapshot is invalid: {error}"))?;
         let compatibility = std::env::var("PLURX_HWDECODE").ok();
         let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
-            .qualifying_artifacts(self.artifact_qualification());
+            .qualifying_artifacts(qualification);
         transcode::resolve_transcode(
             &TranscodeRequest::new(encoder, TranscodeMediaOptions::from_options(file, options)),
             facts,
@@ -38704,5 +38735,126 @@ pub(crate) mod tests {
             .join(&lenient_hash[..2])
             .join(&lenient_hash)
             .exists());
+    }
+
+    /// A measured decoder name reaches the plan only under the qualified
+    /// identity, and it reaches it as the *implementation*, not the family.
+    ///
+    /// Both halves matter. Naming a decoder changes an artifact's name, so
+    /// doing it unconditionally would rotate every deployed node's cache for a
+    /// value nothing there enforces. Not doing it under the qualified identity
+    /// would be worse: a diagnostic contract is qualified against a named
+    /// decoder, so a plan that names none can never be matched to one, and an
+    /// attempt nothing can classify can never be certified — the qualified
+    /// namespace would be a key space in which nothing is ever qualified.
+    #[tokio::test]
+    async fn a_measured_decoder_names_the_plan_only_where_it_is_enforced() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+
+        // The case the inventory exists for, stated as a fixture: the family
+        // is one name and the decoder that runs is another.
+        let measured = MeasuredDecoders::from_measured(&[("hevc", "hevc_special")]);
+        let build = |qualification| {
+            let (mgr, work, cache) = cached_manager(&store);
+            let mgr = mgr.with_measured_decoders(measured.clone());
+            mgr.test_publish_artifact_qualification(qualification);
+            (mgr, work, cache)
+        };
+
+        let (unqualified, _w1, _c1) = build(ArtifactQualification::Unqualified);
+        let (qualified, _w2, _c2) = build(ArtifactQualification::HealthQualified);
+        let opts = unqualified.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+
+        let plain = unqualified
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("unqualified plan");
+        assert_eq!(
+            plain.decode().software_decoder(),
+            None,
+            "an unqualified plan must name no decoder, so no deployed cache moves"
+        );
+
+        let named = qualified
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("qualified plan");
+        assert_eq!(
+            named.decode().software_decoder(),
+            Some("hevc_special"),
+            "a qualified plan names the decoder that will actually run"
+        );
+
+        // And the name is what moved the artifact, not merely the identity
+        // the two plans were resolved under: a third plan, qualified with no
+        // measurement, names nothing and lands somewhere else again.
+        let (unmeasured, _w3, _c3) = {
+            let (mgr, work, cache) = cached_manager(&store);
+            mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+            (mgr, work, cache)
+        };
+        let anonymous = unmeasured
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("qualified plan with nothing measured");
+        assert_eq!(anonymous.decode().software_decoder(), None);
+        assert_ne!(
+            anonymous.plan_digest(),
+            named.plan_digest(),
+            "the measured decoder is what names the artifact, not the identity alone"
+        );
+        assert_ne!(plain.plan_digest(), named.plan_digest());
+    }
+
+    #[tokio::test]
+    async fn an_unmeasured_codec_leaves_even_a_qualified_plan_unnamed() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        // Measured, but for a different codec than this file's.
+        let mgr =
+            mgr.with_measured_decoders(MeasuredDecoders::from_measured(&[("av1", "libdav1d")]));
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        let opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let plan = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("qualified plan");
+        assert_eq!(
+            plan.decode().software_decoder(),
+            None,
+            "an unmeasured codec must stay unnamed rather than fall back to its family"
+        );
     }
 }

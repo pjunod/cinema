@@ -65,6 +65,8 @@ pub struct SystemInfo {
     pub encoders: EncoderCaps,
     /// Portable video decoders reported by this exact ffmpeg at boot.
     pub decoders: Vec<String>,
+    /// Which decoder that ffmpeg was measured to select for each of them.
+    pub measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
     /// Human label of the encoder the transcoder will actually pick.
     pub encoder_selected: String,
     /// What the tone-map probe found at boot: the graph this node uses, and
@@ -823,6 +825,7 @@ impl AppState {
                 system.tone_map.selected(),
             )
             .with_decoders(system.decoders.clone())
+            .with_measured_decoders(system.measured_decoders.clone())
             .with_decode_probe(system.decode_probe_identity.clone())
             .with_dv_strippable(system.dovi_rpu)
             .with_dv_convertible(system.dolby_vision_convert)

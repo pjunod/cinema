@@ -1438,14 +1438,27 @@ fn validated_capability_token(value: String, field: &'static str) -> Result<Stri
     Ok(value.to_ascii_lowercase())
 }
 
-fn validated_decoder_name(value: String) -> Result<String, PlanError> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > MAX_DECODER_NAME_BYTES
-        || !value
+/// Whether a plan could carry this decoder name.
+///
+/// Public because a name reaches a plan from outside this module — it is
+/// measured from a running FFmpeg — and the measurement has to be able to ask
+/// the same question the plan will ask. Two spellings of this rule is one
+/// spelling too many: a measurement that accepted a name the plan refuses does
+/// not merely leave that codec unnamed, it makes `DecodeCapabilities::new`
+/// reject the whole snapshot, so one odd name would refuse every plan on the
+/// node including the codecs that measured fine.
+pub fn plan_can_name_decoder(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty()
+        && name.len() <= MAX_DECODER_NAME_BYTES
+        && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
+}
+
+fn validated_decoder_name(value: String) -> Result<String, PlanError> {
+    let value = value.trim();
+    if !plan_can_name_decoder(value) {
         return Err(PlanError::InvalidSoftwareDecoder);
     }
     Ok(value.to_owned())

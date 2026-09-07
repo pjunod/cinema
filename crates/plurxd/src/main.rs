@@ -1855,6 +1855,20 @@ async fn probe_system(
     // Detect available hardware encoders once at startup.
     let encoder_caps = plurx_core::transcode::detect_encoders(&ffmpeg).await;
     let decoders = plurx_core::transcode::detect_video_decoders(&ffmpeg).await;
+    // Which decoder this build actually selects for each of those families.
+    // Read only by qualified planning, but measured unconditionally: it is a
+    // handful of fractional-second probes, and an operator deciding whether to
+    // enable qualification needs to see what this node measured before they
+    // decide, not after.
+    let measured_decoders = plurx_core::transcode::decoder_inventory::measure_selected_decoders(
+        &ffmpeg,
+        &decoders,
+        transcode_dir,
+    )
+    .await;
+    for (codec, decoder) in measured_decoders.measured_codecs() {
+        tracing::info!(%codec, %decoder, "measured the decoder this ffmpeg selects");
+    }
 
     let hwaccel_pref = resolve_hwaccel_pref(store).await?;
     let probe_pref = probe_preference(&hwaccel_pref);
@@ -1894,6 +1908,7 @@ async fn probe_system(
         },
         encoder_selected,
         decoders,
+        measured_decoders,
         tone_map,
         dv_disk: crate::dv_disk::probe_capabilities().await,
     };
@@ -1922,6 +1937,7 @@ struct Measured {
     hdr10_passthrough_qsv: bool,
     encoder_selected: String,
     decoders: Vec<String>,
+    measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
     tone_map: pipeprobe::PipelineReport,
     dv_disk: crate::dv_disk::DvDiskCapabilities,
 }
@@ -1950,6 +1966,7 @@ fn system_info(
         hwaccel_pref,
         encoders,
         decoders: measured.decoders,
+        measured_decoders: measured.measured_decoders,
         encoder_selected: measured.encoder_selected,
         tone_map: measured.tone_map,
         pacing: measured.pacing,
@@ -5119,6 +5136,8 @@ mod startup_tests {
                 ffmpeg_version: Some("ffmpeg version 7.1.1".to_owned()),
                 ffprobe_build_digest: Some("a".repeat(64)),
                 decode_probe_identity: None,
+                measured_decoders:
+                    plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(),
                 pacing: crate::ffmpeg::PacingCaps {
                     readrate: true,
                     initial_burst: true,

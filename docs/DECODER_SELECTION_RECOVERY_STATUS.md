@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3c4 candidate; M0–M3c3, M4 and M5a merged into the effort ·
+**Status:** M3d candidate; M0–M3c4, M4 and M5a merged into the effort ·
 **Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M3c4 task base:** effort head
-`b602b9f2add7c14861265f7d384c1d9910b0c742`
+`effort/decoder-selection-recovery` · **M3d task base:** effort head
+`86647b37cb9e91d3c043f3e3a0ef4fb5330ef34e`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,8 +20,8 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3c4 — the receipt contract, enforced |
-| Task branch | `codex/decoder-selection-m3c4`, based on effort head `b602b9f2` |
+| Milestone | M3d — the qualified decoder inventory |
+| Task branch | `codex/decoder-selection-m3d`, based on effort head `86647b37` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
@@ -38,7 +38,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a–M3c3 merged; M3c4 candidate; M3c5 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 enforces the receipt contract under that identity. Nothing selects it in production yet; the operator control and the paths that cannot yet publish a manifest are M3c5 |
+| M3 · owned observation and health receipts | M3a–M3c4 merged; M3d candidate; M3c5 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d measures which decoder the running build actually selects, without which no attempt could ever be classified and the qualified namespace could hold nothing. Nothing selects it in production yet; the operator control and the paths that cannot yet publish a manifest are M3c5 |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -1374,6 +1374,141 @@ adoption keeping this pass's parts' receipt and refusing another assembly's,
 and a real ffmpeg production refused-and-unclaimed under one identity and kept
 under the other. `make lint`, `make validation-lint` and `make history-check`
 clean; the rolling-producer ownership ledger is unchanged.
+
+## M3d working tree — the qualified decoder inventory
+
+Every milestone so far has built the machinery to certify a decode, and none of
+it could ever fire, for one reason: no production plan names its decoder.
+`resolve_movie_plan_with_facts` built its capability inventory with
+`implementation: None` for every codec, `DiagnosticObservation::resolve`
+refuses a grammar to a plan that names no decoder, and a contract is qualified
+against a *named* decoder. So the chain ended before it started — the qualified
+artifact namespace would have been a key space in which nothing could ever be
+qualified.
+
+This measures it.
+
+### Why it has to be measured
+
+A codec family is not a decoder. `ffmpeg -decoders` lists both — `av1` beside
+`libdav1d`, `libaom-av1` and `av1_cuvid` — and this node's *advertised*
+inventory keeps only the family names, because a family is what a container
+reports and what a queue row can require. Which decoder FFmpeg then picks for
+that family is a property of the build, and nothing but a measurement says
+which. That is not hypothetical: probing the FFmpeg on the qualifying host
+measured
+
+| codec | decoder selected |
+|---|---|
+| av1 | **libdav1d** |
+| h264 | h264 |
+| hevc | hevc |
+| vp8 | vp8 |
+| vp9 | vp9 |
+| mpeg4 | mpeg4 |
+| mpeg2video | mpeg2video |
+
+on `ffmpeg version 9.0.1`. Six of the seven answer with their own family name
+and the seventh does not, which is exactly why guessing is not available: a
+plan that named `av1` would have forced `-c:v av1`, selecting different code
+from the one that runs today, and baked that substitution into the artifact's
+identity. M3a's review already caught this reasoning once, in the grammar; the
+same substitution at the inventory would have made every grammar match nothing,
+and a grammar that matches nothing reports every stream as clean.
+
+### How
+
+FFmpeg names the decoder it opened, in its own diagnostics, in the same context
+grammar the health reader already parses:
+`[vist#0:0/av1 @ …] [dec:libdav1d @ …]`. The measurement is one probe per codec —
+two FFmpeg invocations, or a few more where the first encoder tried is absent:
+encode a fifth of a second of `testsrc`, decode it to null at a log level that
+prints that context for a decode that goes perfectly, and read the name back.
+Each invocation is killed at a five-second budget and on drop, so a build whose
+encoder wedges costs an unnamed codec and a bounded delay rather than a node
+that never opens a listener — the repository already keeps a wedged-ffmpeg
+fixture because that failure is not hypothetical.
+
+Both halves of the context are required. Matching `dec:` alone would accept a
+context belonging to another stream of another codec, and every line is read
+rather than the first, with disagreement across lines refused: two answers is
+not an answer.
+
+A codec this build can decode but cannot encode has no probe clip, and is
+reported as unmeasured rather than guessed. So is a name the plan could not
+carry — and that question is asked of the plan itself, `plan_can_name_decoder`,
+rather than restated here. Two spellings of that rule would be one too many: a
+name accepted by the measurement and refused by the plan does not leave one
+codec unnamed, it makes `DecodeCapabilities::new` reject the whole snapshot and
+refuse every plan on the node, including the codecs that measured perfectly.
+
+Unmeasured means the plan stays unnamed, which keeps it out of the qualified
+namespace instead of putting a guess in a cache key.
+
+### Read only where it is enforced
+
+The measurement runs at boot for every node and is read only by qualified
+planning. Naming a decoder changes an artifact's name, so letting a boot probe
+do it unconditionally would rotate every deployed node's cache in exchange for
+a value nothing there enforces. Under the qualified identity it is the point.
+
+Both halves are asserted:
+`a_measured_decoder_names_the_plan_only_where_it_is_enforced` resolves the same
+file under both identities from one measurement, and checks that the
+unqualified plan names nothing, the qualified plan names the measured decoder,
+and the two therefore name different artifacts.
+
+### What this does not do
+
+It is a necessary condition for classification, not a sufficient one, and the
+difference is worth stating plainly because the milestone reads like the
+unblocking step and is not.
+
+The only retained diagnostic contract covers `input_codec = "rawvideo"` with
+`decoder = "rawvideo"`, and `rawvideo` is not a codec this node advertises for
+decode — so no plan can ever name it, and `contract_for` still finds nothing
+for `h264`, `hevc` or any other real title. A qualified plan now *names* its
+decoder, which is what makes a match possible at all; a contract qualified
+against a real codec on a real fleet build is what would make one happen. That
+is M0's qualification work, owed for each deployed build.
+
+### Qualification owed
+
+The parser is qualified against `ffmpeg version 9.0.1` on the qualifying host,
+where the seven-codec probe runs in 0.79 s, and the retained line shapes it is
+tested against are FFmpeg 8's — the same `vist#`/`dec:` contexts M0 qualified
+for the diagnostic grammar. The fleet's FFmpeg 8.0.1 and 5.1.9 builds have not
+been probed, and FFmpeg 5.1.9 is expected to measure nothing at all, because it
+does not print the attributed context. That is the correct outcome for it: an
+unmeasured build plans unnamed and stays outside the qualified namespace. It is
+recorded here as owed evidence rather than assumed.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate, and it checked the parser's
+premises by running FFmpeg rather than by reading about it. No blocker; three
+major defects and a set of claims that turned out to be false.
+
+| Finding | Disposition |
+|---|---|
+| The probes had no timeout and no `kill_on_drop`, and run on the path to serving. A build whose encoder wedges — the failure the repository keeps a fixture for — would leave the node never opening a listener, with the last log line being the encoder inventory | Every invocation is bounded and killed on drop; a timeout is an unmeasured codec |
+| `the_probe_measures_this_build` could not fail: it asserted over a set that is empty on any build that prints no context, and the assertion inside the loop restated a filter the values had already passed. Making `selected_decoder` return `None` left it green | It requires `mpeg2video` — the one codec whose encoder every build has — to measure, on any build that prints the context at all, and reads the answer as the name rather than as a shape |
+| The probe-table test fed `parse_video_decoder_list` a fixture listing the codecs the test itself had written, so adding a codec to the real advertised list and not to the probe table left it green — the exact silent gap its own comment named | The advertised list is a named constant both sides read, and the test asserts the two sets are equal in both directions |
+| The measurement accepted `.` in a decoder name and the plan does not. One dotted name would not have left one codec unnamed: `DecodeCapabilities::new` refuses the whole snapshot, so it would have refused every plan on the node | The measurement asks the plan, through `plan_can_name_decoder`. One rule, one place |
+| `take_context`'s address check accepted `0xZZZ`, a superset of the health reader's, while the module doc claimed they were the same grammar | Aligned: `0x` and at least one hex digit |
+| `assert_ne!(plain.plan_digest(), named.plan_digest())` was entailed by the two plans' differing identities, so deleting the naming line left it green | A third plan, qualified with nothing measured, isolates the name from the identity |
+| Four claims were untrue as written: what `ffmpeg -decoders` lists, why a container is used rather than an elementary stream, "one probe per codec", and what the stream summary line names | All four corrected against what FFmpeg actually prints |
+| `MeasuredDecoders` leaked its private field name into the system API response | `#[serde(transparent)]` |
+
+Focused evidence on this head, pinned `rustc 1.97.1`: core
+`transcode::decoder_inventory` 10/10 — the decoder read from the context, the
+implementation read rather than the family, a context for another codec, a
+decode that printed none, two answers refused, five shapes that only look like
+a context, a name a plan could not carry, an unmeasured codec not falling back
+to its family, the probe table covering every listed codec, and the probe
+running against this build and cleaning up after itself. Daemon
+`transcode::tests::` 247/247 with two new. `make lint`, `make validation-lint`
+and `make history-check` clean.
 
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 

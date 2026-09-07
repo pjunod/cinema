@@ -33,7 +33,9 @@ M3C1_MERGED_HEAD = "bf75c62cf642ecac7671456aa88e48ed57fd46fd"
 M3C2_MERGED_HEAD = "ff10c2dbfcf74d6e78d51b69378fd40a540b3ff4"
 M3C3_TASK_BASE = M3C2_MERGED_HEAD
 M3C3_MERGED_HEAD = "b602b9f2add7c14861265f7d384c1d9910b0c742"
-M3C4_TASK_BASE = M3C3_MERGED_HEAD
+M3C4_MERGED_HEAD = "86647b37cb9e91d3c043f3e3a0ef4fb5330ef34e"
+M3D_TASK_BASE = M3C4_MERGED_HEAD
+CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -178,11 +180,12 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(f"M3c4 task base:** effort head `{M3C4_TASK_BASE}`", self.flat_status)
+        self.assertIn(f"M3d task base:** effort head `{M3D_TASK_BASE}`", self.flat_status)
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C2_MERGED_HEAD[:8], self.status)
         self.assertIn(M3C3_MERGED_HEAD[:8], self.status)
+        self.assertIn(M3C4_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -306,7 +309,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M3c4 candidate; M0–M3c3, M4 and M5a merged into the effort", self.status
+            "M3d candidate; M0–M3c4, M4 and M5a merged into the effort", self.status
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
@@ -656,6 +659,69 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         )
         self.assertEqual(daemon.count("fn test_publish_artifact_qualification("), 1)
         self.assertIn("Nothing turns this on", self.status)
+
+    def test_m3d_the_decoder_is_measured_and_only_named_where_enforced(self) -> None:
+        """A family is not an implementation, and a guess is worse than silence.
+
+        A contract is qualified against a *named* decoder, so a plan naming
+        none can never be matched to one. But a plan naming the wrong one is
+        worse: the grammar it yields matches nothing, and a grammar that
+        matches nothing reports every stream as clean.
+        """
+        inventory = CORE_INVENTORY.read_text(encoding="utf-8")
+        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+
+        # Both halves of the context are required, so a context belonging to
+        # another stream of another codec cannot answer for this one.
+        matcher = inventory.split("fn decoder_for_codec<'a>(", 1)[1].split("\n}", 1)[0]
+        self.assertIn('strip_prefix("vist#")', matcher)
+        self.assertIn("line_codec != codec", matcher)
+        self.assertIn('strip_prefix("dec:")', matcher)
+
+        # Disagreement across lines is refused rather than resolved.
+        read = inventory.split("pub fn selected_decoder(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("Some(previous) if previous != decoder => return None", read)
+
+        # An unmeasured codec stays unnamed. There is no fallback to the
+        # family anywhere in the module.
+        self.assertNotIn("unwrap_or(codec)", inventory)
+        self.assertNotIn("unwrap_or_else(|| codec", inventory)
+        # And what a plan can carry is asked of the plan, not restated here:
+        # a name this accepted and the plan refused would make
+        # `DecodeCapabilities::new` refuse every plan on the node.
+        self.assertIn("crate::transcode::plan_can_name_decoder(name)", inventory)
+
+        # Each probe is bounded and killed on drop. These run before the node
+        # opens a listener.
+        self.assertIn("const PROBE_TIMEOUT:", inventory)
+        # Every spawn, including the two the probe test makes for its own
+        # comparison: a probe process that outlives a dropped future is the
+        # same leak whether it is production or a test.
+        self.assertEqual(
+            inventory.count("tokio::process::Command::new("),
+            inventory.count(".kill_on_drop(true)"),
+        )
+        self.assertIn("tokio::time::timeout(PROBE_TIMEOUT, work)", inventory)
+
+        # And the measurement reaches a plan only under the enforced identity.
+        naming = daemon.split(".map(|codec| SoftwareDecoder {", 1)[1].split("})", 1)[0]
+        self.assertIn("qualifying", naming)
+        self.assertIn("self.measured_decoders.implementation(&codec)", naming)
+        self.assertIn(
+            "let qualifying = qualification.enforces_receipt();", daemon
+        )
+
+        # The measurement this host actually made is recorded, including the
+        # one codec whose answer is not its own name.
+        self.assertIn("| av1 | **libdav1d** |", self.status)
+        self.assertIn("ffmpeg version 9.0.1", self.status)
+
+        # And the document does not let this read as the unblocking step: the
+        # only retained contract covers a codec no plan can name.
+        self.assertIn("### What this does not do", self.status)
+        self.assertIn(
+            "`rawvideo` is not a codec this node advertises for", self.flat_status
+        )
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.
