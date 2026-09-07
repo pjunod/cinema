@@ -3047,7 +3047,8 @@ async function main() {
         shippedSource("pendingPlaybackControlAcknowledgement"),
         shippedSource("queuePlaybackControlAcknowledgement"),
         shippedSource("settlePlaybackControlAcknowledgement"),
-        shippedSource("preparedVideoElement"), shippedSource("preparedState"),
+        shippedSource("preparedVideoElement"), shippedSource("ensurePreparedVideoElement"),
+        shippedSource("preparedState"),
         shippedSource("handlePreparedReplacementAction"),
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
@@ -3085,8 +3086,14 @@ async function main() {
       attachMedia(media) { this.media = media; }
       destroy() { this.destroyed = true; }
     }
+    // The prepared element is created on first use, so the harness's document
+    // has to be able to create and attach one — and must not find it before.
+    spare.id = "";
+    const attached = [live];
+    live.parentNode = { appendChild(node) { attached.push(node); } };
     const document = {
-      getElementById: (id) => [live, spare].find((node) => node.id === id) || null,
+      getElementById: (id) => attached.find((node) => node.id === id) || null,
+      createElement: () => spare,
     };
     const api = scope(
       document, { Hls: FakeHls, PlurxPlaybackControl: control }, FakeHls,
@@ -3098,7 +3105,7 @@ async function main() {
       !!options.native,
     );
     return Object.assign(api, {
-      live, spare, instances, notifies, logs,
+      live, spare, instances, notifies, logs, attached,
       elements: () => ({ live, spare }),
       fire(id) { const t = timers.get(id); if (t) { timers.delete(id); t.fn(); } },
       fireAll() { for (const [id] of [...timers]) this.fire(id); },
@@ -3141,6 +3148,10 @@ async function main() {
     h.live.currentTime = 300;                       // film 900 s
     const state = h.handle(prepareAction({ media_origin_ms: PREPARE_ORIGIN_MS }));
     assert.ok(state, "a valid preparation builds");
+    assert.equal(h.attached.length, 2, "the successor's element is created on first use");
+    assert.equal(h.spare.id, "video-prepared");
+    assert.equal(h.spare.attributes["aria-hidden"], "true",
+      "…and is out of the accessibility tree while it is a successor");
     assert.equal(h.instances.length, 1, "exactly one prepared pipeline");
     assert.equal(h.instances[0].media, h.spare, "…attached to the hidden element");
     assert.equal(h.instances[0].source, PREPARE_FIXTURE.playlist_url);
