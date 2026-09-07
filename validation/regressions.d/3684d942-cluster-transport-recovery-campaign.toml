@@ -9,6 +9,8 @@ commits = [
   "edfd3ed9",
   "fece3368",
   "f43cbae9",
+  "72ce68aa",
+  "c8c521dc",
 ]
 points = [
   "cluster.auth",
@@ -25,4 +27,4 @@ checks = [
   "catalog-contract",
   "history-regressions",
 ]
-reason = "The Linux transport-recovery qualification launches separate-process TLS clusters and requires twenty learner plus twenty voter snapshot recoveries on the exact candidate SHA. Its closed-schema receipt binds snapshot identity, hashes, acknowledged writes, bounded duration, attempt chronology, and stable resource counts; static operations contracts pin the command, first-attempt-only receipt policy, and promotion integration."
+reason = "The Linux transport-recovery qualification launches separate-process TLS clusters and requires twenty learner plus twenty voter snapshot recoveries on the exact candidate SHA. The one absolute recovery window begins before the target is killed and snapshot creation starts, and source attempt/retry counts advance only for work OpenRaft actually issues. Its receipt feeds one immutable read of the retained bytes through the Rust closed-schema and semantic validator before binding their digest, image identity, acknowledged writes, bounded duration, attempt chronology, and stable resource counts; static operations contracts pin the command, same-workflow first-attempt receipt policy, and promotion integration."
