@@ -491,7 +491,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(request.proto, PlaybackControl.protocolName)
         XCTAssertEqual(
             request.supportedActions,
-            ["hold", "retry_resource", "terminal"],
+            ["hold", "retry_resource", "terminal", "prepare_replacement"],
             "the server sends only actions this client has declared"
         )
         XCTAssertEqual(request.sequence, 1)
@@ -630,14 +630,37 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))
     }
 
+    /// The fixture is deliberately a type no server will ever send.
+    ///
+    /// It used to be the literal `prepare_replacement`, which was a correct
+    /// test right up to the moment this client learned to prepare — and then
+    /// would have gone on passing while its name and its intent became false,
+    /// because the wire tag for that action is `prepare`, not the name it is
+    /// declared under. The property being protected is that an unrecognised
+    /// action is fatal, and that property has to be tested with something
+    /// genuinely unrecognised.
     func testAnUndeclaredActionIsTerminalRatherThanObeyed() async throws {
         try await assertTerminal(response: ControlResponse(
             proto: PlaybackControl.protocolName,
             generation: bootstrap().generation,
             controlEpoch: 7,
             acceptedSequence: 1,
-            action: ControlAction(type: "prepare_replacement")
+            action: ControlAction(type: "conjure_replacement")
         ))
+    }
+
+    /// The declared name is not the tag, and neither spelling is optional.
+    func testTheDeclaredNameAndTheWireTagAreTheTwoDifferentStringsTheServerUses() {
+        XCTAssertEqual(PlaybackControl.prepareReplacementAction, "prepare_replacement")
+        XCTAssertEqual(PlaybackControl.prepareActionType, "prepare")
+        XCTAssertTrue(
+            PlaybackControl.supportedActions.contains(PlaybackControl.prepareReplacementAction),
+            "the server offers only actions named in supported_actions, by their declared name"
+        )
+        XCTAssertFalse(
+            PlaybackControl.supportedActions.contains(PlaybackControl.prepareActionType),
+            "declaring the tag instead of the name is never matched, and fails silently"
+        )
     }
 
     func testATerminalVerdictEndsReportingWithoutAProtocolError() async throws {
