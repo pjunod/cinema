@@ -111,6 +111,7 @@ page; the milestone files are contracts an executing agent works from.
 | [M6-IMPLEMENTATION-HANDOFF.md](playback-control/M6-IMPLEMENTATION-HANDOFF.md) | M6: the prepared-recipe contract, with its measured numbers. | open |
 | [M6-AXIS-CASE-HANDOFF.md](playback-control/M6-AXIS-CASE-HANDOFF.md) | The one measurement M6 waits on, and how to take it. | done |
 | [M6-AXIS-CASE-RESULTS.md](playback-control/M6-AXIS-CASE-RESULTS.md) | That measurement, taken 2026-09-03: physical Apple TV admission failed. | done |
+| [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | M6: what the browser does with a staged successor, and how an operator turns it on. | built |
 | [M7-REMAINDER-HANDOFF.md](playback-control/M7-REMAINDER-HANDOFF.md) | M7: subtitle readiness, bounded materialization, seek coalescing, burn-join, prewarm. | open |
 | [M7-R-M3-CLAUDE-HANDOFF.md](playback-control/M7-R-M3-CLAUDE-HANDOFF.md) | Finish M2, then build seek coalescing. | open |
 | [M7-M1-LARGE-MKV-OBSERVATION.md](playback-control/M7-M1-LARGE-MKV-OBSERVATION.md) | Large-MKV readiness and bounded subtitle publication, observed. | done |
