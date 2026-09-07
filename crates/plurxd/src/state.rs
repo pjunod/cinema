@@ -638,6 +638,9 @@ pub struct AppState {
     pub node_id: String,
     /// Whether LAN discovery must distinguish this node from cluster peers.
     pub cluster_advertisement: bool,
+    /// Reported by the Developer readiness route; not consulted by any
+    /// recovery path, which reads them from `Config` when it builds the node.
+    pub snapshot_recovery_budgets: crate::state::SnapshotRecoveryBudgets,
     pub artwork_dir: PathBuf,
     /// Shared peer-artwork HTTP client, per-filename singleflight, and global
     /// response-buffer bound for request and background reconciliation paths.
@@ -751,6 +754,7 @@ impl AppState {
                 shared_cache_dir: PathBuf::new(),
                 shared_cache_id: String::new(),
                 catalogue,
+                snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
             },
             store,
             dirs,
@@ -783,6 +787,7 @@ impl AppState {
             shared_cache_dir,
             shared_cache_id,
             catalogue,
+            snapshot_recovery_budgets,
         } = config;
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
@@ -895,6 +900,7 @@ impl AppState {
             server_name,
             node_id,
             cluster_advertisement,
+            snapshot_recovery_budgets,
             artwork_dir,
             artwork_fetch: crate::http::images::ArtworkCoordinator::new(),
             cache_dir,
@@ -1022,6 +1028,22 @@ impl AppState {
     }
 }
 
+/// What this node has budgeted for one Raft snapshot recovery, plus the
+/// network boundary it was told to trust.
+///
+/// These live in `[cluster]` config and are consumed only when the Hiqlite
+/// node is built, so nothing in the admin surface could report them. The
+/// Developer readiness route needs to say what they actually are — an
+/// operator asked whether the budgets fit their deployment cannot answer that
+/// from a document listing the defaults.
+#[derive(Clone, Debug, Default)]
+pub struct SnapshotRecoveryBudgets {
+    pub chunk_secs: u64,
+    pub transfer_secs: u64,
+    pub install_secs: u64,
+    pub trusted_network: String,
+}
+
 pub struct AppConfig {
     pub server_name: String,
     pub node_id: String,
@@ -1038,6 +1060,7 @@ pub struct AppConfig {
     pub shared_cache_dir: PathBuf,
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
+    pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.

@@ -477,6 +477,22 @@ including native/overlay subtitle awaits and delayed old attachment callbacks.
 
 ### 5. Visible enablement, qualification and promotion
 
+**Landed — the readings, not the whole item.** `GET /api/v1/developer/readiness`
+(`http/developer.rs`) answers every prerequisite the Developer cards list with
+`met` / `unmet` / `unobservable` plus the sentence it read, and the tab renders
+them in place. Three points for whoever extends it: `unobservable` is the
+honest answer for a CI-artifact receipt and must not be quietly upgraded; the
+requirement *copy* stays in `index.html` and only the *reading* comes from the
+daemon, so the server never owns UI prose; and the advisory rule is pinned from
+both sides — `an_unmet_prerequisite_does_not_block_the_switch` in
+`http/mod.rs`, and a web assertion that every control the panel emits is
+byte-identical under an all-unmet reading and no reading at all. Adding a new
+card means adding its item to that route, or its rows render "checking…"
+forever.
+
+Still open here: the hidden-gate removal below, and the qualification/promotion
+run.
+
 Finish the Developer Enable section's prerequisites and actual behavior;
 remove retained compile/default hidden live-HLS fallback once real VOD recipe
 coverage replaces it. Do not introduce another hidden switch.

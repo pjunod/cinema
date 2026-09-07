@@ -716,7 +716,7 @@ test("Settings loads only the active tab manifest", () => {
     system: { required: ["sys"], secondary: ["playbackEvents"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps"] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
-    developer: { required: ["settings"], secondary: [] },
+    developer: { required: ["settings"], secondary: ["developerReadiness"] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
@@ -1502,6 +1502,10 @@ test("Settings executes exact required and secondary waves for every tab", async
     system:{required:["/system"],secondary:["playback-events","system-log"]},
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","cluster-log"]},
     integrations:{required:["/settings","/trakt/status"],secondary:[]},
+    // The switches paint from the settings snapshot; the advisory prerequisite
+    // readings arrive behind them because one of them asks membership for the
+    // local applied roster.
+    developer:{required:["/settings"],secondary:["/developer/readiness"]},
   };
   for(const [tab,expected] of Object.entries(cases)){
     const requests=[], phases=[], logReleases=[];

@@ -12774,6 +12774,49 @@ pub(crate) fn record_action(
     CONTROL_VOCABULARY[usize::from(complete)][platform].fetch_add(1, Ordering::Relaxed);
 }
 
+/// The rollout counters as data, for the Developer readiness route.
+///
+/// `prometheus()` already renders these, but a text scrape is the wrong shape
+/// for a caller that has to decide met/unmet — parsing our own exposition
+/// format back into numbers would be a second encoder to keep in step. Both
+/// readers now share the same load.
+///
+/// Process-local and reset by a restart, which the route says out loud rather
+/// than presenting a fresh process's zeroes as evidence of anything.
+pub(crate) struct ControlVocabularySnapshot {
+    /// Exchanges from clients declaring every action this server can send,
+    /// indexed web/apple/android.
+    pub complete: [u64; 3],
+    /// Exchanges from clients declaring only some of them.
+    pub partial: [u64; 3],
+}
+
+pub(crate) fn control_vocabulary_snapshot() -> ControlVocabularySnapshot {
+    let read = |row: &[AtomicU64; 3]| {
+        [
+            row[0].load(Ordering::Relaxed),
+            row[1].load(Ordering::Relaxed),
+            row[2].load(Ordering::Relaxed),
+        ]
+    };
+    ControlVocabularySnapshot {
+        complete: read(&CONTROL_VOCABULARY[1]),
+        partial: read(&CONTROL_VOCABULARY[0]),
+    }
+}
+
+pub(crate) struct PreparationStagedSnapshot {
+    pub staged: u64,
+    pub refused: u64,
+}
+
+pub(crate) fn preparation_staged_snapshot() -> PreparationStagedSnapshot {
+    PreparationStagedSnapshot {
+        staged: PREPARATIONS_STAGED[1].load(Ordering::Relaxed),
+        refused: PREPARATIONS_STAGED[0].load(Ordering::Relaxed),
+    }
+}
+
 pub(crate) fn record_producer_hold(reason: crate::transcode::AheadHoldReason) {
     ROLLING_PRODUCER_HOLDS[hold_reason_index(reason)].fetch_add(1, Ordering::Relaxed);
 }

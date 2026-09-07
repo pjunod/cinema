@@ -227,6 +227,7 @@ master regression so far. Reasoning and the failure they target are in
 | `POST /api/v1/system/search-index/rebuild` | Rebuild the node-local search index (admin) |
 | `/api/v1/keys` | Mint/list/revoke scoped API keys (admin token) |
 | `GET /api/v1/live-tv/channels` | The sanitized tuner lineup; DRM channels are listed and marked unplayable (bearer) |
+| `GET /api/v1/developer/readiness` | What this server can currently see of each Developer enable prerequisite — advisory, gates nothing (**admin**) |
 | `GET /api/v1/live-tv/readiness` | The last readiness verdict, without probing (**admin**) |
 | `POST /api/v1/live-tv/readiness/refresh` | Probe the tuner and report one named check per thing that can be wrong (**admin**) |
 | `POST /api/v1/live-tv/channels/{channel}/sessions` | Start a live session; returns one opaque capability (bearer) |

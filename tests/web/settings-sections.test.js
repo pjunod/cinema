@@ -79,7 +79,7 @@ test("every section is a route, grouped in the rail's order", () => {
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
-    developer: "developerPanel(d.settings)",
+    developer: "developerPanel(d.settings,d.developerReadiness)",
   };
   const panel = shippedSource("settingsPanel");
   for (const [id] of r.SET_TABS) {
@@ -235,10 +235,23 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   });
 });
 
-test("Developer is where the switches that cost something live", () => {
+function developerPanelUnder(readiness) {
   const panel = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
-    `${shippedSource("liveTvSettingsCard")}${shippedSource("developerPanel")} return developerPanel;`,
+    [
+      // Newline-joined: a shipped declaration is sliced with the comment block
+      // that follows it, so concatenating two of them directly comments the
+      // second one out. That failure looks like "index.html no longer declares
+      // X" and is not one.
+      shippedConst("DEV_READINESS_LABEL"),
+      shippedSource("devReadinessRow"),
+      shippedSource("devReadinessPill"),
+      shippedSource("devReadinessEvidence"),
+      shippedSource("devReq"),
+      shippedSource("liveTvSettingsCard"),
+      shippedSource("developerPanel"),
+      "return developerPanel;",
+    ].join("\n"),
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
     (body) => `CARD[${body}]`,
@@ -247,7 +260,11 @@ test("Developer is where the switches that cost something live", () => {
     (fn) => `FOOT:${fn}`,
     esc,
   );
-  const html = panel({ playback_control_protocol_v1: true, hls_typeless_sliding: false });
+  return panel({ playback_control_protocol_v1: true, hls_typeless_sliding: false }, readiness);
+}
+
+test("Developer is where the switches that cost something live", () => {
+  const html = developerPanelUnder(undefined);
   for (const id of ["pcpv1", "phs"]) {
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer is missing the ${id} switch`);
   }
@@ -270,6 +287,64 @@ test("Developer is where the switches that cost something live", () => {
   assert.doesNotMatch(html, /special build/);
   assert.match(html, /HDHomeRun Live TV/);
   assert.match(html, /Save the configuration, check readiness, then enable/);
+});
+
+// The readings are the half the section was missing: it listed what must be
+// true and then left the operator with no way to find out. These pin the three
+// answers the daemon can give and, more importantly, that a bad one changes
+// nothing about the controls.
+test("Developer prerequisites report what the server can see, and gate nothing", () => {
+  const readiness = {
+    items: [
+      {
+        id: "playback_control_protocol_v1",
+        enabled: true,
+        requirements: [
+          { id: "clients_report", title: "x", status: "unmet", evidence: "9 exchanges since start, none complete." },
+        ],
+      },
+      {
+        id: "cluster_transport_recovery",
+        requirements: [
+          { id: "recovery_budgets", title: "x", status: "met", evidence: "chunk 30 s, whole transfer 1,200 s." },
+          { id: "recovery_receipt", title: "x", status: "unobservable", evidence: "The daemon never receives it." },
+        ],
+      },
+    ],
+  };
+  const html = developerPanelUnder(readiness);
+
+  assert.match(html, /9 exchanges since start, none complete\./);
+  assert.match(html, /chunk 30 s, whole transfer 1,200 s\./);
+  assert.match(html, /The daemon never receives it\./);
+  assert.match(html, />not met</, "an unmet reading has to say so in words, not only a colour");
+  assert.match(html, />met</);
+  assert.match(html, />not observable</, "a fact the daemon cannot reach is its own answer");
+
+  // The switch is still a switch. If a later change disables a control because
+  // a reading is unmet, this fails — which is the whole point of the section
+  // being advisory rather than a gate with extra steps.
+  // The switches are still switches. Every control this panel emits must be
+  // byte-identical whether the readings are all unmet or absent entirely — if
+  // a later change makes a control depend on a reading, this is what catches
+  // it, and the section stops being advisory the moment it does.
+  const controls = (markup) => markup.match(/TOG:[^\n]*|FOOT:\w+/g).join("\n");
+  assert.equal(controls(html), controls(developerPanelUnder(undefined)));
+
+  // A prerequisite the reading does not cover keeps its explanation and says
+  // it is still waiting, rather than silently rendering as satisfied.
+  assert.match(html, /checking…/);
+  const missing = developerPanelUnder(undefined);
+  assert.match(missing, /twenty consecutive commits/, "the explanation survives a missing reading");
+  assert.doesNotMatch(missing, />met</);
+});
+
+test("A failed prerequisite reading says so instead of reading as satisfied", () => {
+  const html = developerPanelUnder({ unavailable: "membership unavailable" });
+  assert.match(html, />unavailable</);
+  assert.match(html, /The prerequisite reading failed: membership unavailable/);
+  assert.doesNotMatch(html, />met</);
+  assert.match(html, /TOG:pcpv1\|/, "a failed reading still leaves every switch usable");
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
