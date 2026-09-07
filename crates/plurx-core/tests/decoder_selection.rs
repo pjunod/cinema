@@ -1,13 +1,14 @@
 use plurx_core::domain::{AudioStream, DolbyVisionFacts, MediaFile};
 use plurx_core::transcode::{
-    hls_args, resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend,
-    DecodeCacheIdentity, DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity,
-    DecodeCatalogMetadata, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
-    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, DiagnosticLogging,
-    EffectiveRateControl, Encoder, FrameDomain, FrameRateProvenance, OutputGrade, Pacing, Pipeline,
-    PipelineDigest, PlanError, PlanSourceBinding, Recipe, SoftwareDecoder,
-    StreamSelectionProvenance, SubtitleBurn, SubtitleRendering, ToneMap, TranscodeExecution,
-    TranscodeMediaOptions, TranscodeOptions, TranscodeRequest,
+    hls_args, resolve_transcode, ArtifactQualification, AttemptRestrictions, CapabilityStatus,
+    DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
+    DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
+    DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
+    DecodeSurfaceContract, DiagnosticLogging, EffectiveRateControl, Encoder, FrameDomain,
+    FrameRateProvenance, OutputGrade, Pacing, Pipeline, PipelineDigest, PlanError,
+    PlanSourceBinding, Recipe, SoftwareDecoder, StreamSelectionProvenance, SubtitleBurn,
+    SubtitleRendering, ToneMap, TranscodeExecution, TranscodeMediaOptions, TranscodeOptions,
+    TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -2307,4 +2308,154 @@ fn the_diagnostic_log_flags_are_execution_context_and_never_identity() {
     // live on the execution, so there is nowhere for them to reach identity
     // from.
     assert_eq!(execution.diagnostics, DiagnosticLogging::Legacy);
+}
+
+/// Turning qualification on rotates the key space once, and nothing else.
+///
+/// Two things have to be true at the same time and they pull in opposite
+/// directions. A fleet that has not turned qualification on must compute
+/// exactly the artifact names it computed before this identity existed —
+/// otherwise shipping the mechanism is itself a cache flush, which is a cost
+/// nobody asked for. And a fleet that turns it on must land in a key space
+/// that shares nothing with the old one, because the plan document forbids
+/// relabelling an old artifact as health-qualified without reprocessing it,
+/// and a separate namespace is how that is enforced rather than promised.
+#[test]
+fn the_qualified_identity_is_a_separate_key_space_and_costs_nothing_until_it_is_used() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let capabilities = software_capabilities("h264", "h264");
+    let pipeline = PipelineDigest {
+        ffmpeg_build: "ffmpeg fixture".to_owned(),
+    };
+
+    let default = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &capabilities,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("a snapshot built the way every caller builds one");
+    let stated = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &capabilities,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+            .qualifying_artifacts(ArtifactQualification::Unqualified),
+    )
+    .expect("the same thing said out loud");
+    let qualified = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &capabilities,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None)
+            .qualifying_artifacts(ArtifactQualification::HealthQualified),
+    )
+    .expect("qualified artifacts");
+
+    // Not turned on: byte for byte the identity every deployed node computes.
+    assert_eq!(default.artifact_namespace(), UNQUALIFIED_ARTIFACT_NAMESPACE);
+    assert!(!default.enforces_receipt());
+    assert_eq!(default.plan_digest(), stated.plan_digest());
+    assert_eq!(
+        Recipe::new(&pipeline, &default, false).hash(),
+        Recipe::new(&pipeline, &stated, false).hash()
+    );
+
+    // Turned on: a different name for the same work. `Recipe::hash` feeds the
+    // namespace both through `plan_digest` and on its own, so the recipe
+    // assertion below is entailed by the digest one rather than independent of
+    // it — the redundancy is a guard against a future revision of the digest's
+    // field list, and `planned_v3_recipe_hash_is_a_golden_fixture` is what
+    // makes removing it explicit.
+    assert_eq!(
+        qualified.artifact_namespace(),
+        HEALTH_QUALIFIED_ARTIFACT_NAMESPACE
+    );
+    assert!(qualified.enforces_receipt());
+    assert_ne!(
+        default.plan_digest(),
+        qualified.plan_digest(),
+        "an artifact produced under an enforced receipt contract is not the same artifact"
+    );
+    assert_ne!(
+        Recipe::new(&pipeline, &default, false).hash(),
+        Recipe::new(&pipeline, &qualified, false).hash()
+    );
+
+    // And the decode decision itself is untouched: this is an identity, not a
+    // different encode.
+    assert_eq!(default.decode(), qualified.decode());
+    assert_eq!(default.encoder(), qualified.encoder());
+}
+
+/// The artifact identity comes from the requested mode, not from what the node
+/// happened to know.
+///
+/// A namespace derived from diagnostic-contract coverage would be matched on
+/// the FFmpeg binary's own digest, so two distribution builds of one version
+/// would compute two cache keys for the same source and the same encode and
+/// split a cluster's cache mid-upgrade. The evidence class is the same trap one
+/// level down, and the existing digest test already refuses it; this refuses it
+/// for the namespace too.
+#[test]
+fn how_well_a_node_knows_its_decoder_does_not_move_the_artifact_identity() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "24/1",
+        "24/1",
+        Some("bt709"),
+    ));
+    let legacy = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("legacy software");
+    let qualified_caps = capabilities_with_qualified_software(
+        &input,
+        Pipeline::Cpu,
+        Encoder::Software,
+        SubtitleRendering::None,
+        vec![],
+    );
+    let qualified_inventory = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &qualified_caps,
+        DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
+    )
+    .expect("qualified software");
+
+    assert_eq!(legacy.decode().evidence(), DecodeEvidence::LegacyUnverified);
+    assert_eq!(
+        qualified_inventory.decode().evidence(),
+        DecodeEvidence::Qualified
+    );
+    assert_eq!(
+        legacy.artifact_namespace(),
+        qualified_inventory.artifact_namespace(),
+        "a qualified inventory is not a qualified artifact contract"
+    );
+    assert_eq!(legacy.artifact_namespace(), UNQUALIFIED_ARTIFACT_NAMESPACE);
 }

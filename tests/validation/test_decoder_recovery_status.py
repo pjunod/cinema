@@ -30,7 +30,8 @@ M3A_TASK_BASE = "773ad4888194ad3b2986b60bd8d1bd4d67595b4a"
 M5A_TASK_BASE = "f0f7aec8254ce7c09221bf4462f2f34905f172ef"
 M3B_TASK_BASE = "de05be0494d846bc3b77e462505f1d3ecdb21b46"
 M3C1_MERGED_HEAD = "bf75c62cf642ecac7671456aa88e48ed57fd46fd"
-M3C2_TASK_BASE = M3C1_MERGED_HEAD
+M3C2_MERGED_HEAD = "ff10c2dbfcf74d6e78d51b69378fd40a540b3ff4"
+M3C3_TASK_BASE = M3C2_MERGED_HEAD
 M0_QUALIFIED_HEAD = "59d0a4d1"
 M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
@@ -175,10 +176,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
-        self.assertIn(f"M3c2 task base:** effort head `{M3C2_TASK_BASE}`", self.flat_status)
-        # M3c1's merged head is this milestone's base, and the document has to
-        # say which head that is rather than only which pull request it was.
+        self.assertIn(f"M3c3 task base:** effort head `{M3C3_TASK_BASE}`", self.flat_status)
+        # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
+        self.assertIn(M3C2_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -302,7 +303,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M3c2 candidate; M0–M3c1, M4 and M5a merged into the effort", self.status
+            "M3c3 candidate; M0–M3c2, M4 and M5a merged into the effort", self.status
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
         self.assertIn(
@@ -461,7 +462,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertRegex(contract["id"], r"\A[A-Za-z0-9._-]+\Z")
 
         # The status document does not claim a reader consults one yet.
-        self.assertIn("No reader consults a receipt yet; that is M3c3", self.status)
+        self.assertIn("No reader consults a receipt yet; that is M3c4", self.status)
+        # And the document does not name two different milestones for it.
+        self.assertNotIn("That is M3c3, and it now has something", self.status)
 
     def test_m3c2_a_resumed_part_recovers_only_a_record_still_bound_to_it(self) -> None:
         """Reading a record back may recover a conclusion, never invent one.
@@ -515,6 +518,71 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn('PART_HEALTH_FILE: &str = ".part-health.json"', daemon)
         names = daemon.split('std::iter::once("index.m3u8".to_owned())', 1)[1].split(";", 1)[0]
         self.assertNotIn("HEALTH_FILE", names)
+
+    def test_m3c3_the_artifact_identity_is_a_fleet_decision_not_a_node_accident(self) -> None:
+        """A namespace derived from what a node knows splits a cluster's cache.
+
+        Contract coverage is matched on the FFmpeg binary's own digest, so two
+        distribution builds of one version would compute two cache keys for the
+        same encode. The identity has to come from the requested mode, and the
+        unqualified name has to stay byte-identical or shipping the mechanism
+        is itself a cache flush.
+        """
+        decode = CORE_DECODE.read_text(encoding="utf-8")
+        selection = (ROOT / "crates/plurx-core/tests/decoder_selection.rs").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            'pub const UNQUALIFIED_ARTIFACT_NAMESPACE: &str = "decoder-plan-v1-unqualified";',
+            decode,
+        )
+        self.assertIn(
+            "pub const HEALTH_QUALIFIED_ARTIFACT_NAMESPACE: &str = "
+            '"decoder-plan-v1-health-qualified";',
+            decode,
+        )
+        # Unqualified is the default, so a fleet that has not turned it on
+        # computes the names it always computed.
+        qualification = decode.split("pub enum ArtifactQualification {", 1)[1].split(
+            "\n}", 1
+        )[0]
+        self.assertIn("#[default]\n    Unqualified,", qualification)
+
+        # The identity is read from the policy snapshot at resolution, and from
+        # nothing observed afterwards.
+        self.assertIn(
+            "artifact_qualification: policy.artifact_qualification(),", decode
+        )
+        self.assertIn(
+            "self.artifact_qualification.namespace().as_bytes(),", decode
+        )
+        # Never from the evidence class, which is the same trap one level down.
+        self.assertIn("Deliberately absent: `decode.evidence`", decode)
+
+        # And the two properties are asserted, not merely described.
+        self.assertIn(
+            "fn the_qualified_identity_is_a_separate_key_space_and_costs_nothing_until_it_is_used",
+            selection,
+        )
+        self.assertIn(
+            "fn how_well_a_node_knows_its_decoder_does_not_move_the_artifact_identity",
+            selection,
+        )
+
+        # The document says why enforcement is not here yet, rather than
+        # leaving a control that rotates a key space for no benefit.
+        self.assertIn("the control never exists without the behaviour behind it", self.status)
+
+        # The recorded constraints a later milestone will implement literally.
+        # `verified_cache_hit` reads like a reuse decision and is not: its only
+        # caller feeds cluster offer eligibility.
+        daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
+        self.assertEqual(daemon.count("self.verified_cache_hit("), 1)
+        self.assertIn(
+            "and so\n  does `verified_cache_hit`, which reads like a reuse decision and is not",
+            self.status,
+        )
 
     def test_m3a_grammar_is_the_qualified_one(self) -> None:
         """The Rust grammar and the M0 harness are one policy, not two.

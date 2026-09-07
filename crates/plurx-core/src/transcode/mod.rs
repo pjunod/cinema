@@ -21,13 +21,14 @@ mod pipeline;
 mod recipe;
 
 pub use decode::{
-    resolve_transcode, AttemptRestrictions, CapabilityStatus, DecodeBackend, DecodeCacheIdentity,
-    DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata,
-    DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason,
-    DecodeSourceIdentity, DecodeSurfaceContract, DynamicRangeClass, FrameDomain, FrameRate,
-    FrameRateProvenance, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
-    Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
-    SubtitleRendering, TranscodeMediaOptions, TranscodeRequest, RESOLVED_TRANSCODE_PLAN_VERSION,
+    resolve_transcode, ArtifactQualification, AttemptRestrictions, CapabilityStatus, DecodeBackend,
+    DecodeCacheIdentity, DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity,
+    DecodeCatalogMetadata, DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
+    DecodeReason, DecodeSourceIdentity, DecodeSurfaceContract, DynamicRangeClass, FrameDomain,
+    FrameRate, FrameRateProvenance, OutputWidthRule, PlanError, PlanSourceBinding,
+    PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
+    StreamSelectionProvenance, SubtitleRendering, TranscodeMediaOptions, TranscodeRequest,
+    HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{

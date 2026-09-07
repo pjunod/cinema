@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M3c2 candidate; M0–M3c1, M4 and M5a merged into the effort ·
+**Status:** M3c3 candidate; M0–M3c2, M4 and M5a merged into the effort ·
 **Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M3c2 task base:** effort head
-`bf75c62cf642ecac7671456aa88e48ed57fd46fd`
+`effort/decoder-selection-recovery` · **M3c3 task base:** effort head
+`ff10c2dbfcf74d6e78d51b69378fd40a540b3ff4`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,8 +20,8 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M3c2 — a part carries its own observation across a resume |
-| Task branch | `codex/decoder-selection-m3c2`, based on effort head `bf75c62c` |
+| Milestone | M3c3 — the qualified artifact identity |
+| Task branch | `codex/decoder-selection-m3c3`, based on effort head `ff10c2db` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review has run; its findings are repaired in this head |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
@@ -38,7 +38,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
 | M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | M3a, M3b1, M3b2 and M3c1 merged; M3c2 candidate; M3c3 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85)) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 makes a part carry its own receipt across a resume, without which no long film could ever be certified. No reader consults a receipt yet; that is M3c3 |
+| M3 · owned observation and health receipts | M3a, M3b1, M3b2, M3c1 and M3c2 merged; M3c3 candidate; M3c4 not started | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 gives qualified production its own artifact identity. No reader consults a receipt yet; that is M3c4 |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
 | M5 · durable budget and prepublication recovery | M5a merged; M5b/M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. No daemon behaviour change |
 | M6 · postpublication replacement and client intent | Not started | — |
@@ -564,9 +564,9 @@ Nothing consumes a receipt yet. The offline part producer settles one and logs
 it, after its admission permits are back — the child is already reaped so the
 drain is normally instant, and holding a hardware slot through a bounded wait
 for a reader is the trade that path explicitly refuses. No cache reader, no
-publication path and no actor decision reads a receipt, and
-`artifact_namespace()` still returns `decoder-plan-v1-unqualified` for
-everything. That is M3c.
+publication path and no actor decision reads a receipt, and at this head
+`artifact_namespace()` returned `decoder-plan-v1-unqualified` for everything.
+That is M3c.
 
 A *rolling* attempt does not settle a receipt at all yet, and the teardown path
 deliberately drops its reader instead. Settling there was the first draft and it
@@ -720,7 +720,7 @@ is what M3b1's review found wrong with settling in the teardown path.
 ### Still not here
 
 Nothing consumes a receipt: no cache reader, no publication authorization, no
-actor decision, and `artifact_namespace()` still returns
+actor decision, and at this head `artifact_namespace()` returned
 `decoder-plan-v1-unqualified` for everything. That is M3c.
 
 Live TV keeps its bounded 2 KiB window, and the reason is unchanged and worth
@@ -902,7 +902,7 @@ directory an attacker can write must not be believed just because it hashes.
 
 ### Still not here
 
-Nothing yet *acts* on a receipt. `artifact_namespace()` still returns
+Nothing yet *acts* on a receipt. At this head `artifact_namespace()` returned
 `decoder-plan-v1-unqualified` for every plan, `manifest_cache::load` still
 authorizes reuse on digest equality alone, and the `cachekeep` scrub, the
 `resume_parts` validation branch and `assembled_publication` all still accept an
@@ -1066,13 +1066,13 @@ segment name in any case.
 
 ### Still not here
 
-Nothing yet acts on a receipt. `artifact_namespace()` still returns
+Nothing yet acts on a receipt. At this head `artifact_namespace()` returned
 `decoder-plan-v1-unqualified` for every plan, and no cache reader consults one.
-That is M3c3, and it now has something it can actually enforce: with this
+That is M3c3 and M3c4, and they now have something to enforce: with this
 milestone a long film resumed across passes can reach `Qualified`, which before
 it could not.
 
-M3c3's shape is also now settled, and the reason is worth recording here rather
+The identity's shape is also now settled, and the reason is worth recording rather
 than discovering during it. The namespace must not split on per-node contract
 coverage: `contract_for` matches `binary_sha256` and `buildconf_sha256`, so two
 nodes running two distribution builds of the same FFmpeg version would compute
@@ -1117,6 +1117,130 @@ present but will not open. `decoder_health` 38/38 and
 `python3 -m unittest tests.validation.test_decoder_recovery_status` green with
 one new contract; the rolling-producer ownership ledger is unchanged, because
 this milestone adds no task, timer or process shape.
+
+## M3c3 working tree — the qualified artifact identity
+
+`artifact_namespace()` returned one constant, so every plan named the same key
+space and nothing could ever be produced under a contract. This milestone gives
+qualified production a name of its own:
+`ArtifactQualification::{Unqualified, HealthQualified}`, carried on
+`ResolvedTranscode`, set from the policy snapshot at resolution, and fed to
+both `plan_digest()` and `Recipe::hash`.
+
+### Why it is a plan-time decision, and why it is fleet-wide
+
+It cannot come from the receipt. The receipt describes bytes the plan has not
+produced yet, so a key derived from it would depend on its own contents.
+
+It also must not come from whether the running FFmpeg build happens to have a
+diagnostic contract, and this is the sharper trap because it looks reasonable.
+`DiagnosticContract::covers_build` matches `binary_sha256` and
+`buildconf_sha256`. Two nodes running two distribution builds of the same
+FFmpeg version would compute two different cache keys for the same source and
+the same encode — fragmenting the replicated store, and `cache_consumer_pins`
+with it, for the whole duration of a rolling upgrade. The plan digest already
+refuses this one level down for `DecodeEvidence`, with the comment that giving
+a qualified node a private key space "would split the fleet's cache
+mid-rollout"; the namespace has to refuse it for the same reason.
+
+So the identity follows the effective qualification mode: an operator's
+persisted request, bounded by what the node can do. That is a fleet-wide
+decision, taken once, and the plan document accepts its cost explicitly — "the
+broader project deliberately accepts a new cache namespace when the new
+qualification contract turns on".
+
+### Shipping it costs nothing until it is used
+
+`ArtifactQualification::Unqualified` is the default and its namespace is the
+existing constant, so a fleet that has not turned qualification on computes
+byte-for-byte the artifact names it computed before this type existed.
+`the_qualified_identity_is_a_separate_key_space_and_costs_nothing_until_it_is_used`
+asserts both halves: identical digest and recipe hash when the mode is
+unstated or stated as unqualified, and a different digest *and* a different
+recipe hash under the qualified one — with the decode decision and the encoder
+unchanged, because this is an identity, not a different encode.
+
+Separate namespaces are also how "no migration mode may label old artifacts as
+health-qualified without reprocessing them" is enforced rather than promised.
+Nothing under the qualified name can be an artifact that predates the contract,
+because no plan that predates the contract ever computed that name.
+
+### What is deliberately not here
+
+No production site selects `HealthQualified` yet, and that is the sequencing
+rather than an oversight. Turning the identity on rotates a fleet's whole key
+space; an operator control that did that while nothing yet enforced a receipt
+would be a cache flush in exchange for nothing. The operator setting, the
+per-node effective-mode intersection, the `Settings > Developer` enable section
+with its prerequisites, and the enforcement itself land together in M3c4, so
+the control never exists without the behaviour behind it. This milestone is the
+identity and its digest behaviour, exercised end to end through
+`resolve_transcode`.
+
+M3c4's shape is settled too, and the reasons are recorded here because they are
+what makes the enforcement safe rather than merely present:
+
+- **Enforce at retain, never at serve.** Unqualified bytes may still be served
+  to the viewer waiting for them. `serve_cached`, `prepare_shared_cached_read`
+  and the offline package download are serve paths and stay ungated — and so
+  does `verified_cache_hit`, which reads like a reuse decision and is not: its
+  only caller feeds cluster offer *eligibility*, so refusing there does not
+  decline to keep a generation, it moves the viewer to a node that has to
+  encode the film again. The retain decisions are `produce_normalized`'s reuse
+  branch and the publication and claim writes at the end of that function.
+- **Never through `invalidate_cache_location`.** It removes the location row
+  and, via `invalidate_cache_entry`, deletes dependent `cache_consumer_pins` and
+  flips dependent `ready` `offline_packages` to `failed`; the bytes themselves
+  are left for orphan reclamation, and the whole call is a no-op for the
+  `shared` storage class. Failing a package a user already downloaded is reason
+  enough never to route a health refusal here.
+- **Not in the `cachekeep` scrub.** Every generation published before receipts
+  existed carries none, so a scrub that treated an absent receipt as corruption
+  would delete an entire fleet's cache in one rotation. In the qualified
+  namespace the question does not arise: nothing under that name predates the
+  contract.
+- **`complete = 0` is not "serve but do not reuse".** Such a row is invisible to
+  `cache_bytes` and to `cache_by_age`, so its bytes are unbudgeted and
+  unevictable, and `stale_cache_claims` reaps the directory on an age bound. A
+  refusal has to be a state of its own, not a reuse of the claim state.
+- **The queue needs a terminal refusal.** `enqueue_pretranscode_job` has two
+  independent suppression clauses. One is freshness: a `ready` job with a live
+  `complete = 1` location, both inside their own recency bounds. The other is
+  terminal: any same-`dedupe_key` row in `queued`, `running`, `failed` or
+  `cancelled`, *unless* its `last_error_code` says the refusal was provisional
+  — `policy_changed`, or `eligibility_expired` past its retry window. A health
+  refusal that left only bytes behind would re-enqueue the same dedupe key on
+  every discovery pass and re-encode forever; it has to land in the second
+  clause with an error code that is not re-enqueueable.
+- **Ride `expected_policy_generation`.** The house pattern for settings is a
+  per-request read, so an operator flipping the mode mid-production would let a
+  claim be taken under one policy and settled under another. That class of
+  change already has a mechanism in this function and the health mode should use
+  it rather than invent a second one.
+
+### What the whole-PR review found, and what it changed
+
+One adversarial review ran against the candidate. No blocker; one major error,
+and it was in this document rather than in the code — which matters, because
+the bullets above are the constraints a later milestone will implement
+literally.
+
+| Finding | Disposition |
+|---|---|
+| `verified_cache_hit` was listed as a retain decision. Its only caller feeds cluster offer eligibility, so gating it would not decline to keep a generation — it would move a viewer to a node that has to encode the film again, which is the serve refusal the same bullet forbids | It is named as a serve path, with the reason it reads like a reuse decision. The stale in-code comment pointing the same wrong way is corrected too |
+| The queue-dedupe bullet said suppression happens "only" via a `ready` job with a live `complete = 1` location. There are two independent clauses, and the terminal one — a `failed` or `cancelled` row with a non-provisional `last_error_code` — is the one a health refusal actually needs | Both clauses described, with which is freshness and which is terminal |
+| `invalidate_cache_location` was described as deleting the row and the bytes. It removes the row and dependent pins, fails dependent `ready` packages, leaves the bytes for orphan reclamation, and is a no-op for the shared storage class | Restated; the conclusion is unchanged and now rests on the true reason |
+| The recipe-hash half of the new test is entailed by the plan-digest half, because `plan_digest` already feeds the namespace — so removing `Recipe::hash`'s own `plan_namespace` field leaves the test green | The claim of symmetric coverage is withdrawn, and `Recipe::hash` now says why the redundancy is deliberate: `plan_digest` is a revisable field list, and this field is what stops a revision from silently merging the two key spaces |
+| Three earlier sections asserted in the present tense that `artifact_namespace()` returns one constant, and the M3c2 section still pointed reader enforcement at M3c3 after this PR renumbered it | Past-tensed against the heads they describe, and renumbered |
+| `enforces_receipt` used `matches!`, so a third identity would default to no enforcement | Exhaustive `match` |
+| `ArtifactQualification` derived `Serialize` with a wire spelling nothing serializes or tests | Derive dropped until something needs it |
+
+Focused evidence on this head, pinned `rustc 1.97.1`: core
+`cargo test -p plurx-core --test decoder_selection` 46/46, two new — the
+separate key space that costs nothing until used, and the refusal to let a
+node's capability inventory move the artifact identity. `make lint`,
+`make validation-lint` and `make history-check` clean; the rolling-producer
+ownership ledger is unchanged.
 
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 

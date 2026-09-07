@@ -97,6 +97,14 @@ impl Recipe<'_> {
         let mut h = Sha256::new();
         field(&mut h, "v", CACHE_RECIPE_VERSION.to_string().as_bytes());
         self.digest.feed(&mut h);
+        // Redundant today, and deliberately so: `plan_digest` already feeds
+        // the namespace, so this field changes no answer on its own. It is
+        // here because the two key spaces must never merge, and `plan_digest`
+        // is a versioned field list that gets revised. If a revision ever
+        // stops feeding the identity, an artifact produced under an enforced
+        // receipt contract would land on the same name as one produced under
+        // none — the single failure this whole separation exists to prevent —
+        // and this field is what stops that from being a silent change.
         field(
             &mut h,
             "plan_namespace",

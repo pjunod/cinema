@@ -28,10 +28,65 @@ pub const LEGACY_DECODE_POLICY_REVISION: u32 = 1;
 /// Changing the meaning or order of any fed field requires a revision bump.
 pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 1;
 
-/// M2 plans deliberately remain outside the future qualified-artifact
-/// namespace. M3 replaces this marker only after owned diagnostic completion
-/// can produce an authenticated health receipt.
+/// Where a plan's artifacts live when nothing enforces a health receipt over
+/// them. Observation-only rollout keeps this identity, so a node that is
+/// merely *watching* its decoders never writes under the qualified keys.
 pub const UNQUALIFIED_ARTIFACT_NAMESPACE: &str = "decoder-plan-v1-unqualified";
+/// Where a plan's artifacts live when the qualified receipt contract is
+/// enforced over them. Nothing under this identity was produced without an
+/// authenticated receipt permitting its reuse, which is the only thing the
+/// name is allowed to mean.
+pub const HEALTH_QUALIFIED_ARTIFACT_NAMESPACE: &str = "decoder-plan-v1-health-qualified";
+
+/// Which artifact identity a plan's output belongs to.
+///
+/// This is a *plan-time* decision and it has to stay one. It cannot be derived
+/// from the health receipt: the receipt describes bytes this plan has not
+/// produced yet, and a cache key that depended on it would depend on its own
+/// contents. It also must not be derived from whether the running FFmpeg build
+/// happens to have a diagnostic contract, because contract coverage is matched
+/// on `binary_sha256` — two distribution builds of one FFmpeg version would
+/// then compute two different cache keys for the same source and the same
+/// encode, splitting a cluster's cache down the middle mid-upgrade.
+///
+/// What it is derived from is the effective qualification mode: an operator's
+/// persisted request, bounded by what the node can actually do. Turning that
+/// on rotates the key space once, deliberately, which is the cost the plan
+/// document explicitly accepts. No migration may relabel an old artifact as
+/// health-qualified without reprocessing it, and separate namespaces are how
+/// that is enforced rather than promised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArtifactQualification {
+    /// Observation only. Receipts are recorded; nothing refuses an artifact
+    /// for what one says.
+    #[default]
+    Unqualified,
+    /// The receipt contract is enforced over every artifact under this
+    /// identity.
+    HealthQualified,
+}
+
+impl ArtifactQualification {
+    pub fn namespace(self) -> &'static str {
+        match self {
+            Self::Unqualified => UNQUALIFIED_ARTIFACT_NAMESPACE,
+            Self::HealthQualified => HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
+        }
+    }
+
+    /// Whether artifacts under this identity must present a receipt that
+    /// permits their reuse.
+    ///
+    /// Exhaustive rather than a `matches!`, so that adding an identity is a
+    /// compile error here. A mechanism whose purpose is refusing unverified
+    /// artifacts must not default a new state to "no enforcement".
+    pub fn enforces_receipt(self) -> bool {
+        match self {
+            Self::Unqualified => false,
+            Self::HealthQualified => true,
+        }
+    }
+}
 
 /// The input decoder family, independent of the output encoder family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -1397,6 +1452,7 @@ pub struct DecodePolicySnapshot {
     force_software_decode: bool,
     compatibility_value: Option<String>,
     policy_revision: u32,
+    artifact_qualification: ArtifactQualification,
 }
 
 impl DecodePolicySnapshot {
@@ -1414,7 +1470,19 @@ impl DecodePolicySnapshot {
             force_software_decode,
             compatibility_value,
             policy_revision: LEGACY_DECODE_POLICY_REVISION,
+            artifact_qualification: ArtifactQualification::Unqualified,
         }
+    }
+
+    /// Resolve plans into the health-qualified artifact identity.
+    ///
+    /// Deliberately not a parameter of [`Self::new`]: every existing caller
+    /// keeps the identity it had, and a caller that wants the other one says
+    /// so at the site where the effective mode was decided.
+    #[must_use]
+    pub fn qualifying_artifacts(mut self, qualification: ArtifactQualification) -> Self {
+        self.artifact_qualification = qualification;
+        self
     }
 
     pub fn plan_policy(&self) -> DecodePlanPolicy {
@@ -1431,6 +1499,10 @@ impl DecodePolicySnapshot {
 
     pub fn policy_revision(&self) -> u32 {
         self.policy_revision
+    }
+
+    pub fn artifact_qualification(&self) -> ArtifactQualification {
+        self.artifact_qualification
     }
 }
 
@@ -1689,6 +1761,9 @@ impl ResolvedDecode {
 /// decoder/renderer/encoder combination that skipped validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTranscode {
+    /// Which artifact identity this plan's output belongs to. Set from the
+    /// policy snapshot at resolution, never from anything observed afterwards.
+    artifact_qualification: ArtifactQualification,
     decode: ResolvedDecode,
     encoder: Encoder,
     options: TranscodeMediaOptions,
@@ -1775,7 +1850,7 @@ impl ResolvedTranscode {
         );
         feed(
             "artifact_namespace",
-            UNQUALIFIED_ARTIFACT_NAMESPACE.as_bytes(),
+            self.artifact_qualification.namespace().as_bytes(),
         );
         feed("decode_backend", self.decode.backend.name().as_bytes());
         feed(
@@ -1795,8 +1870,10 @@ impl ResolvedTranscode {
         // Two nodes selecting the same backend and the same implementation
         // produce the same picture, and giving the qualified one a private key
         // space would split the fleet's cache mid-rollout. The
-        // qualified-versus-unqualified separation belongs to
-        // `artifact_namespace`, which `Recipe::hash` already feeds separately.
+        // qualified-versus-unqualified separation is `artifact_qualification`,
+        // fed above and by `Recipe::hash` separately — and that one is a
+        // fleet-wide operator decision precisely so it cannot vary per node
+        // the way an inventory or an FFmpeg build digest does.
         feed(
             "decode_policy_revision",
             self.decode.policy_revision.to_string().as_bytes(),
@@ -1968,7 +2045,13 @@ impl ResolvedTranscode {
     }
 
     pub fn artifact_namespace(&self) -> &'static str {
-        UNQUALIFIED_ARTIFACT_NAMESPACE
+        self.artifact_qualification.namespace()
+    }
+
+    /// Whether artifacts this plan produces must present a receipt permitting
+    /// their reuse before anything may keep them.
+    pub fn enforces_receipt(&self) -> bool {
+        self.artifact_qualification.enforces_receipt()
     }
 
     /// Which source the artifact this plan names belongs to.
@@ -2237,6 +2320,7 @@ pub fn resolve_transcode(
         audio_offset_ms: options.audio_offset_ms,
     };
     Ok(ResolvedTranscode {
+        artifact_qualification: policy.artifact_qualification(),
         decode: ResolvedDecode {
             backend,
             software_decoder,

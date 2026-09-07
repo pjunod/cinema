@@ -12344,8 +12344,15 @@ impl TranscodeManager {
     /// for, so there is no second argument that could name a different film.
     /// What it does *not* yet prove is that the bytes on disk are still the
     /// bytes that were measured — `plan.source_binding()` records whether the
-    /// facts were descriptor-bound, and the qualified-reuse gate that must
-    /// refuse [`PlanSourceBinding::CatalogRow`] arrives with receipts in M3.
+    /// facts were descriptor-bound.
+    ///
+    /// A health receipt does not belong in this answer, and the temptation to
+    /// put one here is worth naming. Its only caller feeds cluster offer
+    /// eligibility, so answering `false` does not decline to *keep* a
+    /// generation — it moves a viewer to a node that has to encode the title
+    /// again. Unqualified bytes may still be served to the viewer waiting for
+    /// them; refusing to reuse them is a decision for the paths that publish
+    /// and claim, not for the one that says which node already has the film.
     async fn verified_cache_hit(&self, plan: &ResolvedTranscode) -> bool {
         let Some(cache) = self.cache.as_ref() else {
             return false;
