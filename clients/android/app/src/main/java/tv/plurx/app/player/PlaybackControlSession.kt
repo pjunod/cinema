@@ -270,6 +270,8 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         observe: () -> PlayerControlObservation?,
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
+        onPrepare: (ControlAction) -> Unit = {},
+        onAcknowledged: (ActionAcknowledgement) -> Unit = {},
     ) {
         end()
         // A generation, not a reset. `end()` stops the old reporter in a
@@ -313,7 +315,22 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                 if (subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)) {
                     scope.launch { onSubtitleReady() }
                 }
+                // An acknowledgement rides on the request, so its delivery is
+                // an answer to *this* exchange rather than a separate reply.
+                // Only an exchange the server actually answered clears it: a
+                // retry replays the exact request, which is what makes a lost
+                // commit go again instead of vanishing.
+                if (exchange.response != null && generation == answerGeneration) {
+                    exchange.request.acknowledgement?.let { onAcknowledged(it) }
+                }
                 val action = exchange.response?.action
+                // A staged successor is named on an ordinary exchange, not only
+                // on a stall ask, so the dispatch is here rather than in the
+                // player's stall path. The reporter has already refused a
+                // malformed payload — this only ever sees one that validated.
+                if (action != null && action.type == PlaybackControl.PREPARE_ACTION_TYPE) {
+                    onPrepare(action)
+                }
                 if (action != null &&
                     action.type == "terminal" &&
                     !action.message.isNullOrEmpty()

@@ -36,11 +36,34 @@ object PlaybackControl {
     const val PROTOCOL = "plurx-playback-control-v1"
 
     /**
+     * The name a client *declares* to be offered a prepared replacement, and
+     * the tag that then arrives as `action.type`. They are deliberately
+     * different strings and the difference is silent both ways: declaring
+     * `"prepare"` is never matched by the server's literal `accepts()`
+     * comparison and is never offered anything, while switching on
+     * `"prepare_replacement"` as an action type never fires. The transaction is
+     * named for the transaction; the tag is named for the moment.
+     *
+     * `crates/plurxd/src/playback_control.rs:53` and its
+     * `ControlAction::vocabulary_name()` at `:1730` are the two sides.
+     */
+    const val PREPARE_REPLACEMENT_ACTION = "prepare_replacement"
+    const val PREPARE_ACTION_TYPE = "prepare"
+
+    /**
      * The actions this client will accept, and therefore the only ones the
      * server will send it. An action that is never declared is never sent, so
      * a client cannot be silenced by one it does not understand.
+     *
+     * Declaring `prepare_replacement` costs nothing on a client the server will
+     * never stage a successor for: it makes `can_settle_preparation` true, so
+     * the server performs a quorum store read for a staged generation on
+     * exchanges that would not otherwise have done one — sessions still on
+     * `owner_epoch == 1`, carrying no acknowledgement, not ending — and that
+     * read always answers `Absent` while `dual_player_preparation` is false.
      */
-    val SUPPORTED_ACTIONS = listOf("hold", "retry_resource", "terminal")
+    val SUPPORTED_ACTIONS =
+        listOf("hold", "retry_resource", "terminal", PREPARE_REPLACEMENT_ACTION)
     const val MIN_EXCHANGE_MS = 250L
     const val MAX_EXCHANGE_MS = 60_000L
     const val EXCHANGE_DEADLINE_MS = 6_000L
@@ -50,6 +73,44 @@ object PlaybackControl {
     const val MAX_CAPABILITY_VALUES = 8
     const val MAX_OBSERVED_DOWNLOAD_BPS = 10_000_000_000_000L
     const val MAX_ERROR_DETAIL_BYTES = 512
+
+    /**
+     * The server's own bounds, mirrored so a malformed `prepare` is refused
+     * here rather than acted on. Every one is copied from
+     * `crates/plurxd/src/playback_control.rs` — `MAX_MEDIA_MILLIS` at `:34`,
+     * `MAX_ACTION_ID_LEN` at `:56`, `MAX_PLAYLIST_URL_LEN` at `:58` — and
+     * [MAX_HEIGHT] above is already `crate::transcode::MAX_HEIGHT`.
+     */
+    const val MAX_MEDIA_MILLIS = 366L * 24 * 60 * 60 * 1_000
+    const val MAX_ACTION_ID_LEN = 64
+    const val MAX_PLAYLIST_URL_LEN = 512
+    const val MAX_TRACK_INDEX = 1_024L
+    const val MAX_AUDIO_OFFSET_MS = 15_000L
+
+    /**
+     * `effective_selection.codec` is not a codec name. Two values, and they
+     * distinguish direct-play/remux from transcode — the server's
+     * `PreparationAxis::DeliveryMethod`. Rendering this string to a viewer as a
+     * codec would be wrong.
+     */
+    val DELIVERY_METHODS = setOf("source", "server_selected")
+    val DYNAMIC_RANGES = setOf("dolby_vision", "hdr10", "hlg", "sdr")
+
+    /**
+     * `/api/v1/hls/{session}/index.m3u8` or `…/master.m3u8` and nothing else,
+     * with the session segment being the successor's own id.
+     *
+     * `is_node_relative_playlist` (`playback_control.rs:1759`) is the server's
+     * copy of this rule, and the relay path already refuses to point a client
+     * anywhere. So does this: an absolute URL is refused before any request,
+     * even if a future server sends one.
+     */
+    fun isNodeRelativePlaylist(playlistUrl: String, sessionId: String): Boolean {
+        if (playlistUrl.length > MAX_PLAYLIST_URL_LEN) return false
+        val path = playlistUrl.split('?', '#').first()
+        return path == "/api/v1/hls/$sessionId/index.m3u8" ||
+            path == "/api/v1/hls/$sessionId/master.m3u8"
+    }
 
     private val UUID_RE = Regex(
         "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -232,6 +293,78 @@ data class DynamicCapabilities(
             dynamicRanges.size <= PlaybackControl.MAX_CAPABILITY_VALUES
 }
 
+/**
+ * What a session actually delivers, as the server answers it.
+ *
+ * It appears twice on the wire: on the response, describing the session that is
+ * playing now, and inside a `prepare` action, describing the successor. The
+ * difference between the two is what is about to change.
+ *
+ * `crates/plurxd/src/playback_control.rs:861-891`.
+ */
+@Serializable
+data class EffectiveSelection(
+    @SerialName("quality_auto") val qualityAuto: Boolean = false,
+    val height: Long = 0,
+    @SerialName("audio_track") val audioTrack: Long? = null,
+    @SerialName("subtitle_burn") val subtitleBurn: Long? = null,
+    @SerialName("audio_offset_ms") val audioOffsetMs: Long = 0,
+    /** `source` or `server_selected` — a delivery method, not a codec name. */
+    val codec: String = "",
+    @SerialName("dynamic_range") val dynamicRange: String? = null,
+) {
+    /** `EffectiveSelection::is_valid`, boundary for boundary. */
+    val isValid: Boolean
+        get() = height in 0..PlaybackControl.MAX_HEIGHT.toLong() &&
+            (audioTrack == null || audioTrack in 0..PlaybackControl.MAX_TRACK_INDEX) &&
+            (subtitleBurn == null || subtitleBurn in 0..PlaybackControl.MAX_TRACK_INDEX) &&
+            audioOffsetMs in -PlaybackControl.MAX_AUDIO_OFFSET_MS..PlaybackControl.MAX_AUDIO_OFFSET_MS &&
+            codec in PlaybackControl.DELIVERY_METHODS &&
+            (dynamicRange == null || dynamicRange in PlaybackControl.DYNAMIC_RANGES)
+}
+
+/**
+ * How far a prepared replacement got, named by the transaction it belongs to.
+ *
+ * Exactly five states, and a sixth is a serde error on the server — a `400`
+ * with no `invalid_field`, because it never reaches the semantic validator.
+ * `crates/plurxd/src/playback_control.rs:490-534`.
+ */
+@Serializable
+enum class AcknowledgementState {
+    @SerialName("metadata_ready") METADATA_READY,
+    @SerialName("buffer_ready") BUFFER_READY,
+    @SerialName("committed") COMMITTED,
+    @SerialName("failed") FAILED,
+    @SerialName("aborted") ABORTED,
+}
+
+@Serializable
+data class ActionAcknowledgement(
+    @SerialName("action_id") val actionId: String,
+    val state: AcknowledgementState,
+    @SerialName("buffered_through_ms") val bufferedThroughMs: Long? = null,
+    @SerialName("first_frame_unix_ms") val firstFrameUnixMs: Long? = null,
+) {
+    /**
+     * The server's own acceptance, applied before the request is built rather
+     * than discovered as a `400`. `buffer_ready` requires a runway and
+     * `committed` requires the wall clock of a frame that actually rendered;
+     * an acknowledgement missing either is worse than none, because the
+     * exchange it rides on is refused whole.
+     */
+    val isValid: Boolean
+        get() = PlaybackControl.isUuid(actionId) &&
+            actionId.length <= PlaybackControl.MAX_ACTION_ID_LEN &&
+            (
+                bufferedThroughMs == null ||
+                    bufferedThroughMs in 0..PlaybackControl.MAX_MEDIA_MILLIS
+                ) &&
+            (firstFrameUnixMs == null || firstFrameUnixMs > 0) &&
+            (state != AcknowledgementState.BUFFER_READY || bufferedThroughMs != null) &&
+            (state != AcknowledgementState.COMMITTED || firstFrameUnixMs != null)
+}
+
 @Serializable
 data class ClientObservation(
     @SerialName("dropped_frames") val droppedFrames: Long? = null,
@@ -288,6 +421,14 @@ data class PlaybackControlSnapshot(
     val selection: ClientSelection,
     val capabilities: DynamicCapabilities,
     val observation: ClientObservation? = null,
+    /**
+     * The prepared replacement's progress, when there is one to report.
+     *
+     * It rides the ordinary snapshot rather than a channel of its own because
+     * the protocol has no channel of its own: an acknowledgement is a field on
+     * the next request, and there is at most one request in flight.
+     */
+    val acknowledgement: ActionAcknowledgement? = null,
 ) {
     val isValid: Boolean
         get() = positionMs >= 0 &&
@@ -304,7 +445,26 @@ data class PlaybackControlSnapshot(
                     observedDownloadBps in 0..PlaybackControl.MAX_OBSERVED_DOWNLOAD_BPS
                 ) &&
             selection.isValid &&
-            capabilities.isValid
+            capabilities.isValid &&
+            (acknowledgement == null || acknowledgement.isValid)
+
+    /**
+     * The acknowledgement this snapshot may actually carry.
+     *
+     * You may not commit a replacement on the same exchange that ends the
+     * session (`playback_control.rs:253-259`), and the pairing is a `400` that
+     * costs the `end` as well as the commit. Dropping the commit rather than
+     * the whole snapshot is the cheaper loss: the session still ends on time
+     * and the unsettled preparation is reaped at its 330 s deadline, whereas a
+     * dropped `end` strands the session until its lease expires.
+     *
+     * The Controller sends `committed` urgently at the switch, well before any
+     * teardown, so this is a fence rather than a path.
+     */
+    val sendableAcknowledgement: ActionAcknowledgement?
+        get() = acknowledgement?.takeUnless {
+            demand == PlaybackDemand.END && it.state == AcknowledgementState.COMMITTED
+        }
 }
 
 @Serializable
@@ -325,6 +485,14 @@ data class ControlRequest(
     val selection: ClientSelection,
     val capabilities: DynamicCapabilities? = null,
     val observation: ClientObservation? = null,
+    /**
+     * How the prepared replacement this client was offered is going, if it was
+     * offered one. Absent is the ordinary case and absent is correct: the
+     * server's field is an `Option`, and `explicitNulls = false` drops a null
+     * rather than sending one. Unlike [supportedActions] this field must *not*
+     * appear on every exchange, so a null default is the right shape.
+     */
+    val acknowledgement: ActionAcknowledgement? = null,
     // No default. `Json` encodes defaults only when asked to, so a defaulted
     // value here would be silently dropped from the request — and a server that
     // never sees the vocabulary never sends the action, which is the exact
@@ -332,6 +500,15 @@ data class ControlRequest(
     @SerialName("supported_actions") val supportedActions: List<String>,
 )
 
+/**
+ * Deliberately flat, and deliberately not a sealed class.
+ *
+ * The server tags this internally on `type` with no `deny_unknown_fields`, so a
+ * later server may add keys and this parser must tolerate them. Web and Apple
+ * both keep a flat shape and this file's header makes cross-client sameness a
+ * contract; [QualitySelection] is the one sealed class here and it is not the
+ * pattern to follow.
+ */
 @Serializable
 data class ControlAction(
     val type: String,
@@ -346,7 +523,50 @@ data class ControlAction(
     /** `terminal` only: which producer decision ended this session. */
     val code: String? = null,
     val message: String? = null,
-)
+    /**
+     * `prepare` only, and the transaction's identity: minted once per staging
+     * and replayed byte-identically on every exchange until it settles. Every
+     * acknowledgement echoes it, which is how a commit that arrives late names
+     * *this* staging rather than whichever one is current when it lands — and
+     * why a repeat of the same id is the same preparation, not a new one.
+     */
+    @SerialName("action_id") val actionId: String? = null,
+    /** `prepare` only: the successor's own session UUID. */
+    @SerialName("session_id") val sessionId: String? = null,
+    /** `prepare` only: node-relative, and never to be followed as absolute. */
+    @SerialName("playlist_url") val playlistUrl: String? = null,
+    /**
+     * `prepare` only: the source position the successor's session-relative zero
+     * maps to. Without it the second timeline cannot be aligned with the first,
+     * and the commit boundary is expressed in film time.
+     */
+    @SerialName("media_origin_ms") val mediaOriginMs: Long? = null,
+    /** `prepare` only: what the successor will deliver, not what was asked. */
+    @SerialName("effective_selection") val effectiveSelection: EffectiveSelection? = null,
+) {
+    /**
+     * `prepared_payload_is_valid` (`playback_control.rs:1776`), client side.
+     *
+     * The playlist is checked against this action's *own* `session_id`, as the
+     * server checks it: a URL naming a different session is not this
+     * successor's, and following it would prime a pipeline on a stream nobody
+     * staged.
+     */
+    val preparedPayloadIsValid: Boolean
+        get() {
+            val id = actionId ?: return false
+            val session = sessionId ?: return false
+            val playlist = playlistUrl ?: return false
+            val origin = mediaOriginMs ?: return false
+            val selection = effectiveSelection ?: return false
+            return PlaybackControl.isUuid(id) &&
+                id.length <= PlaybackControl.MAX_ACTION_ID_LEN &&
+                PlaybackControl.isUuid(session) &&
+                PlaybackControl.isNodeRelativePlaylist(playlist, session) &&
+                origin in 0..PlaybackControl.MAX_MEDIA_MILLIS &&
+                selection.isValid
+        }
+}
 
 @Serializable
 data class ControlDelivery(
@@ -377,6 +597,13 @@ data class ControlResponse(
     @SerialName("accepted_sequence") val acceptedSequence: Long,
     val action: ControlAction,
     val delivery: ControlDelivery? = null,
+    /**
+     * What the session that is playing *now* delivers. The server has always
+     * sent it; `ignoreUnknownKeys` meant this client dropped it. Comparing it
+     * against a `prepare`'s own selection is how a client knows what is about
+     * to change.
+     */
+    @SerialName("effective_selection") val effectiveSelection: EffectiveSelection? = null,
 )
 
 /**
@@ -616,6 +843,7 @@ class PlaybackControlReporter private constructor(
             selection = newest.selection,
             capabilities = if (repeats) null else newest.capabilities,
             observation = newest.observation?.bounded(),
+            acknowledgement = newest.sendableAcknowledgement,
             supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
         )
     }
@@ -711,6 +939,19 @@ class PlaybackControlReporter private constructor(
                     throw ControlProtocolException("action")
                 }
             }
+            // `"prepare"`, not `"prepare_replacement"`. The declared name and
+            // the wire tag differ for this one action alone, and switching on
+            // the declared name here would never fire while every test that
+            // fed it kept passing.
+            //
+            // A malformed `prepare` costs the viewer the whole control plane —
+            // this exception records `protocol:action` and stops the reporter
+            // for the rest of the film — so it is validated strictly here,
+            // before anything primes a second pipeline on it.
+            PlaybackControl.PREPARE_ACTION_TYPE ->
+                if (!response.action.preparedPayloadIsValid) {
+                    throw ControlProtocolException("action")
+                }
             else -> throw ControlProtocolException("action")
         }
     }

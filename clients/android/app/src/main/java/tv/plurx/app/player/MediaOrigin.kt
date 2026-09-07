@@ -25,14 +25,57 @@ internal data class SessionPlaybackTimeline(
     val attachPositionMs: Long,
 )
 
+/**
+ * Map a session onto ExoPlayer's local timeline, from its origin alone.
+ *
+ * A media origin is a media origin whether it came from a create response or
+ * from a `prepare` action's `media_origin_ms`, and a prepared successor has no
+ * [HlsStart] to read — it has the one number the server sent. Taking the raw
+ * origin is what lets both callers share this rather than compute it twice and
+ * eventually disagree.
+ */
+internal fun sessionPlaybackTimeline(
+    mediaOriginMs: Long,
+    isVod: Boolean,
+    requestedStartMs: Long,
+): SessionPlaybackTimeline = SessionPlaybackTimeline(
+    baseMs = mediaOriginMs.coerceAtLeast(0L),
+    attachPositionMs = if (isVod) requestedStartMs.coerceAtLeast(0L) else 0L,
+)
+
 /** Map a freshly-created HLS session onto ExoPlayer's local timeline. */
 internal fun sessionPlaybackTimeline(
     hls: HlsStart,
     requestedStartMs: Long,
-): SessionPlaybackTimeline = SessionPlaybackTimeline(
-    baseMs = sessionMediaOriginMs(hls),
-    attachPositionMs = if (hls.vod) requestedStartMs.coerceAtLeast(0L) else 0L,
+): SessionPlaybackTimeline = sessionPlaybackTimeline(
+    mediaOriginMs = sessionMediaOriginMs(hls),
+    isVod = hls.vod,
+    requestedStartMs = requestedStartMs,
 )
+
+/**
+ * Where to attach a prepared successor so its picture is the incumbent's.
+ *
+ * The successor's session-relative zero maps to [mediaOriginMs] on the source
+ * timeline, and [filmPositionMs] is where the viewer actually is — so the
+ * difference is the local position to prime, and a successor whose origin is
+ * already past the playhead starts at zero rather than negative.
+ */
+internal fun successorAttachPositionMs(
+    mediaOriginMs: Long,
+    filmPositionMs: Long,
+): Long = (filmPositionMs - mediaOriginMs.coerceAtLeast(0L)).coerceAtLeast(0L)
+
+/**
+ * The successor's contiguous runway, back in film time.
+ *
+ * The inverse of [successorAttachPositionMs]: the player reports its own local
+ * clock, and every number the protocol carries is film time.
+ */
+internal fun successorFilmPositionMs(
+    mediaOriginMs: Long,
+    playerPositionMs: Long,
+): Long = mediaOriginMs.coerceAtLeast(0L) + playerPositionMs.coerceAtLeast(0L)
 
 /** Resolve the player's local clock through the active delivery regime. */
 internal fun realMediaPositionMs(
