@@ -99,13 +99,114 @@ pub(crate) async fn readiness(
         .map(|value| value.trim())
         == Some("1");
 
+    let live_recovery_on = settings
+        .get(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+        .map(|value| value.trim())
+        != Some("0");
+
     Ok(Json(DeveloperReadiness {
         items: vec![
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(),
+            live_hls_recovery(live_recovery_on),
         ],
     }))
+}
+
+/// The retained live-HLS engine: what it is, why it chose the work, and where
+/// the switch is.
+///
+/// It spends real encode time on real hardware and, until this row existed,
+/// said so only in a log line. It also used to be gated by a default Cargo
+/// feature no build ever turned off, which meant the question "does this node
+/// even have that engine" was answered by a compile flag rather than by
+/// anything an operator could see.
+fn live_hls_recovery(enabled: bool) -> DeveloperEnableItem {
+    let counts = crate::transcode::live_recovery_snapshot();
+    let total = counts.iter().sum::<u64>();
+    let by_reason = crate::transcode::LIVE_RECOVERY_LABELS
+        .iter()
+        .zip(counts.iter())
+        .filter(|(_, count)| **count > 0)
+        .map(|(label, count)| format!("{label} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let coverage = if total == 0 {
+        DeveloperRequirement {
+            id: "vod_coverage_replaces_it",
+            title: "Real VOD recipe coverage has replaced it",
+            status: RequirementStatus::Unobservable,
+            evidence: "This process has served no session through the retained engine since it \
+                       started, which is consistent with complete coverage and also with nobody \
+                       having asked. These counters are process-local and a restart returns them \
+                       to zero, so a quiet hour is not a coverage proof."
+                .to_owned(),
+        }
+    } else {
+        DeveloperRequirement {
+            id: "vod_coverage_replaces_it",
+            title: "Real VOD recipe coverage has replaced it",
+            status: RequirementStatus::Unmet,
+            evidence: format!(
+                "{total} session(s) since this process started were served by the retained \
+                 engine rather than by immutable VOD ({by_reason}). Turning the fallback off \
+                 today would refuse those titles instead. Settings \u{2192} Playback \u{2192} \
+                 Streaming holds the switch."
+            ),
+        }
+    };
+
+    // Counted apart from the fallback because it is not one. A request that
+    // already names the live presentation — today, the peer takeover path,
+    // whose recipe validation requires it — never consults the setting, so
+    // this is the only place a node reports live-HLS work it is doing with
+    // the fallback switched off.
+    let unswitchable = counts[0];
+    let takeover = if total == 0 {
+        // Vacuously true is not `met`. With nothing served there is nothing to
+        // report, and a green tick here would mean "no sessions yet" while
+        // reading as "the switch covers everything".
+        DeveloperRequirement {
+            id: "no_session_bypasses_the_switch",
+            title: "Nothing reaches the live engine past the switch",
+            status: RequirementStatus::Unobservable,
+            evidence: "The retained engine has served nothing since this process started, so \
+                       there is no session to report either way."
+                .to_owned(),
+        }
+    } else if unswitchable == 0 {
+        DeveloperRequirement {
+            id: "no_session_bypasses_the_switch",
+            title: "Nothing reaches the live engine past the switch",
+            status: RequirementStatus::Met,
+            evidence: format!(
+                "All {total} session(s) the retained engine served since this process started \
+                 went through the fallback setting; none arrived already naming the live \
+                 presentation."
+            ),
+        }
+    } else {
+        DeveloperRequirement {
+            id: "no_session_bypasses_the_switch",
+            title: "Nothing reaches the live engine past the switch",
+            status: RequirementStatus::Unmet,
+            evidence: format!(
+                "{unswitchable} session(s) since start arrived already naming the live \
+                 presentation and were served without consulting the fallback setting. That is \
+                 the peer takeover path, whose recipe validation requires it; turning the switch \
+                 off does not stop those."
+            ),
+        }
+    };
+
+    DeveloperEnableItem {
+        id: "live_hls_recovery",
+        title: "Fall back to the retained live-HLS engine",
+        enabled: Some(enabled),
+        requirements: vec![coverage, takeover],
+    }
 }
 
 async fn cluster_transport_recovery(state: &AppState) -> DeveloperEnableItem {

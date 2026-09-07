@@ -4245,7 +4245,8 @@ mod tests {
             vec![
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
-                "prepared_quality_handoff"
+                "prepared_quality_handoff",
+                "live_hls_recovery"
             ],
             "every Developer card with prerequisites needs a row here: {body}"
         );
@@ -4306,6 +4307,18 @@ mod tests {
         // client exist, not when an operator changes a setting.
         for id in ["server_preparation_is_real", "client_two_player_handoff"] {
             assert_eq!(seen.get(id).map(String::as_str), Some("unmet"));
+        }
+        // The retained engine has served nothing in this process, so neither
+        // of its rows has read anything. "Nothing bypassed the switch" is
+        // vacuously true here and must not render as satisfied — that is the
+        // same green-tick-meaning-not-checked this route exists to remove,
+        // and it shipped once already in `cache_revocation_capability`.
+        for id in ["vod_coverage_replaces_it", "no_session_bypasses_the_switch"] {
+            assert_eq!(
+                seen.get(id).map(String::as_str),
+                Some("unobservable"),
+                "a row with no sessions behind it must not answer: {body}"
+            );
         }
     }
 
@@ -8436,6 +8449,17 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        // This test asserts the typed VOD refusal, so it says which policy
+        // it is under. The shipped default is the other one: an absent
+        // `playback.vod_live_recovery` falls back to the retained live engine.
+        // The two used to be decided by `cfg(test)`, which is how every
+        // refusal regression here came to describe a policy production never
+        // runs.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy this test is about");
 
         // A 900p source: not itself a rung, which is the interesting case.
         let dir = crate::test_temp_path(format!("plurx-ladder-{}", uuid::Uuid::new_v4()));
@@ -10716,6 +10740,83 @@ mod tests {
         );
     }
 
+    /// The shipped default, which no test had ever run.
+    ///
+    /// `live_hls_recovery_enabled` used to read `== Some("1")` under
+    /// `cfg(test)` and `!= Some("0")` otherwise, so every VOD-refusal
+    /// regression in this file described the opposite of what the fleet does:
+    /// with the setting absent, a typed prerequisite refusal is answered by
+    /// the retained live engine, not returned to the client. Four tests
+    /// changed answer when the two were unified, and each of them now says
+    /// which policy it is asserting. This one asserts the default.
+    ///
+    /// It also pins the attribution. The engine spends encode time on this
+    /// node; before this, a session it served appeared in a log line and
+    /// nowhere else — no metric, no admin surface, nothing that would let an
+    /// operator watching a busy GPU find out what was running or that a
+    /// switch existed.
+    #[tokio::test]
+    async fn the_shipped_default_answers_a_vod_refusal_with_the_retained_engine() {
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, s.file, 16).await;
+        assert!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+                .await
+                .expect("setting read")
+                .is_none(),
+            "this test is about the absent-setting default; it must not be written first"
+        );
+
+        let before = crate::transcode::live_recovery_snapshot();
+
+        // A transcode rung has no VOD recipe yet, so this is a
+        // `vod_transcode_unavailable` refusal at the VOD door.
+        let (status, body) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({ "playback_id": "pb-default-recovery", "height": 720 }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the shipped default serves the retained engine rather than refusing: {body}"
+        );
+        assert_eq!(body["vod"], false, "{body}");
+
+        let after = crate::transcode::live_recovery_snapshot();
+        assert_eq!(
+            after[2],
+            before[2] + 1,
+            "a session the retained engine served must be attributable to the reason it was \
+             chosen, or an operator watching this node encode has nothing to read"
+        );
+        assert_eq!(
+            after[0], before[0],
+            "this one went through the fallback setting; the switch-bypassing counter is for \
+             requests that arrive already naming the live presentation"
+        );
+
+        // And it is readable from outside the process, which is the half a
+        // log line never had.
+        let exposition = crate::transcode::live_recovery_prometheus();
+        assert!(
+            exposition.contains(&format!(
+                "plurx_live_hls_recovery_sessions_total{{reason=\"vod_transcode_unavailable\"}} {}",
+                after[2]
+            )),
+            "the count an operator can scrape must be the count the route reads: {exposition}"
+        );
+    }
+
     /// All four routes at once, each under its own name, from the three places
     /// that actually know: the transcode manager, the progressive registry,
     /// and the direct-play registry that S2 added because nothing else held
@@ -10726,6 +10827,17 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        // This test asserts the typed VOD refusal, so it says which policy
+        // it is under. The shipped default is the other one: an absent
+        // `playback.vod_live_recovery` falls back to the retained live engine.
+        // The two used to be decided by `cfg(test)`, which is how every
+        // refusal regression here came to describe a policy production never
+        // runs.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy this test is about");
         // Progressive remux is intentionally allowed to run at several times
         // realtime. Keep enough source behind it that the response-owned
         // activity guard cannot reach EOF while the VOD session starts under
@@ -11347,6 +11459,17 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        // This test asserts the typed VOD refusal, so it says which policy
+        // it is under. The shipped default is the other one: an absent
+        // `playback.vod_live_recovery` falls back to the retained live engine.
+        // The two used to be decided by `cfg(test)`, which is how every
+        // refusal regression here came to describe a policy production never
+        // runs.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy this test is about");
         prepare_vod_copy_fixture(&state, s.file, 16).await;
 
         // Unknown session → 404 for both playlist and segment.
@@ -11779,6 +11902,17 @@ mod tests {
         crate::transcode::require_ffmpeg();
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
+        // This test asserts the typed VOD refusal, so it says which policy
+        // it is under. The shipped default is the other one: an absent
+        // `playback.vod_live_recovery` falls back to the retained live engine.
+        // The two used to be decided by `cfg(test)`, which is how every
+        // refusal regression here came to describe a policy production never
+        // runs.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "0")
+            .await
+            .expect("pin the refusal policy this test is about");
         let file = seed_mixed_subtitles(&state, Some("hdr10")).await;
 
         let (status, preflight) = call(

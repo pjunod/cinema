@@ -508,8 +508,62 @@ the code they describe, or they go stale silently: `server_preparation_is_real`
 has `a_prepared_successor_still_publishes_a_staged_encoder` in `http::hls`, and
 that test is what will tell whoever finishes §4 that this row now lies.
 
-Still open here: the hidden-gate removal below, and the qualification/promotion
-run.
+**Landed — the hidden gates around the retained live engine.** The
+`live-hls-recovery` Cargo feature is gone. It was a *default* feature that
+nothing in the Makefile, Dockerfile, deploy or scripts ever turned off, so it
+decided nothing while hiding ~100 code sites and a whole streaming engine
+behind a compile flag; whether the engine runs is a runtime setting an operator
+can see, and whether it exists is not a question a build should answer
+silently. Three things came with it:
+
+- **The test and production defaults were opposites.** `live_hls_recovery_enabled`
+  read `== Some("1")` under `cfg(test)` and `!= Some("0")` otherwise, so every
+  VOD-refusal regression in the repo described a policy the fleet does not run.
+  Four tests changed answer when the two were unified — including one whose own
+  comment said *"The old fourth method is not a fallback"* about a path that is
+  exactly a fallback in production. Each of them now states which policy it is
+  asserting, and
+  `the_shipped_default_answers_a_vod_refusal_with_the_retained_engine` covers
+  the default that had never once run.
+- **The engine is attributable now.** It transcodes, so a session it serves
+  costs encode time on the node, and it announced that in a `tracing::warn!`
+  and nowhere else. `plurx_live_hls_recovery_sessions_total{reason}` counts
+  what it served and why, and a Developer card reports the same numbers and
+  names the switch that stops the fallback. The switch itself stays in
+  Playback → Streaming; two copies of one control drift.
+- **One path does not consult the switch, and now says so.** A request that
+  arrives already naming `Presentation::Live` goes straight to the retained
+  engine — today that is the peer takeover path, whose recipe validation
+  requires it. It is counted under `requested_live` and reported by
+  `no_session_bypasses_the_switch`, because a node serving live-HLS sessions
+  with the fallback off is otherwise invisible. **Whether that path should
+  consult the setting is a decision, not an oversight, and it is still open.**
+
+Not done here: removing the engine. §5 conditions that on real VOD recipe
+coverage replacing it, and the coverage row exists precisely so someone can
+tell when that is true.
+
+Still open here: the remaining hidden gates in the inventory below, and the
+qualification/promotion run.
+
+**The rest of the hidden-gate inventory**, found while doing the above and not
+yet addressed. Each is a switch that changes product behaviour with no visible
+control:
+
+- `PLURX_PGS_OVERLAY` (`state.rs`) — default **off**, gates the whole PGS
+  subtitle-overlay feature including which subtitle tracks clients are told
+  exist. No setting, no API field, no UI, and a whole `plurx-pgs` crate behind
+  it.
+- `PLURX_DV_CONVERT` (`main.rs`) — default **on**, kill switch for the
+  Profile 7 → 8.1 conversion. Reported in `system_info`, not settable.
+- `OFFLINE_ENABLED` — master kill switch for offline packages; reaches the
+  settings API and renders nowhere.
+- `SW_POOL_THREADS`, `MAX_HW_SESSIONS`, `LIBRARY_DV_DISK_CONVERT` — settings
+  keys with no DTO field at all.
+
+`PLURX_HWACCEL` is the pattern the rest should follow: it seeds a stored
+setting the admin UI then displays, rather than being an invisible decision
+input at each call site.
 
 Finish the Developer Enable section's prerequisites and actual behavior;
 remove retained compile/default hidden live-HLS fallback once real VOD recipe
