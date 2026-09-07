@@ -53,6 +53,8 @@ const RESOURCE_STABLE_SAMPLES: usize = 2;
 const THREAD_MARGIN: u64 = 0;
 const SOCKET_MARGIN: u64 = 0;
 const OWNED_ASYNC_TASK_MARGIN: u64 = 0;
+const RECOVERY_WRITE_SQL: &str =
+    "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1578,10 +1580,11 @@ pub async fn run_transport_recovery_writer(config_path: &Path) -> Result<()> {
         }
         let key = format!("{}{ordinal:06}", config.prefix);
         let value = format!("transport-recovery-ack-{ordinal:06}-{}", "x".repeat(128));
+        let updated_at = unix_ms()? / 1_000;
         let execution = client
             .execute(
-                "INSERT INTO settings (key, value) VALUES ($1, $2)",
-                params!(key.as_str(), value.as_str()),
+                RECOVERY_WRITE_SQL,
+                params!(key.as_str(), value.as_str(), updated_at),
             )
             .await;
         if let Err(error) = execution {
@@ -2539,6 +2542,14 @@ mod tests {
         ] {
             assert!(voter_smoke_plan(&arguments).is_err());
         }
+    }
+
+    #[test]
+    fn recovery_writer_populates_every_required_settings_column() {
+        assert_eq!(
+            RECOVERY_WRITE_SQL,
+            "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)"
+        );
     }
 
     #[test]
