@@ -52,6 +52,9 @@ startup budget rather than by a codec.
 companion for anyone — contributor or coding agent — whose checkout has no
 Rust toolchain: how to put `cargo check`, Clippy and the unit suite ten
 minutes away instead of pushing to find out.
+[docs/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md](docs/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md)
+specifies the TLS flush correction, bounded snapshot recovery, and the
+regressions required before the clustering reliability fixes ship.
 [docs/CI_TEST_OVERHAUL_PLAN.md](docs/CI_TEST_OVERHAUL_PLAN.md) records
 the measured failure order, docs-only lane, suite split, and safe rebase-result
 reuse roadmap. Then
