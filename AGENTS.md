@@ -5,6 +5,26 @@ workflows. GitHub branch protection is unavailable on the current account
 plan, so every contributor and coding agent must enforce the merge convention
 below.
 
+## Rust compile loop
+
+At the start of any session that may change Rust, establish a working compiler
+loop before editing. If the checkout host cannot run the repository-pinned
+Rust 1.97.1 toolchain, use the source-only cloud loop in
+[docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md#4-compile-before-ci-send-source-to-the-compiler-never-credentials).
+Do not wait for CI to discover type errors, moved values, missing struct fields,
+test failures, or denied lints.
+
+- Archive committed source with `git archive`; transfer neither `.git` nor a
+  repository credential to the cloud container.
+- Keep the cloud `target/` warm and run check, clippy, formatting, and the
+  focused tests needed by the change before pushing.
+- After applying the verified patch to the current intended base, archive that
+  exact branch and run the loop again. Results against the older source snapshot
+  are not evidence for a branch whose base moved.
+- Verify `rustc --version` rather than trusting the default `cargo`; an unpinned
+  toolchain is not equivalent evidence. Remove stale source extractions when
+  the session's fixed writable allowance gets tight.
+
 ## Large efforts
 
 - Integrate a multi-task project on one temporary `effort/<project>` branch.
