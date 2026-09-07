@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["8386910d"]
+points = []
+checks = []
+reason = "This commit only records the previous commit's validation mapping; it changes no runtime behaviour. It is listed here because its subject names the fixes it maps, which the audit reads as corrective work of its own — the mapping is the whole content, and a ledger entry cannot carry evidence for itself."
+ignore = true
