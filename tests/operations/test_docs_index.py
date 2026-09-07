@@ -23,15 +23,21 @@ INDEX = ROOT / "docs" / "README.md"
 # the index as directories, so listing every file would only add noise.
 UNLISTED_DIRS = {"apple-builds", "evidence", "img", "mockups", "archive/retro-2026-08-09"}
 
-# docs/ paths referenced in the repo that have never existed. Each is prose
-# in an older document naming a companion that was never written, or a test
-# fixture whose path is synthetic. Fix by writing the doc or the reference,
-# not by widening this set.
+# docs/ paths referenced in the repo that do not exist here. Each is prose in
+# an older document naming a companion that was never written, a reference to
+# another repository's docs/ that happens to share the path shape, or a
+# synthetic test fixture. Fix by writing the doc or correcting the reference,
+# not by widening this set. Note that the macOS working copy is
+# case-insensitive and CI is not, so a lowercase path can resolve locally and
+# fail on Linux — this list is judged by the Linux answer.
 KNOWN_ABSENT = {
     "docs/VOD-ENCODING.md",                          # named by streaming/STREAMING-RELIABILITY-HANDOFF.md
     "docs/FRAGMENT-INDEX-QUEUE-REPAIR-HANDOFF.md",   # named by crates/plurx-core/src/store/placeholder_census.rs
-    "docs/plan-integration.md",                      # clients/EBOOK-READER-PLAN.md, refers to Curator's docs
-    "docs/settings.md",                              # clients/EBOOK-READER-PLAN.md, refers to Curator's docs
+    # clients/EBOOK-READER-PLAN.md §M6 names three files in *Curator's* docs/,
+    # not this repo's. The path shape is identical, so the sweep sees them.
+    "docs/settings.md",
+    "docs/integration.md",
+    "docs/plan-integration.md",
     "docs/base.md", "docs/current.md", "docs/plan.md",  # tests/validation/test_history.py fixtures
     "docs/NOTES.md",                                 # tests/validation/test_mobile_versions.py fixture
 }
