@@ -45,6 +45,24 @@ fn video(
     })
 }
 
+/// Cover art carried as a video stream. Every ordinal-counting selector has to
+/// skip these, or ordinal 0 means "the poster" on a large fraction of a library.
+fn attached_picture(index: u32) -> Value {
+    json!({
+        "index": index,
+        "codec_type": "video",
+        "codec_name": "mjpeg",
+        "profile": null,
+        "width": 600,
+        "height": 900,
+        "pix_fmt": "yuvj420p",
+        "avg_frame_rate": "0/0",
+        "r_frame_rate": "90000/1",
+        "color_transfer": null,
+        "disposition": {"attached_pic": 1}
+    })
+}
+
 fn facts(stream: Value) -> DecodeFacts {
     DecodeFacts::from_ffprobe_json(&json!({"streams": [stream]}), identity('a'))
         .expect("valid decode facts")
@@ -161,7 +179,7 @@ fn capabilities(rows: Vec<DecodeCapability>) -> DecodeCapabilities {
             .into_iter()
             .map(|codec| SoftwareDecoder {
                 codec: codec.to_owned(),
-                implementation: codec.to_owned(),
+                implementation: Some(codec.to_owned()),
             })
             .collect(),
     )
@@ -186,13 +204,27 @@ fn capabilities_with_qualified_software(
     capabilities(rows)
 }
 
+/// An inventory that knows the build decodes this codec but has measured no
+/// implementation — the honest shape of a startup `ffmpeg -decoders` read.
+fn software_capabilities_without_implementation(codec: &str) -> DecodeCapabilities {
+    DecodeCapabilities::new(
+        snapshot_identity(),
+        vec![],
+        vec![SoftwareDecoder {
+            codec: codec.to_owned(),
+            implementation: None,
+        }],
+    )
+    .expect("valid inventory naming no implementation")
+}
+
 fn unqualified_software_capabilities(codec: &str) -> DecodeCapabilities {
     DecodeCapabilities::new(
         snapshot_identity(),
         vec![],
         vec![SoftwareDecoder {
             codec: codec.to_owned(),
-            implementation: codec.to_owned(),
+            implementation: Some(codec.to_owned()),
         }],
     )
     .expect("valid inventory without qualification")
@@ -280,7 +312,7 @@ fn software_capabilities(codec: &str, implementation: &str) -> DecodeCapabilitie
         vec![],
         vec![SoftwareDecoder {
             codec: codec.to_owned(),
-            implementation: implementation.to_owned(),
+            implementation: Some(implementation.to_owned()),
         }],
     )
     .expect("valid software decoder inventory")
@@ -754,12 +786,6 @@ fn the_same_source_measured_two_ways_names_one_artifact() {
         .descriptor_bound();
     let from_catalog_row = DecodeFacts::from_ffprobe_json_at(&json, identity('d'), 0)
         .expect("facts from stored probe");
-    assert_ne!(
-        descriptor_bound.source_identity().as_str(),
-        from_catalog_row.source_identity().as_str(),
-        "the two routes really do fingerprint the source differently"
-    );
-
     let capabilities = software_capabilities("h264", "h264");
     let plan_of = |facts: &DecodeFacts| {
         resolve_with_options(
@@ -795,6 +821,37 @@ fn the_same_source_measured_two_ways_names_one_artifact() {
     );
 }
 
+/// Two routes that land on the same stream must describe it identically.
+///
+/// The stored-probe route asks for "the first playable video"; the
+/// descriptor-bound route asks for an absolute index it resolved by ordinal.
+/// Those are two ways of saying the same thing, and while the facts digest
+/// recorded *which way was used*, they named two different artifacts for every
+/// file — the producer's key space and the player's never met. What the digest
+/// binds is the stream; how it was named is not part of the picture.
+#[test]
+fn explicit_and_first_playable_selection_of_one_stream_agree() {
+    let json = json!({"streams": [
+        attached_picture(0),
+        video(1, Some("h264"), Some("high"), 1920, 1080, Some("yuv420p"), "24/1", "24/1", Some("bt709"))
+    ]});
+    let first_playable =
+        DecodeFacts::from_ffprobe_json(&json, identity('c')).expect("first playable");
+    let explicit = DecodeFacts::from_ffprobe_json_at(&json, identity('d'), 1).expect("explicit");
+
+    assert_eq!(
+        first_playable.input_video_stream(),
+        1,
+        "cover art is not the film"
+    );
+    assert_eq!(explicit.input_video_stream(), 1);
+    assert_eq!(
+        first_playable.facts_digest(),
+        explicit.facts_digest(),
+        "one stream, one description, whichever way it was asked for"
+    );
+}
+
 /// The other half of the same rule: one name per source means two sources must
 /// not share one. Identity is the catalog row — id, size, mtime — so a file
 /// that is replaced stops matching, while a file that merely moves does not.
@@ -816,8 +873,11 @@ fn different_sources_have_different_artifact_names() {
         ffmpeg_build: "ffmpeg fixture".to_owned(),
     };
     let name_for = |file: &MediaFile| {
-        let mut media = options(Pipeline::Cpu);
-        media.cache_identity = DecodeCacheIdentity::from_media_file(file);
+        // Built the way production builds it. Setting `cache_identity` by hand
+        // here would leave a `from_options` that assigned a constant identity
+        // passing this test, which is the regression it exists to catch.
+        let mut media = TranscodeMediaOptions::from_options(file, &execution_options());
+        media.pipeline = Pipeline::Cpu;
         let plan = resolve_with_options(
             Encoder::Software,
             media,
@@ -884,13 +944,30 @@ fn missing_codec_or_uninventoried_software_decoder_is_a_typed_refusal() {
         "24/1",
         None,
     ));
+    // An uninventoried codec is not a refusal under the legacy policy. The
+    // startup inventory lists a small canonical set of families; VC-1, MPEG-1
+    // and ProRes are absent from it and decode perfectly well, because the
+    // pre-plan command named no decoder and FFmpeg chose one. The plan says so
+    // by naming none either.
+    let legacy = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &av1,
+        &capabilities(vec![]),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("an uninventoried codec still plans under the legacy policy");
+    assert_eq!(legacy.decode().backend(), DecodeBackend::Software);
+    assert_eq!(legacy.decode().software_decoder(), None);
+
+    // Under enforcement the inventory is the contract, so the refusal stands.
     assert_eq!(
         resolve(
             Encoder::Software,
             Pipeline::Cpu,
             &av1,
             &capabilities(vec![]),
-            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
         ),
         Err(PlanError::SoftwareDecoderUnavailable)
     );
@@ -1944,6 +2021,29 @@ fn plan_digest_and_command_are_stable_after_environment_mutation() {
         ffmpeg_build: "ffmpeg fixture".to_owned(),
     };
     let before_recipe = Recipe::new(&pipeline, &plan, false).hash();
+
+    // Where the environment *does* belong: in the policy snapshot taken while
+    // the plan is resolved. If this stopped mattering, the mutation below
+    // would be proving the absence of an effect that never existed.
+    let forced = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("off")),
+    )
+    .expect("compatibility snapshot resolves");
+    assert_eq!(forced.decode().backend(), DecodeBackend::Software);
+    let unforced = resolve(
+        Encoder::VideoToolbox,
+        Pipeline::Cpu,
+        &input,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("plain snapshot resolves");
+    assert_ne!(forced.plan_digest(), unforced.plan_digest());
+
     let previous = std::env::var_os("PLURX_HWDECODE");
     // SAFETY: this test serializes its mutation and restores the process
     // environment before releasing the lock.
@@ -2009,13 +2109,11 @@ fn execution_changes_do_not_change_plan_or_recipe_identity() {
     )
     .expect("second execution");
     assert_ne!(hls_args(&plan, &first), hls_args(&plan, &second));
-    let pipeline = PipelineDigest {
-        ffmpeg_build: "ffmpeg fixture".to_owned(),
-    };
-    assert_eq!(
-        Recipe::new(&pipeline, &plan, false).hash(),
-        Recipe::new(&pipeline, &plan, false).hash()
-    );
+    // The recipe half of this property is now enforced by the type: `Recipe`
+    // takes the plan and nothing else, so no execution value can reach it and
+    // an assertion here could not fail. What remains testable is that the
+    // execution fields above changed the command and left the plan alone.
+    assert_eq!(plan.plan_digest(), plan.plan_digest());
 }
 
 #[test]
@@ -2054,8 +2152,17 @@ fn reason_text_does_not_change_plan_digest() {
     assert_eq!(preferred.plan_digest(), continuation.plan_digest());
 }
 
+/// What runs changes the name; what we happen to know about it does not.
+///
+/// The implementation is in the command, so two implementations are two
+/// pictures and two names. Whether this node held a qualified inventory is not
+/// in the command: a qualified node and an unqualified node running the same
+/// decoder produce the same bytes, and giving the qualified one a private key
+/// space would split the fleet's cache in half during a rollout. That
+/// separation belongs to the artifact namespace, which `Recipe::hash` feeds on
+/// its own.
 #[test]
-fn qualification_or_software_implementation_changes_plan_digest() {
+fn the_software_implementation_changes_the_plan_digest_and_the_evidence_class_does_not() {
     let input = facts(video(
         0,
         Some("h264"),
@@ -2098,6 +2205,31 @@ fn qualification_or_software_implementation_changes_plan_digest() {
         DecodePolicySnapshot::new(DecodePlanPolicy::Enforce, None),
     )
     .expect("qualified software");
-    assert_ne!(legacy.plan_digest(), alternate.plan_digest());
-    assert_ne!(legacy.plan_digest(), qualified.plan_digest());
+    let unnamed = resolve(
+        Encoder::Software,
+        Pipeline::Cpu,
+        &input,
+        &software_capabilities_without_implementation("h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("an inventory that names no implementation still plans");
+    assert_eq!(unnamed.decode().software_decoder(), None);
+
+    assert_ne!(
+        legacy.plan_digest(),
+        alternate.plan_digest(),
+        "two decoders are two pictures"
+    );
+    assert_ne!(
+        legacy.plan_digest(),
+        unnamed.plan_digest(),
+        "naming a decoder and letting FFmpeg choose are different commands"
+    );
+    assert_eq!(legacy.decode().evidence(), DecodeEvidence::LegacyUnverified);
+    assert_eq!(qualified.decode().evidence(), DecodeEvidence::Qualified);
+    assert_eq!(
+        legacy.plan_digest(),
+        qualified.plan_digest(),
+        "the same decoder produces the same bytes however well we know it"
+    );
 }

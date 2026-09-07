@@ -1368,15 +1368,19 @@ fn hls_args_inner(
     let (decode_args, hwdownload) = if let Some(plan) = plan {
         let decode = plan.decode();
         let args = match decode.backend() {
-            DecodeBackend::Software => vec![
-                "-hwaccel".to_owned(),
-                "none".to_owned(),
-                "-c:v".to_owned(),
-                decode
-                    .software_decoder()
-                    .expect("validated software plan has a decoder")
-                    .to_owned(),
-            ],
+            // A named implementation is one the inventory measured, so the
+            // command names it. With none measured the command names none,
+            // which is what shipped before decode planning existed: FFmpeg
+            // chooses, and for some codecs its choice is better than the
+            // decoder named after the codec.
+            DecodeBackend::Software => {
+                let mut args = vec!["-hwaccel".to_owned(), "none".to_owned()];
+                if let Some(implementation) = decode.software_decoder() {
+                    args.push("-c:v".to_owned());
+                    args.push(implementation.to_owned());
+                }
+                args
+            }
             DecodeBackend::VideoToolbox => {
                 vec!["-hwaccel".to_owned(), "videotoolbox".to_owned()]
             }
@@ -1478,7 +1482,7 @@ fn hls_args_inner(
         |plan| {
             video_filters_for_contract(
                 planned_output_size,
-                plan.input_dynamic_range_name(),
+                plan.input_hdr_format(),
                 plan.input_is_hdr(),
                 plan.routing_dynamic_range(),
                 opts,

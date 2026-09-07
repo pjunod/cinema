@@ -79,7 +79,7 @@ The three shipping movie builders now consume the plan directly:
 
 Live TV cannot know codec/profile facts until tuner bytes arrive. Its separate
 `LiveTvTranscodePlan` therefore freezes the pre-body contract explicitly:
-software input auto-detection, absolute `0:v:0`, selected encoder, output
+software input auto-detection, the `0:v:0` stream specifier, selected encoder, output
 height, thread allowance, and force-IDR policy. The command states
 `-hwaccel none` and stays outside the movie cache namespace rather than
 inventing source facts.
@@ -112,6 +112,25 @@ symptom is indistinguishable from a cache that is merely cold. The facts digest
 now describes the measured stream only; which stream was selected still changes
 it, and the descriptor does not.
 
+There were two divergent terms, not one. The second was the selection rule
+itself: the stored-probe route asked for the first playable video stream while
+the descriptor-bound route asked for the stream FFmpeg's `0:v:0` resolves to.
+On a file carrying cover art as a video stream those are different streams, so
+the two routes planned different work and named different artifacts — and only
+one of them matched the command the shipping builder emits. Both routes now go
+through `legacy_ordinal_facts`, which resolves the ordinal FFmpeg would resolve
+and applies the catalog row only when the selected stream is the film. The
+ordinal deliberately counts attached pictures, because FFmpeg counts them;
+changing that would be a silent routing change, and it is not M2's to make.
+
+The facts digest also stopped carrying `selection_provenance`, and the plan
+digest stopped carrying `decode_evidence`. Both are provenance: they record how
+a fact was obtained or how well the node knows its own capability, not what will
+be produced. Two nodes running the same decoder produce the same picture, and
+giving the better-informed one a private key space would have split the fleet's
+cache during a rollout. The qualified-versus-unqualified separation belongs to
+`artifact_namespace`, which `Recipe::hash` already feeds on its own.
+
 Descriptor continuity survives as a separate question with a separate answer.
 `ResolvedTranscode::observed_source_identity` retains the fingerprint the facts
 were read through, and `ResolvedTranscode::source_binding` records
@@ -136,6 +155,33 @@ refuses to carry the plan of the route it is replacing.
 `a_pre_plan_staged_prefix_is_quarantined_by_the_v3_recipe_hash` proves a staged
 prefix written under a pre-plan recipe hash is quarantined rather than
 assembled into the new encode.
+
+### What the whole-PR review found, and what it changed
+
+Two independent adversarial reviews ran against exact head `aec3012a`. They
+agreed on six blockers. Four of them were already in the M2 working tree before
+this milestone's identity work; two were in the identity work itself. All are
+repaired in one batch; the disposition is below rather than in a PR comment,
+because four of these were shipping behaviour changes that a reader of this page
+needs to know about.
+
+| Finding | Disposition |
+|---|---|
+| Every GPU pipeline tone-mapped SDR sources. The plan path passed `input_dynamic_range_name()` where the legacy path passed `MediaFile.hdr`; the first answers `Some("sdr")` for an ordinary file and the renderers tone-map on `is_some()`. A 4K SDR file on a QSV node got `vpp_qsv=…:tonemap=1`, and the wrong picture would have been cached permanently under the v3 key | Added `ResolvedTranscode::input_hdr_format`, which is `None` unless the source is HDR, and used it at the one call site |
+| A file with `probe_json IS NULL` became unplayable, including one already fully cached: planning is resolved before the cache lookup, and a missing probe was a hard error. That row state is expected — the scan's repair pass and the probe retry job exist for it | `catalog_plan_probe` builds facts from what the scan recorded. It carries no frame rate, because the row has none and inventing one is the silent default the plan forbids |
+| Any codec outside the seven-family startup inventory became unplayable on a software-decode node — VC-1, MPEG-1, WMV3, ProRes — and a node whose `ffmpeg -decoders` call failed lost all transcoding. Before planning, the command named no decoder and FFmpeg read the container | Under the legacy policy an uninventoried codec resolves to software decode with no named implementation. Under `Enforce` the inventory is the contract and the refusal stands |
+| The startup inventory claimed `implementation == codec`, which the plan then forced as `-c:v`. `-c:v av1` selects the native decoder where FFmpeg would otherwise choose `libdav1d`, and the slower choice would have been baked into artifact identity | `SoftwareDecoder::implementation` is now `Option<String>`. The daemon's startup inventory records availability and names nothing, so the command names nothing, exactly as it did before planning existed. Naming an implementation is M3's job, once one has been measured |
+| Cluster cache locality was off. `media_offer_probe` hardcoded `cache_hit = false`, and that field is an *eligibility* input downstream, not a preference — a node holding a complete byte-verified generation was refused whenever its source was momentarily unreadable, which is exactly when serving from cache is the point. The cache-offer verification subsystem went `#[cfg(test)]` with it, so corrupt generations on offered-but-unselected nodes stopped being detected | The offer resolves a plan the same way live and offline do — no descriptor, no `stat`, only the catalog row and stored probe facts — and the verification subsystem is production code again. A plan that cannot be resolved yields no claim |
+| Descriptor-bound fact collection could spend a producer's entire deadline and then fail the job, with the 2-second cap and the budget restoration both removed. A title whose source probes slowly would produce nothing, every cycle, forever | `DECODE_PLAN_PROBE_BUDGET` caps it at two seconds, `retain_production_budget_after_planning` gives the time back, and a probe that cannot finish falls back to the stored-probe plan rather than failing production |
+
+The reviews also took apart the milestone's own new tests. Three proved less
+than their names claimed and one passed identically on the base commit; the
+assertions no mutation could fail were deleted rather than reworded, and the
+tests that were testing their own fixtures were rebuilt to go through the
+production derivation. Two assertions the recipe suite had dropped during M2
+were restored, and one of them is now stronger than it was: a renderer the
+source cannot feed is refused outright rather than merely given a distinct
+cache entry.
 
 ### A correction to the plan's own command list
 

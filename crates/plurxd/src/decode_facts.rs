@@ -3231,12 +3231,7 @@ async fn collect(
             let index = absolute_video_ordinal(&json, ordinal).ok_or_else(|| {
                 DecodeFactError::InvalidFacts("legacy video stream is missing".to_owned())
             })?;
-            match catalog.filter(|_| first_playable_video_index(&json) == Some(index)) {
-                Some(catalog) => {
-                    DecodeFacts::from_ffprobe_json_at_with_catalog(&json, before, index, catalog)
-                }
-                None => DecodeFacts::from_ffprobe_json_at(&json, before, index),
-            }
+            legacy_ordinal_facts(&json, before, index, catalog)
         }
         ProbeStreamSelection::Absolute(index) => {
             match catalog.filter(|_| first_playable_video_index(&json) == Some(index)) {
@@ -3253,7 +3248,39 @@ async fn collect(
     .map_err(|error| DecodeFactError::InvalidFacts(error.to_string()))
 }
 
-fn absolute_video_ordinal(json: &serde_json::Value, ordinal: u32) -> Option<u32> {
+/// The absolute index FFmpeg's `0:v:<ordinal>` resolves to.
+///
+/// Attached pictures are counted, because FFmpeg counts them: `-map 0:v:0` on a
+/// file with cover art selects the cover art. That is what the shipping command
+/// does, so it is what the plan has to describe. Skipping them here would be a
+/// silent routing change dressed up as a fix — and it would still leave the two
+/// planning routes disagreeing, because the disagreement is about which rule to
+/// use, not about how the rule counts. Both routes use this one.
+/// Facts for the stream `0:v:<ordinal>` resolves to, catalog applied only when
+/// that stream is the film.
+///
+/// Both planning routes call this. They used to select differently — the
+/// descriptor-bound route by FFmpeg ordinal, the stored-probe route by "first
+/// playable" — which on a file carrying cover art is two different streams,
+/// two different plans and two artifact names for one title, only one of which
+/// matched the command. One rule, in one place, so they cannot drift again.
+pub(crate) fn legacy_ordinal_facts(
+    json: &serde_json::Value,
+    source_identity: plurx_core::transcode::DecodeSourceIdentity,
+    index: u32,
+    catalog: Option<&DecodeCatalogMetadata>,
+) -> Result<DecodeFacts, plurx_core::transcode::PlanError> {
+    // The catalog row describes the film. Applied to an attached picture it
+    // would claim that a JPEG is Dolby Vision.
+    match catalog.filter(|_| first_playable_video_index(json) == Some(index)) {
+        Some(catalog) => {
+            DecodeFacts::from_ffprobe_json_at_with_catalog(json, source_identity, index, catalog)
+        }
+        None => DecodeFacts::from_ffprobe_json_at(json, source_identity, index),
+    }
+}
+
+pub(crate) fn absolute_video_ordinal(json: &serde_json::Value, ordinal: u32) -> Option<u32> {
     json.get("streams")?
         .as_array()?
         .iter()
@@ -3266,7 +3293,7 @@ fn absolute_video_ordinal(json: &serde_json::Value, ordinal: u32) -> Option<u32>
         .and_then(|index| u32::try_from(index).ok())
 }
 
-fn first_playable_video_index(json: &serde_json::Value) -> Option<u32> {
+pub(crate) fn first_playable_video_index(json: &serde_json::Value) -> Option<u32> {
     json.get("streams")?
         .as_array()?
         .iter()
@@ -3298,6 +3325,69 @@ async fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One rule for both planning routes, including the case that used to
+    /// split them: a file whose cover art is a video stream. Whatever the rule
+    /// selects, both routes select it, and the catalog row is applied only when
+    /// the selected stream is the film.
+    #[test]
+    fn both_planning_routes_select_one_stream_through_one_rule() {
+        let json = serde_json::json!({"streams": [
+            {"index": 2, "codec_type": "audio", "codec_name": "aac"},
+            {"index": 4, "codec_type": "video", "codec_name": "mjpeg", "profile": "Baseline",
+             "pix_fmt": "yuvj420p", "width": 600, "height": 600,
+             "avg_frame_rate": "25/1", "r_frame_rate": "25/1", "color_transfer": "bt709",
+             "disposition": {"attached_pic": 1}},
+            {"index": 7, "codec_type": "video", "codec_name": "hevc", "profile": "Main 10",
+             "pix_fmt": "yuv420p10le", "width": 3840, "height": 2160,
+             "avg_frame_rate": "24/1", "r_frame_rate": "24/1", "color_transfer": "smpte2084",
+             "disposition": {"attached_pic": 0}}
+        ]});
+        let index = absolute_video_ordinal(&json, 0).expect("0:v:0 resolves");
+        assert_eq!(index, 4, "FFmpeg's 0:v:0 is the attached picture here");
+
+        let catalog = DecodeCatalogMetadata::new(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+            plurx_core::domain::DolbyVisionFacts {
+                profile: Some(8),
+                level: Some(6),
+                bl_compat_id: Some(1),
+                el_present: Some(false),
+                rpu_present: Some(true),
+            },
+        )
+        .expect("catalog facts");
+
+        let identity = |byte: char| {
+            plurx_core::transcode::DecodeSourceIdentity::from_sha256(byte.to_string().repeat(64))
+                .expect("identity")
+        };
+        // The bound route's identity and the stored route's identity differ by
+        // construction; the facts they produce must not.
+        let bound =
+            legacy_ordinal_facts(&json, identity('c'), index, Some(&catalog)).expect("bound facts");
+        let stored = legacy_ordinal_facts(&json, identity('d'), index, Some(&catalog))
+            .expect("stored facts");
+
+        assert_eq!(bound.input_video_stream(), 4);
+        assert_eq!(stored.input_video_stream(), 4);
+        assert_eq!(
+            bound.facts_digest(),
+            stored.facts_digest(),
+            "one stream, one description, so one artifact name"
+        );
+        assert_eq!(
+            bound.dynamic_range(),
+            Some("sdr"),
+            "the film's Dolby Vision row does not describe its cover art"
+        );
+
+        // And when the ordinal does land on the film, the catalog applies.
+        let film = legacy_ordinal_facts(&json, identity('c'), 7, Some(&catalog)).expect("film");
+        assert_eq!(film.input_video_stream(), 7);
+        assert_eq!(film.dynamic_range(), Some("dolby_vision"));
+    }
 
     #[test]
     fn production_pre_exec_transitive_source_audit_rejects_allocation_and_panic_forms() {

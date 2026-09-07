@@ -22,12 +22,12 @@ use plurx_core::domain::{
 use plurx_core::error::StoreError;
 use plurx_core::store::{keys, PublicationFence, PublicationStore, Store};
 use plurx_core::transcode::{
-    self, AttemptRestrictions, DecodeCapabilities, DecodeCapabilitySnapshotIdentity,
-    DecodeCatalogMetadata, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
-    DecodeSourceIdentity, EffectiveRateControl, Encoder, EncoderCaps, OutputGrade, Pacing,
-    Pipeline, PipelineDigest, QualityRateControlValidation, QualityRc, RateMode, Recipe,
-    ResolvedTranscode, SoftwareDecoder, ToneMap, TranscodeExecution, TranscodeMediaOptions,
-    TranscodeOptions, TranscodeRequest, CACHE_RECIPE_VERSION,
+    self, AttemptRestrictions, DecodeCacheIdentity, DecodeCapabilities,
+    DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeFacts, DecodePlanPolicy,
+    DecodePolicySnapshot, DecodeSourceIdentity, EffectiveRateControl, Encoder, EncoderCaps,
+    OutputGrade, Pacing, Pipeline, PipelineDigest, QualityRateControlValidation, QualityRc,
+    RateMode, Recipe, ResolvedTranscode, SoftwareDecoder, ToneMap, TranscodeExecution,
+    TranscodeMediaOptions, TranscodeOptions, TranscodeRequest, CACHE_RECIPE_VERSION,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
@@ -57,12 +57,33 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
+/// How long descriptor-bound fact collection may borrow from a producer's
+/// deadline.
+///
+/// The bound probe is an improvement on the stored-probe plan, not a
+/// precondition for producing anything. Left unbounded it takes the whole
+/// production window from a title whose source probes slowly, and the producer
+/// then makes nothing — every cycle, forever, for that title. Bounded, the
+/// worst case is two seconds and a plan built from stored facts, which is what
+/// every other path already uses. The elapsed time is added back to the
+/// production deadline so observing costs the encode nothing.
+const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+/// Give back what observation spent, so a bounded probe cannot shorten the
+/// encode it was meant to inform.
+fn retain_production_budget_after_planning(
+    production_deadline: Instant,
+    observation_duration: Duration,
+) -> Instant {
+    production_deadline
+        .checked_add(observation_duration)
+        .unwrap_or(production_deadline)
+}
+
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
-#[cfg(test)]
 const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);
-#[cfg(test)]
 const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
 const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
@@ -1892,7 +1913,18 @@ impl PrepublicationTranscodeRetry {
             encoder: retry_encoder,
             software_threads,
         } = prepared;
-        if plan.encoder() != retry_encoder || plan.options().pipeline != retry_opts.pipeline {
+        // Encoder and pipeline alone are not "this plan is for this retry".
+        // They happen to catch the plan of the route being replaced, because
+        // `prepare` always changes one of them — but a plan for a different
+        // title, height, audio track or rate control would pass, and the retry
+        // publishes under that plan's key. Check the whole prepared request.
+        if plan.encoder() != retry_encoder
+            || plan.options().pipeline != retry_opts.pipeline
+            || plan.options().target_height != retry_opts.target_height
+            || plan.options().audio_index != retry_opts.audio_index
+            || plan.options().effective_rate_control != retry_opts.effective_rate_control
+            || plan.cache_identity() != &DecodeCacheIdentity::from_media_file(file)
+        {
             return Err("one-step retry plan disagrees with its prepared encode route".to_owned());
         }
         let execution =
@@ -3878,7 +3910,6 @@ struct CachedLocationIdentity {
     manifest_digest: Option<String>,
 }
 
-#[cfg(test)]
 enum CacheOfferVerdict {
     Pending {
         identity: CachedLocationIdentity,
@@ -3891,7 +3922,6 @@ enum CacheOfferVerdict {
     },
 }
 
-#[cfg(test)]
 struct CacheOfferVerification {
     verified: bool,
     revoke_shared_member: bool,
@@ -9536,9 +9566,7 @@ pub struct TranscodeManager {
     /// cache mount may strand one verifier, but the semaphore and pending
     /// entry ensure offers never submit a second filesystem operation behind
     /// it. Offers fail closed until the background verdict arrives.
-    #[cfg(test)]
     cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
-    #[cfg(test)]
     cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     /// Arc-owned so an accepted retirement can remove its exact Session after
     /// the initiating request, reaper, or takeover future has disappeared.
@@ -9851,9 +9879,7 @@ impl TranscodeManager {
             scratch_sampled_at_unix_ms: AtomicI64::new(0),
             scratch_sample_generation: AtomicU64::new(0),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
-            #[cfg(test)]
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            #[cfg(test)]
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             recent_marker_ambiguities: Arc::new(std::sync::Mutex::new(
@@ -10339,12 +10365,21 @@ impl TranscodeManager {
             None,
             grade,
         );
-        // Offers deliberately do not bind or even stat the source. A planned
-        // cache identity is therefore unavailable here and guessing from the
-        // catalog row would risk advertising an artifact built for a
-        // different selected stream or decode surface. The authoritative
-        // start path binds a complete plan before its lookup.
-        let cache_hit = false;
+        // An offer cannot bind or stat the source, and it does not need to:
+        // the artifact key is the catalog identity plus stored probe facts,
+        // both of which this node already has. `cache_hit` is an *eligibility*
+        // input downstream, not a preference — a node holding a complete
+        // byte-verified generation whose source is momentarily unreadable is
+        // exactly the node that should serve, and answering `false` here would
+        // refuse it. Plan resolution failing means we cannot name the artifact,
+        // so we claim nothing and fail closed.
+        let cache_hit = match self.resolve_movie_plan(file, &opts, encoder).await {
+            Ok(plan) => self.verified_cache_hit(&plan).await,
+            Err(reason) => {
+                tracing::debug!(file_id = file.id, %reason, "offer cannot name an artifact");
+                false
+            }
+        };
         let (hardware_used, hardware_max) = self.hardware_slots().await;
         let software_max = self.software_budget().await;
         let software_used = self.admissions.software_in_use();
@@ -10534,8 +10569,23 @@ impl TranscodeManager {
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(test)]
-    fn synthetic_plan_probe(file: &plurx_core::domain::MediaFile) -> serde_json::Value {
+    /// What the catalog row alone can say about the source, as FFprobe would
+    /// have said it.
+    ///
+    /// `probe_json IS NULL` is an expected, first-class row state — the scan's
+    /// repair pass and the probe retry job exist for exactly those rows — so a
+    /// missing probe cannot be allowed to mean "this title is unplayable".
+    /// Before decode planning, such a file transcoded fine: the command named
+    /// no decoder and FFmpeg read the container. Planning has to be able to say
+    /// the same thing.
+    ///
+    /// Everything here is a value the scan actually recorded. There is no frame
+    /// rate, because the row has none and inventing 24 fps would be exactly the
+    /// silent default the plan forbids; the facts carry it as unknown. The
+    /// resulting plan differs from a stored-probe plan and therefore names a
+    /// different artifact, which is correct — they are different measurements,
+    /// and the one made from real probe output wins the moment it exists.
+    fn catalog_plan_probe(file: &plurx_core::domain::MediaFile) -> serde_json::Value {
         let transfer = match transcode::routing_hdr(file) {
             Some("hdr10" | "hdr10plus" | "dolby_vision") => Some("smpte2084"),
             Some("hlg") => Some("arib-std-b67"),
@@ -10550,8 +10600,6 @@ impl TranscodeManager {
                 "width": file.width,
                 "height": file.height,
                 "pix_fmt": if file.bit_depth.unwrap_or(8) >= 10 { "yuv420p10le" } else { "yuv420p" },
-                "avg_frame_rate": "24/1",
-                "r_frame_rate": "24/1",
                 "color_transfer": transfer,
                 "disposition": {"attached_pic": 0}
             }]
@@ -10569,24 +10617,32 @@ impl TranscodeManager {
             .get_file_probe_json(file.id)
             .await
             .map_err(|error| format!("reading decoder planning facts: {error}"))?;
-        #[cfg(not(test))]
-        let probe: serde_json::Value = serde_json::from_str(
-            stored_probe
-                .as_deref()
-                .ok_or_else(|| "decoder planning facts are unavailable".to_owned())?,
-        )
-        .map_err(|error| format!("decoder planning facts are invalid: {error}"))?;
-        #[cfg(test)]
+        // One expression for both builds: a row without probe output plans
+        // from what the scan recorded rather than refusing to play.
         let probe: serde_json::Value = match stored_probe.as_deref() {
             Some(encoded) => serde_json::from_str(encoded)
                 .map_err(|error| format!("decoder planning facts are invalid: {error}"))?,
-            None => Self::synthetic_plan_probe(file),
+            None => Self::catalog_plan_probe(file),
         };
         let source_identity = Self::plan_source_identity(file)?;
         let catalog = DecodeCatalogMetadata::from_media_file(file)
             .map_err(|error| format!("decoder catalog facts are invalid: {error}"))?;
-        let facts = DecodeFacts::from_ffprobe_json_with_catalog(&probe, source_identity, &catalog)
-            .map_err(|error| format!("decoder planning facts are incompatible: {error}"))?;
+        // The same stream the bound route selects, by the same rule. This used
+        // to ask for "the first playable video stream" while the bound route
+        // asked for FFmpeg's `0:v:0`. On a file carrying cover art those are
+        // two different streams, so the producer and the player planned
+        // different work and named different artifacts — and only one of them
+        // matched the command the shipping builder emits. One rule, and it is
+        // the one the command uses.
+        let index = crate::decode_facts::absolute_video_ordinal(&probe, 0)
+            .ok_or_else(|| "decoder planning facts name no video stream".to_owned())?;
+        let facts = crate::decode_facts::legacy_ordinal_facts(
+            &probe,
+            source_identity,
+            index,
+            Some(&catalog),
+        )
+        .map_err(|error| format!("decoder planning facts are incompatible: {error}"))?;
         self.resolve_movie_plan_with_facts(file, options, encoder, &facts)
     }
 
@@ -10620,9 +10676,16 @@ impl TranscodeManager {
             Vec::new(),
             decoders
                 .into_iter()
+                // Availability, not an implementation claim: `ffmpeg
+                // -decoders` lists codec families, and this node has measured
+                // nothing about which decoder FFmpeg will pick for one. Naming
+                // the family here would force `-c:v av1` where FFmpeg would
+                // otherwise choose `libdav1d`, and bake that slower choice into
+                // the artifact's identity. M3's qualified inventory is where an
+                // implementation gets measured and named.
                 .map(|codec| SoftwareDecoder {
-                    implementation: codec.clone(),
                     codec,
+                    implementation: None,
                 })
                 .collect(),
         )
@@ -10648,10 +10711,9 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ResolvedTranscode, String> {
-        let probe = self
-            .decode_probe_identity
-            .as_ref()
-            .ok_or_else(|| "bound decoder planning probe is unavailable".to_owned())?;
+        let Some(probe) = self.decode_probe_identity.as_ref() else {
+            return self.resolve_movie_plan(file, options, encoder).await;
+        };
         let catalog = DecodeCatalogMetadata::from_media_file(file)
             .map_err(|error| format!("decoder catalog facts are invalid: {error}"))?;
         let fact_source = crate::decode_facts::DecodeFactSource::new(
@@ -10668,12 +10730,48 @@ impl TranscodeManager {
                 fact_source,
                 Some(&catalog),
                 crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
-                deadline.saturating_duration_since(Instant::now()),
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(DECODE_PLAN_PROBE_BUDGET),
                 cancelled,
             )
-            .await
-            .map_err(|error| format!("collecting bound decoder planning facts: {error}"))?;
-        self.resolve_movie_plan_with_facts(file, options, encoder, &facts)
+            .await;
+        match facts {
+            Ok(facts) => self.resolve_movie_plan_with_facts(file, options, encoder, &facts),
+            // A probe that could not finish inside its budget, or a node with
+            // no probe artifact at all, must not make the title unproducible.
+            // Fall back to the same stored-probe plan live and offline already
+            // use; the plan records `CatalogRow` so nothing downstream can
+            // mistake it for a descriptor-bound measurement.
+            Err(error) => {
+                tracing::debug!(
+                    file_id = file.id,
+                    %error,
+                    "bound decoder planning fell back to stored probe facts"
+                );
+                self.resolve_movie_plan(file, options, encoder).await
+            }
+        }
+    }
+
+    /// Whether a plan describes the request it is sitting next to.
+    ///
+    /// Several call paths still carry `file` and `opts` alongside the plan
+    /// because they need values the plan does not hold — the source path, the
+    /// resume position, the scratch directory. Nothing checked that the two
+    /// described the same work, which is the fault `Recipe::new` used to have
+    /// one layer down: the key comes from the plan and the advertised shape
+    /// from the options, so a mis-wired caller could look up one title and
+    /// describe another. Cheap to check, and it fails closed.
+    fn plan_matches_request(
+        plan: &ResolvedTranscode,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+    ) -> bool {
+        plan.cache_identity() == &DecodeCacheIdentity::from_media_file(file)
+            && plan.options().target_height == opts.target_height
+            && plan.options().audio_index == opts.audio_index
+            && plan.options().effective_rate_control == opts.effective_rate_control
     }
 
     /// The only constructor for a content-addressed transcode recipe.
@@ -11472,7 +11570,6 @@ impl TranscodeManager {
     /// bytes that were measured — `plan.source_binding()` records whether the
     /// facts were descriptor-bound, and the qualified-reuse gate that must
     /// refuse [`PlanSourceBinding::CatalogRow`] arrives with receipts in M3.
-    #[cfg(test)]
     async fn verified_cache_hit(&self, plan: &ResolvedTranscode) -> bool {
         let Some(cache) = self.cache.as_ref() else {
             return false;
@@ -11585,7 +11682,6 @@ impl TranscodeManager {
         false
     }
 
-    #[cfg(test)]
     async fn verify_cache_offer_location(
         store: Arc<dyn Store>,
         readers: crate::cachekeep::ActiveCacheReaders,
@@ -11629,7 +11725,6 @@ impl TranscodeManager {
         .await
     }
 
-    #[cfg(test)]
     async fn verify_cache_offer_location_inner(
         store: Arc<dyn Store>,
         readers: crate::cachekeep::ActiveCacheReaders,
@@ -11882,6 +11977,13 @@ impl TranscodeManager {
         owner: SessionOwner<'_>,
     ) -> Option<StartInfo> {
         let cache = self.cache.as_ref()?;
+        if !Self::plan_matches_request(plan, file, opts) {
+            tracing::error!(
+                file_id = file.id,
+                "cache lookup refused: the plan does not describe this request"
+            );
+            return None;
+        }
         let digest = self.digest()?;
         let hash = self.effective_recipe(&digest, plan, false).hash();
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -12401,6 +12503,7 @@ impl TranscodeManager {
         // Bind decoder facts and the immutable plan before deriving any cache,
         // singleflight, staging, or publication identity. The held descriptor
         // used here is the same source descriptor later inherited by ffmpeg.
+        let planning_started = Instant::now();
         let plan = match bound_source.as_ref() {
             Some(source) => {
                 self.resolve_bound_movie_plan(
@@ -12415,6 +12518,8 @@ impl TranscodeManager {
             }
             None => self.resolve_movie_plan(file, &opts, encoder).await?,
         };
+        let deadline =
+            retain_production_budget_after_planning(deadline, planning_started.elapsed());
         let digest = self.digest().ok_or("no cache digest")?;
         let hash = self.effective_recipe(&digest, &plan, false).hash();
         if cancelled.is_cancelled() {
@@ -33034,10 +33139,10 @@ pub(crate) mod tests {
         )
         .await
         .expect("build the alternative");
-        assert_ne!(
-            retry.actor_recipe.fingerprint, failed_hash,
-            "the successor attempt cannot be admitted as the failed producer"
-        );
+        // The retry's fingerprint and the recipe hash are digests over
+        // different field lists, so asserting they differ proves nothing but
+        // the absence of a SHA-256 collision. What is worth proving is below.
+        let _ = &retry.actor_recipe.fingerprint;
 
         // The prefix protection itself: a retry prepared for the software
         // route cannot be constructed carrying the hardware plan it replaced,
@@ -33066,12 +33171,29 @@ pub(crate) mod tests {
     }
 
     /// Staged parts are only worth resuming if they were produced under the
-    /// same recipe. A pre-plan prefix carries a pre-plan hash, so v3 must
-    /// quarantine it rather than assemble a title out of two different
-    /// encodes — the one cache failure that is not an error, just the wrong
+    /// same recipe. A prefix staged under a different plan carries a different
+    /// v3 hash, so it must be quarantined rather than assembled into this
+    /// encode — the one cache failure that is not an error, just the wrong
     /// film.
+    ///
+    /// Both hashes come from `effective_recipe`, not from two arbitrary
+    /// strings: a test that hand-wrote them would pass on any recipe
+    /// composition, including one that had stopped telling the two plans apart.
     #[tokio::test]
-    async fn a_pre_plan_staged_prefix_is_quarantined_by_the_v3_recipe_hash() {
+    async fn a_staged_prefix_from_another_plan_is_quarantined_by_the_v3_recipe_hash() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let staged_file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let stale_hash = recipe_hash_for(&mgr, &staged_file, 480).await;
+        let planned_hash = recipe_hash_for(&mgr, &staged_file, 1080).await;
+        assert_ne!(
+            stale_hash, planned_hash,
+            "two plans, two names — otherwise this test proves nothing"
+        );
+
         let root = crate::test_tempdir().expect("staging root");
         let parent = plurx_core::fs_secure::SecureDirectory::open(root.path())
             .await
@@ -33096,9 +33218,8 @@ pub(crate) mod tests {
             source_size: job.source_size,
             source_mtime: job.source_mtime,
             policy_generation: job.policy_generation.clone(),
-            // What a pre-plan producer would have written: a recipe hash from
-            // before the plan namespace existed.
-            recipe_hash: "0".repeat(64),
+            // What a producer working under a different plan wrote.
+            recipe_hash: stale_hash.clone(),
             source,
         };
         write_pretranscode_staging_identity(&staging, &stale)
@@ -33113,7 +33234,6 @@ pub(crate) mod tests {
             .await
             .is_ok());
 
-        let planned_hash = "a".repeat(64);
         let rebound =
             bind_pretranscode_staging(&parent, "job-staging", staging, &job, &planned_hash, source)
                 .await

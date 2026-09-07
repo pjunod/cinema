@@ -57,7 +57,9 @@ impl DecodeBackend {
 }
 
 impl DecodeEvidence {
-    fn name(self) -> &'static str {
+    /// Diagnostic spelling. Deliberately not part of `plan_digest` — see the
+    /// comment where the other fields are fed.
+    pub fn name(self) -> &'static str {
         match self {
             Self::Qualified => "qualified_selection",
             Self::LegacyUnverified => "legacy_unverified_selection",
@@ -551,10 +553,18 @@ pub struct DecodeFacts {
     facts_digest: String,
 }
 
+/// What the measurement found, not how the measurement was made.
+///
+/// `input_video_stream` belongs here: it decides which bytes are encoded.
+/// `selection_provenance` does not, and used to — the stored-probe route
+/// resolves `FirstPlayableVideo` while the descriptor-bound route resolves
+/// `ExplicitAbsoluteIndex`, so including it gave the player and the producer
+/// disjoint key spaces for every file, exactly as the descriptor fingerprint
+/// did. Two routes that agree on which stream to encode must agree on the
+/// name of the result.
 #[derive(Serialize)]
 struct FactsDigest<'a> {
     input_video_stream: u32,
-    selection_provenance: StreamSelectionProvenance,
     codec: &'a Option<String>,
     profile: &'a Option<String>,
     pixel_format: &'a Option<String>,
@@ -664,7 +674,6 @@ impl DecodeFacts {
             catalog.map_or_else(DolbyVisionFacts::default, |metadata| metadata.dolby_vision);
         let digest_input = FactsDigest {
             input_video_stream,
-            selection_provenance,
             codec: &codec,
             profile: &profile,
             pixel_format: &pixel_format,
@@ -1110,10 +1119,19 @@ pub struct DecodeCapability {
 
 /// An explicit mapping from a codec class to an inventoried software decoder
 /// implementation. A codec family is never treated as an implementation name.
+///
+/// `implementation` is `None` when the inventory knows the build can decode the
+/// codec but has not measured *which* decoder it will use. That is the honest
+/// state for a startup inventory read from `ffmpeg -decoders`: it lists codec
+/// families, and FFmpeg's default for a family is not always the decoder named
+/// after it — `av1` selects the native decoder where FFmpeg would otherwise
+/// choose `libdav1d`. A plan with no named implementation emits no `-c:v`, so
+/// FFmpeg picks exactly as it did before decode planning existed, and the
+/// digest records no implementation because none was measured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SoftwareDecoder {
     pub codec: String,
-    pub implementation: String,
+    pub implementation: Option<String>,
 }
 
 /// Node-local capability snapshot for the exact FFmpeg build and device class.
@@ -1121,7 +1139,7 @@ pub struct SoftwareDecoder {
 pub struct DecodeCapabilities {
     identity: DecodeCapabilitySnapshotIdentity,
     capabilities: Vec<DecodeCapability>,
-    software_decoders: BTreeMap<String, String>,
+    software_decoders: BTreeMap<String, Option<String>>,
 }
 
 impl DecodeCapabilities {
@@ -1133,7 +1151,10 @@ impl DecodeCapabilities {
         let mut mapped = BTreeMap::new();
         for decoder in software_decoders {
             let codec = validated_capability_token(decoder.codec, "software codec")?;
-            let implementation = validated_decoder_name(decoder.implementation)?;
+            let implementation = decoder
+                .implementation
+                .map(validated_decoder_name)
+                .transpose()?;
             if mapped.insert(codec, implementation).is_some() {
                 return Err(PlanError::DuplicateCapability);
             }
@@ -1217,8 +1238,14 @@ impl DecodeCapabilities {
         &self.identity
     }
 
+    /// Whether this build can decode the codec at all.
+    fn decodes_in_software(&self, codec: &str) -> bool {
+        self.software_decoders.contains_key(codec)
+    }
+
+    /// The measured implementation for the codec, when one was measured.
     fn software_decoder(&self, codec: &str) -> Option<&str> {
-        self.software_decoders.get(codec).map(String::as_str)
+        self.software_decoders.get(codec).and_then(Option::as_deref)
     }
 
     fn status(
@@ -1693,6 +1720,19 @@ impl ResolvedTranscode {
         self.input_dynamic_range.map(DynamicRangeClass::name)
     }
 
+    /// The source's HDR format for the filter chain, or `None` when the source
+    /// is not HDR.
+    ///
+    /// Not the same as [`Self::input_dynamic_range_name`], which answers
+    /// `Some("sdr")` for an ordinary file. The renderers take this as
+    /// `Option<&str>` and tone-map on `is_some()`, so passing the dynamic-range
+    /// name there tone-maps every SDR source on every GPU pipeline.
+    pub fn input_hdr_format(&self) -> Option<&'static str> {
+        self.input_dynamic_range
+            .filter(|range| range.is_hdr())
+            .map(DynamicRangeClass::name)
+    }
+
     pub fn input_is_hdr(&self) -> bool {
         self.input_dynamic_range
             .is_some_and(DynamicRangeClass::is_hdr)
@@ -1738,7 +1778,13 @@ impl ResolvedTranscode {
             "input_video_stream",
             self.decode.input_video_stream.to_string().as_bytes(),
         );
-        feed("decode_evidence", self.decode.evidence.name().as_bytes());
+        // Deliberately absent: `decode.evidence`. Whether this node happened
+        // to hold a qualified capability inventory does not change the bytes.
+        // Two nodes selecting the same backend and the same implementation
+        // produce the same picture, and giving the qualified one a private key
+        // space would split the fleet's cache mid-rollout. The
+        // qualified-versus-unqualified separation belongs to
+        // `artifact_namespace`, which `Recipe::hash` already feeds separately.
         feed(
             "decode_policy_revision",
             self.decode.policy_revision.to_string().as_bytes(),
@@ -2125,13 +2171,11 @@ pub fn resolve_transcode(
         }
     };
 
+    // `None` means the inventory did not name an implementation, so the
+    // command names none either and FFmpeg selects its default. The digest
+    // records the absence rather than a decoder nobody measured.
     let software_decoder = if backend == DecodeBackend::Software {
-        Some(
-            capabilities
-                .software_decoder(codec)
-                .ok_or(PlanError::SoftwareDecoderUnavailable)?
-                .to_owned(),
-        )
+        capabilities.software_decoder(codec).map(str::to_owned)
     } else {
         None
     };
@@ -2261,9 +2305,16 @@ fn software_evidence(
     policy: &DecodePolicySnapshot,
 ) -> Result<DecodeEvidence, PlanError> {
     let codec = facts.codec().ok_or(PlanError::MissingCodec)?;
-    capabilities
-        .software_decoder(codec)
-        .ok_or(PlanError::SoftwareDecoderUnavailable)?;
+    // The startup inventory lists a small canonical set of codec families. A
+    // VC-1, MPEG-1 or ProRes source is absent from it and still decodes: the
+    // pre-plan command named no decoder and FFmpeg chose one. Refusing here
+    // would turn "this node has not inventoried your codec" into "this title
+    // cannot be played", which is a regression, not a safety property. Under
+    // `Enforce` the inventory is the contract and the refusal stands.
+    if !capabilities.decodes_in_software(codec) && policy.plan_policy() != DecodePlanPolicy::Legacy
+    {
+        return Err(PlanError::SoftwareDecoderUnavailable);
+    }
     match capabilities.status(DecodeBackend::Software, facts, surface) {
         CapabilityStatus::Qualified => Ok(DecodeEvidence::Qualified),
         CapabilityStatus::Unavailable | CapabilityStatus::Advertised

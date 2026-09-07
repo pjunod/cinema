@@ -218,7 +218,7 @@ mod tests {
             vec![],
             vec![SoftwareDecoder {
                 codec: "hevc".to_owned(),
-                implementation: software_decoder.to_owned(),
+                implementation: Some(software_decoder.to_owned()),
             }],
         )
         .expect("valid legacy capability inventory")
@@ -238,6 +238,20 @@ mod tests {
             &AttemptRestrictions::none(),
         )
         .expect("fixture must resolve to a validated legacy plan")
+    }
+
+    fn try_plan(
+        f: &MediaFile,
+        o: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> Result<ResolvedTranscode, crate::transcode::PlanError> {
+        resolve_transcode(
+            &TranscodeRequest::new(encoder, TranscodeMediaOptions::from_options(f, o)),
+            &decode_facts(),
+            &capabilities("hevc"),
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::none(),
+        )
     }
 
     fn plan(f: &MediaFile, o: &TranscodeOptions, encoder: Encoder) -> ResolvedTranscode {
@@ -428,26 +442,36 @@ mod tests {
     /// deliberately invalidates every pre-plan recipe. Pin its exact bytes so
     /// future namespace changes remain explicit fleet-wide decisions.
     ///
-    /// The pinned value changed once during v3's development, when the source
-    /// moved *into* the plan: the recipe stopped taking a `MediaFile` beside
-    /// the plan (nothing checked that the two described the same film), the
-    /// plan digest gained the catalog cache identity, and the facts digest
-    /// dropped the descriptor fingerprint that had been splitting the
-    /// producer's key space from the player's. Same inputs, one fewer way to
-    /// be wrong. v3 has never been published, so nothing on disk moved.
+    /// The value cannot be checked against v2's golden: v3 is not v2 with a
+    /// field added, it is a different construction. The last published golden
+    /// was `b9dae1c4…` at `CACHE_FORMAT_VERSION = 2`, when `PipelineDigest`
+    /// carried the encoder, codec, pixel format and colour literals and the
+    /// recipe hashed a `MediaFile` passed beside it. v3 moves all of that into
+    /// the plan digest, adds the source's cache identity, and drops the
+    /// descriptor fingerprint, stream-selection provenance and evidence class
+    /// that were forking the key on how a file was measured rather than on
+    /// what would be produced from it.
+    ///
+    /// So this fixture cannot prove v3 was composed correctly — it was
+    /// regenerated from the implementation, and a mistake made in the same
+    /// commit would be pinned along with everything else. What it does is make
+    /// the next change explicit: nothing may move this value without saying
+    /// why. The composition itself is proven by the field-by-field mutation
+    /// table above, which is where a missing field is actually caught. v3 has
+    /// never been published, so nothing on disk has moved.
     #[test]
     fn planned_v3_recipe_hash_is_a_golden_fixture() {
         let (d, f, o) = (digest(), media(), TranscodeOptions::default());
         assert_eq!(
             hash_of(&d, &f, &o, Encoder::Software, false),
-            "c246f577226a5271249698d59491f739897cbcbb14635ff89e481fe39d0ce1be"
+            "82b1fd5b9c96d0e0201ef5f56606cc0d677996c67907d1d46bef870996e526cb"
         );
     }
 
     /// The HDR10 rung is a different presentation from the SDR tone-map of
     /// the same input, so it must occupy a different entry.
     #[test]
-    fn the_hdr10_grade_is_a_distinct_entry() {
+    fn the_hdr10_grade_is_a_distinct_entry_and_no_sdr_key_moved() {
         let (d, f) = (digest(), media());
         let sdr = TranscodeOptions::default();
         let hdr10 = TranscodeOptions {
@@ -457,6 +481,52 @@ mod tests {
         let sdr_hash = hash_of(&d, &f, &sdr, Encoder::Software, false);
         let hdr10_hash = hash_of(&d, &f, &hdr10, Encoder::Software, false);
         assert_ne!(hdr10_hash, sdr_hash);
+        // The Dolby graph run over ordinary PQ frames is a broken picture at
+        // exit 0, so the two Dolby renderers must never share an entry.
+        // The Dolby renderers used to be compared here by hash. They cannot be
+        // any more, and for a better reason: the fixture is an HDR10 source,
+        // and a plan now *refuses* a renderer the source cannot feed rather
+        // than naming a distinct entry for a picture that would come out
+        // broken at exit 0. Refusal is the stronger guarantee, so assert it.
+        for dolby in [Pipeline::DoviPassthrough, Pipeline::DoviTonemapx] {
+            let o = TranscodeOptions {
+                pipeline: dolby,
+                ..Default::default()
+            };
+            assert_eq!(
+                try_plan(&f, &o, Encoder::Software)
+                    .expect_err("a renderer the source cannot feed is refused"),
+                crate::transcode::PlanError::IncompatibleRenderer,
+                "{dolby:?} over a source with no Dolby Vision layer"
+            );
+        }
+        // Every SDR pipeline still hashes exactly as it did — the grade
+        // fields are emitted only for a grade that is not SDR.
+        for pipeline in crate::transcode::PIPELINE_CANDIDATES
+            .iter()
+            .copied()
+            .chain(std::iter::once(Pipeline::DoviTonemapx))
+        {
+            let o = TranscodeOptions {
+                pipeline,
+                ..Default::default()
+            };
+            assert_eq!(
+                o.pipeline.output_grade(),
+                crate::transcode::OutputGrade::Sdr,
+                "{pipeline:?}"
+            );
+        }
+        assert_eq!(
+            sdr_hash,
+            hash_of(
+                &d,
+                &f,
+                &TranscodeOptions::default(),
+                Encoder::Software,
+                false
+            )
+        );
     }
 
     #[test]

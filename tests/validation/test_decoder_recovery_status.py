@@ -355,6 +355,47 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "nothing in M2 yet refuses a `CatalogRow` plan", self.status
         )
 
+    def test_provenance_is_kept_out_of_the_artifact_name(self) -> None:
+        """How a fact was obtained is not part of what will be produced.
+
+        Three terms forked the key on provenance rather than on bytes: the
+        descriptor fingerprint, the stream-selection provenance, and the
+        capability evidence class. Each gave two producers of identical work
+        two different artifact names.
+        """
+        digest_body = self.core_decode.split("pub fn plan_digest", 1)[1].split(
+            "pub fn artifact_namespace", 1
+        )[0]
+        # Match the emitting call, not the bare identifier: the identifiers
+        # appear in the comment that explains their absence. Allow the line
+        # break rustfmt puts after `feed(`.
+        def feeds(name: str) -> bool:
+            return re.search(rf'feed\(\s*"{name}"', digest_body) is not None
+
+        for absent in ("decode_evidence", "source_binding", "observed_source_identity"):
+            self.assertFalse(feeds(absent), absent)
+        self.assertTrue(feeds("source_cache_identity"))
+        self.assertTrue(feeds("input_video_stream"))
+
+        facts_digest = self.core_decode.split("struct FactsDigest", 1)[1].split("}", 1)[0]
+        self.assertIn("input_video_stream", facts_digest)
+        self.assertNotIn("selection_provenance", facts_digest)
+        self.assertNotIn("source_identity", facts_digest)
+
+        # One selection rule, reached by both planning routes.
+        daemon_facts = (ROOT / "crates/plurxd/src/decode_facts.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("pub(crate) fn legacy_ordinal_facts(", daemon_facts)
+        self.assertEqual(self.daemon_transcode.count("legacy_ordinal_facts("), 1)
+        self.assertNotIn(
+            "DecodeFacts::from_ffprobe_json_with_catalog(", self.daemon_transcode
+        )
+
+        self.assertIn(
+            "What the whole-PR review found, and what it changed", self.status
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
