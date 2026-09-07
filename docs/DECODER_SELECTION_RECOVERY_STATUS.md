@@ -1,9 +1,9 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M5b candidate; M0–M3f, M4, M5a and the M5a census repair merged
-into the effort · **Updated:** 2026-09-07 · **Integration branch:**
-`effort/decoder-selection-recovery` · **M5b task base:** effort head
-`02831892f096c047d5300ac0c89cbff2ed7216a3`
+**Status:** M0–M3f, M4, M5a, M5b and the M5a census repair merged into the
+effort; M5c specified and not started · **Updated:** 2026-09-07 ·
+**Integration branch:** `effort/decoder-selection-recovery` · **Next task
+base:** effort head `7f2cb598c6ed89dd24996e06783077f1e29c0678`
 
 The effort was created from Forgejo `main` at
 `4a6a0268bd314ad5587cb3037f12ebd992c0074e`. The original M0 research baseline was `main` at
@@ -20,8 +20,8 @@ An unchecked item is not implied by a nearby passing check.
 
 | Field | Current value |
 |---|---|
-| Milestone | M5b — the budget's key, on the row that owns it |
-| Task branch | `codex/decoder-selection-m5b`, based on effort head `02831892` |
+| Milestone | M5c — prepublication recovery. Specified below; not started |
+| Task branch | Next task branches from effort head `7f2cb598` |
 | Task PR | Open against the effort branch. One whole-PR adversarial review is owed on this candidate before it merges |
 | M1 dependency | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) is merged. Exact head `f7f98b01` completed `make validate-full` with 23 passed, 0 failed, and 2 declared skips (`android-device`, no `adb` on the qualifying host; `live-tv-two-node`, which does not run on Darwin); `target/validation/report.json` records `git_ref f7f98b01`, generated `2026-09-07T01:01:02Z`. It fast-forwarded into the effort. M2 ([Forgejo #73](http://192.168.4.7:3000/noirr/plurx/pulls/73)) then fast-forwarded onto it after its own whole-PR review, its findings repair, and the Forgejo effort gate on exact head `773ad488` — which is the commit this M3a branch is based on |
 | Effort PR | Not opened yet |
@@ -41,7 +41,7 @@ An unchecked item is not implied by a nearby passing check.
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
 | M3 · owned observation and health receipts | Complete — M3a–M3f and M3c5 merged | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f ([#99](http://192.168.4.7:3000/noirr/plurx/pulls/99), head `02831892`) adds the operator request, the node effective-mode intersection that decides whether it may be honoured, and the `Settings > Developer` enable section that states the cost and shows what this node measured |
 | M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
-| M5 · durable budget and prepublication recovery | M5a and its census repair merged; M5b is this candidate; M5c not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. M5a left five inherited test failures invisible to the effort gate; its census repair ([#96](http://192.168.4.7:3000/noirr/plurx/pulls/96), head `b2dcf458`) closes them. M5b gives the ledger the key it was missing: a server-owned `recovery_epoch` on the session row, minted by a deliberate new play and inherited by every continuation. Still no recovery behaviour — nothing reads the epoch until M5c |
+| M5 · durable budget and prepublication recovery | M5a, its census repair and M5b merged; M5c specified, not started | `media_session_producer_recovery` exists on both backends with the reservation contract running against each. M5a left five inherited test failures invisible to the effort gate; its census repair ([#96](http://192.168.4.7:3000/noirr/plurx/pulls/96), head `b2dcf458`) closes them. M5b gives the ledger the key it was missing: a server-owned `recovery_epoch` on the session row, minted by a deliberate new play and inherited by every continuation. Still no recovery behaviour — nothing reads the epoch until M5c |
 | M6 · postpublication replacement and client intent | Not started | — |
 | M7 · offline, shared cache, and handoff enforcement | Not started | — |
 | M8 · fleet qualification and promotion | Not started | — |
@@ -2234,6 +2234,101 @@ freezing an alternative, and installing software decode against the same
 hardware encoder are M5c. This milestone is the key, and it is deliberately
 separable — a key nobody can present is the defect M5a shipped, and it is worth
 closing on its own where it can be reviewed on its own.
+
+## M5c specification — where the recovery has to be decided, and why not where it looks
+
+This section is a design record, not a working tree. It exists because the
+question it answers cost real analysis and the answer is not the obvious one:
+the place the fault is currently observed is the wrong place to act on it.
+
+### The nine seams
+
+| # | Seam | Where |
+|---|---|---|
+| 1 | The latched fault is read and only logged; the decision is made from `reason` alone | `playback_control.rs` `commit_producer_decision_at`, the "Observe mode" block |
+| 2 | `ProducerDecisionReason` has fourteen variants and none of them is a decode fault | `playback_control.rs` |
+| 3 | `HealthAccumulator::automatic_action_allowed` exists, is correct, and has no caller outside tests | `decoder_health.rs` |
+| 4 | The only production planning path passes `AttemptRestrictions::none()` | `transcode.rs` `resolve_movie_plan_with_facts` |
+| 5 | No conversion exists from `ContinuationDecodeRestriction` to `AttemptRestrictions` | `plurx-core` `domain.rs` / `transcode/decode.rs` |
+| 6 | The retry recipe is frozen *before the first producer runs*, from a plan resolved with no restriction | `transcode.rs` `PrepublicationTranscodeRetry::build` |
+| 7 | The one-shot retry budget is `PrepublicationRetryState`, in one process — which is the gap the durable ledger was built to close | `playback_control.rs`, and the store API with no `plurxd` caller |
+| 8 | The retain-the-hardware-encoder transition already exists and is already correct | `transcode.rs` `add_cpu_decode_reservation`, not `demote_to_software` |
+| 9 | The epoch is minted and inherited on the activation path and written as `""` everywhere else | `http/hls.rs` |
+
+Seam 8 is worth calling out as *finished*: §8.3 asks for an explicit transition
+that retains the hardware slot and adds a CPU reservation instead of calling
+`demote_to_software`, and M4 already built it, with the reason written at the
+call site — releasing the hardware slot there would leave a live hardware
+encoder running with nothing reserved for it, and the next hardware start would
+be admitted onto the same block.
+
+### The ordering discovery
+
+The obvious install point is `commit_producer_decision_at`: it already reads
+the latched fault, through the accessor built for exactly that, and logs that
+it is in observe mode. It is the wrong place, and the reason is a deliberate
+property of the design one milestone below it.
+
+`AttemptChild`'s supervisor publishes the process terminal **first** and
+settles the diagnostic receipt **after**, and says why: *a process can exit long
+before its stderr reaches EOF, and "the process finished" is not "we saw
+everything it said."* So the exit classification — which is what drives
+`commit_producer_decision_at` — always runs before the receipt exists.
+
+That matters because §7.3's gate for an automatic action requires a *complete*
+observation and an uncompressed log, neither of which is knowable at latch time
+or at exit time. A decision taken at exit could only act on a fault whose
+qualification it has not yet established — which is the substitution this whole
+effort exists to remove, arriving one layer lower.
+
+### Therefore: the diagnostics-complete barrier is the decision point
+
+The silent failure this effort is named after **exits zero**. There is
+frequently no failure decision at all: FFmpeg drops every frame, exits
+successfully, and the session completes with garbage. Waiting for the settled
+receipt therefore costs nothing in the case that matters — there is no earlier
+decision to lose a race with — and it is the only point at which
+`automatic_action_allowed()` can be asked honestly.
+
+So M5c's shape is:
+
+1. `observe_producer_diagnostics_complete` becomes a decision point. It already
+   receives the settled `ProducerHealthReceipt` and already refuses a stale
+   attempt.
+2. The action gate is asked there. `automatic_action_allowed()` lives on the
+   accumulator rather than the receipt, so either the supervisor passes the
+   answer alongside the receipt, or the receipt gains the field — the former
+   avoids a receipt-schema version bump and the artifact-namespace rotation
+   that comes with it, and is therefore preferred.
+3. A new `ProducerDecisionReason` for a qualified decode fault, which is *not*
+   permanent — a restricted retry is the entire point — and which the retry
+   eligibility must allow.
+4. The durable budget is reserved before the retry is installed, keyed by the
+   epoch M5b put on the session row, and settled on every path out.
+5. The frozen alternative is a *second* recipe resolved under
+   `AttemptRestrictions::requiring(DecodeBackend::Software)`. It cannot be the
+   existing one: that recipe is frozen before any fault exists, from a plan
+   resolved with no restriction, and its own contract says it never re-runs
+   policy. Freezing both at session start keeps that contract intact.
+6. The install is the existing `execute_prepublication_transcode_retry` with
+   the mixed transition — the encoder and its hardware slot stay, the CPU
+   reservation grows by the difference.
+
+### What must not be assumed on the way
+
+The restriction is durable and applies to *every* later continuation, so the
+conversion in seam 5 has to be a real parse: `ContinuationDecodeRestriction`
+stores backend names as strings, and a name this build cannot parse is a
+refusal, never an absence — the same rule its `decode` already applies, and for
+the same reason. Restoring automatic hardware selection for a source that
+already failed on hardware is the loop the restriction exists to stop.
+
+Applying it at seam 4 changes the artifact identity, because the decoder
+backend feeds `plan_digest`. That is correct and intended: a generation
+produced under the restriction is a different artifact from the one produced
+without it, and the cache must not serve one for the other. It also changes
+`TranscodeResourceEstimate::of`, because forcing software decode can rewrite
+the renderer — so admission has to be re-asked, not adjusted.
 
 ## M4 working tree — a hardware encoder is not evidence of an idle CPU
 

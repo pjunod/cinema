@@ -46,6 +46,7 @@ M5A_CENSUS_MERGED_HEAD = "b2dcf458500e210032197b3a3c73abbbe89092b8"
 M3F_TASK_BASE = M5A_CENSUS_MERGED_HEAD
 M3F_MERGED_HEAD = "02831892f096c047d5300ac0c89cbff2ed7216a3"
 M5B_TASK_BASE = M3F_MERGED_HEAD
+M5B_MERGED_HEAD = "7f2cb598c6ed89dd24996e06783077f1e29c0678"
 CORE_INVENTORY = ROOT / "crates/plurx-core/src/transcode/decoder_inventory.rs"
 CORE_STORE = ROOT / "crates/plurx-core/src/store/mod.rs"
 SQLITE_CACHE = ROOT / "crates/plurx-core/src/store/sqlite/cache.rs"
@@ -222,7 +223,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_current_base_and_receipt_state_cannot_be_confused_with_history(self) -> None:
         self.assertIn(FORGEJO_MAIN_LINEAGE, self.status)
         self.assertIn(
-            f"M5b task base:** effort head `{M5B_TASK_BASE}`", self.flat_status
+            f"Next task base:** effort head `{M5B_MERGED_HEAD}`", self.flat_status
         )
         # Each merged head is named, not only the pull request that carried it.
         self.assertIn(M3C1_MERGED_HEAD[:8], self.status)
@@ -234,6 +235,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(M3C5_MERGED_HEAD[:8], self.status)
         self.assertIn(M5A_CENSUS_MERGED_HEAD[:8], self.status)
         self.assertIn(M3F_MERGED_HEAD[:8], self.status)
+        self.assertIn(M5B_MERGED_HEAD[:8], self.status)
         self.assertIn(M1_EFFORT_BASE, self.status)
         self.assertIn(
             "| Pre-rebase `01368ce1` | `make validate-full`", self.status
@@ -357,8 +359,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 self.assertEqual(source.count(surface.get("m2_anchor", "")), 1)
 
         self.assertIn(
-            "M5b candidate; M0–M3f, M4, M5a and the M5a census repair merged "
-            "into the effort",
+            "M0–M3f, M4, M5a, M5b and the M5a census repair merged into the "
+            "effort; M5c specified and not started",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -1345,6 +1347,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # Nothing reads it yet, and the document says so rather than implying
         # the recovery path works.
         self.assertIn("Nothing reads the epoch yet", self.status)
+        # And M5c's specification records the ordering discovery that decides
+        # where the recovery can honestly be committed: the receipt is settled
+        # after the process terminal is published, so an exit-time decision
+        # could only act on a fault whose qualification it has not established.
+        self.assertIn("the diagnostics-complete barrier is the decision point", self.status)
+        self.assertIn(
+            "a process can exit long before its stderr reaches EOF",
+            self.flat_status,
+        )
         # The claim about what the epoch buys is the corrected one: it does not
         # bound a client that varies `playback_id`, because the ledger key
         # contains `playback_id`.
