@@ -707,7 +707,7 @@ pub(crate) struct DeliveryView {
     pub hold_reason: Option<String>,
     /// Why the producer stopped, when it stopped for a reason this server has
     /// named. `producer_state` says only `failed`; this says which of the
-    /// fifteen decisions that was, and therefore whether trying again could
+    /// sixteen decisions that was, and therefore whether trying again could
     /// ever work. Optional: an older peer relaying a response has no such
     /// field, and absence means "not classified here", never "healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1641,7 +1641,7 @@ pub(crate) enum ControlAction {
     },
     /// Production stopped for a reason that may not recur.
     ///
-    /// Twelve of the fifteen producer decisions are timing, process or
+    /// Thirteen of the sixteen producer decisions are timing, process or
     /// executor facts. The client should try again on the server's own
     /// cadence rather than deciding for itself how hard to retry, which is
     /// what every client does today.
@@ -3869,6 +3869,18 @@ pub(crate) enum ProducerDecisionReason {
     FlowResumeDeadline,
     InstallDeadline,
     ExecutorLost,
+    /// The producer's own diagnostics said this source did not decode, and a
+    /// software-decode alternate is being installed for it.
+    ///
+    /// The counterpart to [`Self::SourceDecodeFailed`] and deliberately *not*
+    /// permanent: a restricted retry is the entire point, and a permanent
+    /// reason on a retry reaches the client as a terminal answer while the
+    /// node is still bringing the successor up. This is what the operator sees
+    /// when the recovery this effort exists for actually fires — distinct from
+    /// the timing verdict that triggered the decision, so a dashboard can tell
+    /// "we tried again because it stalled" from "we tried again because the
+    /// decoder said the source did not decode".
+    SourceDecodeRetry,
     /// The producer's own diagnostics said this source did not decode, under a
     /// grammar qualified against this build.
     ///
@@ -3895,21 +3907,22 @@ impl ProducerDecisionReason {
             Self::FlowResumeDeadline => "flow_resume_deadline",
             Self::InstallDeadline => "install_deadline",
             Self::ExecutorLost => "executor_lost",
+            Self::SourceDecodeRetry => "source_decode_retry",
             Self::SourceDecodeFailed => "source_decode_failed",
         }
     }
 
     /// Whether retrying this source, unchanged, can ever succeed.
     ///
-    /// Twelve of these fifteen reasons are timing, process, or executor
-    /// facts: the same file on the same pipeline may well work on the next
-    /// attempt. Three are verdicts about the source itself — this container
+    /// Thirteen of these sixteen reasons are timing, process, executor or
+    /// recovery facts: the same file on the same pipeline may well work on the
+    /// next attempt. Three are verdicts about the source itself — this container
     /// cannot be carried by this pipeline, the recipe that was asked for is
     /// not a legal one, or the decoder's own diagnostics said the source did
     /// not decode — and no amount of retrying changes any of them.
     ///
     /// The distinction is the whole reason a client cannot decide for itself.
-    /// `producer_state` flattens all fifteen to the word `failed`, so a
+    /// `producer_state` flattens all sixteen to the word `failed`, so a
     /// client seeing a failure has no way to tell "try again" from "this will
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
@@ -3945,7 +3958,7 @@ impl ProducerDecisionReason {
     }
 
     /// The bounded vocabulary, in the order the wire and metrics use.
-    pub(crate) const ALL: [Self; 15] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::StartupDeadline,
         Self::ProgressDeadline,
         Self::ExitClassificationDeadline,
@@ -3960,6 +3973,7 @@ impl ProducerDecisionReason {
         Self::FlowResumeDeadline,
         Self::InstallDeadline,
         Self::ExecutorLost,
+        Self::SourceDecodeRetry,
         Self::SourceDecodeFailed,
     ];
 
@@ -13578,9 +13592,16 @@ mod tests {
     #[test]
     fn only_a_verdict_about_the_source_itself_is_permanent() {
         // The split that decides whether a client should ever be told to give
-        // up. Twelve of the fifteen are timing, process, or executor facts:
-        // the same file on the same pipeline may work on the next attempt.
-        // Three are verdicts about the source, and no retry changes those.
+        // up. Thirteen of the sixteen are timing, process, executor or
+        // recovery facts: the same file on the same pipeline may work on the
+        // next attempt. Three are verdicts about the source, and no retry
+        // changes those.
+        //
+        // `SourceDecodeRetry` sits on the impermanent side on purpose, and it
+        // is the pair that is easiest to get backwards: it and
+        // `SourceDecodeFailed` describe the same finding, and what separates
+        // them is whether there is an alternate to install. One is a retry the
+        // client should wait through; the other is the answer.
         //
         // `SourceDecodeFailed` is the newest and the one that mattered most
         // to get on this side of the line: it is produced when the decoder
@@ -13621,7 +13642,7 @@ mod tests {
                 Some(reason),
             );
         }
-        assert_eq!(ProducerDecisionReason::ALL.len(), 15);
+        assert_eq!(ProducerDecisionReason::ALL.len(), 16);
         assert_eq!(ProducerDecisionReason::from_status("invented"), None);
         // The names are wire-safe: lowercase, underscored, no spaces.
         for reason in ProducerDecisionReason::ALL {
