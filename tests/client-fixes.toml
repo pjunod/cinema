@@ -806,6 +806,19 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
 
 [[fixes]]
+# `LiveTvInputPolicy.route` had exactly one call site in the repository and it
+# was its own test, so the transcribed routing table governed nothing: no key
+# handling, no four-second auto-hide, no channel up/down, and a television
+# showing the phone layout behind a Fullscreen button. A D-pad press reached
+# whichever of two overlapping channel lists the focus engine happened to pick.
+id = "android.live-tv-television-routes-every-press-through-the-table"
+commits = ["c0347847"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "LiveTvInputPolicy.route(surface, inputState(), input)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyTest.kt"
+test_anchor = "every press goes through the shared table"
+
+[[fixes]]
 # The screen set the retention flag before calling `enterPictureInPictureMode`
 # and discarded the Boolean it returns. The system refuses PiP whenever the
 # user has turned it off for the app, and on that path no mode-changed callback
