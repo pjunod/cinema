@@ -2187,6 +2187,65 @@ impl Drop for PrepublicationStartSettlement {
     }
 }
 
+/// Build the same delivery options for a software-decoded alternate.
+///
+/// This contract is shared by live replacement and durable offline jobs. It
+/// is intentionally outside the temporary live-HLS feature: offline recovery
+/// is a shipping producer path in both builds, and decoder safety is not a
+/// feature-gated behavior.
+fn decode_restricted_options(
+    delivered: &ResolvedTranscode,
+    alternate: &ResolvedTranscode,
+    opts: &TranscodeOptions,
+) -> Result<Option<TranscodeOptions>, String> {
+    if alternate.decode().backend() != plurx_core::transcode::DecodeBackend::Software {
+        return Err(
+            "the decode-restricted alternate did not resolve to software decode".to_owned(),
+        );
+    }
+    if alternate.decode().input_codec() != delivered.decode().input_codec() {
+        return Err("the decode-restricted alternate changed the input codec".to_owned());
+    }
+    if alternate.encoder() != delivered.encoder() {
+        return Err("the decode-restricted alternate changed the encoder".to_owned());
+    }
+    if alternate.plan_digest() == delivered.plan_digest() {
+        return Ok(None);
+    }
+    if !delivered.enforces_receipt() || !alternate.enforces_receipt() {
+        return Ok(None);
+    }
+    let mut retry_opts = opts.clone();
+    retry_opts.pipeline = alternate.options().pipeline;
+    if retry_opts.pipeline.output_grade() != opts.pipeline.output_grade() {
+        return Err("the decode-restricted alternate changed the frozen color contract".to_owned());
+    }
+    Ok(Some(retry_opts))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OfflineCandidateChoice {
+    Primary,
+    Alternate,
+}
+
+fn offline_candidate_choice(
+    durable_recipe_hash: Option<&str>,
+    primary_recipe_hash: &str,
+    alternate_recipe_hash: Option<&str>,
+) -> Result<OfflineCandidateChoice, String> {
+    match durable_recipe_hash {
+        None => Ok(OfflineCandidateChoice::Primary),
+        Some(stored) if stored == primary_recipe_hash => Ok(OfflineCandidateChoice::Primary),
+        Some(stored) if alternate_recipe_hash == Some(stored) => {
+            Ok(OfflineCandidateChoice::Alternate)
+        }
+        Some(stored) => Err(format!(
+            "offline package recipe {stored} is not the current primary or its software-decode alternate"
+        )),
+    }
+}
+
 #[cfg(any(test, feature = "live-hls-recovery"))]
 impl PrepublicationTranscodeRetry {
     /// The alternate a decode fault asks for: the same delivery, decoded in
@@ -2246,37 +2305,15 @@ impl PrepublicationTranscodeRetry {
         if encoder == Encoder::Software {
             return Ok(None);
         }
-        if alternate.decode().backend() != plurx_core::transcode::DecodeBackend::Software {
-            return Err(
-                "the decode-restricted alternate did not resolve to software decode".to_owned(),
-            );
-        }
-        if alternate.decode().input_codec() != delivered.decode().input_codec() {
-            return Err("the decode-restricted alternate changed the input codec".to_owned());
-        }
-        if alternate.plan_digest() == delivered.plan_digest() {
-            return Ok(None);
-        }
-        if !delivered.enforces_receipt() || !alternate.enforces_receipt() {
-            return Ok(None);
-        }
-        let mut retry_opts = opts.clone();
-        retry_opts.pipeline = alternate.options().pipeline;
-        // The frozen colour contract, the same one `prepare` refuses to break.
-        // `resolve_transcode` only ever moves to a grade-preserving renderer,
-        // so this cannot fire today — which is why it is worth keeping: it is
-        // the assertion that a future renderer cannot quietly change what the
-        // viewer is being shown in the middle of a recovery.
-        if retry_opts.pipeline.output_grade() != opts.pipeline.output_grade() {
-            return Err(
-                "the decode-restricted alternate changed the frozen color contract".to_owned(),
-            );
-        }
-        Ok(Some(PreparedTranscodeRetry {
-            opts: retry_opts,
-            encoder,
-            software_threads: None,
-        }))
+        Ok(
+            decode_restricted_options(delivered, alternate, opts)?.map(|retry_opts| {
+                PreparedTranscodeRetry {
+                    opts: retry_opts,
+                    encoder,
+                    software_threads: None,
+                }
+            }),
+        )
     }
 
     fn prepare(
@@ -3595,6 +3632,7 @@ async fn settle_decode_recovery(
     }
 }
 
+#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn execute_prepublication_transcode_retry(
     session: Arc<Session>,
     retry: &PrepublicationTranscodeRetry,
@@ -11055,6 +11093,13 @@ pub struct TranscodeManager {
     /// production path is always contract-scoped.
     #[cfg(test)]
     force_artifact_qualification: std::sync::atomic::AtomicBool,
+    /// Deterministic offline coordinator outcomes. Production always enters
+    /// `produce_normalized`; tests use this only to prove the durable
+    /// primary-to-alternate transition without depending on host hardware.
+    #[cfg(test)]
+    offline_produce_script: std::sync::Mutex<std::collections::VecDeque<OfflineProduceOutcome>>,
+    #[cfg(test)]
+    offline_produced_recipes: std::sync::Mutex<Vec<String>>,
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
     decode_facts: crate::decode_facts::DecodeFactCache,
@@ -11426,6 +11471,10 @@ impl TranscodeManager {
             manifests_published: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             force_artifact_qualification: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            offline_produce_script: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            #[cfg(test)]
+            offline_produced_recipes: std::sync::Mutex::new(Vec::new()),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
             #[cfg(test)]
@@ -14329,12 +14378,50 @@ impl TranscodeManager {
             .map_or("", |cache| cache.node_id.as_str())
     }
 
+    async fn offline_decode_alternate(
+        &self,
+        package_id: &str,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        primary_plan: &ResolvedTranscode,
+        encoder: Encoder,
+        digest: &PipelineDigest,
+    ) -> Option<(TranscodeOptions, ResolvedTranscode, String)> {
+        let alternate_plan = match self
+            .resolve_restricted_movie_plan(
+                file,
+                opts,
+                encoder,
+                &AttemptRestrictions::requiring(plurx_core::transcode::DecodeBackend::Software),
+            )
+            .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                tracing::warn!(package = package_id, %error, "offline decode alternate did not resolve");
+                return None;
+            }
+        };
+        match decode_restricted_options(primary_plan, &alternate_plan, opts) {
+            Ok(Some(alternate_opts)) => {
+                let hash = self.effective_recipe(digest, &alternate_plan, false).hash();
+                Some((alternate_opts, alternate_plan, hash))
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(package = package_id, %error, "offline decode alternate is unsafe");
+                None
+            }
+        }
+    }
+
     /// Prepare the exact mobile package requested by an authenticated user.
     /// Unlike speculative production, this preserves the file's A/V offset,
     /// accepts explicit tracks, and forces SDR even on a passthrough node.
     pub async fn ensure_offline(
         &self,
         package_id: &str,
+        durable_recipe_hash: Option<&str>,
         file: &plurx_core::domain::MediaFile,
         spec: &OfflineSpec,
         deadline: Instant,
@@ -14375,10 +14462,33 @@ impl TranscodeManager {
         let opts = self.offline_package_options(encoder, file, spec, subtitle_burn);
         let plan = self.resolve_movie_plan(file, &opts, encoder).await?;
         let digest = self.digest().ok_or("no cache digest")?;
-        let hash = self.effective_recipe(&digest, &plan, false).hash();
+        let primary_hash = self.effective_recipe(&digest, &plan, false).hash();
+        // The normal path pays no extra planning read. Reconstruct the
+        // alternate only when a durable row says recovery was already spent,
+        // or after this primary actually receives a terminal health refusal.
+        let mut alternate = if durable_recipe_hash.is_some_and(|stored| stored != primary_hash) {
+            self.offline_decode_alternate(package_id, file, &opts, &plan, encoder, &digest)
+                .await
+        } else {
+            None
+        };
+        let choice = offline_candidate_choice(
+            durable_recipe_hash,
+            &primary_hash,
+            alternate.as_ref().map(|(_, _, hash)| hash.as_str()),
+        )?;
+        let resumed_alternate = choice == OfflineCandidateChoice::Alternate;
+        let (selected_opts, selected_plan, selected_hash) = match choice {
+            OfflineCandidateChoice::Primary => (&opts, &plan, &primary_hash),
+            OfflineCandidateChoice::Alternate => {
+                let (alternate_opts, alternate_plan, alternate_hash) =
+                    alternate.as_ref().expect("matched alternate above");
+                (alternate_opts, alternate_plan, alternate_hash)
+            }
+        };
         if !self
             .store
-            .set_offline_package_recipe(package_id, &hash)
+            .set_offline_package_recipe(package_id, selected_hash)
             .await
             .map_err(|error| error.to_string())?
         {
@@ -14388,25 +14498,62 @@ impl TranscodeManager {
                 Err("offline package is no longer preparing".to_owned())
             };
         }
-        let outcome = self
-            .produce_normalized(
-                PortableProduction {
-                    file,
-                    opts: &opts,
-                    plan: &plan,
-                    deadline,
-                    yield_to_offline: false,
-                    cancelled: Some(cancelled),
-                    offline_package_id: Some(package_id),
-                    publication_fence: None,
-                    pretranscode_fence: None,
-                    expected_policy_generation: None,
-                    expected_source_snapshot: None,
-                    bound_source: None,
-                },
-                hash,
+        let mut outcome = self
+            .produce_offline_candidate(
+                package_id,
+                file,
+                selected_opts,
+                selected_plan,
+                selected_hash,
+                deadline,
+                cancelled,
             )
             .await?;
+        if matches!(outcome, OfflineProduceOutcome::HealthRefused) && !resumed_alternate {
+            if alternate.is_none() {
+                alternate = self
+                    .offline_decode_alternate(package_id, file, &opts, &plan, encoder, &digest)
+                    .await;
+            }
+            if let Some((alternate_opts, alternate_plan, alternate_hash)) = alternate.as_ref() {
+                let advanced = match self
+                    .store
+                    .advance_offline_package_recipe(
+                        package_id,
+                        self.offline_owner(),
+                        &primary_hash,
+                        alternate_hash,
+                    )
+                    .await
+                {
+                    Ok(advanced) => advanced,
+                    Err(error) => {
+                        tracing::warn!(package = package_id, %error, "offline recovery budget could not be persisted");
+                        return Ok(OfflineProduceOutcome::StoreUnavailable);
+                    }
+                };
+                if !advanced || cancelled.is_cancelled() {
+                    return Ok(OfflineProduceOutcome::Yielded);
+                }
+                tracing::warn!(
+                    package = package_id,
+                    failed_recipe = primary_hash,
+                    alternate_recipe = alternate_hash,
+                    "offline decode fault consumed the durable recovery budget"
+                );
+                outcome = self
+                    .produce_offline_candidate(
+                        package_id,
+                        file,
+                        alternate_opts,
+                        alternate_plan,
+                        alternate_hash,
+                        deadline,
+                        cancelled,
+                    )
+                    .await?;
+            }
+        }
         if matches!(
             outcome,
             OfflineProduceOutcome::Ready(_) | OfflineProduceOutcome::Cached(_)
@@ -14425,6 +14572,52 @@ impl TranscodeManager {
             }
         }
         Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn produce_offline_candidate(
+        &self,
+        package_id: &str,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        plan: &ResolvedTranscode,
+        hash: &str,
+        deadline: Instant,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> Result<OfflineProduceOutcome, String> {
+        #[cfg(test)]
+        {
+            let scripted = self
+                .offline_produce_script
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            if let Some(outcome) = scripted {
+                self.offline_produced_recipes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(hash.to_owned());
+                return Ok(outcome);
+            }
+        }
+        self.produce_normalized(
+            PortableProduction {
+                file,
+                opts,
+                plan,
+                deadline,
+                yield_to_offline: false,
+                cancelled: Some(cancelled),
+                offline_package_id: Some(package_id),
+                publication_fence: None,
+                pretranscode_fence: None,
+                expected_policy_generation: None,
+                expected_source_snapshot: None,
+                bound_source: None,
+            },
+            hash.to_owned(),
+        )
+        .await
     }
 
     /// Shared content-addressed production tail. Track and eligibility policy
@@ -16940,6 +17133,27 @@ impl TranscodeManager {
             namespace = qualification.namespace(),
             "published the effective artifact identity"
         );
+    }
+
+    /// Replace real offline production with deterministic outcomes and retain
+    /// the exact recipe reference each attempt received.
+    #[cfg(test)]
+    fn test_script_offline_production(
+        &self,
+        outcomes: impl IntoIterator<Item = OfflineProduceOutcome>,
+    ) {
+        self.offline_produce_script
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(outcomes);
+    }
+
+    #[cfg(test)]
+    fn test_offline_produced_recipes(&self) -> Vec<String> {
+        self.offline_produced_recipes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// How many generation manifests this manager has published.
@@ -27105,6 +27319,7 @@ pub(crate) mod tests {
         assert!(matches!(
             mgr.ensure_offline(
                 package_id,
+                None,
                 &file,
                 &spec,
                 Instant::now(),
@@ -27135,6 +27350,7 @@ pub(crate) mod tests {
         assert!(matches!(
             mgr.ensure_offline(
                 package_id,
+                Some(&first_hash),
                 &file,
                 &spec,
                 Instant::now(),
@@ -27154,6 +27370,174 @@ pub(crate) mod tests {
                 .as_deref(),
             Some(first_hash.as_str()),
             "ensure_offline must keep the package's legacy identity across a hot quality change"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offline_decode_fault_persists_one_alternate_across_restart() {
+        use plurx_core::domain::{NewOfflinePackage, OfflineCreateOutcome};
+        use plurx_core::store::{keys, SqliteStore};
+        use plurx_core::transcode::ArtifactQualification;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let user = store.create_user("paul", "hash", true).await.expect("user");
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        store
+            .put_setting(keys::HWACCEL, "videotoolbox")
+            .await
+            .expect("select the hardware encoder");
+        let (mut mgr, _work, _cache) = cached_manager(&store);
+        mgr.caps.videotoolbox = true;
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
+        mgr.test_script_offline_production([
+            OfflineProduceOutcome::HealthRefused,
+            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::HealthRefused,
+        ]);
+
+        let package_id = "offline-one-shot-decode-recovery";
+        let requested = NewOfflinePackage {
+            id: package_id.to_owned(),
+            request_id: "offline-one-shot-decode-recovery-request".to_owned(),
+            user_id: user.id,
+            file_id,
+            node_id: NODE.to_owned(),
+            source_path: file.path.to_string_lossy().into_owned(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            effective_rate_control: "vbr".to_owned(),
+            target_height: 720,
+            output_width: Some(1280),
+            output_height: Some(720),
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_index: None,
+            subtitle_language: None,
+            subtitle_mode: "none".to_owned(),
+            estimated_bytes: 1_000_000,
+            reserved_bytes: 1_100_000,
+            expires_at: i64::MAX,
+        };
+        assert!(matches!(
+            store
+                .create_offline_package(&requested, 10, 10_000_000, 20_000_000)
+                .await
+                .expect("create package"),
+            OfflineCreateOutcome::Created(_)
+        ));
+        store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim")
+            .expect("queued package");
+        let spec = OfflineSpec {
+            target_height: 720,
+            audio_index: None,
+            subtitle: OfflineSubtitle::None,
+            effective_rate_control: EffectiveRateControl::Vbr,
+        };
+
+        assert!(matches!(
+            mgr.ensure_offline(
+                package_id,
+                None,
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first offline pass"),
+            OfflineProduceOutcome::Yielded
+        ));
+        let attempts = mgr.test_offline_produced_recipes();
+        assert_eq!(attempts.len(), 2, "one refused primary gets one alternate");
+        assert_ne!(
+            attempts[0], attempts[1],
+            "the software-decode recovery must publish under a distinct artifact identity"
+        );
+        let primary_hash = attempts[0].clone();
+        let alternate_hash = store
+            .offline_package_for_user(package_id, user.id)
+            .await
+            .expect("read recovered package")
+            .expect("recovered package")
+            .recipe_hash
+            .expect("durable alternate result reference");
+        assert_eq!(alternate_hash, attempts[1]);
+
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages(NODE)
+                .await
+                .expect("reset interrupted package"),
+            1
+        );
+        let resumed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("reclaim")
+            .expect("recovered package");
+        assert_eq!(
+            resumed.recipe_hash.as_deref(),
+            Some(alternate_hash.as_str())
+        );
+        assert!(matches!(
+            mgr.ensure_offline(
+                package_id,
+                Some(&alternate_hash),
+                &file,
+                &spec,
+                Instant::now(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("resumed offline pass"),
+            OfflineProduceOutcome::HealthRefused
+        ));
+        assert_eq!(
+            mgr.test_offline_produced_recipes(),
+            vec![primary_hash, alternate_hash.clone(), alternate_hash.clone()],
+            "restart must retry the consumed alternate once and must not mint another recovery"
+        );
+        assert_eq!(
+            store
+                .offline_package_for_user(package_id, user.id)
+                .await
+                .expect("read resumed package")
+                .expect("resumed package")
+                .recipe_hash
+                .as_deref(),
+            Some(alternate_hash.as_str()),
+            "a failed alternate cannot move the durable result reference again"
+        );
+    }
+
+    #[test]
+    fn an_offline_recipe_reference_is_also_its_one_shot_recovery_state() {
+        assert_eq!(
+            offline_candidate_choice(None, "primary", Some("alternate")).expect("new package"),
+            OfflineCandidateChoice::Primary
+        );
+        assert_eq!(
+            offline_candidate_choice(Some("primary"), "primary", Some("alternate"))
+                .expect("primary resume"),
+            OfflineCandidateChoice::Primary
+        );
+        assert_eq!(
+            offline_candidate_choice(Some("alternate"), "primary", Some("alternate"))
+                .expect("recovered resume"),
+            OfflineCandidateChoice::Alternate,
+            "a restart must resume the already-consumed alternate rather than minting a new recovery"
+        );
+        assert!(
+            offline_candidate_choice(Some("unknown"), "primary", Some("alternate")).is_err(),
+            "a stale or foreign result reference must fail closed"
+        );
+        assert!(
+            offline_candidate_choice(Some("alternate"), "primary", None).is_err(),
+            "a build that cannot reconstruct the alternate must not guess at the stored result"
         );
     }
 
@@ -38033,6 +38417,7 @@ pub(crate) mod tests {
         let outcome = mgr
             .ensure_offline(
                 package_id,
+                None,
                 &file,
                 &OfflineSpec {
                     target_height: 240,

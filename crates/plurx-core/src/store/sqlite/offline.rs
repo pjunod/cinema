@@ -507,6 +507,30 @@ impl OfflinePackageStore for SqliteStore {
         .await
     }
 
+    async fn advance_offline_package_recipe(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        failed_recipe_hash: &str,
+        alternate_recipe_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let (id, node, failed, alternate) = (
+            package_id.to_owned(),
+            node_id.to_owned(),
+            failed_recipe_hash.to_owned(),
+            alternate_recipe_hash.to_owned(),
+        );
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE offline_packages SET recipe_hash = ?4, updated_at = unixepoch() \
+                 WHERE id = ?1 AND node_id = ?2 AND state = 'preparing' \
+                   AND recipe_hash = ?3 AND ?3 != ?4",
+                params![id, node, failed, alternate],
+            )? > 0)
+        })
+        .await
+    }
+
     async fn update_offline_progress(
         &self,
         package_id: &str,

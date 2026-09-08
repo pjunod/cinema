@@ -1985,6 +1985,31 @@ impl OfflinePackageStore for HiqliteAuthStore {
             > 0)
     }
 
+    async fn advance_offline_package_recipe(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        failed_recipe_hash: &str,
+        alternate_recipe_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let now = self.now()?;
+        Ok(self
+            .execute(
+                "UPDATE offline_packages SET recipe_hash = $1, updated_at = $2 \
+                 WHERE id = $3 AND node_id = $4 AND state = 'preparing' \
+                   AND recipe_hash = $5 AND $5 != $1",
+                params!(
+                    alternate_recipe_hash,
+                    now,
+                    package_id,
+                    node_id,
+                    failed_recipe_hash
+                ),
+            )
+            .await?
+            > 0)
+    }
+
     async fn update_offline_progress(
         &self,
         package_id: &str,

@@ -2851,6 +2851,21 @@ pub trait OfflinePackageStore: Send + Sync + 'static {
         recipe_hash: &str,
     ) -> Result<bool, StoreError>;
 
+    /// Consume the package's one automatic decoder recovery and make the
+    /// alternate recipe its durable result reference in the same write.
+    ///
+    /// The exact old hash is the one-shot budget: after this compare-and-set
+    /// succeeds, a worker restart observes `alternate_recipe_hash` and resumes
+    /// that recipe instead of buying another recovery. `node_id` also fences a
+    /// late producer after package ownership moves to another node.
+    async fn advance_offline_package_recipe(
+        &self,
+        package_id: &str,
+        node_id: &str,
+        failed_recipe_hash: &str,
+        alternate_recipe_hash: &str,
+    ) -> Result<bool, StoreError>;
+
     /// `node_id` fences progress to the current owner so a doomed producer on
     /// a departing node cannot flap the phase and percentage a survivor is
     /// reporting for the same package.

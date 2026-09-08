@@ -431,6 +431,7 @@ const OFFLINE_METHODS: &[&str] = &[
     "claim_next_offline_package",
     "requeue_offline_package",
     "set_offline_package_recipe",
+    "advance_offline_package_recipe",
     "update_offline_progress",
     "fail_offline_package",
     "invalidate_ready_offline_package",
@@ -7861,6 +7862,10 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             encoder_families: vec!["unsupported-hardware".to_owned()],
             ..capable.clone()
         };
+        let newer_protocol = PretranscodeWorkerCapabilities {
+            version: PretranscodeRequirements::VERSION.saturating_add(1),
+            ..capable.clone()
+        };
 
         let queue_clock = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -7956,6 +7961,21 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: incompatible claim: {error}"))
                 .is_none(),
             "{backend}: an incompatible worker claimed a job"
+        );
+        assert!(
+            matches!(
+                store
+                    .claim_pretranscode_job(
+                        "node-newer",
+                        &newer_protocol,
+                        &[],
+                        queue_time(200),
+                        queue_time(500),
+                    )
+                    .await,
+                Err(StoreError::Task(_))
+            ),
+            "{backend}: a worker from an unsupported capability protocol was not rejected"
         );
 
         let (claim_a, claim_b, claim_c) = tokio::join!(
@@ -25908,6 +25928,68 @@ async fn offline_package_contract_runs_through_dyn_store() {
                 .as_deref(),
             Some("offline-recipe")
         );
+        assert!(
+            !store
+                .advance_offline_package_recipe(
+                    &first.id,
+                    "not-the-owner",
+                    "offline-recipe",
+                    "offline-recipe-alternate",
+                )
+                .await
+                .expect("reject stale offline recovery owner"),
+            "a stale node must not consume the package's recovery budget"
+        );
+        assert!(
+            !store
+                .advance_offline_package_recipe(
+                    &first.id,
+                    "offline-node",
+                    "offline-recipe",
+                    "offline-recipe",
+                )
+                .await
+                .expect("reject identical offline recovery recipe"),
+            "a no-op recipe transition must not count as a recovery"
+        );
+        assert!(store
+            .advance_offline_package_recipe(
+                &first.id,
+                "offline-node",
+                "offline-recipe",
+                "offline-recipe-alternate",
+            )
+            .await
+            .expect("consume offline recovery"));
+        assert!(
+            !store
+                .advance_offline_package_recipe(
+                    &first.id,
+                    "offline-node",
+                    "offline-recipe",
+                    "offline-recipe-second-alternate",
+                )
+                .await
+                .expect("reject second offline recovery"),
+            "the old recipe cannot buy a second recovery"
+        );
+        assert_eq!(
+            store
+                .reset_interrupted_offline_packages("offline-node")
+                .await
+                .expect("reset recovered package"),
+            1
+        );
+        let recovered = store
+            .claim_next_offline_package("offline-node")
+            .await
+            .expect("claim recovered package")
+            .expect("recovered package");
+        assert_eq!(
+            recovered.recipe_hash.as_deref(),
+            Some("offline-recipe-alternate"),
+            "a worker restart must preserve both the spent budget and alternate result reference"
+        );
         assert!(store
             .update_offline_progress(&first.id, "offline-node", "video", 500)
             .await
@@ -25923,7 +26005,7 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .mark_offline_package_ready(
                 &first.id,
                 "offline-node",
-                "offline-recipe",
+                "offline-recipe-alternate",
                 4_000,
                 7_200_000
             )
@@ -25962,7 +26044,7 @@ async fn offline_package_contract_runs_through_dyn_store() {
             .invalidate_ready_offline_package(
                 &first.id,
                 "offline-node",
-                "offline-recipe",
+                "offline-recipe-alternate",
                 "cache_integrity",
                 "corrupt generation",
             )

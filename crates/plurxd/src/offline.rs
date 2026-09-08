@@ -598,6 +598,7 @@ impl OfflineManager {
             .transcode
             .ensure_offline(
                 &package.id,
+                package.recipe_hash.as_deref(),
                 &file,
                 &spec,
                 Instant::now() + PRODUCE_PASS,
