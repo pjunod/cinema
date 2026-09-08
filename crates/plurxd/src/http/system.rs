@@ -1948,14 +1948,15 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
 /// therefore plans into.
 ///
 /// Read-only, and reported next to the request rather than instead of it. The
-/// request is what an operator asked for; this is what the node can honour.
-/// A surface that showed only the first would let someone believe every
-/// transcode on the node is now verified when nothing about it changed.
+/// request is always honoured as policy; coverage says which exact paths can
+/// produce verified artifacts. A surface that showed only the first would let
+/// someone believe every transcode is verified when only a subset may be.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DecoderHealthQualification {
-    /// The content-addressed namespace this node plans into right now.
+    /// The requested namespace. Uncovered paths remain in the unqualified
+    /// namespace rather than publishing receipts they cannot produce.
     pub namespace: String,
-    /// Whether it is enforcing producer health receipts.
+    /// Whether the path-scoped verified-artifact policy is enabled.
     pub enforcing: bool,
     /// Whether this node *could* enforce them if asked — that is, whether a
     /// retained diagnostic contract covers its own FFmpeg build for at least
@@ -1967,9 +1968,10 @@ pub struct DecoderHealthQualification {
     pub measured_decoders: Vec<String>,
     /// The subset a retained contract covers on this build.
     pub covered_decoders: Vec<String>,
-    /// Machine-readable reason the request is not in force, if it is not.
+    /// Legacy field name for a machine-readable readiness advisory. It can be
+    /// present while `enforcing` is true when coverage is partial.
     pub refusal: Option<String>,
-    /// One sentence an operator can act on.
+    /// One advisory sentence an operator can act on.
     pub explanation: Option<String>,
     /// The stored request differs from the one this node published, so a
     /// restart is owed before the request means anything.

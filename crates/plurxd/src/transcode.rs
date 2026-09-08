@@ -10419,7 +10419,7 @@ async fn forget_unfenced_claim_with(
     }
 }
 
-/// Why a node is not planning into the health-qualified identity.
+/// What prevents complete, unambiguous health-qualified coverage.
 ///
 /// Ordered by what an operator should do about it, and stated rather than
 /// implied: a control whose only feedback is "still off" tells the person who
@@ -10440,6 +10440,10 @@ pub enum QualificationRefusal {
     /// This is the fleet's ordinary state today and the one that takes real
     /// work to leave: it needs a capture from this build.
     NoContractCoversThisBuild,
+    /// At least one measured path is covered, but at least one other path is
+    /// not. The enabled policy applies only to the covered paths; this warning
+    /// prevents a partial rollout being mistaken for fleet-wide enforcement.
+    IncompleteCoverage,
     /// More than one retained contract covers this build for the same codec,
     /// decoder and log mode. `contract_for` refuses ambiguity, so this reads
     /// as "no grammar" to everything downstream — but the fix is the opposite
@@ -10459,6 +10463,7 @@ impl QualificationRefusal {
             Self::BuildUnmeasured => "build_unmeasured",
             Self::NoDecoderMeasured => "no_decoder_measured",
             Self::NoContractCoversThisBuild => "no_contract_covers_this_build",
+            Self::IncompleteCoverage => "incomplete_coverage",
             Self::AmbiguousContract => "ambiguous_contract",
             Self::SettingUnreadable => "setting_unreadable",
         }
@@ -10478,7 +10483,13 @@ impl QualificationRefusal {
             }
             Self::NoContractCoversThisBuild => {
                 "No retained diagnostic contract covers this node's FFmpeg build under \
-                 the qualified log flags. Capture one from this build before enabling."
+                 the qualified log flags. Capture one from this build before expecting \
+                 verified artifacts."
+            }
+            Self::IncompleteCoverage => {
+                "Only some measured decode paths have a unique diagnostic contract. The \
+                 enabled policy applies to those paths; capture the missing paths before \
+                 treating this node as fully covered."
             }
             Self::AmbiguousContract => {
                 "More than one retained diagnostic contract covers this build for the \
@@ -10492,7 +10503,8 @@ impl QualificationRefusal {
     }
 }
 
-/// What this node measured, and what it may therefore honour.
+/// What this node measured, which paths can honour the request, and its
+/// operator-selected policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactQualificationReadiness {
     /// Whether an operator asked for the qualified identity on this node.
@@ -10504,14 +10516,16 @@ pub struct ArtifactQualificationReadiness {
     /// The subset of those a retained diagnostic contract covers on this
     /// build, under the qualified log flags.
     pub covered_decoders: Vec<(String, plurx_core::transcode::DecodeBackend, String)>,
-    /// The identity this node will actually plan into.
+    /// The enabled policy. Individual plans use the qualified identity only
+    /// when their exact measured path has one unique covering contract.
     pub effective: plurx_core::transcode::ArtifactQualification,
-    /// Why, when that is not the one requested.
+    /// Readiness advisory for incomplete or ambiguous coverage, if any.
     pub refusal: Option<QualificationRefusal>,
 }
 
 impl ArtifactQualificationReadiness {
-    /// Whether the node could honour a request, whether or not one was made.
+    /// Whether at least one measured path could honour a request, whether or
+    /// not one was made.
     ///
     /// Conjoined with the build rather than derived from coverage alone, so
     /// this cannot answer "yes" on a node that never identified the binary the
@@ -10536,14 +10550,13 @@ impl ArtifactQualificationReadiness {
     }
 }
 
-/// The intersection an operator request is subject to.
+/// The operator request and its advisory readiness report.
 ///
-/// The request names a different content-addressed key space, so honouring one
-/// this node cannot serve is not a degraded mode — it rotates the whole
-/// transcode cache to keys whose every generation is then refused, and the
-/// node re-encodes each title once per request forever while reporting healthy.
-/// So the request is intersected with three things this node measured about
-/// itself, and a node that fails any of them stays where it is and says which.
+/// The request is never refused because a prerequisite is missing. Planning
+/// applies it per decode path: a uniquely covered `(codec, backend, decoder)`
+/// uses the qualified identity, while every other path keeps its existing
+/// unqualified identity. That makes the prerequisites advisory without
+/// rotating uncovered work into a namespace whose receipts it cannot produce.
 ///
 /// A free function, and deliberately not a method: it takes only measured
 /// facts, so the whole rule can be tested without a manager, a store, a cache
@@ -10593,12 +10606,14 @@ pub fn artifact_qualification_readiness(
         Some(QualificationRefusal::BuildUnmeasured)
     } else if measured_decoders.is_empty() {
         Some(QualificationRefusal::NoDecoderMeasured)
-    } else if !covered_decoders.is_empty() {
-        None
     } else if ambiguous {
         Some(QualificationRefusal::AmbiguousContract)
-    } else {
+    } else if covered_decoders.is_empty() {
         Some(QualificationRefusal::NoContractCoversThisBuild)
+    } else if covered_decoders.len() != measured_decoders.len() {
+        Some(QualificationRefusal::IncompleteCoverage)
+    } else {
+        None
     };
 
     ArtifactQualificationReadiness {
@@ -10606,7 +10621,7 @@ pub fn artifact_qualification_readiness(
         measured_build,
         measured_decoders,
         covered_decoders,
-        effective: if refusal.is_none() {
+        effective: if requested {
             ArtifactQualification::HealthQualified
         } else {
             ArtifactQualification::Unqualified
@@ -11009,6 +11024,11 @@ pub struct TranscodeManager {
     /// would revert green.
     #[cfg(test)]
     manifests_published: std::sync::atomic::AtomicUsize,
+    /// Tests that exercise receipt enforcement without installing a real
+    /// diagnostic policy can explicitly force the old all-plan identity. The
+    /// production path is always contract-scoped.
+    #[cfg(test)]
+    force_artifact_qualification: std::sync::atomic::AtomicBool,
     /// Descriptor-bound per-source decode facts, scoped to the configured
     /// FFprobe build rather than to a mutable pathname.
     decode_facts: crate::decode_facts::DecodeFactCache,
@@ -11018,19 +11038,13 @@ pub struct TranscodeManager {
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
-    /// Which artifact identity this node currently plans into.
+    /// The published request and its measured path coverage.
     ///
     /// Published rather than read per plan, for the same reason the rate
-    /// control is: it decides an artifact's name, and a name that changed
-    /// between a claim and its settlement would settle one identity's bytes
-    /// under another's key. A change to it is a policy generation change, which
-    /// is the mechanism this producer already has for exactly that.
-    /// The whole published answer, not only its conclusion.
-    ///
-    /// The settings surface reports what this node *published*, and reporting
-    /// a fresh recomputation instead would let it say "enforcing" on a node
-    /// that is planning unqualified — the exact false certificate this control
-    /// exists to prevent, arriving through the control.
+    /// control is: changing which paths use a different artifact name between
+    /// claim and settlement would settle one identity's bytes under another's
+    /// key. Each plan then intersects this stable request with its own exact
+    /// measured diagnostic contract; uncovered paths keep their old identity.
     artifact_qualification: std::sync::RwLock<ArtifactQualificationReadiness>,
     /// Serializes probe → durable settings → publication. Without this, two
     /// concurrent admin PUTs can leave the store describing one request and
@@ -11384,6 +11398,8 @@ impl TranscodeManager {
             ),
             #[cfg(test)]
             manifests_published: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            force_artifact_qualification: std::sync::atomic::AtomicBool::new(false),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
             #[cfg(test)]
@@ -12241,6 +12257,88 @@ impl TranscodeManager {
         facts: &DecodeFacts,
         restrictions: &AttemptRestrictions,
     ) -> Result<ResolvedTranscode, String> {
+        use plurx_core::transcode::ArtifactQualification;
+
+        #[cfg(test)]
+        if self
+            .force_artifact_qualification
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return self.resolve_movie_plan_with_qualification(
+                file,
+                options,
+                encoder,
+                facts,
+                restrictions,
+                self.artifact_qualification(),
+            );
+        }
+
+        // Resolve once under the stable identity every node already has. The
+        // decode backend does not depend on artifact qualification, and this
+        // gives us the exact path whose contract must be checked without
+        // guessing from the encoder or the host.
+        let unqualified = self.resolve_movie_plan_with_qualification(
+            file,
+            options,
+            encoder,
+            facts,
+            restrictions,
+            ArtifactQualification::Unqualified,
+        )?;
+        if !self.published_artifact_qualification().requested {
+            return Ok(unqualified);
+        }
+        let Some(codec) = unqualified.decode().input_codec() else {
+            return Ok(unqualified);
+        };
+        let backend = unqualified.decode().backend();
+        let Some(decoder) = self.measured_decoders.implementation(codec, backend) else {
+            return Ok(unqualified);
+        };
+        if self
+            .diagnostic_policy
+            .contract_for(
+                codec,
+                decoder,
+                backend.name(),
+                crate::decoder_health::QUALIFIED_STDERR_MODE,
+            )
+            .is_none()
+        {
+            return Ok(unqualified);
+        }
+
+        let qualified = self.resolve_movie_plan_with_qualification(
+            file,
+            options,
+            encoder,
+            facts,
+            restrictions,
+            ArtifactQualification::HealthQualified,
+        )?;
+        if qualified.decode().backend() != backend
+            || qualified.decode().input_codec() != Some(codec)
+        {
+            tracing::warn!(
+                codec,
+                backend = backend.name(),
+                "artifact qualification changed the resolved decode path; keeping its stable identity"
+            );
+            return Ok(unqualified);
+        }
+        Ok(qualified)
+    }
+
+    fn resolve_movie_plan_with_qualification(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: &DecodeFacts,
+        restrictions: &AttemptRestrictions,
+        qualification: plurx_core::transcode::ArtifactQualification,
+    ) -> Result<ResolvedTranscode, String> {
         let build = self
             .cache
             .as_ref()
@@ -12251,7 +12349,6 @@ impl TranscodeManager {
             None,
         )
         .map_err(|error| error.to_string())?;
-        let qualification = self.artifact_qualification();
         let qualifying = qualification.enforces_receipt();
         #[allow(unused_mut)]
         let mut decoders = self.decoders.clone();
@@ -16657,7 +16754,11 @@ impl TranscodeManager {
         self.caps.choose(&prefer)
     }
 
-    /// The artifact identity this node plans into right now.
+    /// The published requested mode.
+    ///
+    /// Production planning additionally intersects this with the exact
+    /// resolved decode path; this accessor remains for the direct-identity
+    /// test seam and startup transition logging.
     pub fn artifact_qualification(&self) -> plurx_core::transcode::ArtifactQualification {
         self.artifact_qualification
             .read()
@@ -16689,8 +16790,7 @@ impl TranscodeManager {
         )
     }
 
-    /// Read the operator request, intersect it with what this node measured,
-    /// and publish the identity this node will actually plan into.
+    /// Read and publish the operator's requested path-scoped policy.
     ///
     /// **Called once, at start.** Not on every write, and that is the whole
     /// design rather than an omission. This value is part of every cache key
@@ -16704,15 +16804,19 @@ impl TranscodeManager {
     /// because it would be caused by the fix.
     ///
     /// So the request is stored when it is written and read when the node next
-    /// starts, which is also how a fleet rolls one out. The settings surface
-    /// reports the stored request and the published answer as separate facts,
-    /// so an operator can see that a restart is owed.
+    /// starts, which is also how a fleet rolls one out. Each later plan applies
+    /// that stable request only to an exact path with one covering contract.
+    /// The settings surface reports the stored request and the published
+    /// answer as separate facts, so an operator can see that a restart is owed.
     ///
     /// A store that cannot be read is not an excuse to guess, and it is also
     /// not a reason to refuse to start a media server. The node keeps the
     /// identity every deployed node already has and says it could not read the
     /// setting, which is true and is visible on the settings surface.
     pub async fn publish_artifact_qualification(&self) -> ArtifactQualificationReadiness {
+        #[cfg(test)]
+        self.force_artifact_qualification
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let stored = self
             .store
             .get_setting(plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS)
@@ -16734,16 +16838,13 @@ impl TranscodeManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = readiness.clone();
         if previous != readiness.effective {
-            // A change here rotates every recipe hash this node computes, so
-            // it is logged at the level an operator reading a startup log will
-            // see, with the reason rather than only the outcome.
             tracing::warn!(
                 namespace = readiness.effective.namespace(),
                 previous = previous.namespace(),
                 requested,
                 covered = readiness.covered_decoders.len(),
                 refusal = readiness.refusal.map(QualificationRefusal::name),
-                "the effective artifact identity changed; this node's transcode cache keys move with it"
+                "the verified-artifact policy changed; uniquely covered decode paths use its identity"
             );
         } else {
             tracing::info!(
@@ -16757,7 +16858,7 @@ impl TranscodeManager {
         readiness
     }
 
-    /// Publish an identity directly, without the intersection.
+    /// Publish an identity directly, without per-path contract selection.
     ///
     /// Test-only, and it must stay that way. Every test of the enforcement
     /// behind this control runs on a host no diagnostic contract covers, so
@@ -16775,8 +16876,13 @@ impl TranscodeManager {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             published.effective = qualification;
+            published.requested = qualification.enforces_receipt();
             published.refusal = None;
         }
+        self.force_artifact_qualification.store(
+            qualification.enforces_receipt(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         tracing::info!(
             namespace = qualification.namespace(),
             "published the effective artifact identity"
@@ -41152,7 +41258,7 @@ scope = "test"
     /// on its own, because a refusal an operator cannot act on is the same as
     /// no refusal at all.
     #[test]
-    fn a_request_for_the_qualified_identity_is_intersected_with_what_the_node_measured() {
+    fn a_request_is_enabled_while_coverage_remains_advisory() {
         use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
         use plurx_core::transcode::ArtifactQualification;
 
@@ -41212,12 +41318,15 @@ scope = "test"
              so an operator can see the answer before paying for it"
         );
 
-        // Asked, and every prerequisite met. Only the covered pair is listed:
-        // hevc was measured and is not covered, and saying otherwise would
-        // claim a grammar that does not exist.
+        // Asked, and enabled. Only the covered pair is listed: hevc was
+        // measured and is not covered, so the surface must call the node
+        // partially covered rather than imply every plan is verified.
         let asked = artifact_qualification_readiness(true, &covered, &measured);
         assert_eq!(asked.effective, ArtifactQualification::HealthQualified);
-        assert_eq!(asked.refusal, None);
+        assert_eq!(
+            asked.refusal,
+            Some(QualificationRefusal::IncompleteCoverage)
+        );
         assert_eq!(
             asked.covered_decoders,
             vec![(
@@ -41233,7 +41342,11 @@ scope = "test"
         let unmeasured =
             crate::decoder_health::DiagnosticPolicy::new(None, vec![contract("h264", "h264")]);
         let readiness = artifact_qualification_readiness(true, &unmeasured, &measured);
-        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
+        assert_eq!(
+            readiness.effective,
+            ArtifactQualification::HealthQualified,
+            "readiness is advisory and does not turn the request back off"
+        );
         assert_eq!(
             readiness.refusal,
             Some(QualificationRefusal::BuildUnmeasured)
@@ -41247,7 +41360,7 @@ scope = "test"
         // so a plan that names none can never be matched to one.
         let readiness =
             artifact_qualification_readiness(true, &covered, &MeasuredDecoders::default());
-        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
+        assert_eq!(readiness.effective, ArtifactQualification::HealthQualified);
         assert_eq!(
             readiness.refusal,
             Some(QualificationRefusal::NoDecoderMeasured)
@@ -41258,7 +41371,7 @@ scope = "test"
         // leave: it needs a capture from this build.
         let uncovered = crate::decoder_health::DiagnosticPolicy::new(Some(build()), Vec::new());
         let readiness = artifact_qualification_readiness(true, &uncovered, &measured);
-        assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
+        assert_eq!(readiness.effective, ArtifactQualification::HealthQualified);
         assert_eq!(
             readiness.refusal,
             Some(QualificationRefusal::NoContractCoversThisBuild)
@@ -41325,10 +41438,94 @@ scope = "test"
             "the identical software decoder name does not inherit the hardware contract"
         );
         assert_eq!(readiness.measured_decoders.len(), 2);
+        assert_eq!(
+            readiness.refusal,
+            Some(QualificationRefusal::IncompleteCoverage)
+        );
     }
 
-    /// The publisher writes what the intersection decided, and the identity it
-    /// writes moves every cache key the node computes.
+    #[tokio::test]
+    async fn an_enabled_partial_policy_qualifies_only_its_exact_decode_path() {
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::DecodeBackend;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let mut contract = decode_contract_fixture(DecodeBackend::VideoToolbox);
+        contract.input_codec = "hevc".to_owned();
+        contract.decoder = "hevc".to_owned();
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let measured = MeasuredDecoders::from_measured(&[
+            ("hevc", DecodeBackend::Software, "hevc"),
+            ("hevc", DecodeBackend::VideoToolbox, "hevc"),
+        ]);
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mgr = mgr
+            .with_measured_decoders(measured)
+            .with_diagnostic_policy(Arc::new(policy));
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("enable requested policy");
+        let published = mgr.publish_artifact_qualification().await;
+        assert_eq!(
+            published.refusal,
+            Some(QualificationRefusal::IncompleteCoverage),
+            "hardware-only coverage is visible as unsafe for automatic recovery"
+        );
+
+        let hardware_options = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let hardware = mgr
+            .resolve_movie_plan(&file, &hardware_options, Encoder::VideoToolbox)
+            .await
+            .expect("hardware plan");
+        assert_eq!(hardware.decode().backend(), DecodeBackend::VideoToolbox);
+        assert!(hardware.enforces_receipt());
+
+        let software_options = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        let software = mgr
+            .resolve_movie_plan(&file, &software_options, Encoder::Software)
+            .await
+            .expect("software plan");
+        assert_eq!(software.decode().backend(), DecodeBackend::Software);
+        assert!(
+            !software.enforces_receipt(),
+            "one hardware contract must not rotate an uncovered software path into a namespace it cannot certify"
+        );
+    }
+
+    /// The publisher writes the requested policy, and a covered path's
+    /// identity moves its cache key.
     ///
     /// The free-function test above proves the rule. This proves the two
     /// things only the manager can: that the published value is what planning
@@ -41452,15 +41649,15 @@ scope = "test"
     fn ambiguous_coverage_is_not_reported_as_missing_coverage() {
         use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
 
-        let contract = |id: &str| crate::decoder_health::DiagnosticContract {
+        let contract = |id: &str, codec: &str| crate::decoder_health::DiagnosticContract {
             id: id.to_owned(),
             host: "workstation".to_owned(),
             ffmpeg_version: "ffmpeg version 9.0.1".to_owned(),
             binary_sha256: "b".repeat(64),
             buildconf_sha256: "c".repeat(64),
             stderr_mode: crate::decoder_health::QUALIFIED_STDERR_MODE.to_owned(),
-            input_codec: "h264".to_owned(),
-            decoder: "h264".to_owned(),
+            input_codec: codec.to_owned(),
+            decoder: codec.to_owned(),
             decode_backend: plurx_core::transcode::DecodeBackend::Software
                 .name()
                 .to_owned(),
@@ -41480,23 +41677,41 @@ scope = "test"
                 binary_sha256: "b".repeat(64),
                 buildconf_sha256: "c".repeat(64),
             }),
-            vec![contract("first"), contract("second")],
+            vec![
+                contract("unique", "h264"),
+                contract("first", "hevc"),
+                contract("second", "hevc"),
+            ],
         );
         let readiness = artifact_qualification_readiness(
             true,
             &policy,
-            &MeasuredDecoders::from_measured(&[(
-                "h264",
-                plurx_core::transcode::DecodeBackend::Software,
-                "h264",
-            )]),
+            &MeasuredDecoders::from_measured(&[
+                (
+                    "h264",
+                    plurx_core::transcode::DecodeBackend::Software,
+                    "h264",
+                ),
+                (
+                    "hevc",
+                    plurx_core::transcode::DecodeBackend::Software,
+                    "hevc",
+                ),
+            ]),
         );
         assert_eq!(
             readiness.refusal,
             Some(QualificationRefusal::AmbiguousContract)
         );
-        assert!(readiness.covered_decoders.is_empty());
-        assert!(!readiness.eligible());
+        assert_eq!(readiness.covered_decoders.len(), 1);
+        assert_eq!(
+            readiness.covered_decoders[0].0, "h264",
+            "the unique path remains visible while the mixed ambiguous path is called out"
+        );
+        assert!(
+            readiness.eligible(),
+            "the unique path remains usable; ambiguity on another path remains an advisory"
+        );
         assert!(
             readiness
                 .refusal
@@ -41518,6 +41733,9 @@ scope = "test"
             QualificationRefusal::BuildUnmeasured,
             QualificationRefusal::NoDecoderMeasured,
             QualificationRefusal::NoContractCoversThisBuild,
+            QualificationRefusal::IncompleteCoverage,
+            QualificationRefusal::AmbiguousContract,
+            QualificationRefusal::SettingUnreadable,
         ];
         let names = all.map(QualificationRefusal::name);
         let mut unique = names.to_vec();

@@ -5086,7 +5086,18 @@ mod startup_tests {
                 ffprobe_build_digest: Some("a".repeat(64)),
                 decode_probe_identity: None,
                 measured_decoders:
-                    plurx_core::transcode::decoder_inventory::MeasuredDecoders::default(),
+                    plurx_core::transcode::decoder_inventory::MeasuredDecoders::from_measured(&[
+                        (
+                            "h264",
+                            plurx_core::transcode::DecodeBackend::Software,
+                            "h264",
+                        ),
+                        (
+                            "h264",
+                            plurx_core::transcode::DecodeBackend::VideoToolbox,
+                            "h264",
+                        ),
+                    ]),
                 pacing: crate::ffmpeg::PacingCaps {
                     readrate: true,
                     initial_burst: true,
@@ -5124,6 +5135,15 @@ mod startup_tests {
         assert_eq!(
             system.tone_map.selected(),
             plurx_core::transcode::Pipeline::Cpu
+        );
+        let wire = serde_json::to_value(&system).expect("serialize /api/v1/system info");
+        assert_eq!(
+            wire["measured_decoders"]["by_codec"]["h264"], "h264",
+            "the v1 field keeps string values for existing API consumers"
+        );
+        assert_eq!(
+            wire["measured_decoders"]["by_codec_and_backend_v2"]["h264"]["videotoolbox"], "h264",
+            "the versioned sibling carries the backend-aware path"
         );
     }
 

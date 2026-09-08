@@ -368,7 +368,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         self.assertIn(
             "M0–M5 complete · M6 server/client implementation landed, fleet "
-            "acceptance open · M7b backend-aware inventory in progress · M8 and "
+            "acceptance open · M7b adversarial findings under repair · M8 and "
             "promotion remain",
             self.flat_status,
         )
@@ -530,10 +530,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         # Until M3f nothing selected the qualified identity at all, and this
         # asserted the document said so. M3f adds the selector, so the claim
-        # worth pinning is the one that replaced it: the identity is never
-        # chosen by a request alone, only by a request the node's own
-        # measurements allow.
-        self.assertIn("the node effective-mode intersection", self.status)
+        # worth pinning is the rule that replaced it: the request is honoured,
+        # while only an exactly measured and uniquely covered path changes
+        # identity. Missing prerequisites remain visible advice.
+        self.assertIn("path-scoped policy", self.status)
         self.assertNotIn("Nothing selects it in production yet", self.status)
         # And the document does not name two different milestones for it.
         self.assertNotIn("That is M3c3, and it now has something", self.status)
@@ -1189,6 +1189,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "BuildUnmeasured",
             "NoDecoderMeasured",
             "NoContractCoversThisBuild",
+            "IncompleteCoverage",
             # Two covering contracts read downstream exactly like none, and the
             # fix for one is the opposite of the fix for the other.
             "AmbiguousContract",
@@ -1264,10 +1265,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # node measured, and saves its own single field.
         self.assertIn("function verifiedDecodeCard(", web)
         self.assertIn("verifiedDecodeCard(settings)", web)
-        # Conditional, because on a node that cannot honour the request there
-        # is no cost — and an unconditional warning above three crosses that
-        # contradict it teaches an operator to stop reading warnings.
-        self.assertIn("cannot honour the request today", web)
+        # Conditional, because an uncovered path pays no cache rename yet.
+        # The prerequisites advise; they never disable the operator control.
+        self.assertIn("You may still enable the policy", web)
+        self.assertIn("advisory and never disable this control", web)
         self.assertIn("renames every transcode it caches", web)
         self.assertIn("pays the same rename a second time", web)
         # FFmpeg's banner and decoder names are somebody else's strings.
@@ -1316,9 +1317,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "Selecting decoder '<name>' because of requested hwaccel method <backend>",
             inventory,
         )
-        self.assertIn('command.args(["-hwaccel", backend.name()]);', inventory)
+        self.assertIn('"-hwaccel_output_format",', inventory)
+        self.assertIn("hardware_runtime_evidence(stderr, backend)", inventory)
+        self.assertIn("const INVENTORY_TIMEOUT: std::time::Duration", inventory)
+        self.assertIn("by_codec_and_backend_v2", inventory)
         self.assertIn(
-            "selected_hardware_decoder(&stderr, codec, backend)", inventory
+            "selected_hardware_decoder(&stderr, codec, backend, output.status.success())",
+            inventory,
         )
         observation = daemon.split("fn for_plan_against(", 1)[1].split(
             "fn resolve(", 1

@@ -371,23 +371,25 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   } });
   assert.match(bare, /TOG:dhqa\|/);
   assert.match(bare, /FOOT:saveVerifiedDecode/);
-  // On a node that cannot honour the request there is no cost, and saying
-  // there is teaches an operator to stop reading the warnings.
-  assert.match(bare, /cannot honour the request today/);
+  // No covered path pays a rename yet, but the control remains enabled: the
+  // prerequisites are advice, not a disabled switch.
+  assert.match(bare, /No measured path can produce a verified artifact today/);
+  assert.match(bare, /checks above are advisory and never disable this control/);
   assert.doesNotMatch(bare, /This node can honour the request/);
   // Why the feature exists at all, in the words the failure actually takes.
   assert.match(bare, /drop every frame of a file and still exit successfully/);
   assert.equal((bare.match(/✗/g) || []).length, 3, "three unmet checks, each shown");
   assert.match(bare, /Not requested on this node\./);
 
-  // Requested, and refused with the reason the fleet will actually hit.
+  // Requested and enabled, with the uncovered state still shown as advice.
   const refused = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
-    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: false,
+    namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, eligible: false,
     measured_build: "ffmpeg version 5.1.9", measured_decoders: ["h264/software/h264", "hevc/software/hevc"],
     covered_decoders: [], refusal: "no_contract_covers_this_build",
-    explanation: "No retained diagnostic contract covers this node's FFmpeg build under the qualified log flags. Capture one from this build before enabling.",
+    explanation: "No retained diagnostic contract covers this node's FFmpeg build under the qualified log flags.",
   } });
-  assert.match(refused, /Requested · not in force/, "the state is not the request");
+  assert.match(refused, /Enabled · covered paths/);
+  assert.match(refused, /Coverage advisory/);
   assert.match(refused, /No retained diagnostic contract covers/);
   assert.match(refused, /<code>h264\/software\/h264<\/code>/, "what it did measure is still shown");
   assert.equal((refused.match(/✓/g) || []).length, 2);
@@ -399,7 +401,7 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
     measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/software/h264"],
     covered_decoders: ["h264/software/h264"], refusal: null, explanation: null,
   } });
-  assert.match(on, /Enforcing/);
+  assert.match(on, /Enabled · covered paths/);
   assert.equal((on.match(/✗/g) || []).length, 0);
   assert.doesNotMatch(on, /Not in force/);
   // An eligible node is the one that actually pays, so it is the one told.
@@ -435,6 +437,31 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // only source for this card, and a page that throws on a missing field is a
   // Settings section that cannot be opened at all.
   assert.doesNotThrow(() => card({}));
+});
+
+test("Automatic recovery requires a covered hardware and software pair for one codec", () => {
+  const card = new Function(
+    "setCard", "cardHead", "esc",
+    `${shippedSource("decodeRecoveryCard")}\nreturn decodeRecoveryCard;`,
+  )(
+    (body) => `CARD[${body}]`,
+    (title, sub, tools) => `CARDHEAD:${title}|${sub || ""}|${tools || ""}`,
+    esc,
+  );
+
+  const crossed = card({ decoder_health_qualification: {
+    measured_build: "ffmpeg version 9.0.1",
+    covered_decoders: ["h264/software/h264", "hevc/videotoolbox/hevc"],
+  } });
+  assert.match(crossed, /✗ The same codec has covered hardware and software paths/);
+  assert.match(crossed, /different codecs do not form a recovery/);
+
+  const paired = card({ decoder_health_qualification: {
+    measured_build: "ffmpeg version 9.0.1",
+    covered_decoders: ["h264/software/h264", "h264/videotoolbox/h264"],
+  } });
+  assert.match(paired, /✓ The same codec has covered hardware and software paths/);
+  assert.match(paired, /h264\/videotoolbox\/h264/);
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {
