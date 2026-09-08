@@ -368,7 +368,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         self.assertIn(
             "M0–M5 complete · M6 server/client implementation landed, fleet "
-            "acceptance open · M7b exact candidate awaiting re-review · "
+            "acceptance open · M7b final advisory finding under repair · "
             "M8 and promotion remain",
             self.flat_status,
         )
@@ -378,16 +378,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "introduced by M2.",
             self.flat_status,
         )
-        # The operator explicitly requires one final full suite on each task
-        # candidate after review repairs. Keep that override visible, while
-        # retaining the separate exact-tree promotion obligation.
+        # Task PRs use the effort lane; the expensive complete suite runs once
+        # after all reviewed tasks are merged into the frozen effort candidate.
         self.assertIn(
-            "Per Paul's 2026-09-08 instruction, run one `make validate-full` only "
-            "after adversarial findings are repaired",
+            "Per Paul's 2026-09-08 clarification, task PRs into the effort do not "
+            "run the full unit suite",
             self.flat_status,
         )
         self.assertIn(
-            "exact-tree promotion still reruns the Main gate after fresh `main` is merged",
+            "Run it once on the frozen, fully reviewed effort branch after all fixes",
             self.flat_status,
         )
 
@@ -1147,7 +1146,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # What the repair does not claim.
         self.assertIn("That is a practice, not a gate", self.status)
         self.assertIn(
-            "Wire the full `cargo test --workspace` run into a gate", self.status
+            "Run the full `cargo test --workspace` coverage in the effort's promotion",
+            self.status,
         )
         self.assertIn(
             "Give `populated_v14_import_fixture` in `tests/store_contract.rs` "
@@ -1357,9 +1357,12 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             web,
         )
         self.assertIn(
-            "const ready=policyEnabled&&!q.pending_restart&&!!q.measured_build&&recoverable.length>0;",
+            "const ready=policyReady&&!!q.measured_build&&recoverable.length>0;",
             web,
         )
+        self.assertIn("const policyReady=policyEnabled&&!q.pending_restart;", web)
+        self.assertIn("checks advise and never gate that setting", web)
+        self.assertIn("must restart before the published policy changes", web)
         self.assertIn("ready for eligible sessions", web)
         self.assertIn("Only some selectable decode paths", daemon)
         self.assertIn("missing measurements or contracts", daemon)

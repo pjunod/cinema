@@ -480,6 +480,7 @@ test("Automatic recovery requires a covered hardware and software pair for one c
   } });
   assert.match(paired, /✓ The same codec has covered hardware and software paths/);
   assert.match(paired, /h264\/videotoolbox\/h264/);
+  assert.match(paired, /✓ The receipt-qualified decode policy is applied/);
   assert.match(paired, /ready for eligible sessions/);
   assert.doesNotMatch(paired, /prerequisites unmet/);
 
@@ -489,6 +490,9 @@ test("Automatic recovery requires a covered hardware and software pair for one c
     covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
   } });
   assert.match(off, /prerequisites unmet/);
+  assert.match(off, /✗ The receipt-qualified decode policy is applied/);
+  assert.match(off, /policy is off on this node/);
+  assert.match(off, /checks advise and never gate that setting/);
 
   const pending = card({ decoder_health_qualification: {
     policy_enabled: true, pending_restart: true,
@@ -496,6 +500,8 @@ test("Automatic recovery requires a covered hardware and software pair for one c
     covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
   } });
   assert.match(pending, /prerequisites unmet/);
+  assert.match(pending, /✗ The receipt-qualified decode policy is applied/);
+  assert.match(pending, /must restart before the published policy changes/);
 
   const legacy = card({ decoder_health_qualification: {
     enforcing: true,

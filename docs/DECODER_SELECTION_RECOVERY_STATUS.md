@@ -1,7 +1,7 @@
 # Decoder selection and recovery — implementation status
 
 **Status:** M0–M5 complete · M6 server/client implementation landed, fleet
-acceptance open · M7b exact candidate awaiting re-review · M8 and promotion
+acceptance open · M7b final advisory finding under repair · M8 and promotion
 remain · **Updated:** 2026-09-08 · **Integration branch:**
 `effort/decoder-selection-recovery` at `265e1fc4` · **Active task:**
 `codex/decoder-m7b-inventory`
@@ -24,7 +24,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
 | M6 · prepared replacement contract and clients | Code landed | Apple is the only client currently reaching a viewer; the cross-client fleet receipt remains M8 evidence |
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
-| M7b · hardware diagnostic path | Exact candidate awaiting re-review | Backend-aware inventory is implemented. The first eight adversarial findings are closed. The three exact-head findings from `65c688fc` were repaired at `255fd555`; review of that head found three UI/advisory follow-ups: consume the v2 path list, derive the recovery-readiness pill from applied state, and describe selectable-but-unmeasured coverage accurately. Those repairs are committed at `a32ab767`, current effort head `265e1fc4` is integrated, and the merged-base fast lane is green. Exact-tree re-review, one final full suite, draft-PR promotion and merge remain. A real hardware contract is separate fleet evidence |
+| M7b · hardware diagnostic path | Final advisory finding under repair | Backend-aware inventory is implemented. The first eleven adversarial findings are closed. Exact review of `8a6eee57` found one remaining advisory gap: the recovery header considered applied/pending-restart policy state without showing that prerequisite in the checklist. The non-gating policy/restart row is under repair. Exact-tree re-review, draft-PR promotion and merge remain; the full suite is deferred to the final frozen effort branch. A real hardware contract is separate fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Not yet audited | Job-scoped recovery budget · alternate-result and part/assembly receipt verification · versioned worker capabilities · owner-handoff coverage · shipping-path exercise without the legacy recovery feature flag |
 | M8 · fleet qualification | Not started | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs |
 | Promotion to `main` | Not started | Freeze effort merges · merge fresh `main` · requalify the exact tree · pass Main promotion gate · merge |
@@ -41,14 +41,14 @@ recovery remains deliberately unreachable rather than falsely certified.
 | Milestone | M7b slice 2 — measure and report decoders per `(codec, backend)`, then use that exact path for diagnostic-contract lookup |
 | Task base | Effort head `48ad8716` at task creation; current effort head `265e1fc4` from Forgejo PR #176 was merged into the task before exact-candidate qualification |
 | Task branch | `codex/decoder-m7b-inventory` in an agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
-| Task PR | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174), `WIP:`. It stays draft until adversarial findings are clean; the full suite runs once on that corrected candidate |
+| Task PR | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174), `WIP:`. It stays draft until adversarial findings are clean and the Effort development gate passes; no task-level full suite runs before merge |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Implemented locally | Nested backend-aware inventory with a backward-compatible v1 API field and versioned backend-aware sibling · aggregate inventory timeout · successful hardware-frame runtime proof · exact `(codec, backend)` diagnostic lookup · path-scoped policy identity for uniquely covered plans · same-codec recovery readiness · Settings → Developer presents prerequisites as advice and never disables the control |
-| Adversarial review | Exact head `a148676d`: five findings repaired at `b51eed01`. Re-review of `b51eed01` closed those five and found three follow-ups, repaired at `65c688fc`: conservative legacy settings semantics, path-scoped cache-cost copy, and mutation-sensitive child/file cleanup proof. Review of `65c688fc` confirmed those eight closed and found three further boundaries, repaired at `255fd555`: qualified successor pairing, selectable-path completeness, and settings path-list wire compatibility. Review of `255fd555` closed all prior findings and found three UI/advisory follow-ups: read the v2 recovery paths, make the header pill reflect real readiness, and tell operators about selectable/unmeasured gaps. No additional correctness, security or concurrency findings were found. The three follow-ups are committed at `a32ab767`; exact merged-base re-review is next |
-| Focused evidence | Exact merged-base head `f83417a8`: decoder inventory 15/15; all six qualification-readiness boundaries; qualified same-codec alternate integration; existing software-alternate and executor-install cases; current/legacy settings serialization; Developer UI 16/16; status contract 21/21; formatting and branch diff check all pass |
+| Adversarial review | Exact head `a148676d`: five findings repaired at `b51eed01`. Re-review of `b51eed01` closed those five and found three follow-ups, repaired at `65c688fc`. Review of `65c688fc` confirmed those eight closed and found three further boundaries, repaired at `255fd555`. Review of `255fd555` closed all prior findings and found three UI/advisory follow-ups, repaired at `a32ab767`. Exact merged-base review of `8a6eee57` closed those three and found one last advisory gap: applied/pending-restart policy state affected the header but was absent from the checklist. No runtime, security, concurrency, path-scoping, recovery-pair, cleanup or wire-compatibility issue remains; the checklist finding is under repair |
+| Focused evidence | Exact merged-base head `f83417a8`: decoder-inventory module 14/14 plus the neighboring encoder-advertisement case; all six qualification-readiness boundaries; qualified same-codec alternate integration; existing software-alternate and executor-install cases; current/legacy settings serialization; Developer UI 16/16; status contract 21/21; formatting and branch diff check all pass |
 | Fast lane | Exact merged-base head `f83417a8`: history 1,604 corrective commits with 967 explicit mappings · catalog 24 points / 33 checks / 1,571 audited files · pinned Rust 1.97.1 formatting and locked all-target workspace compile · changed `plurxd` binary Clippy with warnings denied all pass. Forgejo preflight correctly refused earlier `255fd555` because its corrective runtime commit lacked a regression-ledger mapping; `a32ab767` supplies it. Operations had the same 10 failures on the earlier candidate and untouched `48ad8716`: the macOS system Bash lacks `mapfile`; 280/290 pass. All-target Clippy reached the same four unused store-fixture constants on both trees |
-| Full validation | Per Paul's 2026-09-08 instruction, run one `make validate-full` only after adversarial findings are repaired and immediately before taking `WIP:` off the PR; exact-tree promotion still reruns the Main gate after fresh `main` is merged |
-| Next | Obtain exact-head adversarial approval · run one final full suite · mark ready and merge after the effort gate |
+| Full validation | Per Paul's 2026-09-08 clarification, task PRs into the effort do not run the full unit suite. Run it once on the frozen, fully reviewed effort branch after all fixes and immediately before promotion to `main`; requalify if that tree moves |
+| Next | Prove the visible non-gating policy/restart row · obtain exact-head adversarial approval · rerun the effort gate · mark ready and merge into the effort without a task-level full-suite run |
 | External blocker | No retained contract is yet qualified against a real hardware decoder. The code can make that contract expressible and enforceable; a qualifying host must supply the evidence |
 
 ## Milestones
@@ -3688,15 +3688,17 @@ full-base diff. The exact head then passed the full PR suite recorded below.
 | 2026-09-06 | Run qualification through task-scoped `ffmpeg-full` 8.1.2_2 wrappers | The installed full build provides `zscale`; the wrappers add only the retained x265 ABI 216 library path and leave the host installation unchanged |
 | 2026-09-06 | Accept two declared full-suite skips on this Darwin builder | Android device validation requires unavailable `adb`; the two-node Live TV drill is Linux-only. Both remain explicit M8 fleet/client prerequisites rather than passing claims |
 | 2026-09-06 | Reuse warmed cluster targets for the final exact-head suite | The first diagnostic run spent its 1,800-second bound compiling vendor targets. Warm targets change no source or test semantics and let the complete three-node workload run inside the same fixed bound |
-| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact plus kernel isolation for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. The supported path requires memfd seals, `execveat`, Landlock, seccomp-BPF with user notification, `close_range`, pidfds, and a supervised native thread on x86-64 or arm64 Linux; failure is a neutral M1 observation and keeps legacy routing. Other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name these prerequisites rather than hide them behind a code feature gate || 2026-09-07 | Qualify task PRs with the `Effort development gate` and defer the full suite to the `Main promotion gate` | The plan's per-milestone workflow asks for one `make validate-full` on every task candidate; `AGENTS.md` and `effort-ci.yml` say a task PR into an effort branch runs the development gate and the effort's single full qualification happens at promotion. The repository's own pipeline is what the branch protection enforces, and one full suite per task is fifty minutes of three-node cluster work per milestone with nothing between them to invalidate. Recorded here rather than silently: the effort still owes exactly one `make validate-full` on the exact promotion head |
+| 2026-09-06 | Require a sealed, self-contained Linux FFprobe artifact plus kernel isolation for enforced fact collection | Hashing a script, dynamic launcher, or mutable tempfile does not bind the parser that actually runs. The supported path requires memfd seals, `execveat`, Landlock, seccomp-BPF with user notification, `close_range`, pidfds, and a supervised native thread on x86-64 or arm64 Linux; failure is a neutral M1 observation and keeps legacy routing. Other production Unix targets refuse until they have an equivalent dependency-closure guarantee. The later Developer settings UI must name these prerequisites rather than hide them behind a code feature gate |
+| 2026-09-07, reaffirmed 2026-09-08 | Qualify task PRs with the `Effort development gate` and defer the full suite to the `Main promotion gate` | `AGENTS.md`, `effort-ci.yml`, and the operator's clarification agree: a task PR into an effort branch runs focused evidence and the development gate; the effort's single full qualification happens after all reviews and fixes on the frozen promotion candidate. One full suite per task would spend roughly fifty minutes of three-node cluster work on intermediate trees that later task merges invalidate. The effort still owes exactly one `make validate-full` on the exact promotion head |
 | 2026-09-07 | No M0 contract names a fatal decode family | The only fatal in the retained evidence is `Decode error rate 1 exceeds maximum`, which is FFmpeg abandoning a corrupt input rather than a backend becoming unavailable. Labelling it `DecodeBackendUnavailable` would ask M3b to swap decoders for a fault a decoder swap cannot repair, so the family is contract-driven and absent until one is qualified against its own fixture |
 
 ## Validation ledger
 
 No passing run is recorded until its command finishes on the named tree. Each
-task PR gets adversarial agent review, findings are fixed, then one full suite
-runs on the corrected head before merge. During development, the effort fast
-lane and focused tests provide earlier feedback.
+task PR gets adversarial agent review, findings are fixed, then the focused
+tests and Effort development gate qualify it for merge into the effort. The
+complete suite runs once on the frozen, fully reviewed effort branch before
+promotion to `main`.
 
 | Commit/tree | Command | Result |
 |---|---|---|
@@ -3847,10 +3849,11 @@ lane and focused tests provide earlier feedback.
   `COALESCE` default and the cross-node serde default — before M5c chooses a
   policy for `''`. Today a dropped budget is indistinguishable from a session
   that never had one.
-- Wire the full `cargo test --workspace` run into a gate a task candidate
-  cannot pass without. The five failures this repair closes were invisible to
-  the `Effort development gate` for eight milestones, and the only thing that
-  found them was choosing to run the whole suite once.
+- Run the full `cargo test --workspace` coverage in the effort's promotion
+  gate after every task is merged and the exact effort tree is frozen. The
+  five failures this repair closes were invisible to the lightweight task
+  gate and were found only by the complete suite; that evidence belongs on the
+  final tree whose promotion it protects.
 - Give `populated_v14_import_fixture` in `tests/store_contract.rs` arithmetic
   of its own, the way `DROPPED_BY_THE_FIXTURE` guards the v43 fixture. Today
   it is protected by being named in another test's failure message, which

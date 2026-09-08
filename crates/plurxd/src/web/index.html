@@ -14499,14 +14499,21 @@ function decodeRecoveryCard(s){
   const hardware=paths.filter(path=>path.backend!=="software");
   const recoverable=hardware.filter(path=>software.some(peer=>peer.codec===path.codec));
   const policyEnabled=q.policy_enabled===undefined?!!q.enforcing:!!q.policy_enabled;
-  const ready=policyEnabled&&!q.pending_restart&&!!q.measured_build&&recoverable.length>0;
+  const policyReady=policyEnabled&&!q.pending_restart;
+  const ready=policyReady&&!!q.measured_build&&recoverable.length>0;
   const ok=b=>b?"✓":"✗";
+  const policyNote=q.pending_restart
+    ? "The setting is saved, but this node must restart before the published policy changes. Recovery stays unavailable until that restart."
+    : (policyEnabled
+        ? "The receipt-qualified decode policy is applied on this node."
+        : "The receipt-qualified decode policy is off on this node. Turn on Require a producer health receipt and restart this node; these checks advise and never gate that setting.");
   const readiness=ready
     ? `<span class="pill" style="color:var(--good);border-color:var(--good)">ready for eligible sessions</span>`
     : `<span class="pill warn">prerequisites unmet</span>`;
   return setCard(`${cardHead("Automatic decode recovery","A producer that says out loud it could not decode the source is answered once — by a successor that decodes in software behind the same hardware encoder — instead of being answered with the command that just failed. Every timing verdict tells a client to try again, so without this a file that cannot be decoded is a reopen loop.",readiness)}
       <div class="hint"><b>There is no switch here.</b> This recovery is not behind a build flag or a setting; it fires when the conditions below hold and does nothing when they do not. The list is what has to become true, not what you have to click.</div>
       <h2 class="section">What must be true first</h2>
+      <div class="tog"><span>${ok(policyReady)} The receipt-qualified decode policy is applied<small>${policyNote}</small></span></div>
       <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Nothing this build prints can be matched to a contract, so nothing it prints is evidence, and a decode failure is indistinguishable from a stall."}</small></span></div>
       <div class="tog"><span>${ok(software.length>0)} A retained contract covers this build's software decoders<small>${list(software.map(path=>path.value))}<br>The successor decodes in software, so the same codec's software decode has to be measured and covered — otherwise the recovery installs a producer nobody can certify.</small></span></div>
       <div class="tog"><span>${ok(recoverable.length>0)} The same codec has covered hardware and software paths<small>${list(recoverable.map(path=>path.value))}<br>${recoverable.length?"Each listed hardware path has a covered software alternate for the same codec. The startup probe required successful hardware-frame output as well as FFmpeg's selection statement.":"<b>Not true on any node today, and it is what blocks the path.</b> A hardware contract and a software contract for different codecs do not form a recovery. No matched pair is retained yet, so a hardware decode cannot produce certified evidence and then install a certifiable software alternate."}</small></span></div>
