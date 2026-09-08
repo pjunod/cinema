@@ -2498,6 +2498,120 @@ change resets. The ledger M5a built and M5b keyed exists to make it one per
 *playback*, and `plurxd` still calls none of it. Until it does, the loop this
 effort is named after is narrowed rather than closed.
 
+## M5c3 specification — the durable budget, and why it is not a plumbing job
+
+M5c2 narrowed the loop and did not close it. `PrepublicationRetryState` is an
+in-process one-shot: a session installs the alternate or the colour-safe retry,
+once. A new session mints a fresh one, so a viewer whose source cannot be
+decoded still gets one automatic alternate per *reopen, seek and track change*.
+The ledger M5a built and M5b keyed exists to make it one per playback, and
+`plurxd` calls none of it — `reserve_producer_recovery`,
+`settle_producer_recovery` and `producer_recovery_for_epoch` have zero callers
+in the daemon.
+
+This section is a design record. It exists because the shape of the work is not
+the shape it looks like: the missing piece is not a store call, it is that four
+of the five values the ledger is keyed by cannot be seen from the place that
+would make it.
+
+### What the ledger needs, and where each value is
+
+`ProducerRecoveryRequest` wants `user_id`, `playback_id`, `recovery_epoch`,
+`failed_incarnation_id`, `failed_producer_attempt`, `decision_sequence`,
+`failed_plan_digest`, `alternate_plan_digest` and an optional
+`ContinuationDecodeRestriction`.
+
+| value | where it is |
+|---|---|
+| `playback_id` | on `Session` |
+| `failed_producer_attempt`, `decision_sequence` | in scope at the decision and at the executor |
+| `failed_plan_digest` | `ProducerDecodeFault.plan_digest`, latched, in scope at the decision |
+| `user_id` | **dies one frame below the handler** — `create_cluster_session` converts it to the `supersession_user` JSON string and drops the integer |
+| `incarnation_id` | **never reaches the session** — carried as far as `SessionRequest.request_id` and dropped at the live-recovery destructuring |
+| `recovery_epoch` | **does not exist in `transcode.rs` at all**, outside one test literal |
+| `alternate_plan_digest` | **not visible to the actor.** `ValidatedRetryRecipe` carries a fingerprint that *contains* the plan digest and is not invertible; the digest itself lives on `PrepublicationTranscodeRetry.observation`, inside the executor |
+| `ContinuationDecodeRestriction` | **never constructed in the daemon.** `input_video_stream` is on the fault and the two backends are derivable, but `source_revision_digest`, `input_codec` and `policy_revision` have no producer anywhere in `plurxd` |
+
+### The ordering discovery
+
+The epoch is decided at `http/hls.rs`'s `MediaSessionActivation` literal. The
+`Session` is built about 270 lines earlier, by the placement task. So the
+session that would hold the epoch is already running when the epoch is chosen,
+and no amount of threading fixes that by itself.
+
+The cheapest resolution is a reordering rather than an injection: the epoch's
+only input is `activation_predecessor`, which is already read *before*
+placement. Computing it there and passing it down costs one moved expression
+and no store read. The alternative — injecting a handle into a live session
+after activation — adds a state a session can be in, and the window where it is
+in that state is exactly the window a startup deadline fires in.
+
+### The digest problem, and the two ways out
+
+The actor chooses the alternate; the executor knows what the alternate is. The
+reservation has to name both plans, and no single frame sees both in the
+64-lowercase-hex form the store validates.
+
+1. **Reserve in the executor**, where both digests are present and the
+   decision's sequence and attempt arrive as parameters. Simplest, and it puts
+   the reservation *after* the actor already committed the decision — so a
+   refused budget means unwinding a decision that has been made and may have
+   been observed.
+2. **Put the plan digest on `ValidatedRetryRecipe`** so the actor can reserve
+   before it installs. This is the honest order, and the cost is that the type
+   is `Serialize`, is compared by equality on both sides of the actor/executor
+   seam, and has a `for_test` constructor — so both copies must carry the same
+   value or every recipe match fails.
+
+The second is the better trade and the more invasive one. Whichever is taken,
+it should be taken deliberately: the first reads as simpler and moves the
+failure to the worst moment.
+
+### Three things that will bite
+
+**A copy session's plan digest is not a digest.** The copy path sets
+`plan_digest` to `copy:<session>`, which the store's validator refuses for not
+being 64 lowercase hex. Decode-fault recovery does not apply to copy sessions,
+but that must be an explicit exclusion rather than an assumption, or the first
+copy-path fault produces a store error instead of a decision.
+
+**The budget is never refunded.** `ProducerRecoveryState` goes
+`Reserved → Installed | Exhausted` and never returns. A reservation taken for
+an alternate that then fails to install has spent the playback's one recovery.
+Settling on every path out — including the paths that do not reach the
+executor — is the whole correctness of this slice.
+
+**One test reads the source text of the file it tests.**
+`the_confirmation_reserves_recovery_budget_inside_the_owner_lease` in
+`http/hls.rs` matches literal substrings against `include_str!("hls.rs")`,
+including `"    let route = match confirmation {"` and a verbatim call
+expression. Any edit to that region — whitespace included — fails it, and the
+failure names the test rather than the edit.
+
+### The slices
+
+1. **The identity reaches the session.** Move the epoch computation above
+   placement; carry `user_id`, `incarnation_id` and `recovery_epoch` down the
+   start chain onto `Session`. No behaviour change, and the whole rest of the
+   milestone is unreachable without it.
+2. **A recovery ledger handle**, modelled on `PreparationExecutor` — the
+   existing precedent for "store plus identity, doing durable work on the
+   actor's behalf" — but reachable from the executor rather than from HTTP.
+   Note the only store a `Session` can reach today is the one on its
+   *retirement* context, which is an accident to be replaced rather than a
+   seam to build on.
+3. **Reserve before installing**, by whichever of the two digest routes §M5c3
+   settles on, with the copy-path exclusion explicit.
+4. **Settle on every path out**, including the ones that never reach the
+   executor, and a test per path. This is the slice that decides whether the
+   budget is a bound or a leak.
+
+`ContinuationDecodeRestriction` is deliberately last and may be deferred: the
+budget works without it, and the restriction is what makes the *next* session
+inherit the answer rather than rediscovering it. Building it needs three fields
+that have no producer in the daemon, and inventing them badly is worse than
+leaving the column null.
+
 ### The vocabulary is an owner-before-relay rollout constraint
 
 Recorded here because nothing else says it and the first person to hit it will
