@@ -10,9 +10,25 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.descriptors.element
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonClassDiscriminator
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /**
  * Android's passive playback-control reporter.
@@ -36,13 +52,15 @@ import kotlinx.serialization.json.JsonClassDiscriminator
  */
 object PlaybackControl {
     const val PROTOCOL = "plurx-playback-control-v1"
+    const val PREPARE_ACTION_TYPE = "prepare"
 
     /**
      * The actions this client will accept, and therefore the only ones the
      * server will send it. An action that is never declared is never sent, so
      * a client cannot be silenced by one it does not understand.
      */
-    val SUPPORTED_ACTIONS = listOf("hold", "retry_resource", "terminal")
+    val SUPPORTED_ACTIONS =
+        listOf("hold", "retry_resource", "terminal", "prepare_replacement")
     const val MIN_EXCHANGE_MS = 250L
     const val MAX_EXCHANGE_MS = 60_000L
     const val EXCHANGE_DEADLINE_MS = 6_000L
@@ -52,6 +70,14 @@ object PlaybackControl {
     const val MAX_CAPABILITY_VALUES = 8
     const val MAX_OBSERVED_DOWNLOAD_BPS = 10_000_000_000_000L
     const val MAX_ERROR_DETAIL_BYTES = 512
+    const val MAX_MEDIA_MILLIS = 366L * 24 * 60 * 60 * 1_000
+    const val MAX_ACTION_ID_LEN = 64
+    const val MAX_PLAYLIST_URL_LEN = 512
+    const val MAX_TRACK_INDEX = 1_024L
+    const val MAX_AUDIO_OFFSET_MS = 15_000L
+
+    private val DELIVERY_METHODS = setOf("source", "server_selected")
+    private val DELIVERED_DYNAMIC_RANGES = setOf("dolby_vision", "hdr10", "hlg", "sdr")
 
     private val UUID_RE = Regex(
         "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -65,6 +91,27 @@ object PlaybackControl {
      * check is exactly the mistake it exists to prevent.
      */
     fun isUuid(value: String): Boolean = UUID_RE.matches(value)
+
+    private val UUID_SHAPE_RE = Regex(
+        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** Action and successor ids are parsed UUIDs on the server, including newer UUID versions. */
+    fun isUuidShape(value: String): Boolean = UUID_SHAPE_RE.matches(value)
+
+    /** A prepared successor may name only its own node-relative HLS entry route. */
+    fun isPreparedPlaylist(playlistUrl: String, sessionId: String): Boolean {
+        if (playlistUrl.length > MAX_PLAYLIST_URL_LEN) return false
+        val path = playlistUrl.split('?', '#').first()
+        return path == "/api/v1/hls/$sessionId/index.m3u8" ||
+            path == "/api/v1/hls/$sessionId/master.m3u8"
+    }
+
+    fun isDeliveryMethod(value: String): Boolean = value in DELIVERY_METHODS
+
+    fun isDeliveredDynamicRange(value: String?): Boolean =
+        value == null || value in DELIVERED_DYNAMIC_RANGES
 }
 
 // ---------------------------------------------------------------- wire types
@@ -238,6 +285,161 @@ data class DynamicCapabilities(
             dynamicRanges.size <= PlaybackControl.MAX_CAPABILITY_VALUES
 }
 
+/** The complete recipe the server says a prepared successor will deliver. */
+@Serializable(with = EffectiveSelectionSerializer::class)
+data class EffectiveSelection(
+    @SerialName("quality_auto") val qualityAuto: Boolean,
+    val height: Long,
+    @SerialName("audio_track") val audioTrack: Long?,
+    @SerialName("subtitle_burn") val subtitleBurn: Long?,
+    @SerialName("audio_offset_ms") val audioOffsetMs: Long,
+    /** `source` or `server_selected`: a delivery method, not a codec name. */
+    val codec: String,
+    @SerialName("dynamic_range") val dynamicRange: String?,
+) {
+    val isValid: Boolean
+        get() = height in 0..PlaybackControl.MAX_HEIGHT.toLong() &&
+            (audioTrack == null || audioTrack in 0..PlaybackControl.MAX_TRACK_INDEX) &&
+            (subtitleBurn == null || subtitleBurn in 0..PlaybackControl.MAX_TRACK_INDEX) &&
+            audioOffsetMs in -PlaybackControl.MAX_AUDIO_OFFSET_MS..PlaybackControl.MAX_AUDIO_OFFSET_MS &&
+            PlaybackControl.isDeliveryMethod(codec) &&
+            PlaybackControl.isDeliveredDynamicRange(dynamicRange)
+}
+
+/**
+ * Kotlin serialization otherwise treats a missing nullable value as JSON
+ * null when `explicitNulls` is disabled. The server requires all seven keys,
+ * including the three whose value may explicitly be null, so presence is
+ * validated before producing the typed recipe.
+ */
+object EffectiveSelectionSerializer : KSerializer<EffectiveSelection> {
+    override val descriptor: SerialDescriptor = buildClassSerialDescriptor(
+        "tv.plurx.app.player.EffectiveSelection",
+    ) {
+        element<Boolean>("quality_auto")
+        element<Long>("height")
+        element<Long?>("audio_track")
+        element<Long?>("subtitle_burn")
+        element<Long>("audio_offset_ms")
+        element<String>("codec")
+        element<String?>("dynamic_range")
+    }
+
+    override fun deserialize(decoder: Decoder): EffectiveSelection {
+        val input = decoder as? JsonDecoder
+            ?: throw SerializationException("EffectiveSelection is JSON-only")
+        val fields = input.decodeJsonElement().jsonObject
+        REQUIRED_FIELDS.forEach { field ->
+            if (field !in fields) throw SerializationException("missing effective_selection.$field")
+        }
+        return EffectiveSelection(
+            qualityAuto = fields.requiredBoolean("quality_auto"),
+            height = fields.requiredLong("height"),
+            audioTrack = fields.requiredNullableLong("audio_track"),
+            subtitleBurn = fields.requiredNullableLong("subtitle_burn"),
+            audioOffsetMs = fields.requiredLong("audio_offset_ms"),
+            codec = fields.requiredString("codec"),
+            dynamicRange = fields.requiredNullableString("dynamic_range"),
+        )
+    }
+
+    override fun serialize(encoder: Encoder, value: EffectiveSelection) {
+        val output = encoder as? JsonEncoder
+            ?: throw SerializationException("EffectiveSelection is JSON-only")
+        output.encodeJsonElement(
+            buildJsonObject {
+                put("quality_auto", JsonPrimitive(value.qualityAuto))
+                put("height", JsonPrimitive(value.height))
+                put("audio_track", value.audioTrack?.let(::JsonPrimitive) ?: JsonNull)
+                put("subtitle_burn", value.subtitleBurn?.let(::JsonPrimitive) ?: JsonNull)
+                put("audio_offset_ms", JsonPrimitive(value.audioOffsetMs))
+                put("codec", JsonPrimitive(value.codec))
+                put("dynamic_range", value.dynamicRange?.let(::JsonPrimitive) ?: JsonNull)
+            },
+        )
+    }
+
+    private val REQUIRED_FIELDS = setOf(
+        "quality_auto",
+        "height",
+        "audio_track",
+        "subtitle_burn",
+        "audio_offset_ms",
+        "codec",
+        "dynamic_range",
+    )
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredBoolean(
+        name: String,
+    ): Boolean = getValue(name).jsonPrimitive.booleanOrNull
+        ?: throw SerializationException("invalid effective_selection.$name")
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredLong(
+        name: String,
+    ): Long = getValue(name).jsonPrimitive.longOrNull
+        ?: throw SerializationException("invalid effective_selection.$name")
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredNullableLong(
+        name: String,
+    ): Long? = getValue(name).let { value ->
+        if (value is JsonNull) null else value.jsonPrimitive.longOrNull
+            ?: throw SerializationException("invalid effective_selection.$name")
+    }
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredString(
+        name: String,
+    ): String = getValue(name).jsonPrimitive.let { value ->
+        if (value.isString) value.content
+        else throw SerializationException("invalid effective_selection.$name")
+    }
+
+    private fun Map<String, kotlinx.serialization.json.JsonElement>.requiredNullableString(
+        name: String,
+    ): String? = getValue(name).let { element ->
+        if (element is JsonNull) null else element.jsonPrimitive.let { value ->
+            if (value.isString) value.content
+            else throw SerializationException("invalid effective_selection.$name")
+        }
+    }
+}
+
+/**
+ * The prepared-replacement acknowledgement vocabulary this release may send.
+ * `switched` is deliberately absent until the fleet can negotiate it safely.
+ */
+@Serializable
+enum class AcknowledgementState {
+    @SerialName("metadata_ready") METADATA_READY,
+    @SerialName("buffer_ready") BUFFER_READY,
+    @SerialName("committed") COMMITTED,
+    @SerialName("failed") FAILED,
+    @SerialName("aborted") ABORTED,
+}
+
+@Serializable
+data class ActionAcknowledgement(
+    @SerialName("action_id") val actionId: String,
+    val state: AcknowledgementState,
+    @SerialName("buffered_through_ms") val bufferedThroughMs: Long? = null,
+    @SerialName("committed_media_origin_ms") val committedMediaOriginMs: Long? = null,
+    @SerialName("first_frame_unix_ms") val firstFrameUnixMs: Long? = null,
+) {
+    val isValid: Boolean
+        get() = PlaybackControl.isUuidShape(actionId) &&
+            actionId.length <= PlaybackControl.MAX_ACTION_ID_LEN &&
+            (bufferedThroughMs == null || bufferedThroughMs in 0..PlaybackControl.MAX_MEDIA_MILLIS) &&
+            (
+                committedMediaOriginMs == null ||
+                    committedMediaOriginMs in 0..PlaybackControl.MAX_MEDIA_MILLIS
+                ) &&
+            (firstFrameUnixMs == null || firstFrameUnixMs > 0) &&
+            (state != AcknowledgementState.BUFFER_READY || bufferedThroughMs != null) &&
+            (
+                state != AcknowledgementState.COMMITTED ||
+                    (committedMediaOriginMs != null && firstFrameUnixMs != null)
+                )
+}
+
 @Serializable
 data class ClientObservation(
     @SerialName("dropped_frames") val droppedFrames: Long? = null,
@@ -294,6 +496,7 @@ data class PlaybackControlSnapshot(
     val selection: ClientSelection,
     val capabilities: DynamicCapabilities,
     val observation: ClientObservation? = null,
+    val acknowledgement: ActionAcknowledgement? = null,
 ) {
     val isValid: Boolean
         get() = positionMs >= 0 &&
@@ -308,9 +511,16 @@ data class PlaybackControlSnapshot(
             (
                 observedDownloadBps == null ||
                     observedDownloadBps in 0..PlaybackControl.MAX_OBSERVED_DOWNLOAD_BPS
-                ) &&
+            ) &&
             selection.isValid &&
-            capabilities.isValid
+            capabilities.isValid &&
+            (acknowledgement == null || acknowledgement.isValid)
+
+    /** A commit and session end are mutually exclusive on the control wire. */
+    val sendableAcknowledgement: ActionAcknowledgement?
+        get() = acknowledgement?.takeUnless {
+            demand == PlaybackDemand.END && it.state == AcknowledgementState.COMMITTED
+        }
 }
 
 /** Local identity of the player lifetime and reporting attachment, not a wire owner epoch. */
@@ -352,6 +562,7 @@ data class ControlRequest(
     val selection: ClientSelection,
     val capabilities: DynamicCapabilities? = null,
     val observation: ClientObservation? = null,
+    val acknowledgement: ActionAcknowledgement? = null,
     // No default. `Json` encodes defaults only when asked to, so a defaulted
     // value here would be silently dropped from the request — and a server that
     // never sees the vocabulary never sends the action, which is the exact
@@ -382,7 +593,32 @@ data class ControlAction(
     /** `terminal` only: which producer decision ended this session. */
     val code: String? = null,
     val message: String? = null,
-)
+    /** `prepare` only: the stable identity echoed by every acknowledgement. */
+    @SerialName("action_id") val actionId: String? = null,
+    /** `prepare` only: the staged successor's public session id. */
+    @SerialName("session_id") val sessionId: String? = null,
+    /** `prepare` only: a node-relative playlist for [sessionId]. */
+    @SerialName("playlist_url") val playlistUrl: String? = null,
+    /** `prepare` only: source position mapped to successor timeline zero. */
+    @SerialName("media_origin_ms") val mediaOriginMs: Long? = null,
+    /** `prepare` only: the complete recipe that successor will deliver. */
+    @SerialName("effective_selection") val effectiveSelection: EffectiveSelection? = null,
+) {
+    val preparedPayloadIsValid: Boolean
+        get() {
+            val id = actionId ?: return false
+            val session = sessionId ?: return false
+            val playlist = playlistUrl ?: return false
+            val origin = mediaOriginMs ?: return false
+            val selection = effectiveSelection ?: return false
+            return PlaybackControl.isUuidShape(id) &&
+                id.length <= PlaybackControl.MAX_ACTION_ID_LEN &&
+                PlaybackControl.isUuidShape(session) &&
+                PlaybackControl.isPreparedPlaylist(playlist, session) &&
+                origin in 0..PlaybackControl.MAX_MEDIA_MILLIS &&
+                selection.isValid
+        }
+}
 
 @Serializable
 data class ControlDelivery(
@@ -426,6 +662,8 @@ class ControlTransportException(
     val generation: String? = null,
     val controlEpoch: Long? = null,
     val retryAfterMs: Long? = null,
+    val detail: String? = null,
+    val invalidField: String? = null,
 ) : Exception("control transport ${status ?: "-"}/${code ?: "-"}")
 
 /**
@@ -462,6 +700,7 @@ class PlaybackControlReporter private constructor(
         val response: ControlResponse?,
         val failure: String?,
         val capture: PlaybackControlCapture,
+        val cause: Throwable? = null,
     ) {
         val intentGeneration: Long get() = capture.intentGeneration
     }
@@ -705,6 +944,7 @@ class PlaybackControlReporter private constructor(
             selection = newest.snapshot.selection,
             capabilities = if (repeats) null else newest.snapshot.capabilities,
             observation = newest.snapshot.observation?.bounded(),
+            acknowledgement = newest.snapshot.sendableAcknowledgement,
             supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
         )
         return PendingRequest(request, newest)
@@ -732,7 +972,15 @@ class PlaybackControlReporter private constructor(
         try {
             accept(request, response)
         } catch (protocolFailure: ControlProtocolException) {
-            onExchange(Exchange(request, null, describe(protocolFailure), pendingRequest.capture))
+            onExchange(
+                Exchange(
+                    request,
+                    null,
+                    describe(protocolFailure),
+                    pendingRequest.capture,
+                    protocolFailure,
+                ),
+            )
             stop()
             return
         }
@@ -799,17 +1047,26 @@ class PlaybackControlReporter private constructor(
                     throw ControlProtocolException("action")
                 }
             }
+            PlaybackControl.PREPARE_ACTION_TYPE ->
+                if (!response.action.preparedPayloadIsValid) {
+                    throw ControlProtocolException("action")
+                }
             else -> throw ControlProtocolException("action")
         }
     }
 
     private suspend fun handle(failure: Throwable, pendingRequest: PendingRequest) {
         val request = pendingRequest.request
-        onExchange(Exchange(request, null, describe(failure), pendingRequest.capture))
+        onExchange(Exchange(request, null, describe(failure), pendingRequest.capture, failure))
         val transport = failure as? ControlTransportException
         val status = transport?.status
         val code = transport?.code
-        if (status == 409 && code == "owner_changed") {
+        val replacementGeneration = transport?.generation
+        val staleGeneration = status == 409 &&
+            code == "stale_control" &&
+            replacementGeneration != null &&
+            replacementGeneration != request.generation
+        if ((status == 409 && code == "owner_changed") || staleGeneration) {
             val adopted = mutex.withLock {
                 if (!adoptNewOwnerLocked(transport)) {
                     false
@@ -819,6 +1076,23 @@ class PlaybackControlReporter private constructor(
                 }
             }
             if (!adopted) stop()
+            return
+        }
+        // Preparation settlement can lose the actor's commit/deadline fence.
+        // That rejection tears the successor down server-side, but it is not a
+        // sequencing failure and must not silence the otherwise healthy
+        // control loop. The session consumes this typed failure to release its
+        // local preparation; the next exchange proceeds with a fresh sequence.
+        if (status == 409 &&
+            code == "stale_control" &&
+            request.acknowledgement != null &&
+            transport.isPreparationAcknowledgementRejected
+        ) {
+            mutex.withLock {
+                if (stopped) return
+                retryRequest = null
+                pending = newestCapture(pending)
+            }
             return
         }
         val retryableControl = (status == 425 && code == "owner_transition") ||
@@ -899,3 +1173,8 @@ class PlaybackControlReporter private constructor(
             throw ControlTransportException(status = 408, code = "exchange_deadline")
         }
 }
+
+internal val ControlTransportException.isPreparationAcknowledgementRejected: Boolean
+    get() = status == 409 &&
+        code == "stale_control" &&
+        detail?.contains("preparation acknowledgement") == true

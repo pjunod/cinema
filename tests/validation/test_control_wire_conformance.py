@@ -203,22 +203,40 @@ class ControlRequestWireCase(unittest.TestCase):
         # the Swift and Kotlin requests, and the test starts comparing it
         # again.
         rust.discard("intent")
-        self.assertPortWire(
+        swift = swift_coding_keys(self.apple, "ControlRequest")
+        kotlin = kotlin_fields(self.android, "ControlRequest")
+        common_rust = rust - {"acknowledgement"}
+        self.assertSameWire(
             "ControlRequestV1",
-            "Apple",
-            rust,
-            swift_coding_keys(self.apple, "ControlRequest"),
+            common_rust,
+            swift - {"acknowledgement"},
+            kotlin - {"acknowledgement"},
         )
-        # Android remains a passive reporter until its own adapter lands, so
-        # compare the request it can actually build without concealing the
-        # acknowledgement from the Apple/server comparison above.
-        rust.discard("acknowledgement")
-        self.assertPortWire(
-            "ControlRequestV1",
-            "Android",
-            rust,
-            kotlin_fields(self.android, "ControlRequest"),
-        )
+        for label, fields, source, pattern in (
+            (
+                "Apple",
+                swift,
+                self.apple,
+                r"supportedActions\s*=\s*\[([^\]]*)\]",
+            ),
+            (
+                "Android",
+                kotlin,
+                self.android,
+                r"SUPPORTED_ACTIONS\s*=\s*listOf\(([^)]*)\)",
+            ),
+        ):
+            found = re.search(pattern, source)
+            self.assertIsNotNone(found, f"{label} no longer declares an action vocabulary")
+            supports_prepare = "prepare_replacement" in set(
+                re.findall(r'"([^"]+)"', found.group(1))
+            )
+            self.assertEqual(
+                "acknowledgement" in fields,
+                supports_prepare,
+                f"{label} must model acknowledgement exactly when it declares "
+                "prepare_replacement",
+            )
 
     def test_every_modelled_acknowledgement_matches_the_server(self) -> None:
         """Each active adapter spells every acknowledgement field exactly."""
@@ -229,12 +247,28 @@ class ControlRequestWireCase(unittest.TestCase):
             rust,
             swift_coding_keys(self.apple, "ActionAcknowledgement"),
         )
-        if re.search(r"(data\s+)?class\s+ActionAcknowledgement\b", self.android):
-            self.assertPortWire(
-                "ActionAcknowledgement",
-                "Android",
-                rust,
-                kotlin_fields(self.android, "ActionAcknowledgement"),
+        self.assertPortWire(
+            "ActionAcknowledgement",
+            "Android",
+            rust,
+            kotlin_fields(self.android, "ActionAcknowledgement"),
+        )
+
+        server = rust_enum_values(self.rust, "AcknowledgementState")
+        self.assertIn("switched", server, "the server vocabulary unexpectedly changed")
+        for label, states in (
+            ("Apple", swift_enum_values(self.apple, "AcknowledgementState")),
+            ("Android", kotlin_enum_values(self.android, "AcknowledgementState")),
+        ):
+            self.assertNotIn(
+                "switched",
+                states,
+                f"{label} must not send switched before that state is fleet-safe",
+            )
+            self.assertEqual(
+                states,
+                server - {"switched"},
+                f"{label} speaks a different acknowledgement vocabulary subset",
             )
 
     def test_the_selection(self) -> None:

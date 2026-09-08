@@ -2,6 +2,7 @@ package tv.plurx.app.player
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -365,6 +366,16 @@ class PlaybackControlMappingThroughputTest {
             map(playing().copy(observedDownloadBps = 0)).observedDownloadBps,
             "zero is not an estimate",
         )
+    }
+}
+
+class PlaybackControlPreparedCapabilityTest {
+    @Test
+    fun `prepared replacement stays disabled on measured Android evidence`() {
+        val capabilities = controlCapabilities(
+            mapOf("vcodec" to "hevc,h264", "hdr" to "1", "dv" to "1"),
+        )
+        assertFalse(capabilities.dualPlayerPreparation)
     }
 }
 
