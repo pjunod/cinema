@@ -39,6 +39,7 @@ mod titlestore;
 mod trakt;
 mod transcode;
 mod version;
+mod vodencode;
 mod vodgen;
 mod vodserve;
 mod waitpool;

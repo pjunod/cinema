@@ -3425,6 +3425,23 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
             "vod_source_unsupported" => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "vod_source_unsupported")
             }
+            "vod_video_geometry_unknown" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "vod_video_geometry_unknown",
+            ),
+            "vod_frame_cadence_unknown" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "vod_frame_cadence_unknown",
+            ),
+            "vod_audio_track_missing" => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "vod_audio_track_missing")
+            }
+            "vod_subtitle_track_missing" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "vod_subtitle_track_missing",
+            ),
+            "vod_invalid_height" => (StatusCode::BAD_REQUEST, "vod_invalid_height"),
+            "vod_recipe_unresolved" => (StatusCode::INTERNAL_SERVER_ERROR, "vod_recipe_unresolved"),
             "vod_reopen_required" => (StatusCode::CONFLICT, "vod_reopen_required"),
             "live_presentation_removed" => (StatusCode::GONE, "live_presentation_removed"),
             _ => return ApiError::Internal(error),
@@ -20081,6 +20098,21 @@ mod tests {
             ("vod_transcode_unavailable", StatusCode::NOT_IMPLEMENTED),
             ("vod_subtitle_burn_unavailable", StatusCode::NOT_IMPLEMENTED),
             ("vod_source_unsupported", StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                "vod_video_geometry_unknown",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "vod_frame_cadence_unknown",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("vod_audio_track_missing", StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                "vod_subtitle_track_missing",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("vod_invalid_height", StatusCode::BAD_REQUEST),
+            ("vod_recipe_unresolved", StatusCode::INTERNAL_SERVER_ERROR),
             ("vod_reopen_required", StatusCode::CONFLICT),
             ("live_presentation_removed", StatusCode::GONE),
         ];

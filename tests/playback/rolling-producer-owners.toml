@@ -438,7 +438,10 @@ expected_occurrences = 29
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
 pattern = "HlsPresentationResolution"
-expected_occurrences = 21
+# +2 encoded VOD: the frozen-encoding HLS facts branch and its production
+# manager/GET regression use the existing typed presentation owner. Neither
+# adds a worker; both retain the VOD response owner attached to those bytes.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -1280,7 +1283,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # each running one `create` concurrently so the other side can move the ask
 # underneath it. Both are joined before the test ends, so neither outlives
 # its test and neither owns a producer.
-expected_occurrences = 439
+# +1 encoded VOD: ensure_burn_file's bounded no-follow sidecar-open worker.
+# It is awaited by preparation; extraction itself reuses the existing owned,
+# timed singleflight and is not a second task per requesting viewer.
+# +6 final encoded review: three BoundedDiagnosticChild::spawn calls (one
+# production, two injected-child tests) are conservatively matched alongside
+# task spawns. One actual production task owns a cancelled extractor through
+# kill/reap; two test tasks own the cancelled output and held-admission driver.
+# No detached stderr reader exists. Tests abort/join or await their actors.
+expected_occurrences = 446
 
 [[module_structures]]
 id = "method-spawn"
@@ -1308,12 +1319,19 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # and live_tv.rs's per-session encoder on main's. Neither side's total
 # describes the merged tree, so the count is measured off it rather than
 # carried across from one parent.
-expected_occurrences = 45
+# +1 encoded VOD: ProducerSlot::Inner::drop transfers its exact child and
+# admission resources to a runtime-owned reap task after start_kill. Capacity
+# is released after child.wait, not when the pipe reader or slot disappears.
+# +2 final encoded review: the bounded extractor helper's actual child spawn
+# replaces the implicit spawn in Command::output; one test sleep child models
+# a live encoder owning the pool's only permit and is explicitly reaped.
+expected_occurrences = 48
 
 [[module_structures]]
 id = "bare-task-spawn"
 pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 3
+# +1 is the BoundedDiagnosticChild::spawn method declaration, not a task call.
+expected_occurrences = 4
 
 [[module_structures]]
 id = "namespaced-time-constructor"
@@ -1492,7 +1510,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 645 -> 646 with the drain-release test's one `Duration::from_millis`, which
 # spaces two exchanges past `MIN_CONTROL_INTERVAL` so the second is judged
 # rather than rate-limited. Test-only, and owned by the test's own future.
-expected_occurrences = 646
+# +4 encoded VOD: the sole rendition driver's 250ms admission retry; one
+# one-second policy-pair read deadline and one five-second held-sidecar digest
+# deadline; and the test-only five-second observation of slot-drop reaping.
+# None creates a competing playback-progress clock. Policy timeout holds no
+# LiveWait; only the already-owned driver retries. Sidecar timeout admits no
+# encoder. The reaping test awaits its bounded observation before teardown.
+# +5 final encoded review: test-only deadlines bound noisy-child completion,
+# cancellation reap, admission rendezvous, cached GET, and driver completion.
+# Production policy still has its single existing one-second deadline.
+expected_occurrences = 655
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1543,7 +1570,17 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # neither parent's value describes the merged tree. Every ownership
 # obligation recorded above is retained on both sides; the total is read
 # off the merge rather than added up.
-expected_occurrences = 71
+# +19 encoded VOD: one shipped subtitle-only Matroska extraction command,
+# owned by the existing bounded singleflight (kill_on_drop, size/timeout
+# limits, awaited output). Eighteen test-only commands generate real media,
+# independently decode/probe GET output, construct equal-size replacements,
+# or run the explicit two-hour benchmark (17 in vodencode_tests, one in the
+# manager integration test). Every new fixture command awaits output and is
+# kill_on_drop; no fixture child outlives its temporary source/cache owner.
+# +3 final encoded review: two shell fixtures emit bounded/noisy diagnostics
+# through the real extractor owner; one sleep fixture retains a sole encoder
+# permit until the production restart path confirms its reap.
+expected_occurrences = 93
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1692,7 +1729,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 275 -> 279 with the drain-release and staged-switch tests: four `.await`
 # shapes across the store calls that stage, commit and read back the drained
 # row. Test-only; no new shipped path launches anything.
-expected_occurrences = 279
+# +20 encoded VOD: the same 19 awaited command outputs described above, plus
+# the in-process runtime.spawn that owns ProducerSlot's kill/reap resources.
+# The latter is a task launch, not a twentieth OS child.
+# +4 final encoded review: the helper's actual spawn, two test calls to its
+# bounded output method, and the sleep fixture's spawn. The production
+# .output call now invokes the owned helper instead of unbounded Command output.
+expected_occurrences = 303
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1742,7 +1785,14 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # neither parent's value describes the merged tree. Every ownership
 # obligation recorded above is retained on both sides; the total is read
 # off the merge rather than added up.
-expected_occurrences = 330
+# +4 encoded VOD: slot drop's start_kill + awaited child.wait, and explicit
+# kill/reap in the two impossible missing-stdout branches (generation/head)
+# before their acquired encoder permits may drop. Close/failure retirement
+# also uses the existing serialized ProducerSlot::perform termination path.
+# +7 final encoded review: extractor ordinary wait and cancellation start_kill
+# plus wait (three OS actions); two test-only admission-hook barriers and two
+# fixture rendezvous waits (four in-process synchronization calls).
+expected_occurrences = 341
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -1757,7 +1807,9 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # the before and the after. The actual termination is still `ProducerSlot`'s,
 # through `Step::Terminate`; the probes are how the test proves that happened
 # to a real process rather than only to a belief.
-expected_occurrences = 36
+# +2 final encoded review: test-only libc::kill(pid, 0) checks after confirmed
+# reaping. These observe exact fixture PIDs and deliver no signal.
+expected_occurrences = 38
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -1781,7 +1833,13 @@ pattern = "kill_on_drop\\s*\\("
 # neither parent's value describes the merged tree. Every ownership
 # obligation recorded above is retained on both sides; the total is read
 # off the merge rather than added up.
-expected_occurrences = 41
+# +19 encoded VOD: the bounded burn extraction and 18 awaited fixture media
+# commands inventoried above. kill_on_drop is cancellation backstop; normal
+# output awaits/reaps completion, and the main producer slot owns its own
+# admission through explicit reap rather than relying on drop alone.
+# +1 final encoded review: the live sleep fixture; the extractor's existing
+# kill_on_drop moves to its shared bounded owner, with no net added site.
+expected_occurrences = 61
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

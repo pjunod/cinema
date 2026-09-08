@@ -13741,6 +13741,149 @@ impl TranscodeManager {
         }
     }
 
+    /// Freeze an executable encoded recipe before any rendition is named.
+    /// Copy remains index-driven; selecting burn pixels requires an encoder
+    /// even when the incoming request otherwise asks for source quality.
+    async fn prepare_vod_encoding(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        if matches!(req.kind, SessionKind::Copy { .. }) && req.subtitle_burn.is_none() {
+            return Ok(None);
+        }
+        let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+        // Bind preparation, burn extraction, key construction, and the final
+        // producer open to the same inspected object, not scanner seconds.
+        let source_object_version = source.object_version().to_owned();
+        let source_height = file.height.filter(|height| *height >= 2).ok_or_else(|| {
+            vod_refusal_error(
+                "vod_video_geometry_unknown",
+                "the source has no usable video height",
+            )
+        })?;
+        let target_height = match req.kind {
+            SessionKind::Transcode { height } if height > 0 => height.min(source_height),
+            SessionKind::Copy { .. } => source_height,
+            _ => {
+                return Err(vod_refusal_error(
+                    "vod_invalid_height",
+                    "the requested height must be positive",
+                ))
+            }
+        }
+        .max(2)
+            & !1;
+        if plurx_core::transcode::output_size(file, target_height).is_none() {
+            return Err(vod_refusal_error(
+                "vod_video_geometry_unknown",
+                "the source has no usable video dimensions",
+            ));
+        }
+        if req
+            .audio_index
+            .is_some_and(|index| index < 0 || index as usize >= file.audio_streams.len())
+        {
+            return Err(vod_refusal_error(
+                "vod_audio_track_missing",
+                "the requested audio track no longer exists",
+            ));
+        }
+        let subtitle_burn = req
+            .subtitle_burn
+            .map(|index| {
+                let stream = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| file.subtitle_streams.get(index))
+                    .ok_or_else(|| {
+                        vod_refusal_error(
+                            "vod_subtitle_track_missing",
+                            "the requested subtitle track no longer exists",
+                        )
+                    })?;
+                Ok::<_, String>(plurx_core::transcode::SubtitleBurn {
+                    subtitle_index: index,
+                    bitmap: plurx_core::tracks::is_bitmap_subtitle(&stream.codec),
+                })
+            })
+            .transpose()?;
+        if let Some(burn) = &subtitle_burn {
+            if let Some(reason) = crate::pipeprobe::burn_filters().await.refusal(burn.bitmap) {
+                return Err(unsupported_build_error(reason));
+            }
+        }
+        let probe = self
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let grid = crate::vodencode::frame_grid(probe.as_deref()).ok_or_else(|| {
+            vod_refusal_error(
+                "vod_frame_cadence_unknown",
+                "the source probe has no usable video cadence; rescan the file",
+            )
+        })?;
+        let (encoder, grade) = self
+            .encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
+            .await?;
+        let software_threads = Workload::of(file, target_height)
+            .software_threads()
+            .min(self.software_budget().await)
+            .max(1) as u32;
+        let mut options = self.live_lookup_options(
+            self.rate_control_snapshot(),
+            encoder,
+            file,
+            target_height,
+            0.0,
+            req.audio_index,
+            subtitle_burn,
+            Some(software_threads),
+            grade,
+        );
+        let subtitle = if let Some(burn) = options.subtitle_burn.as_ref() {
+            let subtitle = crate::subtitles::ensure_burn_file(
+                &self.subtitle_cache,
+                file,
+                burn.subtitle_index,
+                Some(&source_object_version),
+            )
+            .await?;
+            options.subtitle_file = Some("/dev/fd/5".into());
+            Some(Arc::new(subtitle))
+        } else {
+            None
+        };
+        if !source.unchanged() {
+            return Err("source changed during encoded recipe preparation".into());
+        }
+        let subtitle_digest = if let Some(subtitle) = &subtitle {
+            Some(
+                crate::vodencode::digest_subtitle(subtitle)
+                    .await
+                    .map_err(start_infrastructure_error)?,
+            )
+        } else {
+            None
+        };
+        Ok(Some(Arc::new(crate::vodencode::Encoding {
+            source_object_version,
+            encoder,
+            options,
+            grid,
+            subtitle,
+            subtitle_digest,
+            ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
+            executable: crate::ffmpeg::EncodedExecutable::capture().await?,
+            admissions: self.admissions.clone(),
+            store: Arc::clone(&self.store),
+            queued: std::sync::Mutex::new(None),
+            policy_retry: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            admission_pause: std::sync::Mutex::new(None),
+        })))
+    }
+
     /// The only public HLS presentation. A request either receives immutable
     /// VOD or fails with a stable refusal; it never enters the live arms.
     async fn try_vod_session(
@@ -13773,7 +13916,7 @@ impl TranscodeManager {
                 "VOD session creation is disabled on this server",
             ));
         };
-        let file = self
+        let mut file = self
             .store
             .get_file(req.file_id)
             .await
@@ -13781,6 +13924,32 @@ impl TranscodeManager {
                 start_infrastructure_error(format!("reading the source file: {error}"))
             })?
             .ok_or_else(|| "the file no longer exists".to_owned())?;
+        file.audio_offset_ms = if file.audio_streams.is_empty() {
+            0
+        } else {
+            req.audio_offset_ms.clamp(-15_000, 15_000)
+        };
+        let encoding = self.prepare_vod_encoding(req, &file).await?;
+        let target_height = encoding
+            .as_ref()
+            .map_or(file.height.unwrap_or(0), |encoding| {
+                encoding.options.target_height
+            });
+        let grade = encoding.as_ref().map_or(OutputGrade::Sdr, |encoding| {
+            encoding.options.pipeline.output_grade()
+        });
+        let kind = encoding
+            .as_ref()
+            .map_or(req.kind, |encoding| SessionKind::Transcode {
+                height: encoding.options.target_height,
+            });
+        let encoder = encoding
+            .as_ref()
+            .map_or("vod", |encoding| encoding.encoder.label());
+        let prepared = crate::vodserve::VodRecipeRequest {
+            request: req,
+            encoding,
+        };
         // Cluster activation is make-before-break: the Store pointer CAS and
         // exact post-CAS terminal projection are the only operations allowed
         // to retire the authoritative predecessor. If provisional capacity is
@@ -13807,7 +13976,7 @@ impl TranscodeManager {
         let start = if let Some(admission) = serving_admission {
             self.vod
                 .try_create_cluster(
-                    req,
+                    prepared,
                     &file,
                     &settings,
                     attribution,
@@ -13832,7 +14001,7 @@ impl TranscodeManager {
                 })?
         } else {
             self.vod
-                .try_create(req, &file, &settings, attribution, session_id)
+                .try_create(prepared, &file, &settings, attribution, session_id)
                 .await?
         };
         Ok(StartInfo {
@@ -13843,12 +14012,12 @@ impl TranscodeManager {
             // zero, and the client seeks — that is the point.
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
-            target_height: file.height.unwrap_or(0),
-            kind: req.kind,
-            encoder: "vod",
+            target_height,
+            kind,
+            encoder,
             // A copy session encodes nothing; same answer the old copy arm
             // gave without retaining its live presentation.
-            grade: OutputGrade::Sdr,
+            grade,
             vod: true,
             control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
         })
@@ -14075,7 +14244,15 @@ impl TranscodeManager {
             let Ok(Some(settings)) = self.vod_settings(&req).await else {
                 return false;
             };
-            let Ok(Some(file)) = self.store.get_file(req.file_id).await else {
+            let Ok(Some(mut file)) = self.store.get_file(req.file_id).await else {
+                return false;
+            };
+            file.audio_offset_ms = if file.audio_streams.is_empty() {
+                0
+            } else {
+                req.audio_offset_ms.clamp(-15_000, 15_000)
+            };
+            let Ok(encoding) = self.prepare_vod_encoding(&req, &file).await else {
                 return false;
             };
             let user_name = self
@@ -14098,7 +14275,10 @@ impl TranscodeManager {
             match self
                 .vod
                 .try_create_before_release(
-                    &req,
+                    crate::vodserve::VodRecipeRequest {
+                        request: &req,
+                        encoding,
+                    },
                     &file,
                     &settings,
                     crate::vodserve::VodAttribution {
@@ -18800,6 +18980,45 @@ impl TranscodeManager {
             Err(_) => return HlsPresentationResolution::StateChanged,
         };
         if let Some(facts) = vod_facts {
+            if let Some(encoding) = &facts.encoding {
+                let height = encoding.options.target_height;
+                let grade = encoding.options.pipeline.output_grade();
+                let mut file = facts.file;
+                file.width =
+                    plurx_core::transcode::output_size(&file, height).map(|(width, _)| width);
+                file.height = Some(height);
+                file.hdr = (grade == OutputGrade::Hdr10).then(|| "hdr10".to_owned());
+                file.hdr_format = (grade == OutputGrade::Hdr10).then(|| "HDR10".to_owned());
+                file.dolby_vision = Default::default();
+                file.bit_depth = Some(if grade == OutputGrade::Hdr10 { 10 } else { 8 });
+                file.video_codec = Some(
+                    if grade == OutputGrade::Hdr10 {
+                        "hevc"
+                    } else {
+                        "h264"
+                    }
+                    .to_owned(),
+                );
+                let mut codecs = transcoded_hls_codecs(grade, height);
+                if file.audio_streams.is_empty() {
+                    codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
+                }
+                return HlsPresentationResolution::Ready(
+                    HlsContext {
+                        file_id: file.id,
+                        start_seconds: 0.0,
+                        media_origin_seconds: 0.0,
+                        codecs,
+                        supplemental_codecs: None,
+                        frame_rate: Some(
+                            f64::from(encoding.grid.numerator)
+                                / f64::from(encoding.grid.denominator),
+                        ),
+                    },
+                    file,
+                    MediaResponseOwner(MediaResponseOwnerKind::Vod(facts.response_owner)),
+                );
+            }
             // The VOD registry freezes the file/recipe but does not yet retain
             // raw codec side data. Preserve its existing Dolby/HEVC contract
             // until that registry grows the missing immutable probe fact;
@@ -29779,6 +29998,8 @@ pub(crate) mod tests {
         assert!(mgr.stop_session(&info.session_id, "test").await);
         assert_eq!(mgr.active_sessions().await, 0);
     }
+
+    include!("vodencode_manager_tests.rs");
 
     async fn seed_file(store: &Arc<dyn Store>) -> i64 {
         seed_file_at(store, "/media/Heat.mkv").await

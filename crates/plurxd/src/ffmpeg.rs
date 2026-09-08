@@ -35,6 +35,160 @@ pub fn ffprobe_bin() -> String {
     resolve_bin(std::env::var("PLURX_FFPROBE").ok(), "ffprobe")
 }
 
+/// Pass held source/sidecar capabilities into reserved child FDs. Duplicate
+/// every original before assigning any target: an original may itself be
+/// fd 3 or fd 5. The post-fork closure performs only descriptor syscalls.
+pub(crate) fn inherit_file_descriptors(
+    command: &mut tokio::process::Command,
+    files: &[(&std::fs::File, i32)],
+) {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        assert!(files.len() <= 7 && files.iter().all(|(_, target)| (3..=9).contains(target)));
+        let descriptors = files
+            .iter()
+            .map(|(file, target)| (file.as_raw_fd(), *target))
+            .collect::<Vec<_>>();
+        unsafe {
+            command.pre_exec(move || {
+                let mut copies = [None; 7];
+                for (index, (fd, target)) in descriptors.iter().enumerate() {
+                    let duplicate = libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, 10);
+                    if duplicate == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    copies[index] = Some((duplicate, *target));
+                }
+                for (duplicate, target) in copies.into_iter().flatten() {
+                    if libc::dup2(duplicate, target) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    libc::close(duplicate);
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (command, files);
+}
+
+/// Drain diagnostics alongside the media pipe without letting a noisy
+/// encoder block on stderr or allocate an unbounded line/string. Keep the
+/// last 8 KiB, where encoder/filter failures normally explain their exit.
+pub(crate) async fn drain_diagnostics(mut input: impl AsyncRead + Unpin) -> String {
+    const LIMIT: usize = 8 * 1024;
+    let mut tail = Vec::with_capacity(LIMIT);
+    let mut chunk = [0u8; 2048];
+    while let Ok(read) = input.read(&mut chunk).await {
+        if read == 0 {
+            break;
+        }
+        let discard = (tail.len() + read).saturating_sub(LIMIT);
+        tail.drain(..discard);
+        tail.extend_from_slice(&chunk[..read]);
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
+/// A file-producing child with no captured stdout and one bounded stderr
+/// reader. Cancellation transfers the exact child to a reap owner, never a
+/// detached diagnostic reader. Used by whole-track burn extraction.
+pub(crate) struct BoundedDiagnosticChild {
+    child: Option<tokio::process::Child>,
+    stderr: Option<tokio::process::ChildStderr>,
+    #[cfg(test)]
+    reaped: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl BoundedDiagnosticChild {
+    pub fn spawn(command: &mut tokio::process::Command) -> std::io::Result<Self> {
+        let mut child = command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let stderr = child.stderr.take();
+        Ok(Self {
+            child: Some(child),
+            stderr,
+            #[cfg(test)]
+            reaped: None,
+        })
+    }
+
+    pub async fn output(mut self) -> std::io::Result<(std::process::ExitStatus, String)> {
+        let stderr = self
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("extractor stderr was not piped"))?;
+        let child = self.child.as_mut().expect("owned extraction child");
+        let (status, diagnostics) = tokio::join!(child.wait(), drain_diagnostics(stderr));
+        let status = status?;
+        self.child.take(); // Successful wait, including nonzero exit, proves reap.
+        #[cfg(test)]
+        if let Some(reaped) = self.reaped.take() {
+            let _ = reaped.send(());
+        }
+        Ok((status, diagnostics))
+    }
+}
+
+impl Drop for BoundedDiagnosticChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = child.start_kill();
+        #[cfg(test)]
+        let reaped = self.reaped.take();
+        tokio::spawn(async move {
+            let result = child.wait().await;
+            if let Err(ref error) = result {
+                tracing::warn!(%error, "reaping cancelled burn-track extraction failed");
+            }
+            #[cfg(test)]
+            if result.is_ok() {
+                if let Some(reaped) = reaped {
+                    let _ = reaped.send(());
+                }
+            }
+        });
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct EncodedExecutable {
+    pub path: std::path::PathBuf,
+    pub digest: String,
+    object_version: String,
+}
+
+impl EncodedExecutable {
+    pub async fn capture() -> Result<Self, String> {
+        let path = resolve_executable_path(&ffmpeg_bin())
+            .ok_or("cannot resolve the encoder executable")?;
+        Self::capture_at(path).await
+    }
+
+    async fn capture_at(path: std::path::PathBuf) -> Result<Self, String> {
+        let (digest, object_version) = hash_engine_object(&path).await?;
+        Ok(Self {
+            path,
+            digest: hex::encode(digest),
+            object_version,
+        })
+    }
+
+    pub fn is_current(&self) -> bool {
+        std::fs::metadata(&self.path)
+            .ok()
+            .and_then(|metadata| engine_object_version(&metadata).ok())
+            .is_some_and(|version| version == self.object_version)
+    }
+}
+
 /// The executable and first line it reports from `-version`.
 pub async fn ffmpeg_build() -> String {
     let bin = ffmpeg_bin();
@@ -1093,6 +1247,100 @@ async fn probe_burst() -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn encoded_executable_refuses_same_size_mtime_replacement() {
+        let base = crate::test_tempdir().expect("engine identity");
+        let path = base.path().join("encoder");
+        tokio::fs::write(&path, b"encoder-a")
+            .await
+            .expect("first engine");
+        let modified = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
+        let engine = EncodedExecutable::capture_at(path.clone())
+            .await
+            .expect("capture engine");
+        assert!(engine.is_current());
+        let replacement = base.path().join("replacement");
+        tokio::fs::write(&replacement, b"encoder-b")
+            .await
+            .expect("new engine");
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("replacement handle")
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .expect("preserve mtime");
+        std::fs::rename(replacement, &path).expect("atomic engine replacement");
+        assert!(!engine.is_current());
+        assert_ne!(
+            engine.digest,
+            EncodedExecutable::capture_at(path)
+                .await
+                .expect("new capture")
+                .digest
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_diagnostics_drain_but_retain_only_the_bounded_tail() {
+        let input = [vec![b'x'; 24 * 1024], b"terminal filter error".to_vec()].concat();
+        let tail = drain_diagnostics(input.as_slice()).await;
+        assert_eq!(tail.len(), 8 * 1024);
+        assert!(tail.ends_with("terminal filter error"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_extraction_drains_noisy_child_and_reaps_nonzero_exit() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "i=0; while [ $i -lt 4096 ]; do printf '0123456789abcdef0123456789abcdef' >&2; i=$((i + 1)); done; printf 'terminal extractor error' >&2; printf 'discarded stdout'; exit 7",
+        ]);
+        let mut owner = BoundedDiagnosticChild::spawn(&mut command).expect("noisy child");
+        let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
+        owner.reaped = Some(reaped_tx);
+        let (status, tail) = tokio::time::timeout(Duration::from_secs(5), owner.output())
+            .await
+            .expect("fully drain without a stderr pipe deadlock")
+            .expect("wait for noisy child");
+        assert_eq!(status.code(), Some(7));
+        assert_eq!(tail.len(), 8 * 1024);
+        assert!(tail.ends_with("terminal extractor error"));
+        reaped_rx.await.expect("nonzero exit still reaped");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_bounded_extraction_transfers_exact_child_to_reaper() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "while :; do printf 'waiting extractor' >&2; done"]);
+        let mut owner = BoundedDiagnosticChild::spawn(&mut command).expect("noisy pending child");
+        let pid = owner
+            .child
+            .as_ref()
+            .expect("owned child")
+            .id()
+            .expect("PID");
+        let (reaped_tx, reaped_rx) = tokio::sync::oneshot::channel();
+        owner.reaped = Some(reaped_tx);
+        let output = tokio::spawn(owner.output());
+        tokio::task::yield_now().await;
+        output.abort();
+        let _ = output.await;
+        tokio::time::timeout(Duration::from_secs(5), reaped_rx)
+            .await
+            .expect("cancellation reaper settles")
+            .expect("successful exact child wait");
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
 
     /// A Compose file with an unset variable hands the process `PLURX_FFMPEG=`,
     /// and spawning a binary named "" fails with an ENOENT that names nothing.
