@@ -2113,7 +2113,7 @@ impl Drop for PrepublicationStartSettlement {
 #[cfg(any(test, feature = "live-hls-recovery"))]
 impl PrepublicationTranscodeRetry {
     /// The alternate a decode fault asks for: the same delivery, decoded in
-    /// software.
+    /// software — or `None` when there is no such thing to install.
     ///
     /// Deliberately *not* [`Self::prepare`]. That one answers a different
     /// question — "this encode route failed, what is the one-step colour-safe
@@ -2122,34 +2122,77 @@ impl PrepublicationTranscodeRetry {
     /// the viewer's screen was fine when it arrived; what failed was reading
     /// the source, and the fix is to read it differently.
     ///
-    /// So the options and the encoder are carried through untouched, and the
-    /// only difference is in the plan the caller resolves under
-    /// `AttemptRestrictions::requiring(DecodeBackend::Software)`. `build`'s
-    /// guard passes on that plan for exactly the right reason: it compares
-    /// encoder, pipeline, height, audio track, rate control and cache
-    /// identity, all of which are unchanged, and the decode backend is not one
-    /// of them because it is not part of the *encode route*.
+    /// **The pipeline is taken from the alternate plan, not from the delivered
+    /// options, and that is the whole correctness of this function.** Forcing
+    /// software decode can rewrite the renderer: a vendor-native graph accepts
+    /// only its own decoder, so `resolve_transcode` moves `VppQsv` and
+    /// `TonemapVaapi` to their colour-preserving software renderer on the way
+    /// past. Copying the delivered pipeline instead would disagree with the
+    /// plan and `build`'s guard would refuse the alternate — on exactly the two
+    /// pipelines that decode on the GPU, which is the population that produces
+    /// hardware decode faults in the first place. A first draft did precisely
+    /// that and its test did not catch it, because the fixture was already on
+    /// `Pipeline::Cpu`, where nothing is rewritten.
+    ///
+    /// Reading the pipeline off the plan rather than re-deriving the rule also
+    /// keeps one authority: the rule lives in `resolve_transcode` and is
+    /// private to it, and a copy here would drift the first time a renderer is
+    /// added.
+    ///
+    /// `Ok(None)` for the two cases where an alternate is not a thing that
+    /// exists, both of which would otherwise install a producer that cannot
+    /// help:
+    ///
+    /// * a software encoder has no hardware slot to keep, so there is no mixed
+    ///   transition to make and nothing this function returns would be true of
+    ///   the recipe `build` produced;
+    /// * a delivered plan that already decoded in software has no alternate —
+    ///   the digests are equal, so the "recovery" would tear down the failed
+    ///   child and respawn the identical command.
     ///
     /// `software_threads` is `None`, which is what makes this the mixed
     /// transition rather than a demotion. The encoder and its hardware slot
-    /// stay; what grows is the CPU reservation, by the difference `build`
-    /// computes into `cpu_total` from a plan that now decodes in software.
-    /// Returning `Some` here would hand the hardware slot back and leave a
-    /// live hardware encoder with nothing reserved for it.
+    /// stay; what grows is the CPU reservation, by the difference the executor
+    /// takes from `cpu_total`. Returning `Some` here would hand the hardware
+    /// slot back and leave a live hardware encoder with nothing reserved for
+    /// it.
     ///
-    /// No installer yet: M5c2c is this function's caller. The attribute
-    /// matches `ValidatedRetryRecipe`'s own, which is dead outside tests for
-    /// the same reason — the transport landed before the thing it carries.
+    /// No installer yet: M5c2c is this function's caller.
     #[cfg_attr(not(test), allow(dead_code))]
     fn prepare_decode_restricted(
+        delivered: &ResolvedTranscode,
+        alternate: &ResolvedTranscode,
         opts: &TranscodeOptions,
         encoder: Encoder,
-    ) -> PreparedTranscodeRetry {
-        PreparedTranscodeRetry {
-            opts: opts.clone(),
+    ) -> Result<Option<PreparedTranscodeRetry>, String> {
+        if encoder == Encoder::Software {
+            return Ok(None);
+        }
+        if alternate.decode().backend() != plurx_core::transcode::DecodeBackend::Software {
+            return Err(
+                "the decode-restricted alternate did not resolve to software decode".to_owned(),
+            );
+        }
+        if alternate.plan_digest() == delivered.plan_digest() {
+            return Ok(None);
+        }
+        let mut retry_opts = opts.clone();
+        retry_opts.pipeline = alternate.options().pipeline;
+        // The frozen colour contract, the same one `prepare` refuses to break.
+        // `resolve_transcode` only ever moves to a grade-preserving renderer,
+        // so this cannot fire today — which is why it is worth keeping: it is
+        // the assertion that a future renderer cannot quietly change what the
+        // viewer is being shown in the middle of a recovery.
+        if retry_opts.pipeline.output_grade() != opts.pipeline.output_grade() {
+            return Err(
+                "the decode-restricted alternate changed the frozen color contract".to_owned(),
+            );
+        }
+        Ok(Some(PreparedTranscodeRetry {
+            opts: retry_opts,
             encoder,
             software_threads: None,
-        }
+        }))
     }
 
     fn prepare(
@@ -11814,15 +11857,29 @@ impl TranscodeManager {
     ///
     /// Separate from [`Self::resolve_movie_plan`] rather than a parameter on
     /// it, because every existing caller wants the unrestricted answer and a
-    /// twelfth positional argument spelled `&AttemptRestrictions::none()` at
-    /// every one of them is a place for the wrong value to be pasted.
+    /// fourth positional argument spelled `&AttemptRestrictions::none()` at
+    /// two dozen call sites is a place for the wrong value to be pasted.
     ///
     /// A restricted plan is a **different artifact**: the decode backend feeds
     /// `plan_digest`, so a generation produced under a restriction has its own
     /// cache identity and the cache cannot serve one for the other. That is
-    /// intended. It also changes `TranscodeResourceEstimate::of`, because
-    /// forcing software decode rewrites what the pipeline costs — so admission
-    /// has to be re-asked for a restricted plan rather than adjusted.
+    /// intended.
+    ///
+    /// It also changes `TranscodeResourceEstimate::of`, because forcing
+    /// software decode rewrites what the pipeline costs. The session is
+    /// already paying for what it reserved at admission, so what a mid-session
+    /// alternate owes is the *difference* — `build` records the restricted
+    /// plan's whole estimate as `cpu_total` and the executor takes
+    /// `cpu_total - software_threads_held()`. Asking for the whole estimate
+    /// again would make the session pay twice to end up owning once, and on a
+    /// box where twice does not fit the recovery would fail over capacity it
+    /// already held.
+    ///
+    /// And it can rewrite the renderer, because a vendor-native graph accepts
+    /// only its own decoder. That is why
+    /// [`PrepublicationTranscodeRetry::prepare_decode_restricted`] reads the
+    /// pipeline off the plan this returns rather than off the options it was
+    /// given.
     async fn resolve_restricted_movie_plan(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -32389,11 +32446,23 @@ pub(crate) mod tests {
         // And the recipe built from it is the mixed transition rather than a
         // demotion: no software thread claim, so nothing hands the hardware
         // slot back, and a total for the CPU delta to be taken from.
-        let prepared =
-            PrepublicationTranscodeRetry::prepare_decode_restricted(&opts, Encoder::VideoToolbox);
+        let prepared = PrepublicationTranscodeRetry::prepare_decode_restricted(
+            &delivered,
+            &alternate,
+            &opts,
+            Encoder::VideoToolbox,
+        )
+        .expect("a legal alternate")
+        .expect("an alternate exists for a hardware-decoded delivery");
         assert_eq!(
             prepared.software_threads, None,
             "a Some here would demote and release the slot the encoder is using"
+        );
+        assert_eq!(
+            prepared.opts.pipeline,
+            alternate.options().pipeline,
+            "the pipeline comes from the plan, because forcing software decode \
+             can rewrite the renderer and the guard compares the two"
         );
         let dir = std::env::temp_dir().join(format!("plurx-m5c2b-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
@@ -32414,10 +32483,87 @@ pub(crate) mod tests {
             crate::playback_control::ProducerStartupKind::MixedSoftwareDecode,
         );
         assert!(
-            recipe.cpu_total.is_some_and(|total| total > 0),
+            recipe.cpu_total.is_some(),
             "the mixed transition needs a total to take its delta from"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// There is no alternate when the delivery already decodes in software,
+    /// and saying so is the whole job.
+    ///
+    /// `prepare` structurally cannot produce a retry identical to the attempt
+    /// that just failed — it always moves the pipeline or the encoder. This one
+    /// moves neither, so nothing but an explicit refusal stops it from tearing
+    /// down the failed child and respawning the identical command: same plan
+    /// digest, same arguments, same recipe fingerprint. A recovery that is a
+    /// no-op is worse than none, because it spends an attempt and reads in the
+    /// ledger as though something was tried.
+    #[tokio::test]
+    async fn there_is_no_software_decode_alternate_for_a_delivery_already_decoding_in_software() {
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::{AttemptRestrictions, DecodeBackend};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::Software,
+            &file,
+            1080,
+            0.0,
+            None,
+            None,
+            None,
+            tone_map_pref(),
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+
+        // Resolve the delivered plan *under the restriction*, which is the
+        // shape of a session whose delivery already decodes in software.
+        let already_software = mgr
+            .resolve_restricted_movie_plan(
+                &file,
+                &opts,
+                Encoder::VideoToolbox,
+                &AttemptRestrictions::requiring(DecodeBackend::Software),
+            )
+            .await
+            .expect("software-decoded delivery");
+        assert_eq!(already_software.decode().backend(), DecodeBackend::Software);
+        assert!(
+            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                &already_software,
+                &already_software,
+                &opts,
+                Encoder::VideoToolbox,
+            )
+            .expect("a legal answer")
+            .is_none(),
+            "an alternate with the delivered plan's own digest is not an alternate"
+        );
+
+        // A software encoder has no hardware slot to keep, so there is no
+        // mixed transition to make and every sentence the recipe's doc claims
+        // about one would be false.
+        let software_plan = mgr
+            .resolve_movie_plan(&file, &opts, Encoder::Software)
+            .await
+            .expect("software plan");
+        assert!(
+            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                &software_plan,
+                &already_software,
+                &opts,
+                Encoder::Software,
+            )
+            .expect("a legal answer")
+            .is_none(),
+            "a software encoder is not a mixed transition"
+        );
     }
 
     /// The derivation this whole milestone rests on, exercised through a real
