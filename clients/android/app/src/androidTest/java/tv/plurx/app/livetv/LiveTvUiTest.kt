@@ -168,7 +168,10 @@ class LiveTvUiTest {
         // does not owe a touch screen.
         if (television) compose.onNodeWithText("Back").assertIsFocused()
         else compose.onNodeWithText("Back").assertHasClickAction()
-        compose.onNodeWithText("Find a channel").performTextInput("Fixture")
+        // The field's label says what search now matches. It used to read
+        // "Find a channel"; since the guide landed it also matches the
+        // programme on now, and the label says so.
+        compose.onNodeWithText("Number, name, or what is on").performTextInput("Fixture")
         compose.onNodeWithText("7.1 · Fixture News").assertIsDisplayed()
         compose.onNodeWithText("Watch live").assertIsDisplayed()
         assertTrue(requests.none { it.startsWith("POST ") })

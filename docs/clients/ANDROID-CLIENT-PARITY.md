@@ -212,7 +212,7 @@ focused `LiveTvTest` cases cover these contracts; physical decode and remote
 navigation remain separate acceptance evidence. DRM, DVR, rewind and captions
 are deliberately unsupported.
 
-**Build 74 adds the programme guide.** Channel rows carry the programme on now,
+**Build 75 adds the programme guide.** Channel rows carry the programme on now,
 a bar running to its end and what is next; a phone or tablet can switch to a
 half-hour grid with a red now line; search matches the number, the callsign and
 the programme on now. The guide is read-only: a future cell opens details and

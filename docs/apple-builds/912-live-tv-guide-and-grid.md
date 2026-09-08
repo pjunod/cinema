@@ -1,6 +1,6 @@
 # Live TV says what is on, and keeps playing in picture-in-picture
 
-Build: 119
+Build: 120
 Issue: #912
 
 Channel rows now carry the programme on now, a bar running to its end, and
