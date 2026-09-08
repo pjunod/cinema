@@ -91,14 +91,15 @@ The related policy values come from one Store snapshot under a one-second
 deadline. A hung read returns no permit and leaves no foreground waiter;
 only the existing driver owns its bounded retry.
 
-The executable is a captured canonical path and content digest, checked for
-object replacement before spawn and publication. This is not complete
-engine attestation: independently replaced dynamic codec/libass libraries
-and system font resolution are not yet fingerprinted. The retained subtitle
-sidecar's actual bytes are hashed into the recipe. Until full dependency/font
-attestation exists, package or font changes require an explicit encoded-cache
-retirement and fresh qualification; unchanged init bytes alone do not prove
-unchanged burned pixels.
+The executable is a captured canonical path and content digest. Its loaded
+codec/filter dependency closure is hashed once and every object identity is
+rechecked before spawn and publication. Text burn also fingerprints active
+Fontconfig rules and every discoverable font object; the retained sidecar's
+actual bytes cover embedded attachments. Encoded identities include a random
+daemon-process identity, so two nodes, driver stacks, or daemon restarts never
+regenerate bytes into one another's durable keyspace merely because their
+encoder names match. Any dependency or font replacement in the running daemon
+withdraws the recipe with a typed engine-changed result.
 
 ## Long seeks are correct, not yet qualified as transparent
 
@@ -167,9 +168,31 @@ Darwin `ps` to inspect their own children; all 11 pass together outside the
 restricted process sandbox. Neither event was hidden by weakening an
 assertion.
 
-This commit is task-PR evidence, not release evidence. It still needs a draft
-Forgejo PR, one adversarial review of that exact PR tree, correction of every
-finding, and one full suite after those corrections. The prior
+Draft Forgejo PR [#173](http://192.168.4.7:3000/noirr/plurx/pulls/173) passed
+the Effort development gate at reviewed head `44abf337`. The one adversarial
+review found no P0s, three P1 merge blockers, and one P2 status error. Correction
+commit `c7b87df5` closes all four:
+
+- renderer identity now covers the FFmpeg dependency closure, active font
+  inputs for text burn, and a process-local boundary that prevents unsafe
+  cross-node or post-restart cache reuse;
+- recipe preparation ffprobes the held source descriptor and compares the
+  canonical document with the stored scan before using its geometry, tracks,
+  cadence, or color facts;
+- subtitle plus Matroska-attachment extraction writes through a daemon-owned
+  bounded pipe, kills at exactly 64 MiB, confirms child reap, and publishes no
+  overflow artifact;
+- this checkpoint records the reviewed and corrected heads rather than
+  implying review was still pending.
+
+The correction fast lane passes pinned Rust 1.97.1 all-target compilation,
+workspace all-target Clippy with warnings denied, 93 VOD-serving tests with the
+explicit two-hour benchmark ignored, 18 subtitle-cache tests, and focused
+manager, dependency/font, process-isolation, disk-bound, and production
+oversized-attachment regressions. The default Homebrew FFmpeg 9.0.1 formula
+lacks libass and zscale; full burn/HDR checks used the supported
+`ffmpeg-full` 9.0.1 binary instead of weakening those tests. The PR remains
+draft, and its one post-correction full-suite run remains unspent. The prior
 7.561–12.273-second warm two-hour measurements remain a performance nonclaim:
 correctness inside the 30-second materialization budget is not transparent
 seek latency.
