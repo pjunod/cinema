@@ -4246,7 +4246,9 @@ mod tests {
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
-                "live_hls_recovery"
+                "live_hls_recovery",
+                "pgs_overlay",
+                "dolby_vision_convert"
             ],
             "every Developer card with prerequisites needs a row here: {body}"
         );
@@ -4435,8 +4437,135 @@ mod tests {
                     "no advisory prerequisite may refuse `{setting}` in either \
                      direction: {body}"
                 );
+                // The status code alone proves nothing here. `UpdateSettings`
+                // ignores a field it does not recognise and answers 200, so a
+                // name this request cannot write makes the whole loop pass by
+                // writing nothing — which is exactly how the first version of
+                // this test passed while carrying store keys instead of API
+                // field names. Read the value back.
+                assert_eq!(
+                    body[&setting],
+                    serde_json::json!(want),
+                    "`{setting}` did not take the value this request wrote, so this \
+                     loop is not exercising the switch it names"
+                );
             }
         }
+    }
+
+    /// Both new switches answer from the store on the next request, and the
+    /// settings page and the readiness route agree with the server about what
+    /// the stored string means.
+    ///
+    /// One stored value parsed in three places is how a server ends up serving
+    /// overlays while the card's checkbox says off, so the spelling an
+    /// operator might hand-edit is the interesting input, not `1`.
+    #[tokio::test]
+    async fn a_hand_written_switch_value_reads_the_same_everywhere() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+
+        // Defaults, before anyone has answered: the overlay is off and the
+        // conversion is on, and both surfaces say so.
+        let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(settings["pgs_overlay"], serde_json::json!(false));
+        assert_eq!(settings["dolby_vision_convert"], serde_json::json!(true));
+        assert!(!state
+            .pgs_overlay_enabled()
+            .await
+            .expect("read the overlay switch"));
+        assert!(state.transcode.dv_convert_enabled().await);
+
+        // Both keys set on every row, because a leftover from the previous
+        // one would make this pass by accident.
+        for (overlay_value, convert_value, overlay, convert) in [
+            ("On", "1", true, true),
+            (" TRUE ", "yes", true, true),
+            ("nonsense", "nonsense", false, true),
+            ("0", "OFF", false, false),
+            ("off", "No", false, false),
+        ] {
+            let stored = format!("overlay {overlay_value:?}, convert {convert_value:?}");
+            state
+                .store
+                .put_setting(plurx_core::store::keys::PGS_OVERLAY, overlay_value)
+                .await
+                .expect("store a hand-written value");
+            state
+                .store
+                .put_setting(plurx_core::store::keys::DV_CONVERT, convert_value)
+                .await
+                .expect("store a hand-written value");
+            let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            let (_, readiness) = call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            let reported = |id: &str| {
+                readiness["items"]
+                    .as_array()
+                    .expect("items")
+                    .iter()
+                    .find(|item| item["id"] == id)
+                    .expect("item")["enabled"]
+                    .clone()
+            };
+            assert_eq!(
+                (
+                    state
+                        .pgs_overlay_enabled()
+                        .await
+                        .expect("read the overlay switch"),
+                    state.transcode.dv_convert_enabled().await,
+                    settings["pgs_overlay"].clone(),
+                    settings["dolby_vision_convert"].clone(),
+                    reported("pgs_overlay"),
+                    reported("dolby_vision_convert"),
+                ),
+                (
+                    overlay,
+                    convert,
+                    serde_json::json!(overlay),
+                    serde_json::json!(convert),
+                    serde_json::json!(overlay),
+                    serde_json::json!(convert),
+                ),
+                "{stored}: the server, the settings page and the readiness route must \
+                 not disagree about one stored string"
+            );
+        }
+    }
+
+    /// The switches take effect on the next request rather than at the next
+    /// restart, which is the whole reason they stopped being environment
+    /// variables.
+    #[tokio::test]
+    async fn turning_a_switch_on_needs_no_restart() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        assert!(!state
+            .pgs_overlay_enabled()
+            .await
+            .expect("read the overlay switch"));
+
+        let (status, body) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                serde_json::json!({"pgs_overlay": true, "dolby_vision_convert": false}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            state
+                .pgs_overlay_enabled()
+                .await
+                .expect("read the overlay switch"),
+            "the same process has to honour the switch it was just given"
+        );
+        assert!(
+            !state.transcode.dv_convert_enabled().await,
+            "the transcoder reads the switch, not the value this process booted with"
+        );
     }
 
     #[tokio::test]
@@ -5715,10 +5844,10 @@ mod tests {
         (router(state.clone()), state)
     }
 
-    fn test_state_with_pgs_overlay() -> (Router, AppState) {
+    async fn test_state_with_pgs_overlay() -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-pgs-api-{}", uuid::Uuid::new_v4()));
-        let mut state = AppState::new(
+        let state = AppState::new(
             "test".into(),
             Arc::new(store),
             test_dirs(&base),
@@ -5727,7 +5856,11 @@ mod tests {
             Default::default(),
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
-        state.pgs_overlay_enabled = true;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PGS_OVERLAY, "1")
+            .await
+            .expect("enable the pgs overlay");
         (router(state.clone()), state)
     }
 
@@ -7123,7 +7256,7 @@ mod tests {
         };
         use sha2::{Digest, Sha256};
 
-        let (app, state) = test_state_with_pgs_overlay();
+        let (app, state) = test_state_with_pgs_overlay().await;
         let admin = setup_admin(&app).await;
         let source_dir =
             crate::test_temp_path(format!("plurx-pgs-source-{}", uuid::Uuid::new_v4()));

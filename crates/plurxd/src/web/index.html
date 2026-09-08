@@ -13813,11 +13813,26 @@ function developerPanel(settings,readiness){
       ${advisory}
       ${devReq(readiness,"live_hls_recovery","vod_coverage_replaces_it","Real VOD recipe coverage has replaced it","Turning the fallback off refuses any title whose VOD prerequisites are missing, rather than serving it the old way. The count below is what that would have refused.")}
       ${devReq(readiness,"live_hls_recovery","no_session_bypasses_the_switch","Nothing reaches the live engine past the switch","A request that already names the live presentation — the peer takeover path — never consults the setting. Sessions counted here keep running with the fallback off.")}`);
+  const overlay=setCard(`${cardHead("Image subtitles without burning them in","PGS subtitle tracks served as timed images the player draws over the video, instead of being hidden or burned into the picture.",`<span class="pill">${settings.pgs_overlay?"on":"off"}</span>`)}
+      <div class="hint">Applies to PGS only; other bitmap subtitle formats still burn in. With this off, a PGS track is not offered to the client at all, and choosing one forces a burn-in — which re-encodes the video and costs a transcode session. With it on, the same track is served through the authenticated <code>pgs-v1</code> overlay API and the video is left alone. This was an environment variable read once at startup; it is a setting now, so it can be answered here instead of in a compose file.</div>
+      ${togRow("pgso","Serve PGS subtitles as an overlay","Applies to the next request. Clients that do not implement pgs-v1 keep the burn-in path.",settings.pgs_overlay)}
+      <h2 class="section">What must be true first</h2>
+      ${advisory}
+      ${devReq(readiness,"pgs_overlay","clients_render_overlays","A client in the fleet renders pgs-v1","A client that cannot draw the overlay is offered a subtitle track it will not show. The reading counts overlay manifests fetched since this process started and resets when it restarts.")}
+      ${devReq(readiness,"pgs_overlay","overlay_acceptance","Physical-client acceptance is complete","Timing, positioning and scaling of image subtitles are judged on a screen, not by a passing test. The daemon never holds that receipt.")}
+      <div class="err" id="dserr"></div>
+      ${setCardFoot("saveSubtitleOverlay")}`);
+  const dvconvert=setCard(`${cardHead("Dolby Vision Profile 7 conversion","Profile 7 titles converted to Profile 8.1 so a Dolby Vision client sees Dolby Vision instead of HDR10.",`<span class="pill">${settings.dolby_vision_convert===false?"off":"on"}</span>`)}
+      <div class="hint">On unless you turn it off, which is the opposite of everything else in this section: a Profile 7 title reaching a Dolby Vision client as HDR10 is the thing this stops. It costs encode time only when such a title is actually played. This was an environment variable, so a server that had it turned off said so nowhere.</div>
+      ${togRow("dvcv","Convert Profile 7 to 8.1","Applies to new sessions. Turning it off delivers those titles as HDR10.",settings.dolby_vision_convert!==false)}
+      <div class="hint">Nothing has to be true first. There is no reading for this switch because there is nothing to read: the conversion is plurx's own code, it runs wherever this build runs, and the only question is whether you have turned it off.</div>
+      <div class="err" id="dcerr"></div>
+      ${setCardFoot("saveDolbyVisionConvert")}`);
   const experimental=setCard(`${cardHead("Experimental delivery","Changes the shape of the stream itself. Applies to new sessions only.")}
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${preview}${prepared}${retained}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${preview}${prepared}${retained}${overlay}${dvconvert}${experimental}`;
 }
 function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
@@ -15386,6 +15401,26 @@ async function saveStreaming(btn){
     if(SERVER) SERVER.playback_auto_abr=SETTINGS.playback_auto_abr;
     toast("Streaming settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveDolbyVisionConvert(btn){
+  const err=document.getElementById("dcerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      dolby_vision_convert:document.getElementById("dvcv").checked}}));
+    toast("Dolby Vision conversion saved");
+    if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message||String(e); if(btn) btn.disabled=false; }
+}
+async function saveSubtitleOverlay(btn){
+  const err=document.getElementById("dserr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      pgs_overlay:document.getElementById("pgso").checked}}));
+    toast("Subtitle overlay saved");
+    if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message||String(e); if(btn) btn.disabled=false; }
 }
 async function saveDeveloper(btn){
   const err=document.getElementById("dverr"); err.textContent="";

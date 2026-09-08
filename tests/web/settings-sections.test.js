@@ -307,7 +307,7 @@ test("nothing outside the Developer readings can reach a reading", () => {
   // A save function that early-returns on an unmet reading is invisible to
   // any comparison of rendered markup: the stub records the function name,
   // so the skeleton is byte-identical whatever the function does.
-  for (const name of ["saveDeveloper", "saveExperimental", "saveStreaming"]) {
+  for (const name of ["saveDeveloper", "saveExperimental", "saveStreaming", "saveSubtitleOverlay", "saveDolbyVisionConvert"]) {
     assert.doesNotMatch(
       shippedSource(name),
       /readiness|devReq|DEV_READINESS/i,
@@ -375,6 +375,7 @@ const DEV_REQUIREMENT_IDS = {
   playback_control_protocol_v1: ["clients_report"],
   prepared_quality_handoff: ["server_preparation_is_real", "client_two_player_handoff", "fleet_receipt"],
   live_hls_recovery: ["vod_coverage_replaces_it", "no_session_bypasses_the_switch"],
+  pgs_overlay: ["clients_render_overlays", "overlay_acceptance"],
 };
 function statuses(status) {
   return {

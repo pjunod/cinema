@@ -9970,8 +9970,26 @@ impl TranscodeManager {
     /// conversion off has no converting sessions to serve, and indexing for
     /// them would spend a third full pass over every Profile 7 remux in the
     /// library on a stream nothing can ask for.
-    pub fn dv_convertible(&self) -> bool {
-        self.dv_convertible
+    /// Whether this node converts Profile 7 to 8.1 right now.
+    ///
+    /// The builder value above is what this boot was configured with; the
+    /// setting is what an operator has since answered, and it wins. Absent
+    /// means on, which is the default the environment variable this replaced
+    /// also had: a Profile 7 title reaching a Dolby Vision client as HDR10 is
+    /// what the conversion exists to stop, so it should not need enabling.
+    ///
+    /// A store that cannot be read falls back to the boot value rather than to
+    /// a constant. Losing the setting is not a reason to start or stop doing
+    /// work on somebody's GPU.
+    pub(crate) async fn dv_convert_enabled(&self) -> bool {
+        match self
+            .store
+            .get_setting(plurx_core::store::keys::DV_CONVERT)
+            .await
+        {
+            Ok(stored) => plurx_core::store::stored_switch(stored.as_deref(), true),
+            Err(_) => self.dv_convertible,
+        }
     }
 
     #[cfg(test)]

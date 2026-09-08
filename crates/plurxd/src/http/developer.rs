@@ -73,14 +73,21 @@ pub(crate) struct DeveloperEnableItem {
     /// capability has no switch — it is compiled in and behaves by itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// The settings key this row's switch is, when it has one.
+    /// The `PUT /api/v1/settings` field this row's switch is, when it has one.
     ///
-    /// Named rather than implied by `id`, because for two of these rows they
-    /// differ, and because the one property this whole route has to keep — no
-    /// prerequisite refuses any switch — can only be tested by a caller that
-    /// can enumerate the switches. A test that had to hard-code the list
-    /// tested the switch somebody remembered, and a gate is cheapest to add
-    /// on the one they did not.
+    /// The settings *API field*, deliberately, not the store key. They differ,
+    /// and only one of them is something a caller can act on: the update
+    /// request is a struct of named optional fields and ignores anything it
+    /// does not recognise, so a caller handed a store key writes nothing and
+    /// is told 200. The first version of this field carried the store key, and
+    /// the test that walks every switch to prove no prerequisite refuses one
+    /// passed by writing nothing at all.
+    ///
+    /// Named at all — rather than implied by `id` — because the property this
+    /// whole route has to keep can only be tested by a caller that can
+    /// enumerate the switches. A test that hard-codes the list tests the
+    /// switch somebody remembered, and a gate is cheapest to add on the one
+    /// they did not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setting: Option<&'static str>,
     pub requirements: Vec<DeveloperRequirement>,
@@ -117,14 +124,126 @@ pub(crate) async fn readiness(
         .map(String::as_str)
         != Some("0");
 
+    let overlay_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::PGS_OVERLAY)
+            .map(String::as_str),
+        false,
+    );
+
+    // Absent is on, unlike every other switch here, because a Profile 7 title
+    // reaching a Dolby Vision client as HDR10 is what the conversion exists to
+    // stop.
+    let convert_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::DV_CONVERT)
+            .map(String::as_str),
+        true,
+    );
+
     Ok(Json(DeveloperReadiness {
         items: vec![
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(),
             live_hls_recovery(live_recovery_on),
+            pgs_overlay(overlay_on),
+            dolby_vision_convert(convert_on),
         ],
     }))
+}
+
+/// Profile 7 titles converted to 8.1 rather than delivered as HDR10.
+///
+/// The odd one in this section: it is on by default and costs work only when a
+/// Profile 7 title is actually played. It is here because it was
+/// `PLURX_DV_CONVERT`, an environment variable that could turn off encode work
+/// this node does on somebody's GPU, with nothing in the product to say it had
+/// been turned off or why a Dolby Vision client had started seeing HDR10.
+fn dolby_vision_convert(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "dolby_vision_convert",
+        title: "Convert Dolby Vision Profile 7 to 8.1",
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_convert"),
+        // No prerequisites, and that is the honest answer rather than a gap.
+        // The conversion is plurx's own code and runs wherever this binary
+        // runs; there is nothing to measure and nothing that has to be true
+        // first. Inventing a row to say so would have put this section's only
+        // green tick on the one switch that never earned a reading, which is
+        // exactly the "checked" tick this route exists to remove.
+        requirements: Vec::new(),
+    }
+}
+
+/// Image subtitles served as an overlay rather than hidden or burned in.
+///
+/// This was `PLURX_PGS_OVERLAY`, a boot-time environment read that decided
+/// which subtitle tracks a client is offered. It is here because that decision
+/// is a product question — a viewer with a PGS-only subtitle track either sees
+/// it or does not — and an operator could neither see the answer nor change it
+/// without redeploying.
+fn pgs_overlay(enabled: bool) -> DeveloperEnableItem {
+    let (served, refused) = crate::http::pgs_overlay::overlay_demand_snapshot();
+
+    // Reachable both ways, and neither direction can be read upward into "the
+    // fleet renders overlays". One manifest served proves one client asked and
+    // was answered; it does not prove the client drew anything, which is what
+    // the acceptance row below is for and which no counter can see.
+    let clients = if served > 0 {
+        DeveloperRequirement {
+            id: "clients_render_overlays",
+            title: "A client in the fleet renders pgs-v1",
+            status: RequirementStatus::Unobservable,
+            evidence: format!(
+                "{served} overlay manifest(s) have been served since this process started \
+                 (published ones only; a poll while one is still being prepared is not counted), \
+                 so at least one client asked for one and got it. Whether it drew them is not \
+                 something this server can see. These counters are process-local and a restart \
+                 returns them to zero."
+            ),
+        }
+    } else if refused > 0 {
+        DeveloperRequirement {
+            id: "clients_render_overlays",
+            title: "A client in the fleet renders pgs-v1",
+            status: RequirementStatus::Unobservable,
+            evidence: format!(
+                "{refused} request(s) for a real PGS track since this process started were refused \
+                 because this switch is off, so a client here is asking for the capability. That \
+                 is a reason to consider turning it on, not evidence that the client renders it."
+            ),
+        }
+    } else {
+        DeveloperRequirement {
+            id: "clients_render_overlays",
+            title: "A client in the fleet renders pgs-v1",
+            status: RequirementStatus::Unobservable,
+            evidence: "No client has asked this process for an overlay manifest since it \
+                       started \u{2014} which is also what a fleet with no PGS subtitles looks \
+                       like. These counters are process-local and a restart returns them to zero."
+                .to_owned(),
+        }
+    };
+
+    DeveloperEnableItem {
+        id: "pgs_overlay",
+        title: "Serve PGS subtitles as an overlay",
+        enabled: Some(enabled),
+        setting: Some("pgs_overlay"),
+        requirements: vec![
+            clients,
+            DeveloperRequirement {
+                id: "overlay_acceptance",
+                title: "Physical-client acceptance is complete",
+                status: RequirementStatus::Unobservable,
+                evidence: "Whether image subtitles land in the right place, at the right size, at \
+                           the right moment is judged on a screen. The daemon never receives that \
+                           receipt, and a green unit suite is not it."
+                    .to_owned(),
+            },
+        ],
+    }
 }
 
 /// The retained live-HLS engine: what it is, why it chose the work, and where
@@ -212,7 +331,7 @@ fn live_hls_recovery(enabled: bool) -> DeveloperEnableItem {
         id: "live_hls_recovery",
         title: "Fall back to the retained live-HLS engine",
         enabled: Some(enabled),
-        setting: Some(plurx_core::store::keys::VOD_LIVE_RECOVERY),
+        setting: Some("vod_live_recovery"),
         requirements: vec![coverage, takeover],
     }
 }
@@ -522,7 +641,7 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
         id: "playback_control_protocol_v1",
         title: "Advertise playback control protocol v1",
         enabled: Some(advertised),
-        setting: Some(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1),
+        setting: Some("playback_control_protocol_v1"),
         requirements: vec![reporters],
     }
 }

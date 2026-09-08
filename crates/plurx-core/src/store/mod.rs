@@ -444,12 +444,12 @@ pub use fragment_index_cluster::{
     bounded_analysis_lease_secs, bounded_analysis_max_attempts, bounded_subtitle_window_seconds,
     cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
     cluster_fragment_index_key, cluster_fragment_index_pipeline_digest,
-    decode_cluster_fragment_index_blob, encode_cluster_fragment_index_blob, AnalysisAttempt,
-    AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage,
-    AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
-    NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    decode_cluster_fragment_index_blob, encode_cluster_fragment_index_blob, stored_switch,
+    AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
+    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest,
+    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
     DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
     DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
     MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
@@ -1247,6 +1247,28 @@ pub mod keys {
     /// HLS sessions. Explicit opt-in until every client has a passive reporter
     /// and mixed-fleet behavior has been measured.
     pub const PLAYBACK_CONTROL_PROTOCOL_V1: &str = "playback.control_protocol_v1";
+    /// Serve PGS subtitle tracks through the authenticated `pgs-v1` overlay
+    /// API instead of hiding them.
+    ///
+    /// This was `PLURX_PGS_OVERLAY`, read once at boot. An environment
+    /// variable is the wrong place for it twice over: it decides which
+    /// subtitle tracks a client is even offered, which is a product question
+    /// an operator should be able to see and answer, and it could only be
+    /// changed by restarting the daemon with a different compose file. The
+    /// setting is the switch now; the old variable is read once at startup to
+    /// seed it, so a deployment that had turned it on keeps it on and can
+    /// then find it in Settings.
+    pub const PGS_OVERLAY: &str = "subtitles.pgs_overlay";
+    /// Convert a Dolby Vision Profile 7 title to Profile 8.1 so a Dolby Vision
+    /// client sees Dolby Vision rather than HDR10.
+    ///
+    /// This was `PLURX_DV_CONVERT`, and unlike most switches it defaults *on*:
+    /// the conversion is plurx's own code, and a Profile 7 title reaching a
+    /// Dolby Vision client as HDR10 is the thing it exists to stop. Absent
+    /// therefore means on. It is a setting rather than an environment variable
+    /// for the same reason as the overlay above: an operator turning off work
+    /// their GPU is doing should be able to find the switch, and see it is off.
+    pub const DV_CONVERT: &str = "playback.dolby_vision_convert";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite
