@@ -39,6 +39,7 @@ private let controlExchanges = ControlExchangeLog()
 private final class ControlAnswer: @unchecked Sendable {
     private let lock = NSLock()
     private var value = ControlAction(type: "none")
+    private var readiness: String?
 
     func set(_ action: ControlAction) {
         lock.lock()
@@ -51,9 +52,40 @@ private final class ControlAnswer: @unchecked Sendable {
         defer { lock.unlock() }
         return value
     }
+
+    func setReadiness(_ readiness: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.readiness = readiness
+    }
+
+    func delivery() -> ControlDelivery? {
+        lock.lock()
+        defer { lock.unlock() }
+        return readiness.map { ControlDelivery(subtitleReadiness: $0) }
+    }
 }
 
 private let controlAnswer = ControlAnswer()
+
+/// Holds the actual callback scheduled by the production session so the
+/// main-actor queue race is deterministic rather than dependent on timing.
+private final class SubtitleCallbackQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callbacks: [@MainActor @Sendable () -> Void] = []
+
+    func append(_ callback: @escaping @MainActor @Sendable () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        callbacks.append(callback)
+    }
+
+    func take() -> (@MainActor @Sendable () -> Void)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return callbacks.isEmpty ? nil : callbacks.removeFirst()
+    }
+}
 
 /// Holds one exchange open so a test can stage a race that is otherwise
 /// unstageable: an old reporter's response landing after the next session has
@@ -89,6 +121,25 @@ private final class ControlGate: @unchecked Sendable {
 
 private let controlGate = ControlGate()
 
+/// One-shot owner handoff used to prove an ask does not wait on the new
+/// owner's unrelated sequence space.
+private final class ControlOwnerChange: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+
+    func arm() { lock.lock(); armed = true; lock.unlock() }
+    func reset() { lock.lock(); armed = false; lock.unlock() }
+    func take(sequence: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard armed, sequence > 1 else { return false }
+        armed = false
+        return true
+    }
+}
+
+private let controlOwnerChange = ControlOwnerChange()
+
 /// Accepts every exchange the way the server does, and records what it carried.
 private final class ControlExchangeURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -111,11 +162,25 @@ private final class ControlExchangeURLProtocol: URLProtocol {
             return
         }
         controlExchanges.append(decoded)
+        if controlOwnerChange.take(sequence: decoded.sequence) {
+            let failure = #"{"code":"owner_changed","generation":"44444444-4444-4444-8444-444444444444","control_epoch":9,"retry_after_ms":250}"#
+            let changed = HTTPURLResponse(
+                url: url,
+                statusCode: 409,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: changed, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(failure.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let response = ControlResponse(
             proto: PlaybackControl.protocolName,
             generation: decoded.generation,
             controlEpoch: decoded.controlEpoch,
             acceptedSequence: decoded.sequence,
+            delivery: controlAnswer.delivery(),
             action: controlAnswer.get()
         )
         let body = (try? PlaybackControl.encoder.encode(response)) ?? Data()
@@ -152,6 +217,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
 private final class PlayerStub {
     var positionMs = 4_000
     var reads = 0
+    var subtitleTrack: Int?
 
     func observation() -> PlayerControlObservation? {
         reads += 1
@@ -176,7 +242,7 @@ private final class PlayerStub {
             selection: ClientSelection(
                 quality: .auto,
                 audioTrack: 0,
-                subtitle: SubtitleSelection(mode: .off, track: nil),
+                subtitle: SubtitleSelection(mode: subtitleTrack == nil ? .off : .native, track: subtitleTrack),
                 audioOffsetMs: 0,
                 codec: .auto,
                 dynamicRange: .auto
@@ -274,6 +340,147 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertNotNil(first.capabilities)
     }
 
+    func testSourceActorPublishesBeforeReporterCadenceAndNeverPullsLivePlayer() async throws {
+        controlExchanges.reset()
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        defer { session.end(); urlSession.invalidateAndCancel() }
+        var reads = 0
+        session.begin(bootstrap: sessionBootstrap(), transport: transport, observe: {
+            MainActor.assertIsolated()
+            reads += 1
+            return player.observation()
+        })
+        _ = try await waitForExchange { $0.sequence == 1 }
+        player.positionMs = 7_000
+        session.clearVerdict()
+        session.reportEvidence()
+        // No MainActor suspension separates source capture from this change.
+        // A reporter pull or a deferred capture would observe 99s instead.
+        player.positionMs = 99_000
+        let evidence = try await waitForExchange { $0.sequence == 2 }
+        let cadence = try await waitForExchange { $0.sequence == 3 }
+        XCTAssertEqual(evidence.positionMs, 7_000)
+        XCTAssertEqual(cadence.positionMs, 7_000)
+        XCTAssertEqual(reads, 2, "cadence reads the capture slot, never AVPlayer")
+    }
+
+    func testQueuedSubtitleReadinessFromSessionACannotMutateSessionBWithTheSameTrack() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: true)
+    }
+
+    func testQueuedSubtitleReadinessCannotMutatePlaybackAfterEnd() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: false)
+    }
+
+    func testQueuedSubtitleReadinessIsDeliveredForItsCurrentSession() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: nil)
+    }
+
+    func testQueuedSubtitleReadinessCannotCrossANewerIntentInTheSameSession() async throws {
+        try await assertQueuedSubtitleReadinessIsFenced(replaceSession: nil, newIntent: true)
+    }
+
+    func testEndRevokesATerminalPublicationAlreadyPastTheCaptureGuard() async throws {
+        controlExchanges.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        controlAnswer.setReadiness("pending")
+        let publicationHeld = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let session = PlaybackControlSession(scheduleSubtitleReady: { _ in
+            // onExchange has validated the capture, but has not yet stored
+            // its terminal verdict. Hold that real cross-actor boundary.
+            publicationHeld.signal()
+            _ = release.wait(timeout: .now() + 5)
+        })
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer {
+            release.signal(); session.end(); urlSession.invalidateAndCancel()
+            controlAnswer.set(ControlAction(type: "none")); controlAnswer.setReadiness(nil)
+        }
+        session.begin(bootstrap: sessionBootstrap(), transport: transport,
+                      observe: { player.observation() })
+        _ = try await waitForExchange { $0.sequence == 2 }
+        controlAnswer.set(ControlAction(type: "terminal", code: "unsupported", message: "late"))
+        controlAnswer.setReadiness("ready")
+        session.reportEvidence()
+        let deadline = Date().addingTimeInterval(5)
+        var held = false
+        while !held, Date() < deadline {
+            held = publicationHeld.wait(timeout: .now()) == .success
+            if !held { try await Task.sleep(nanoseconds: 10_000_000) }
+        }
+        XCTAssertTrue(held)
+        session.end()
+        release.signal()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNil(session.terminalVerdict, "End revokes publication even after its outer guard passed")
+    }
+
+    private func assertQueuedSubtitleReadinessIsFenced(replaceSession: Bool?, newIntent: Bool = false) async throws {
+        controlExchanges.reset()
+        controlAnswer.setReadiness("pending")
+        defer { controlAnswer.setReadiness(nil) }
+        let player = PlayerStub()
+        player.subtitleTrack = 7
+        let callbacks = SubtitleCallbackQueue()
+        let session = PlaybackControlSession(scheduleSubtitleReady: { callbacks.append($0) })
+        let (transport, urlSession) = makeTransport()
+        defer { session.end(); urlSession.invalidateAndCancel() }
+        var deliveries = 0
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() },
+            onSubtitleReady: { deliveries += 1 }
+        )
+        // Seeing two requests guarantees the first non-ready response was
+        // consumed before the readiness edge is introduced.
+        _ = try await waitForExchange { $0.sequence == 2 }
+        controlAnswer.setReadiness("ready")
+        session.playerChanged()
+        let deadline = Date().addingTimeInterval(5)
+        var queued: (@MainActor @Sendable () -> Void)?
+        while queued == nil, Date() < deadline {
+            queued = callbacks.take()
+            if queued == nil { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        let staleReady = try XCTUnwrap(queued, "the real session must schedule a readiness callback")
+
+        if replaceSession == true {
+            var next = sessionBootstrap()
+            next.generation = "22222222-2222-4222-8222-222222222222"
+            session.begin(
+                bootstrap: next,
+                transport: transport,
+                observe: { player.observation() },
+                onSubtitleReady: { deliveries += 100 }
+            )
+        } else if replaceSession == false {
+            session.end()
+        }
+        if newIntent { session.clearVerdict() }
+        staleReady()
+        XCTAssertEqual(deliveries, replaceSession == nil && !newIntent ? 1 : 0,
+                       "a queued response loses its authority when its reporting session ends")
+        if newIntent {
+            session.playerChanged()
+            let deadline = Date().addingTimeInterval(5)
+            while deliveries == 0, Date() < deadline {
+                callbacks.take()?()
+                if deliveries == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+            }
+            XCTAssertEqual(deliveries, 1, "discarding A's callback cannot consume B's ready edge")
+            session.reportEvidence()
+            try await Task.sleep(nanoseconds: 300_000_000)
+            while let callback = callbacks.take() { callback() }
+            XCTAssertEqual(deliveries, 1, "current ready cadence commits only one retry")
+        }
+    }
+
     /// The return path M5 exists to open. Before this the reporter was built
     /// without `onExchange`, so it defaulted to a no-op and the server could
     /// send a verdict the player would never see.
@@ -307,6 +514,46 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertEqual(session.terminalVerdict?.code, "unsupported")
         session.end()
         XCTAssertNotNil(session.terminalVerdict, "ending reporting does not retract a verdict")
+    }
+
+    /// A viewer command is an atomic intent boundary even when the prior
+    /// request has already reached the server. Its late terminal response may
+    /// neither re-arm the cleared verdict nor stop reporting the new intent.
+    func testClearingVerdictFencesATerminalResponseAlreadyInFlight() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        defer {
+            controlGate.reset()
+            controlAnswer.set(ControlAction(type: "none"))
+        }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+
+        controlAnswer.set(ControlAction(
+            type: "terminal", code: "unsupported", message: "stale intent"
+        ))
+        controlGate.arm()
+        session.playerChanged()
+        _ = try await waitForExchange { $0.sequence == 2 }
+
+        session.clearVerdict()
+        controlAnswer.set(ControlAction(type: "none"))
+        session.playerChanged()
+        controlGate.release()
+        _ = try await waitForExchange { $0.sequence == 3 }
+
+        XCTAssertNil(session.terminalVerdict)
+        session.end()
     }
 
     func testAnOrdinaryVerdictArmsNothing() async throws {
@@ -501,6 +748,31 @@ final class PlaybackControlSessionTests: XCTestCase {
         let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
         XCTAssertNil(verdict)
         XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+    }
+
+    func testAnOwnerChangeSettlesTheCurrentAskWithoutWaitingOnTheNewOwner() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlOwnerChange.reset()
+        defer { controlOwnerChange.reset() }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        defer { urlSession.invalidateAndCancel() }
+        let session = PlaybackControlSession()
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        controlOwnerChange.arm()
+        let started = Date()
+        let verdict = await session.askForAction(bound: 5, cap: 8, publish: {})
+        XCTAssertNil(verdict)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2,
+                          "the old ask is released while the reporter adopts the new owner")
+        session.end()
     }
 
     /// A verdict outlives its reporter and its session, but not the lease the

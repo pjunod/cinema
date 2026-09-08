@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["655c64f0"]
+points = ["persistence.upgrades", "playback.pipeline", "core.media"]
+checks = ["cluster-auth", "database-upgrades", "rust-gate"]
+reason = "The pointer-fence schema step and the ordinary-activation ask compare both failed against three voters in ways the single-writer backend cannot reach. The migration's ALTER met 'duplicate column name' because a fresh install declares desired_revision in the pointers table while an upgrade adds it, and both shapes are reachable from the same marker; settle_migration_attempt only forgives a failure when another voter advanced the marker, so the step now asks whether the column exists and drops the ALTER when it does, matching the analysis component migration. Separately the compare gated only the pointer write, and because a replicated transaction cannot branch the supersede statement still ended the predecessor while the pointer stayed put — a refused activation stopped the viewer's session and started nothing, strictly worse than the race the compare prevents, and invisible on SQLite where a refusal is a rollback; the supersede now carries the same predicate. an_activation_is_refused_when_the_viewer_has_asked_for_something_else and every replicated migration test in the chain cover both, and they run under the replicated Store contract lane rather than the fast gate."

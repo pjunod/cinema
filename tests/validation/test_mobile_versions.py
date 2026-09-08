@@ -556,5 +556,147 @@ class MobileVersionCase(unittest.TestCase):
         )
 
 
+class CommentOnlyChangeCase(unittest.TestCase):
+    """A comment carries no bytes to a device, so it obligates no build number.
+
+    The counter contract exists so that different bytes reach the store under
+    a different number. Demanding one for a corrected documentation path in a
+    `///` comment is not merely pedantic: the number has to be mirrored into
+    the parity document and the status page, so a comment fix would end up
+    asserting that a build nobody produced was released.
+
+    The exemption has to be narrow in exactly one direction — it may never
+    excuse a change that ships. Every case below that mixes code into the diff
+    is there to prove it does not.
+    """
+
+    def branch_with(self, root: Path, *, swift: str) -> str:
+        seed_repository(root, apple_build=10, android_build=26)
+        branch_point = git(root, "rev-parse", "HEAD").strip()
+        git(root, "checkout", "-qb", "branch")
+        (root / "clients/apple/Sources/App.swift").write_text(swift, encoding="utf-8")
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "change")
+        return branch_point
+
+    def check(self, root: Path, branch_point: str) -> tuple[str, ...]:
+        return check_repository(root, mode="changed-from", base=branch_point)
+
+    def test_a_comment_only_change_obligates_no_build_bump(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            point = self.branch_with(
+                root, swift="/// See docs/clients/APPLE-CLIENT-PARITY.md\nlet release = 1\n"
+            )
+            self.assertEqual(self.check(root, point), ())
+
+    def test_a_block_comment_and_its_delimiters_obligate_no_build_bump(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            point = self.branch_with(
+                root,
+                swift="/*\n * See docs/streaming/ADAPTIVE-QUALITY.md\n */\nlet release = 1\n",
+            )
+            self.assertEqual(self.check(root, point), ())
+
+    def test_a_code_change_beside_a_comment_still_obligates_a_bump(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            point = self.branch_with(
+                root, swift="/// See docs/clients/APPLE-CLIENT-PARITY.md\nlet release = 2\n"
+            )
+            errors = self.check(root, point)
+            self.assertTrue(
+                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
+            )
+
+    def test_a_bare_code_change_still_obligates_a_bump(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            point = self.branch_with(root, swift="let release = 2\n")
+            errors = self.check(root, point)
+            self.assertTrue(
+                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
+            )
+
+    def test_a_deleted_source_file_still_obligates_a_bump(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_repository(root, apple_build=10, android_build=26)
+            point = git(root, "rev-parse", "HEAD").strip()
+            git(root, "checkout", "-qb", "branch")
+            git(root, "rm", "-q", "clients/apple/Sources/App.swift")
+            git(root, "commit", "-qm", "remove")
+            errors = self.check(root, point)
+            self.assertTrue(
+                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
+            )
+
+    def add_source(self, root: Path, contents: str) -> str:
+        seed_repository(root, apple_build=10, android_build=26)
+        point = git(root, "rev-parse", "HEAD").strip()
+        git(root, "checkout", "-qb", "branch")
+        (root / "clients/apple/Sources/Notes.swift").write_text(
+            contents, encoding="utf-8"
+        )
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "add")
+        return point
+
+    def test_a_new_source_file_with_any_code_obligates_a_bump(self):
+        # The diff for a new file is every one of its lines, so one line of
+        # code in it is enough — which is what makes the next case meaningful
+        # rather than an artifact of how new files are diffed.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            point = self.add_source(root, "/// notes\nimport Foundation\n")
+            errors = self.check(root, point)
+            self.assertTrue(
+                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
+            )
+
+    def test_a_new_source_file_of_nothing_but_comments_obligates_none(self):
+        # Consistent with the rule rather than an exception to it: a file the
+        # compiler turns into nothing carries nothing to the device, whether it
+        # is new or edited.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            point = self.add_source(root, "// notes on docs/clients/APPLE-CLIENT-PARITY.md\n")
+            self.assertEqual(self.check(root, point), ())
+
+    def test_a_non_source_release_input_is_never_exempt(self):
+        # project.yml has no comment exemption: it is configuration the build
+        # reads, and a "#" line in it can carry meaning.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_repository(root, apple_build=10, android_build=26)
+            point = git(root, "rev-parse", "HEAD").strip()
+            git(root, "checkout", "-qb", "branch")
+            (root / "clients/apple/project.yml").write_text(
+                "# a comment\n" + apple_project(10), encoding="utf-8"
+            )
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "comment in project.yml")
+            errors = self.check(root, point)
+            self.assertTrue(
+                any("CURRENT_PROJECT_VERSION" in error for error in errors), errors
+            )
+
+    def test_a_workspace_version_change_is_never_exempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_repository(root, apple_build=10, android_build=26)
+            point = git(root, "rev-parse", "HEAD").strip()
+            git(root, "checkout", "-qb", "branch")
+            (root / "Cargo.toml").write_text(cargo_workspace("0.2.3"), encoding="utf-8")
+            (root / "clients/apple/Sources/App.swift").write_text(
+                "/// only a comment change here\nlet release = 1\n", encoding="utf-8"
+            )
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "release")
+            errors = self.check(root, point)
+            self.assertTrue(len(errors) >= 2, errors)
+
+
 if __name__ == "__main__":
     unittest.main()

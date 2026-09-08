@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STATUS_PAGES = (
     "STATUS.md",
     "docs/STATUS.html",
-    "docs/PLAYBACK-CONTROL-STATUS.md",
+    "docs/playback-control/PLAYBACK-CONTROL-STATUS.md",
 )
 
 # Phrases that assert a pull request has not landed. Kept narrow on purpose,
@@ -54,6 +54,14 @@ IN_FLIGHT = re.compile(
     r"\bOPEN\b"  # shouted, which on these pages is always a status
     r"|(?:is|still|remains|currently)\s+open\b"
     r"|\bopen\s*(?:,|--|—|\.|$)"
+    # `open against \`main\`` is how these pages say it, and it was invisible
+    # to every alternative above: the word is followed by "against", not by a
+    # comma, a dash or an end of line, and nothing turns it into a shouted or
+    # copular status. `STATUS.md` used the phrase twice, once honestly about a
+    # branch and once about pull request #37, which had merged as `c661d387`
+    # weeks earlier. The guard passed. A guard that cannot see the wording its
+    # own pages use is decoration.
+    r"|\bopen\s+against\b"
     # `[^.]` rather than `\w+` between the two words: the sentence this check
     # exists for was "awaiting Paul's merge", and an apostrophe is not `\w`.
     r"|\bawaiting\b[^.]{0,40}?\bmerge\b"
@@ -179,6 +187,38 @@ class StatusPullRequestClaimCase(unittest.TestCase):
             "a status page describes a merged pull request as still in flight:\n  "
             + "\n  ".join(stale),
         )
+
+
+    def test_open_against_a_branch_is_an_in_flight_claim(self) -> None:
+        """The wording the pages actually use, which the guard used to miss.
+
+        `**PR [#37](…/pulls/37) — open against `main`.**` sat on `STATUS.md`
+        for weeks after #37 landed as `c661d387`. None of the other
+        alternatives match it: "open" is followed by "against", so the
+        punctuation branch cannot fire, and nothing makes it copular or
+        shouted. The regression is this phrase, not the page.
+        """
+        self.assertTrue(IN_FLIGHT.search("PR #37 — open against `main`."))
+        self.assertTrue(IN_FLIGHT.search("open against main"))
+        # This alternative is deliberately broader than the others: it will
+        # also fire on ordinary English like "a valve held open against the
+        # line". That costs nothing, because a match is only ever reported
+        # when a *merged* `#N` sits within CLAIM_DISTANCE of it — the test
+        # below pins that, and it is the only thing making the width safe.
+
+    def test_a_branch_that_is_honestly_open_is_not_a_finding(self) -> None:
+        """The guard stays one-directional after the addition.
+
+        `STATUS.md` also says a *branch* is "open against `main`" with no
+        pull request number beside it. The phrase now matches, so the only
+        thing keeping that honest sentence out of the failure list is the
+        rule that a claim needs a merged `#N` within `CLAIM_DISTANCE` of it.
+        This pins that rule, because widening `IN_FLIGHT` without it would
+        turn every truthful in-flight line into a failure.
+        """
+        line = "**Branch `fix/ci-runner-disk` — open against `main`.** Runners"
+        self.assertTrue(IN_FLIGHT.search(line))
+        self.assertEqual(list(PR_REFERENCE.finditer(line)), [])
 
 
 if __name__ == "__main__":

@@ -257,6 +257,30 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // A password change and the revocation of that user's tokens are one
+    // boundary because either half alone is a security hole in a different
+    // direction. Commit only the password and the old tokens keep working
+    // after a reset meant to end them; commit only the revocation and the
+    // account is locked out with the old password still valid. Neither is a
+    // state worth being able to crash into.
+    //
+    // `BranchOnRowsAffected` because the answer returned to the caller is
+    // whether the update matched a row -- an id that names nobody reports
+    // false rather than pretending to have reset a password.
+    SqliteTransactionSite {
+        module: "users.rs",
+        method: "reset_password_and_revoke_tokens",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "users.rs",
+        method: "promote_user_and_reset_password",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
     SqliteTransactionSite {
         module: "offline.rs",
         method: "invalidate_ready_offline_package",
@@ -480,6 +504,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "record_desired_selection",
+        is_async: true,
+        // The write decides its own revision — the statement compares the
+        // stored digest and either advances or does not — so the transaction
+        // wraps a write and a read-back rather than a read that a branch then
+        // acts on. Reading first and writing after would let two exchanges for
+        // the same playback observe the same revision and both write its
+        // successor, which is exactly the collision a monotone revision exists
+        // to prevent.
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteUntilStable,
     },
     SqliteTransactionSite {
         module: "sessions.rs",
@@ -882,16 +920,30 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 68 since `reserve_producer_recovery` and `settle_producer_recovery`.
-        // The durable decoder-recovery ledger has three store methods and two
-        // boundaries: `producer_recovery_for_epoch` is a read and deliberately
-        // opens none, because the connection mutex already serializes it
-        // against every write in the store. Before them, 66 since
-        // `put_settings_if_generation`:
-        // the generation-fenced settings write opens its own boundary,
-        // classified beside the others in SQLITE_TRANSACTION_SITES rather than
-        // counted into this number.
-        assert_eq!(methods.len(), 68);
+        // 71 on the merge. Both parents moved this counter from a shared 66
+        // and neither parent's total describes the merged tree, so it is read
+        // off the merge rather than added up — but every boundary each of them
+        // classified is retained, and the arithmetic happens to agree:
+        //
+        // * main reached 69 — 67 after `put_settings_if_generation`'s
+        //   generation-fenced write, plus the two `users.rs` boundaries that
+        //   pair a password change with revoking that user's tokens,
+        //   `reset_password_and_revoke_tokens` and
+        //   `promote_user_and_reset_password`. Those existed unclassified,
+        //   which is what `every_sqlite_transaction_site_is_classified` was
+        //   failing on.
+        // * this effort added `reserve_producer_recovery` and
+        //   `settle_producer_recovery`. The durable decoder-recovery ledger
+        //   has three store methods and two boundaries:
+        //   `producer_recovery_for_epoch` is a read and deliberately opens
+        //   none, because the connection mutex already serializes it against
+        //   every write in the store.
+        //
+        // The number is written out rather than derived so that adding a
+        // transaction boundary has to be a deliberate edit here. That is the
+        // point of the assertion: two of the sites above reached main without
+        // one.
+        assert_eq!(methods.len(), 71);
     }
 
     #[test]

@@ -333,13 +333,7 @@ fn run(
                     // the shared guard from refresh through mmap/read, so an
                     // old incarnation can never open a replacement pathname.
                     let mut layout = wal_locked.write().unwrap();
-                    match wal.shift_delete_logs(
-                        from,
-                        until,
-                        wal_size,
-                        &mut buf,
-                        &mut buf_logs,
-                    ) {
+                    match wal.shift_delete_logs(from, until, wal_size, &mut buf, &mut buf_logs) {
                         Ok(_) => {
                             // the last_log may be none if logs are truncated
                             if last_log.is_some() {
@@ -509,8 +503,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn full_purge_waits_for_an_unmapped_reader_before_reusing_the_wal_path(
-    ) -> Result<(), Error> {
+    fn full_purge_waits_for_an_unmapped_reader_before_reusing_the_wal_path() -> Result<(), Error> {
         let base_path = test_path("full-purge-reader-layout-guard");
         let _ = fs::remove_dir_all(&base_path);
 
@@ -524,11 +517,13 @@ mod tests {
         };
         let (entry_tx, entry_rx) = flume::bounded(2);
         let (append_ack, append_rx) = oneshot::channel();
-        writer.send(Action::Append {
-            rx: entry_rx,
-            callback: Box::new(|| {}),
-            ack: append_ack,
-        }).unwrap();
+        writer
+            .send(Action::Append {
+                rx: entry_rx,
+                callback: Box::new(|| {}),
+                ack: append_ack,
+            })
+            .unwrap();
         entry_tx
             .send(Some((first.index, serialize(&first)?)))
             .unwrap();
@@ -538,12 +533,14 @@ mod tests {
         let layout = wal_locked.read().unwrap();
         let mut reader = layout.clone_no_map();
         let (remove_ack, mut remove_rx) = oneshot::channel();
-        writer.send(Action::Remove {
-            from: 0,
-            until: first.index,
-            last_log: Some(serialize(&first)?),
-            ack: remove_ack,
-        }).unwrap();
+        writer
+            .send(Action::Remove {
+                from: 0,
+                until: first.index,
+                last_log: Some(serialize(&first)?),
+                ack: remove_ack,
+            })
+            .unwrap();
 
         // Fill the writer queue behind Remove. Success proves the writer has
         // received Remove and is waiting on the layout guard held above.
@@ -576,9 +573,7 @@ mod tests {
         reader.active().mmap()?;
         let mut memo = None;
         let mut records = Vec::with_capacity(1);
-        reader
-            .active()
-            .read_logs(1, 1, &mut memo, &mut records)?;
+        reader.active().read_logs(1, 1, &mut memo, &mut records)?;
         assert_eq!(records.len(), 1);
 
         drop(layout);
@@ -590,11 +585,13 @@ mod tests {
         };
         let (entry_tx, entry_rx) = flume::bounded(2);
         let (append_ack, append_rx) = oneshot::channel();
-        writer.send(Action::Append {
-            rx: entry_rx,
-            callback: Box::new(|| {}),
-            ack: append_ack,
-        }).unwrap();
+        writer
+            .send(Action::Append {
+                rx: entry_rx,
+                callback: Box::new(|| {}),
+                ack: append_ack,
+            })
+            .unwrap();
         entry_tx
             .send(Some((replacement.index, serialize(&replacement)?)))
             .unwrap();
@@ -737,7 +734,10 @@ mod tests {
         let sync_failed = status.snapshot();
         assert_eq!(sync_failed.state, WalRuntimeState::Error);
         assert_eq!(
-            sync_failed.last_error.as_ref().map(|value| value.message.as_str()),
+            sync_failed
+                .last_error
+                .as_ref()
+                .map(|value| value.message.as_str()),
             Some("injected sync failure")
         );
 

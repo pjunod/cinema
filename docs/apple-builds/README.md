@@ -42,7 +42,7 @@ That reads `clients/apple/project.yml` and the merge target, picks the next
 number above both, and rewrites every place the number is allowed to appear:
 `project.yml`, the anchored `> Status:` lines in
 [`clients/apple/README.md`](../../clients/apple/README.md) and
-[`APPLE-CLIENT-PARITY.md`](../APPLE-CLIENT-PARITY.md), the viewers tile and the
+[`APPLE-CLIENT-PARITY.md`](../clients/APPLE-CLIENT-PARITY.md), the viewers tile and the
 `👤 Paul` TestFlight item in [`STATUS.html`](../STATUS.html), and the `Build:`
 line of the fragments this branch adds.
 

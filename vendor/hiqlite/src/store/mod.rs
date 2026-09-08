@@ -42,6 +42,7 @@ pub(crate) async fn start_raft_db(
     node_config: &NodeConfig,
     raft_config: Arc<RaftConfig>,
     do_reset_metadata: bool,
+    snapshot_transport: crate::LocalSnapshotTransportStatus,
 ) -> Result<StateRaftDB, Error> {
     // We always want to start stopped and set to `false` as soon as we found out,
     // that we are not pristine node and need cleanup.
@@ -82,6 +83,10 @@ pub(crate) async fn start_raft_db(
         heartbeat_interval: node_config.raft_config.heartbeat_interval,
         is_raft_stopped: is_raft_stopped.clone(),
         is_startup_finished: is_startup_finished.clone(),
+        snapshot_budgets: crate::network::raft_client::SnapshotRpcBudgets::from_node_config(
+            node_config,
+        ),
+        snapshot_transport: snapshot_transport.clone(),
     };
 
     let shutdown_handle = log_store.shutdown_handle();
@@ -95,6 +100,14 @@ pub(crate) async fn start_raft_db(
     )
     .await
     .expect("Raft create failed");
+    snapshot_transport.bind_sqlite_membership(raft.metrics());
+    let snapshot_executor = crate::network::snapshot_executor::start_snapshot_executor(
+        raft.clone(),
+        node_config.snapshot_chunk_timeout,
+        Duration::from_millis(node_config.raft_config.install_snapshot_timeout),
+        "sqlite",
+        snapshot_transport,
+    );
 
     init::init_pristine_node_1_db(
         &raft,
@@ -112,6 +125,7 @@ pub(crate) async fn start_raft_db(
 
     Ok(StateRaftDB {
         raft,
+        snapshot_executor,
         shutdown_handle,
         wal_status,
         sql_writer,
@@ -126,6 +140,7 @@ pub(crate) async fn start_raft_db(
 pub(crate) async fn start_raft_cache<C>(
     node_config: &NodeConfig,
     raft_config: Arc<RaftConfig>,
+    snapshot_transport: crate::LocalSnapshotTransportStatus,
 ) -> Result<StateRaftCache, Error>
 where
     C: Debug + CacheVariants,
@@ -149,6 +164,10 @@ where
         heartbeat_interval: node_config.raft_config.heartbeat_interval,
         is_startup_finished: is_startup_finished.clone(),
         is_raft_stopped: is_raft_stopped.clone(),
+        snapshot_budgets: crate::network::raft_client::SnapshotRpcBudgets::from_node_config(
+            node_config,
+        ),
+        snapshot_transport: snapshot_transport.clone(),
     };
 
     let tx_caches = state_machine_store.tx_caches.clone();
@@ -193,6 +212,13 @@ where
 
         (raft, None)
     };
+    let snapshot_executor = crate::network::snapshot_executor::start_snapshot_executor(
+        raft.clone(),
+        node_config.snapshot_chunk_timeout,
+        Duration::from_millis(node_config.raft_config.install_snapshot_timeout),
+        "cache",
+        snapshot_transport,
+    );
 
     init::init_pristine_node_1_cache(
         &raft,
@@ -211,6 +237,7 @@ where
 
     Ok(StateRaftCache {
         raft,
+        snapshot_executor,
         tx_caches,
         #[cfg(feature = "listen_notify")]
         tx_notify,

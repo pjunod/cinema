@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["fbc3c54e"]
+reason = "This commit only mapped the preceding M4 runtime correction and updated the live delivery status; it changed no runtime behavior."
+ignore = true

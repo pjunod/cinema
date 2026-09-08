@@ -81,6 +81,11 @@ private final class Harness: @unchecked Sendable {
     private var _requests: [ControlRequest] = []
     private var _clock = 0
     private var _snapshot = snapshot()
+    private var _intentGeneration = 0
+    private var _sourceRevision = 0
+    private var _available = true
+    private var _owner = PlaybackControlCaptureOwner(lifecycleId: clientId, attachmentGeneration: 1)
+    private var _afterExchange: (@Sendable () -> Void)?
     private var _outcomes: [Result<ControlResponse, Error>] = []
     private var _exchanges: [PlaybackControlReporter.Exchange] = []
     private var _deadlineFires = false
@@ -94,8 +99,18 @@ private final class Harness: @unchecked Sendable {
         lock.withLock { _sleeps.filter { $0.1 == .pacing }.map(\.0) }
     }
 
-    func setSnapshot(_ value: PlaybackControlSnapshot) { lock.withLock { _snapshot = value } }
+    func setSnapshot(_ value: PlaybackControlSnapshot) { lock.withLock { _snapshot = value; _sourceRevision += 1 } }
+    func setCaptureSource(_ value: PlaybackControlSnapshot, intent: Int, attachment: Int) {
+        lock.withLock {
+            _snapshot = value
+            _sourceRevision += 1
+            _intentGeneration = intent
+            _owner = PlaybackControlCaptureOwner(lifecycleId: clientId, attachmentGeneration: attachment)
+        }
+    }
     func advance(_ ms: Int) { lock.withLock { _clock += ms } }
+    func setAvailable(_ value: Bool) { lock.withLock { _available = value } }
+    func afterNextExchange(_ body: @escaping @Sendable () -> Void) { lock.withLock { _afterExchange = body } }
     func fireDeadlines() { lock.withLock { _deadlineFires = true } }
 
     /// Queue what the next exchanges answer, oldest first. Anything beyond
@@ -145,12 +160,21 @@ private final class Harness: @unchecked Sendable {
     }
 
     var now: @Sendable () -> Int { { [self] in lock.withLock { _clock } } }
-    var takeSnapshot: @Sendable () -> PlaybackControlSnapshot? {
-        { [self] in lock.withLock { _snapshot } }
+    var takeCapture: @Sendable () -> PlaybackControlCapture? {
+        { [self] in lock.withLock {
+            guard _available else { return nil }
+            return PlaybackControlCapture(snapshot: _snapshot, intentGeneration: _intentGeneration,
+                                   owner: _owner, sourceRevision: _sourceRevision)
+        } }
     }
     var onExchange: @Sendable (PlaybackControlReporter.Exchange) -> Void {
         { [self] exchange in
-            lock.withLock { _exchanges.append(exchange) }
+            let after = lock.withLock {
+                _exchanges.append(exchange)
+                let after = _afterExchange; _afterExchange = nil
+                return after
+            }
+            after?()
             gate.signal()
         }
     }
@@ -197,7 +221,8 @@ private func makeReporter(
     PlaybackControlReporter(
         bootstrap: value,
         clientInstanceId: clientId,
-        snapshot: harness.takeSnapshot,
+        owner: PlaybackControlCaptureOwner(lifecycleId: clientId, attachmentGeneration: 1),
+        capture: harness.takeCapture,
         send: harness.send,
         sleep: harness.sleep,
         now: harness.now,
@@ -208,6 +233,160 @@ private func makeReporter(
 // MARK: - Tests
 
 final class PlaybackControlReporterTests: XCTestCase {
+
+    func testNewIntentResumesOnlyAnIntentOwnedTerminalStop() async throws {
+        for transition in ["callback", "ordinary", "urgent", "explicit", "end", "protocol"] {
+            let harness = Harness()
+            var newer = snapshot()
+            newer.positionMs = 9_000; newer.bufferedThroughMs = 19_000
+            let next = newer
+            if transition == "callback" {
+                harness.afterNextExchange { harness.setCaptureSource(next, intent: 1, attachment: 1) }
+            }
+            if transition == "end" {
+                var ended = snapshot(); ended.demand = .end; harness.setSnapshot(ended)
+            }
+            if transition == "protocol" { harness.enqueue([.failure(ControlProtocolError(reason: "body"))]) }
+            else {
+                harness.enqueue([.success(ControlResponse(proto: PlaybackControl.protocolName,
+                    generation: bootstrap().generation, controlEpoch: 7, acceptedSequence: 1,
+                    action: ControlAction(type: "terminal", code: "unsupported", message: "A")))])
+            }
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            await reporter.start()
+            XCTAssertTrue(harness.awaitExchanges(1))
+            if transition != "callback" {
+                var stopped = await reporter.stopped
+                XCTAssertTrue(stopped)
+                await reporter.notify()
+                stopped = await reporter.stopped
+                XCTAssertTrue(stopped, "same intent cannot resume its own terminal stop")
+                if transition == "explicit" { await reporter.stop() }
+                harness.setCaptureSource(next, intent: 1, attachment: 1)
+                if transition == "ordinary" { await reporter.notify() }
+                else { await reporter.notifyUrgently() }
+            }
+            let permanent = ["explicit", "end", "protocol"].contains(transition)
+            if !permanent { XCTAssertTrue(harness.waitUntil { harness.requests.count >= 2 }, transition) }
+            let stopped = await reporter.stopped
+            XCTAssertEqual(stopped, permanent, transition)
+            await reporter.stop()
+            if permanent { XCTAssertEqual(harness.requests.count, 1, transition) }
+            else { XCTAssertEqual(harness.requests[1].positionMs, 9_000, transition) }
+        }
+    }
+
+    func testOwnerResetDuringClearedSourceWaitsForItsOwnAttachmentCapture() async throws {
+        for foreignOwner in [false, true] {
+            let harness = Harness()
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            let nextGeneration = "44444444-4444-4444-8444-444444444444"
+            harness.afterNextExchange { harness.setAvailable(false) }
+            harness.enqueue([.failure(ControlTransportError(status: 409, code: "owner_changed",
+                generation: nextGeneration, controlEpoch: 8))])
+            await reporter.start()
+            XCTAssertTrue(harness.awaitExchanges(1))
+            let stopped = await reporter.stopped
+            XCTAssertFalse(stopped, "a source publication gap is not a terminal protocol error")
+            XCTAssertEqual(harness.requests.count, 1)
+            var newer = snapshot()
+            newer.positionMs = 9_000; newer.bufferedThroughMs = 19_000
+            harness.setCaptureSource(newer, intent: 1, attachment: foreignOwner ? 2 : 1)
+            harness.setAvailable(true)
+            let floor = await reporter.notifyUrgently()
+            if foreignOwner {
+                XCTAssertNil(floor)
+                XCTAssertEqual(harness.requests.count, 1, "old reporter cannot borrow B's body")
+            } else {
+                XCTAssertNotNil(floor)
+                XCTAssertTrue(harness.waitUntil { harness.requests.count >= 2 })
+                XCTAssertEqual(harness.requests[1].generation, nextGeneration)
+                XCTAssertEqual(harness.requests[1].controlEpoch, 8)
+                XCTAssertEqual(harness.requests[1].sequence, 1)
+                XCTAssertEqual(harness.requests[1].positionMs, 9_000)
+            }
+            await reporter.stop()
+        }
+    }
+
+    func testReversedActorEnqueueUsesNewestSourceEvenWhenIntentIsUnchanged() async throws {
+        for sameIntent in [false, true] {
+            let harness = Harness()
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            let older = try XCTUnwrap(harness.takeCapture())
+            var newer = snapshot()
+            newer.positionMs = 9_000; newer.bufferedThroughMs = 19_000
+            harness.setCaptureSource(newer, intent: sameIntent ? 0 : 1, attachment: 1)
+            let captured = try XCTUnwrap(harness.takeCapture())
+            await reporter.notify(captured)
+            await reporter.notify(older) // delayed actor hop from the earlier source turn
+            await reporter.start()
+            XCTAssertTrue(harness.awaitExchanges(1))
+            await reporter.stop()
+            XCTAssertEqual(harness.requests.first?.positionMs, 9_000)
+            XCTAssertEqual(harness.exchanges.first?.capture, captured)
+        }
+    }
+
+    func testClearedSourceAndNewAttachmentCannotAdmitAnOldQueuedCapture() async throws {
+        for replaceOwner in [false, true] {
+            let harness = Harness()
+            let reporter = try XCTUnwrap(makeReporter(harness))
+            let captured = try XCTUnwrap(harness.takeCapture())
+            await reporter.notify(captured)
+            if replaceOwner { harness.setCaptureSource(snapshot(), intent: 0, attachment: 2) }
+            else { harness.setAvailable(false) }
+            await reporter.start()
+            for _ in 0..<10 { await Task.yield() }
+            let floor = await reporter.notifyUrgently(captured)
+            await reporter.stop()
+            XCTAssertNil(floor)
+            XCTAssertTrue(harness.requests.isEmpty, "neither queued work nor cadence may cross the source owner")
+        }
+    }
+
+    func testStartedRetryKeepsTheCapturedPayloadIntentAndAttachment() async throws {
+        let harness = Harness()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        let captured = try XCTUnwrap(harness.takeCapture())
+        var replacement = snapshot()
+        replacement.positionMs = 9_000
+        replacement.bufferedThroughMs = 19_000
+        let newer = replacement
+        harness.afterNextExchange { harness.setCaptureSource(newer, intent: 7, attachment: 1) }
+        harness.enqueue([.failure(ControlTransportError(status: 429, code: "control_rate_limited"))])
+        // Source changes after first failure, before the exact retry.
+        await reporter.notify(captured)
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(2))
+        await reporter.stop()
+        XCTAssertEqual(harness.requests[0], harness.requests[1])
+        XCTAssertEqual(harness.exchanges[0].capture, captured)
+        XCTAssertEqual(harness.exchanges[1].capture, captured)
+        XCTAssertNotEqual(captured.intentGeneration, harness.takeCapture()?.intentGeneration)
+    }
+
+    func testTerminalForOldAttachmentDoesNotStopTheReusedIntentNumber() async throws {
+        let harness = Harness()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        let captured = try XCTUnwrap(harness.takeCapture())
+        harness.afterNextExchange {
+            harness.setCaptureSource(snapshot(), intent: captured.intentGeneration, attachment: 2)
+        }
+        harness.enqueue([.success(ControlResponse(
+            proto: PlaybackControl.protocolName, generation: bootstrap().generation,
+            controlEpoch: 7, acceptedSequence: 1,
+            action: ControlAction(type: "terminal", code: "unsupported", message: "old attachment")
+        ))])
+        await reporter.notify(captured)
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped)
+        await reporter.stop()
+        XCTAssertEqual(harness.exchanges[0].capture, captured)
+        XCTAssertEqual(harness.requests.count, 1, "an old reporter cannot send the replacement's capture")
+    }
     // MARK: bootstrap acceptance
 
     func testAValidBootstrapIsAccepted() {
@@ -271,7 +450,8 @@ final class PlaybackControlReporterTests: XCTestCase {
             PlaybackControlReporter(
                 bootstrap: bootstrap(),
                 clientInstanceId: "not-a-uuid",
-                snapshot: harness.takeSnapshot,
+                owner: PlaybackControlCaptureOwner(lifecycleId: clientId, attachmentGeneration: 1),
+                capture: harness.takeCapture,
                 send: harness.send,
                 sleep: harness.sleep,
                 now: harness.now
@@ -311,7 +491,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(request.proto, PlaybackControl.protocolName)
         XCTAssertEqual(
             request.supportedActions,
-            ["hold", "retry_resource", "terminal"],
+            ["hold", "retry_resource", "terminal", "prepare_replacement"],
             "the server sends only actions this client has declared"
         )
         XCTAssertEqual(request.sequence, 1)
@@ -327,6 +507,20 @@ final class PlaybackControlReporterTests: XCTestCase {
         // the pump is free to have completed another exchange between the
         // gate signalling and this assertion, and on a fast machine it does.
         XCTAssertEqual(harness.exchanges.first?.response?.acceptedSequence, 1)
+    }
+
+    func testUrgentIntentReturnsTheNextRequestOrderingFloor() async throws {
+        let harness = Harness()
+        harness.holdExchanges()
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.waitUntil { harness.requests.count == 1 })
+
+        harness.setSnapshot(snapshot(position: 9_000, render: .seeking))
+        let floor = await reporter.notifyUrgently()
+
+        XCTAssertEqual(floor, 2)
+        await reporter.stop()
     }
 
     func testUnchangedCapabilitiesAreSentOnceAndAChangeResendsThem() async throws {
@@ -436,14 +630,196 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))
     }
 
+    /// The fixture is deliberately a type no server will ever send.
+    ///
+    /// It used to be the literal `prepare_replacement`, which was a correct
+    /// test right up to the moment this client learned to prepare — and then
+    /// would have gone on passing while its name and its intent became false,
+    /// because the wire tag for that action is `prepare`, not the name it is
+    /// declared under. The property being protected is that an unrecognised
+    /// action is fatal, and that property has to be tested with something
+    /// genuinely unrecognised.
     func testAnUndeclaredActionIsTerminalRatherThanObeyed() async throws {
         try await assertTerminal(response: ControlResponse(
             proto: PlaybackControl.protocolName,
             generation: bootstrap().generation,
             controlEpoch: 7,
             acceptedSequence: 1,
-            action: ControlAction(type: "prepare_replacement")
+            action: ControlAction(type: "conjure_replacement")
         ))
+    }
+
+    /// The declared name is not the tag, and neither spelling is optional.
+    func testTheDeclaredNameAndTheWireTagAreTheTwoDifferentStringsTheServerUses() {
+        XCTAssertEqual(PlaybackControl.prepareReplacementAction, "prepare_replacement")
+        XCTAssertEqual(PlaybackControl.prepareActionType, "prepare")
+        XCTAssertTrue(
+            PlaybackControl.supportedActions.contains(PlaybackControl.prepareReplacementAction),
+            "the server offers only actions named in supported_actions, by their declared name"
+        )
+        XCTAssertFalse(
+            PlaybackControl.supportedActions.contains(PlaybackControl.prepareActionType),
+            "declaring the tag instead of the name is never matched, and fails silently"
+        )
+    }
+
+    /// The `prepare` arm is fatal, and it is the higher-consequence half.
+    ///
+    /// An action *outside* the vocabulary was always fatal; this one is inside
+    /// it and would be acted on, so a half-parsed payload would build a second
+    /// decode pipeline against an address nothing validated. Each of these is
+    /// one field the server's own `prepared_payload_is_valid` requires.
+    func testAMalformedPrepareStopsTheReporterRatherThanBeingActedOn() async throws {
+        let sessionId = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d"
+        func prepare(_ mutate: (inout ControlAction) -> Void) -> ControlResponse {
+            var action = ControlAction(
+                type: PlaybackControl.prepareActionType,
+                actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+                sessionId: sessionId,
+                playlistUrl: "/api/v1/hls/\(sessionId)/index.m3u8",
+                mediaOriginMs: 0,
+                effectiveSelection: EffectiveSelection(
+                    qualityAuto: true, height: 1_080, audioTrack: nil, subtitleBurn: nil,
+                    audioOffsetMs: 0, codec: "server_selected", dynamicRange: "sdr"
+                )
+            )
+            mutate(&action)
+            return ControlResponse(
+                proto: PlaybackControl.protocolName,
+                generation: bootstrap().generation,
+                controlEpoch: 7,
+                acceptedSequence: 1,
+                action: action
+            )
+        }
+        try await assertTerminal(response: prepare { $0.actionId = nil })
+        try await assertTerminal(response: prepare { $0.effectiveSelection = nil })
+        try await assertTerminal(response: prepare { $0.mediaOriginMs = -1 })
+        try await assertTerminal(response: prepare {
+            $0.playlistUrl = "http://elsewhere.example/api/v1/hls/\(sessionId)/index.m3u8"
+        })
+    }
+
+    /// A whole `prepare` is accepted and reported, and nothing about it stops
+    /// the reporter — the failure mode of the arm above, in the other
+    /// direction.
+    func testAWholePrepareIsAcceptedAndReachesTheExchange() async throws {
+        let sessionId = "0a9b8c7d-6e5f-4a3b-8c2d-1e0f9a8b7c6d"
+        let harness = Harness()
+        harness.enqueue([.success(ControlResponse(
+            proto: PlaybackControl.protocolName,
+            generation: bootstrap().generation,
+            controlEpoch: 7,
+            acceptedSequence: 1,
+            action: ControlAction(
+                type: PlaybackControl.prepareActionType,
+                actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+                sessionId: sessionId,
+                playlistUrl: "/api/v1/hls/\(sessionId)/master.m3u8?native=1",
+                mediaOriginMs: 600_000,
+                effectiveSelection: EffectiveSelection(
+                    qualityAuto: false, height: 720, audioTrack: nil, subtitleBurn: nil,
+                    audioOffsetMs: 0, codec: "source", dynamicRange: nil
+                )
+            )
+        ))])
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped, "a whole prepare is not a protocol violation")
+        let action = try XCTUnwrap(harness.exchanges.first?.response?.action)
+        let prepared = try XCTUnwrap(PreparedReplacementAction(action))
+        XCTAssertEqual(prepared.mediaOriginMs, 600_000)
+        XCTAssertEqual(prepared.effectiveSelection.height, 720)
+        await reporter.stop()
+    }
+
+    /// §C12.6 and the stickiness rule, on the wire rather than in the ledger.
+    ///
+    /// The settlement rides the snapshot, so the only proof that matters is
+    /// the encoded body of the request the reporter actually sent — and that
+    /// it keeps riding every request until the exchange carrying it comes
+    /// back, because the reporter coalesces and a settlement it dropped would
+    /// hold the server's preparation slot for 330 seconds.
+    func testASettlementRidesTheEncodedRequestUntilItsExchangeReturns() async throws {
+        let harness = Harness()
+        let owed = ActionAcknowledgement(
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            state: .committed,
+            committedMediaOriginMs: 600_000,
+            firstFrameUnixMs: 1_788_000_000_000
+        )
+        var carrying = snapshot()
+        carrying.acknowledgement = owed
+        harness.setSnapshot(carrying)
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        let body = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: PlaybackControl.encoder.encode(try XCTUnwrap(harness.requests.first))
+            ) as? [String: Any]
+        )
+        let sent = try XCTUnwrap(body["acknowledgement"] as? [String: Any])
+        XCTAssertEqual(sent["action_id"] as? String, owed.actionId)
+        XCTAssertEqual(sent["state"] as? String, "committed")
+        XCTAssertEqual(sent["committed_media_origin_ms"] as? Int, 600_000)
+        XCTAssertEqual(sent["first_frame_unix_ms"] as? Int, 1_788_000_000_000)
+        XCTAssertNil(sent["buffered_through_ms"])
+
+        // A newer position replaces the snapshot; the settlement is still owed
+        // and still rides it.
+        var moved = snapshot(position: 9_000)
+        moved.acknowledgement = owed
+        harness.setSnapshot(moved)
+        await reporter.notify()
+        XCTAssertTrue(harness.waitUntil { harness.requests.contains { $0.positionMs == 9_000 } })
+        await reporter.stop()
+        // Every request, not just the next one: the pump's own cadence sends
+        // more than the test asks for, and a settlement that survived only the
+        // exchange it was attached to would still be lost by the one after it.
+        XCTAssertGreaterThan(harness.requests.count, 1)
+        for request in harness.requests {
+            XCTAssertEqual(
+                request.acknowledgement, owed,
+                "a position update replaces the snapshot; it must not replace the settlement"
+            )
+        }
+    }
+
+    /// The one body the server refuses outright, never built.
+    func testAnEndingExchangeNeverCarriesACommit() async throws {
+        let harness = Harness()
+        var ending = snapshot(demand: .end)
+        ending.acknowledgement = ActionAcknowledgement(
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01",
+            state: .committed,
+            committedMediaOriginMs: 0,
+            firstFrameUnixMs: 1_788_000_000_000
+        )
+        harness.setSnapshot(ending)
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        XCTAssertEqual(harness.requests.first?.demand, .end)
+        XCTAssertNil(
+            harness.requests.first?.acknowledgement,
+            "demand `end` may not carry `committed`, and the server answers 400"
+        )
+        // An abort may end the session in the same breath.
+        let harness2 = Harness()
+        var aborting = snapshot(demand: .end)
+        let aborted = ActionAcknowledgement(
+            actionId: "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e01", state: .aborted
+        )
+        aborting.acknowledgement = aborted
+        harness2.setSnapshot(aborting)
+        let reporter2 = try XCTUnwrap(makeReporter(harness2))
+        await reporter2.start()
+        XCTAssertTrue(harness2.awaitExchanges(1))
+        XCTAssertEqual(harness2.requests.first?.acknowledgement, aborted)
+        await reporter2.stop()
     }
 
     func testATerminalVerdictEndsReportingWithoutAProtocolError() async throws {
@@ -808,6 +1184,16 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertTrue(value.isValid)
     }
 
+    func testOriginalQualityHasAnExplicitWireRepresentation() throws {
+        var value = snapshot()
+        value.selection.quality = .original
+        XCTAssertTrue(value.isValid)
+        let json = try XCTUnwrap(
+            String(data: try PlaybackControl.encoder.encode(value.selection), encoding: .utf8)
+        )
+        XCTAssertTrue(json.contains("\"mode\":\"original\""))
+    }
+
     func testCapabilitiesMustNameAtLeastOneCodecAndRange() {
         var value = snapshot()
         value.capabilities.codecs = []
@@ -910,7 +1296,14 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertTrue(json.contains("\"render_state\":\"waiting\""))
         XCTAssertTrue(json.contains("\"demand\":\"hold\""))
         XCTAssertTrue(
-            json.contains("\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\"]")
+            json.contains(
+                "\"supported_actions\":[\"hold\",\"retry_resource\",\"terminal\","
+                    + "\"prepare_replacement\"]"
+            )
+        )
+        XCTAssertFalse(
+            json.contains("\"acknowledgement\""),
+            "a request that settles nothing omits the key rather than sending null"
         )
         XCTAssertFalse(json.contains("\"proto\""), "the wire name is protocol, not proto")
     }
@@ -936,12 +1329,22 @@ final class PlaybackControlReporterTests: XCTestCase {
          "control_epoch":7,"accepted_sequence":4,"server_time_unix_ms":1,
          "lease":{"state":"active","renew_after_ms":5000,"expires_at_unix_ms":2},
          "delivery":{"subtitle_readiness":"warming"},
-         "effective_selection":{},"action":{"type":"none"}}
+         "effective_selection":{"quality_auto":true,"height":1080,"audio_track":null,
+           "subtitle_burn":null,"audio_offset_ms":0,"codec":"server_selected",
+           "dynamic_range":"sdr"},
+         "action":{"type":"none"}}
         """
         let decoded = try PlaybackControl.decoder.decode(ControlResponse.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.acceptedSequence, 4)
         XCTAssertEqual(decoded.delivery?.subtitleReadiness, "warming")
         XCTAssertEqual(decoded.action.type, "none")
+        // The fixture used to carry `"effective_selection":{}` because nothing
+        // read it. It is a whole object on the wire and this client now
+        // compares it against a successor's, so an empty one is not a
+        // placeholder any more — it is a body the decoder rejects.
+        XCTAssertEqual(decoded.effectiveSelection?.height, 1_080)
+        XCTAssertEqual(decoded.effectiveSelection?.codec, "server_selected")
+        XCTAssertEqual(decoded.effectiveSelection?.qualityAuto, true)
     }
 
     func testSubtitleReadinessDecisionAndTransitionAreClosedAndSingleShot() {

@@ -3,9 +3,9 @@
     "Candidate theme token tables for scripts/contrast-check --from-json.",
     "NOT shipped. The shipped tables live in crates/plurxd/src/web/index.html.",
     "Sources, transcribed exactly:",
-    "  Amber, Giallo, Silver, Void, VHS  -- docs/UI-LAYOUTS-PLAN.md S4.2",
-    "  Paper, Tide                       -- docs/UI-LAYOUTS-REVIEW.md 'Reviewer additions'",
-    "  with the corrections from docs/UI-LAYOUTS-IMPLEMENTATION.md S3.4 applied",
+    "  Amber, Giallo, Silver, Void, VHS  -- docs/clients/UI-LAYOUTS-PLAN.md S4.2",
+    "  Paper, Tide                       -- docs/clients/UI-LAYOUTS-REVIEW.md 'Reviewer additions'",
+    "  with the corrections from docs/clients/UI-LAYOUTS-IMPLEMENTATION.md S3.4 applied",
     "  (marked CORRECTED below)."
   ],
 

@@ -24,6 +24,16 @@ pub(crate) const MAX_RELAY_BYTES: usize = 20 * 1024;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub(crate) const EXCHANGE_DEADLINE: Duration = Duration::from_secs(4);
 pub(crate) const NEXT_EXCHANGE_MS: u32 = 5_000;
+
+/// How long a `no_room` hold asks to be left alone.
+///
+/// Four ordinary exchanges. Node capacity is cleared by something outside the
+/// rendition a client is waiting on — another title completing, an eviction, a
+/// producer finishing — so a client that asks again at the ordinary cadence is
+/// spending exchanges on a node that has already said it has nothing to give.
+/// Long enough that the waiting is cheap; short enough that a viewer whose
+/// room appears is not left sitting on a stale answer.
+pub(crate) const NO_ROOM_REVISIT_MS: u32 = 4 * NEXT_EXCHANGE_MS;
 pub(crate) const ROLLING_LEASE_TIMEOUT_MS: u32 = 60_000;
 pub(crate) const ROLLING_EXPLICIT_LEASE_TIMEOUT_MS: u32 = 30_000;
 pub(crate) const VOD_LEASE_TIMEOUT_MS: u32 = 300_000;
@@ -167,6 +177,21 @@ pub(crate) struct ControlRequestV1 {
     /// Unknown names are ignored rather than refused: a client from a later
     /// version must be able to name actions this server has never heard of.
     pub supported_actions: Option<Vec<String>>,
+    /// The same envelope ordinary create carries.
+    ///
+    /// `selection` above says *what* is wanted and this says *which ask* that
+    /// is — which is the half no field on this request has ever carried. The
+    /// four counters that look like they might (`sequence`, `generation`,
+    /// `control_epoch`, and the client's own capture and attachment
+    /// generations) each move for something other than a change of media
+    /// intent, so none of them can order two asks.
+    ///
+    /// Optional so a client that has not been rebuilt keeps working exactly as
+    /// it does today. When it is present it must *agree* with `selection` —
+    /// see [`ControlRequestV1::validate`]. Carrying the ask twice is the price
+    /// of not breaking every deployed client at once; letting the two copies
+    /// disagree would be the price of a bug nobody could see.
+    pub intent: Option<plurx_core::playback::MediaIntentEnvelope>,
 }
 
 impl ControlRequestV1 {
@@ -271,6 +296,25 @@ impl ControlRequestV1 {
                 return Err("supported_actions");
             }
         }
+        if let Some(intent) = &self.intent {
+            if intent.validate().is_err() {
+                return Err("intent");
+            }
+            // The ask is on this request twice, in two shapes, and exactly one
+            // of them can be right. Refusing the disagreement is the only
+            // handling that does not silently pick a winner: taking
+            // `selection` would make the envelope decorative, and taking the
+            // envelope would let a client change the recipe through a field
+            // this server's own admission path does not read yet.
+            //
+            // It is also the only reading a client can act on. A 400 naming
+            // `intent` says "your two copies disagree, fix the one that is
+            // wrong"; serving one of them says nothing at all until a viewer
+            // notices the wrong track playing.
+            if intent.selection != self.selection.desired() {
+                return Err("intent.selection");
+            }
+        }
         Ok(())
     }
 
@@ -326,6 +370,54 @@ pub(crate) struct ClientSelection {
 }
 
 impl ClientSelection {
+    /// The normalized policy this wire selection expresses.
+    ///
+    /// Total by construction, which the wire type is not: the subtitle track
+    /// moves inside the mode that uses it, so the two pairings `validate`
+    /// rejects at runtime — off with a track, and a rendering mode without one
+    /// — cannot survive the conversion as values. A validated selection always
+    /// converts faithfully; an unvalidated one converts to the nearest legal
+    /// reading rather than panicking, because a decision this feeds must not be
+    /// able to take the process down.
+    pub(crate) fn desired(&self) -> plurx_core::playback::DesiredSelection {
+        use plurx_core::playback::{
+            DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,
+        };
+        DesiredSelection {
+            quality: match self.quality {
+                QualitySelection::Auto => DesiredQuality::Auto,
+                QualitySelection::Original => DesiredQuality::Original,
+                QualitySelection::Manual { height } => DesiredQuality::Manual { height },
+            },
+            codec: match self.codec {
+                CodecPolicy::Auto => DesiredCodec::Auto,
+                CodecPolicy::H264 => DesiredCodec::H264,
+                CodecPolicy::Hevc => DesiredCodec::Hevc,
+                CodecPolicy::Av1 => DesiredCodec::Av1,
+            },
+            dynamic_range: match self.dynamic_range {
+                DynamicRangePolicy::Auto => DesiredDynamicRange::Auto,
+                DynamicRangePolicy::DolbyVision => DesiredDynamicRange::DolbyVision,
+                DynamicRangePolicy::Hdr10 => DesiredDynamicRange::Hdr10,
+                DynamicRangePolicy::Hlg => DesiredDynamicRange::Hlg,
+                DynamicRangePolicy::Sdr => DesiredDynamicRange::Sdr,
+            },
+            audio_track: self.audio_track,
+            audio_offset_ms: self.audio_offset_ms,
+            subtitles: match (self.subtitle.mode, self.subtitle.track) {
+                (SubtitleMode::Off, _) => DesiredSubtitles::Off,
+                (SubtitleMode::Native, Some(track)) => DesiredSubtitles::Native { track },
+                (SubtitleMode::Overlay, Some(track)) => DesiredSubtitles::Overlay { track },
+                (SubtitleMode::Burn, Some(track)) => DesiredSubtitles::Burn { track },
+                // A rendering mode with no track is the shape `validate`
+                // refuses, so this arm is unreachable for anything accepted.
+                // Reading it as "no subtitles" is the closest legal answer and
+                // the only one that cannot mislabel a track the viewer chose.
+                (_, None) => DesiredSubtitles::Off,
+            },
+        }
+    }
+
     fn validate(&self) -> Result<(), &'static str> {
         if let QualitySelection::Manual { height } = self.quality {
             if !(crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(&height) {
@@ -350,7 +442,13 @@ impl ClientSelection {
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum QualitySelection {
     Auto,
-    Manual { height: i64 },
+    /// Preserve the source representation and never grant the server
+    /// automatic rung authority. Kept distinct from a manual height because
+    /// sources without probed dimensions still have an explicit Original.
+    Original,
+    Manual {
+        height: i64,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -493,6 +591,40 @@ pub(crate) struct ActionAcknowledgement {
     pub action_id: String,
     pub state: AcknowledgementState,
     pub buffered_through_ms: Option<i64>,
+    /// The source position the client's successor timeline actually starts
+    /// at, echoed back from the offer it is committing to.
+    ///
+    /// This is what a commit is proof *of*. `action_id` says which offer the
+    /// client is answering; this says the client built the thing that offer
+    /// described. Between `Prepare` and `Committed` the server's own intent
+    /// can move — a seek, a quality change, a new recipe — and an
+    /// acknowledgement that carries only an id cannot tell a client that
+    /// committed to the current offer from one that committed to a stale one
+    /// and is about to present media nobody asked for.
+    ///
+    /// Required on `Committed` and compared against the offer in
+    /// [`Self::bound_preparation_acknowledgement`]. A commit the server
+    /// cannot contradict would not be evidence, so this field is only worth
+    /// carrying because the mismatch is refused.
+    ///
+    /// It closes a narrower gap than it first appears. A changed *ask* —
+    /// quality, codec, dynamic range, subtitles — is already caught at commit
+    /// by `desired_digest`. What that digest does not cover is position, so a
+    /// successor built for one point in the film and committed after the
+    /// viewer seeked elsewhere was previously indistinguishable from a
+    /// correct commit. That is the case this closes.
+    pub committed_media_origin_ms: Option<i64>,
+    /// When the client's first frame appeared.
+    ///
+    /// Still required on `Committed`, and deliberately not relaxed. It is not
+    /// *proof* — a wall clock from an unsynchronised device establishes
+    /// neither ownership nor freshness nor that what was displayed is what
+    /// was offered — but it is a measurement, frozen against a corrected
+    /// hardware instrument (`docs/playback-control/M6-CALLER-HANDOFF.md`), and dropping it
+    /// would delete the only signal that instrument produces.
+    ///
+    /// So the change here is additive: `committed_media_origin_ms` is the
+    /// evidence, this stays the measurement, and a commit carries both.
     pub first_frame_unix_ms: Option<i64>,
 }
 
@@ -510,12 +642,21 @@ impl ActionAcknowledgement {
         if self.first_frame_unix_ms.is_some_and(|value| value <= 0) {
             return Err("acknowledgement.first_frame_unix_ms");
         }
+        if self
+            .committed_media_origin_ms
+            .is_some_and(|value| !(0..=MAX_MEDIA_MILLIS).contains(&value))
+        {
+            return Err("acknowledgement.committed_media_origin_ms");
+        }
         match self.state {
             AcknowledgementState::BufferReady if self.buffered_through_ms.is_none() => {
                 Err("acknowledgement.buffered_through_ms")
             }
             AcknowledgementState::Committed if self.first_frame_unix_ms.is_none() => {
                 Err("acknowledgement.first_frame_unix_ms")
+            }
+            AcknowledgementState::Committed if self.committed_media_origin_ms.is_none() => {
+                Err("acknowledgement.committed_media_origin_ms")
             }
             _ => Ok(()),
         }
@@ -596,11 +737,24 @@ impl ControlResponseV1 {
                     "demand" | "time" | "bytes" | "global" | "ahead" | "working_set" | "no_room"
                 )
             })
-            && self
-                .delivery
-                .producer_decision
-                .as_deref()
-                .is_none_or(|value| ProducerDecisionReason::from_status(value).is_some())
+            // Shape, not membership. A relaying node runs its *own* compiled
+            // vocabulary, so during a rolling deploy an ingress on the older
+            // build would reject an owner's newer reason outright — the whole
+            // exchange becomes a 503 `control_unavailable` with a 500 ms
+            // retry, and that session polls ten times faster than its own
+            // cadence for the length of the deploy, learning nothing. An
+            // unrecognised name is relayed and left for the client to ignore,
+            // exactly as the clients already ignore hold reasons they do not
+            // know. `action_is_believable` keeps the exact-name comparison,
+            // because an action must match the decision it claims to rest on,
+            // and it fails closed on a name this node cannot resolve.
+            && self.delivery.producer_decision.as_deref().is_none_or(|value| {
+                !value.is_empty()
+                    && value.len() <= 48
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            })
             && self.delivery.owner_epoch == self.control_epoch
             && self.delivery.owner_node_hash.starts_with("n-")
             && self.delivery.owner_node_hash.len() == 18
@@ -626,7 +780,7 @@ impl ControlResponseV1 {
         declared
             && match &self.action {
                 ControlAction::None => true,
-                ControlAction::Hold { reason } => {
+                ControlAction::Hold { reason, .. } => {
                     self.delivery.hold_reason.as_deref() == Some(reason.as_delivery_str())
                 }
                 // Both verdicts must agree with the decision the same response
@@ -707,7 +861,7 @@ pub(crate) struct DeliveryView {
     pub hold_reason: Option<String>,
     /// Why the producer stopped, when it stopped for a reason this server has
     /// named. `producer_state` says only `failed`; this says which of the
-    /// sixteen decisions that was, and therefore whether trying again could
+    /// twenty-one decisions that was, and therefore whether trying again could
     /// ever work. Optional: an older peer relaying a response has no such
     /// field, and absence means "not classified here", never "healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -784,6 +938,42 @@ pub(crate) fn subtitle_readiness_value(
     )
 }
 
+/// How much of the client's buffer is actually ahead of where it is playing.
+///
+/// `buffered_through_ms` on its own does not say that. A client reports the
+/// end of a buffered region; whether that region *contains* the playhead is a
+/// separate fact, and `buffered_from_ms` is the one that carries it. Reading
+/// only the end credits a client with runway measured across a hole it cannot
+/// play through.
+///
+/// The case this exists for is an ordinary seek. The anchor becomes the seek
+/// target, and the region the client is describing is the one around where it
+/// *was* — so the difference between the two is not buffer, it is the gap the
+/// client is seeking across. Crediting it as runway tells the server the
+/// viewer is comfortable at exactly the moment they have nothing, and the
+/// server holds production on the strength of it.
+///
+/// A region that starts at or before the anchor is contiguous from the
+/// playhead and its end is the honest runway — which is every steady-state
+/// exchange, so nothing changes for the common case.
+///
+/// An absent `buffered_from_ms` means no contiguity evidence, not a hole. That
+/// is the shape a client sends when it could not identify a region containing
+/// the playhead, and it is also the shape every client that predates the field
+/// sends. Both keep the old reading rather than being told they have nothing:
+/// inventing a starvation signal from a missing field would stall production
+/// for clients that are fine.
+fn contiguous_runway_ms(request: &ControlRequestV1, buffer_anchor_ms: i64) -> i64 {
+    let start = request.buffered_from_ms.unwrap_or(buffer_anchor_ms);
+    if start > buffer_anchor_ms {
+        return 0;
+    }
+    request
+        .buffered_through_ms
+        .saturating_sub(buffer_anchor_ms)
+        .max(0)
+}
+
 impl DeliveryView {
     pub(crate) fn from_status(
         status: &HlsSessionInfo,
@@ -794,10 +984,7 @@ impl DeliveryView {
         subtitle_readiness: Option<String>,
     ) -> Self {
         let buffer_anchor_ms = request.seek_target_ms.unwrap_or(request.position_ms);
-        let client_runway_ms = request
-            .buffered_through_ms
-            .saturating_sub(buffer_anchor_ms)
-            .max(0);
+        let client_runway_ms = contiguous_runway_ms(request, buffer_anchor_ms);
         match status {
             HlsSessionInfo::Live(info) => Self {
                 presentation: info.presentation.to_owned(),
@@ -840,15 +1027,25 @@ impl DeliveryView {
                 // deadlocked.
                 produced_through_ms: info.ready_ahead_end_ms,
                 fetched_through_ms: info.fetched_end_ms,
-                delivered_bps: None,
-                delivered_idle_ms: None,
+                // Measured at the VOD serving boundary over monotonic time,
+                // like rolling delivery. `None` until a window has closed, and
+                // never substituted from the encoder's configured target.
+                //
+                // This is what made preparation unreachable on the primary
+                // presentation: `headroom_refusal` needs a delivered rate, and
+                // a `None` here refused every VOD exchange with
+                // `throughput_unreported` — which is most of them.
+                delivered_bps: info.delivered_bps,
+                delivered_idle_ms: Some(info.delivered_idle_ms),
                 recent_producer_speed: None,
                 client_runway_ms,
                 admitted: Some(info.admitted),
-                // VOD's failure is still a prose cause rather than a bounded
-                // decision, so there is nothing honest to put here yet. It is
-                // absent rather than guessed.
-                producer_decision: None,
+                // Classified at the rendition, in the same bounded vocabulary
+                // the rolling arm publishes, so `resolve_action` turns it into
+                // the `terminal` or `retry_resource` the clients already
+                // handle. Absent still means "not classified here", never
+                // "healthy": a VOD session that has not failed has no decision.
+                producer_decision: info.producer_decision.map(str::to_owned),
                 hold_reason: info.producer_hold.map(str::to_owned),
                 subtitle_readiness,
                 owner_node_hash: node_hash(owner_node_id),
@@ -1002,10 +1199,11 @@ pub(crate) fn candidate_request(
         (SessionKind::Transcode { .. }, _) => {
             candidate.kind = SessionKind::Transcode { height };
         }
-        // Auto leaves a copy copying, and a source-height ask is a copy's own
+        // Auto and Original leave a copy copying, and a source-height ask is a copy's own
         // delivery asked for by name. Both leave `kind` exactly as it was,
         // which is what carries `convert_dolby_vision` through.
         (SessionKind::Copy { .. }, QualitySelection::Auto) => {}
+        (SessionKind::Copy { .. }, QualitySelection::Original) => {}
         (SessionKind::Copy { .. }, QualitySelection::Manual { height: asked })
             if Some(asked) == source_height => {}
         (SessionKind::Copy { .. }, QualitySelection::Manual { .. }) => {
@@ -1072,14 +1270,18 @@ pub(crate) enum FallbackReason {
     /// from `ThroughputInsufficient` because the two are opposite findings
     /// that a single `throughput_unproven` would report as one number.
     ///
-    /// This is the common case and will be for some time: both native clients
-    /// hardcode `observed_download_bps` null
-    /// (`PlayerController.swift`, `Controller.kt` — only the web client fills
-    /// it, from `hls.bandwidthEstimate`), and `DeliveryView::from_status`
-    /// leaves `delivered_bps` `None` on every VOD session, which is most of
-    /// them. A counter that booked all of that as "the link was too tight"
-    /// would read as evidence for the throughput rule while measuring only its
-    /// own missing inputs.
+    /// This was the common case and is no longer, which matters because the
+    /// sentence it replaces was read by a client author as a reason to
+    /// disable the capability on VOD. Both halves have since been filled: all
+    /// three clients report `observed_download_bps` — web from
+    /// `hls.bandwidthEstimate`, Apple from
+    /// `AVPlayerItem.accessLog().observedBitrate`, Android from its own
+    /// observed rate — and `DeliveryView::from_status` no longer leaves
+    /// `delivered_bps` `None` on VOD, which is what the arm above says in as
+    /// many words. What is left is the honest reading: a window that has not
+    /// closed yet, and a client that cannot measure. A counter that booked
+    /// those as "the link was too tight" would read as evidence for the
+    /// throughput rule while measuring only its own missing inputs.
     ThroughputUnreported,
     /// The link *was* measured and does not carry a second pipeline. M6
     /// handoff §8: dual preparation doubles network demand and the constrained
@@ -1351,7 +1553,7 @@ const _: () = assert!(
 /// admissions, zero predecessor and post-commit stalls, on a 40 Mbit/s link —
 /// 2.20× the predecessor's 18.183 Mbit/s, above the floor
 /// `headroom_refusal` enforces. See
-/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/M6-AXIS-CASE-HANDOFF.md).
+/// [`M6-AXIS-CASE-HANDOFF.md`](../../../docs/playback-control/M6-AXIS-CASE-HANDOFF.md).
 ///
 /// **Why this list and not a rule.** Shadow mode measured that a pure
 /// resolution change does not occur on a real library at all — the top rung
@@ -1579,6 +1781,21 @@ pub(crate) enum HoldReason {
 }
 
 impl HoldReason {
+    /// How long before this hold is worth asking about again.
+    ///
+    /// Every reason but one lifts on its own as the client consumes what it
+    /// already has, so the ordinary exchange cadence is exactly right: the
+    /// answer changes because the client changed it. `NoRoom` is the exception
+    /// and the reason this method exists — nothing the client does clears it,
+    /// so asking at the same rate is work spent on a node that is already out
+    /// of room, and the honest interval is longer.
+    pub(crate) fn revisit_after_ms(self) -> u32 {
+        match self {
+            Self::NoRoom => NO_ROOM_REVISIT_MS,
+            _ => NEXT_EXCHANGE_MS,
+        }
+    }
+
     pub(crate) fn from_delivery(reason: &str) -> Option<Self> {
         Some(match reason {
             "demand" => Self::Demand,
@@ -1624,6 +1841,25 @@ pub(crate) enum ControlAction {
     /// lifted must not be replayed as though it were still in force.
     Hold {
         reason: HoldReason,
+        /// When the server expects to be worth asking again.
+        ///
+        /// A hold without one is an instruction to wait with no end, and
+        /// `no_room` made that concrete: node capacity is cleared by something
+        /// outside this rendition, so a client told to hold could sit
+        /// indefinitely with nothing to act on and no idea whether the server
+        /// still knew about it.
+        ///
+        /// This is a revisit contract and deliberately not an expiry. The hold
+        /// does not become a failure when the interval passes; the client asks
+        /// again, exactly as it would have, and the server answers with what is
+        /// true then. Escalating to a terminal instead would tell a client to
+        /// tear down a player over a server working precisely as designed —
+        /// the response this action exists to prevent.
+        ///
+        /// Relative rather than absolute, because the two clocks are not
+        /// synchronised and an absolute instant from the server is a value the
+        /// client cannot safely compare against its own.
+        revisit_after_ms: u32,
     },
     /// Production stopped for a reason that trying again cannot change.
     ///
@@ -1641,9 +1877,9 @@ pub(crate) enum ControlAction {
     },
     /// Production stopped for a reason that may not recur.
     ///
-    /// Thirteen of the sixteen producer decisions are timing, process,
-    /// executor or recovery facts, and this is what a client is told about
-    /// every one of them. The client should try again on the server's own
+    /// Seventeen of the twenty-one producer decisions are timing, process,
+    /// plan, executor or recovery facts, and this is what a client is told
+    /// about every one of them. The client should try again on the server's own
     /// cadence rather than deciding for itself how hard to retry, which is
     /// what every client does today.
     RetryResource {
@@ -1829,7 +2065,7 @@ pub(crate) fn action_metrics(
     transaction_suppressed: bool,
 ) -> ActionMetrics {
     match action {
-        ControlAction::Hold { reason } => ActionMetrics {
+        ControlAction::Hold { reason, .. } => ActionMetrics {
             action: ActionKind::Hold,
             hold_reason: Some(*reason),
             suppressed: false,
@@ -1983,7 +2219,10 @@ pub(crate) fn resolve_action(
         .hold_reason
         .as_deref()
         .and_then(HoldReason::from_delivery)
-        .map_or(ControlAction::None, |reason| ControlAction::Hold { reason })
+        .map_or(ControlAction::None, |reason| ControlAction::Hold {
+            reason,
+            revisit_after_ms: reason.revisit_after_ms(),
+        })
 }
 
 /// A bounded explanation for a terminal verdict.
@@ -2000,6 +2239,9 @@ fn terminal_message(decision: ProducerDecisionReason) -> String {
         }
         ProducerDecisionReason::SourceDecodeFailed => {
             "this source did not decode, and trying again will not change that"
+        }
+        ProducerDecisionReason::EngineChanged => {
+            "this server must restart before it can serve this title again"
         }
         // Only permanent decisions reach here today; a future permanent
         // variant without its own sentence gets the reason and no invention.
@@ -2480,12 +2722,14 @@ pub(crate) trait PreparationGate: Send + Sync {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        desired_digest: Option<String>,
     ) -> GateAnswer<'a> {
         self.stage_preparation_for_owner(
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
             1,
+            desired_digest,
         )
     }
 
@@ -2500,6 +2744,7 @@ pub(crate) trait PreparationGate: Send + Sync {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> GateAnswer<'a>;
 
     #[cfg(test)]
@@ -2559,6 +2804,7 @@ impl PreparationGate for RollingControlHandle {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> GateAnswer<'a> {
         Box::pin(RollingControlHandle::stage_preparation_for_owner(
             self,
@@ -2566,6 +2812,7 @@ impl PreparationGate for RollingControlHandle {
             predecessor_incarnation_id,
             deadline_ms,
             expected_owner_epoch,
+            desired_digest,
         ))
     }
 
@@ -2937,8 +3184,37 @@ pub(crate) struct SelectionObservation {
     /// The selection differs from the last accepted one. `false` on a replay
     /// and on the first accepted exchange.
     pub changed: bool,
+    /// A preparation candidate should be evaluated for the current ask.
+    ///
+    /// Not the same question as `changed`, and the difference is the point.
+    /// `changed` asks whether this packet differs from the last one, so an ask
+    /// that arrives while the preparation slot is busy is true exactly once
+    /// and then never again — which is how the successor a viewer actually
+    /// wants gets dropped and never rebuilt. This asks whether the *current*
+    /// ask has been dispatched yet, which stays true across every exchange
+    /// until it has been.
+    pub dispatch_preparation: bool,
+    /// The ask this exchange carries, and whether it still needs persisting.
+    ///
+    /// `Some` only while the durable row does not yet name this ask. The
+    /// handler must write it *before* reporting the exchange accepted — a
+    /// client told its new selection was taken, with nothing durable saying
+    /// so, is exactly the window §1 exists to close — and must call
+    /// [`ControlState::record_desired_persisted`] once the write has landed,
+    /// or every later exchange pays for a row that is already correct.
+    pub persist_desired: Option<PersistDesired>,
     /// The document the **session** is holding, not this exchange's.
     pub capabilities: Option<DynamicCapabilities>,
+}
+
+/// The ask to write, in the two forms the durable row wants.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PersistDesired {
+    pub digest: String,
+    /// Written beside the digest so it is checkable — see the store's own
+    /// note on why a hash whose input is not recoverable is a value nobody
+    /// can verify.
+    pub canonical_form: String,
 }
 
 #[derive(Debug)]
@@ -2974,6 +3250,33 @@ pub(crate) struct ControlState {
     /// sequence space restarts, and a selection from before the advance is not
     /// something this client has since departed from.
     last_selection: Option<ClientSelection>,
+    /// The ask the durable row is known to name.
+    ///
+    /// Separate from `dispatched_digest` because they answer different
+    /// questions about different consumers: one is "has a candidate been built
+    /// for this", the other "does the store know about this". A single flag
+    /// would tie a durable write to a scheduling decision, so a candidate the
+    /// slot refused would suppress the write, and a write that failed would
+    /// suppress the candidate.
+    persisted_digest: Option<String>,
+    /// The ask a preparation candidate was last dispatched for.
+    ///
+    /// Together with `desired_digest` this is the whole of retain-and-coalesce.
+    /// Retention is the two disagreeing: an ask that has not been dispatched
+    /// stays undispatched across exchanges rather than being forgotten after
+    /// the one packet that introduced it. Coalescing is free, because only the
+    /// latest ask is ever in `desired_digest` — three quality changes while the
+    /// slot is busy leave one candidate to build, not three.
+    dispatched_digest: Option<String>,
+    /// The ask acceptance has seen, which is not always the ask `observe` has
+    /// recorded.
+    ///
+    /// Advanced inside acceptance, before any decision acceptance takes, so a
+    /// request carrying a new selection alongside an acknowledgement for the
+    /// successor staged under the old one is judged against the new ask. It is
+    /// the digest rather than the selection because the only question asked of
+    /// it is whether two asks are the same one.
+    desired_digest: Option<String>,
     /// The capability document this session was told, on any exchange.
     ///
     /// Here for the same reason as `last_selection`: the rolling actor has its
@@ -3026,6 +3329,9 @@ impl Default for ControlState {
             prior_preparation_directive: None,
             prepared_action: None,
             last_selection: None,
+            desired_digest: None,
+            dispatched_digest: None,
+            persisted_digest: None,
             last_capabilities: None,
             preparation: PreparationSlot::Empty,
         }
@@ -3039,6 +3345,16 @@ pub(crate) struct ControlAcceptance {
     acknowledgement: Option<ActionAcknowledgement>,
     now_unix_ms: Option<i64>,
     request_fingerprint: Option<String>,
+    /// What this exchange asks for, carried into acceptance rather than read
+    /// after it.
+    ///
+    /// `observe` runs after `accept` in both engines, so the desired state it
+    /// records is always one exchange behind any decision `accept` takes. That
+    /// is fine for every decision except one: a single request may carry a new
+    /// selection *and* an acknowledgement committing the successor staged for
+    /// the previous one, and acceptance must see the new ask first or it
+    /// commits media the viewer has already moved off.
+    desired_digest: Option<String>,
 }
 
 impl ControlAcceptance {
@@ -3056,6 +3372,7 @@ impl ControlAcceptance {
             acknowledgement: None,
             now_unix_ms: None,
             request_fingerprint: None,
+            desired_digest: None,
         }
     }
 
@@ -3064,6 +3381,7 @@ impl ControlAcceptance {
         prepared_successor: &PreparedSuccessorObservation,
         acknowledgement: Option<&ActionAcknowledgement>,
         request_fingerprint: Option<&str>,
+        selection: &ClientSelection,
     ) -> Self {
         Self {
             platform,
@@ -3071,6 +3389,7 @@ impl ControlAcceptance {
             acknowledgement: acknowledgement.cloned(),
             now_unix_ms: None,
             request_fingerprint: request_fingerprint.map(str::to_owned),
+            desired_digest: Some(selection.desired().digest()),
         }
     }
 
@@ -3082,6 +3401,7 @@ impl ControlAcceptance {
             acknowledgement: None,
             now_unix_ms: None,
             request_fingerprint: None,
+            desired_digest: None,
         }
     }
 
@@ -3100,6 +3420,12 @@ impl ControlAcceptance {
     #[cfg(test)]
     fn fingerprinted(mut self, fingerprint: &str) -> Self {
         self.request_fingerprint = Some(fingerprint.to_owned());
+        self
+    }
+
+    #[cfg(test)]
+    fn asking(mut self, selection: &ClientSelection) -> Self {
+        self.desired_digest = Some(selection.desired().digest());
         self
     }
 }
@@ -3162,6 +3488,7 @@ impl ControlState {
             platform,
             prepared_successor,
             acknowledgement,
+            desired_digest,
             now_unix_ms,
             request_fingerprint,
         } = acceptance;
@@ -3222,6 +3549,14 @@ impl ControlState {
             // action identity must survive too. Clearing only the binding
             // would let the same staged incarnation mint a second action id.
             self.last_selection = None;
+            self.desired_digest = None;
+            self.dispatched_digest = None;
+            // Not cleared on an epoch rollover, deliberately. A new owner
+            // inherits the same viewer's ask; forgetting it here would make
+            // every takeover rewrite a row that is already correct, and the
+            // row is keyed by playback rather than by owner precisely so it
+            // survives one.
+
             self.last_capabilities = None;
             inherited.map(|staged_incarnation_id| PreparationDirective::Abort {
                 staged_incarnation_id,
@@ -3286,6 +3621,27 @@ impl ControlState {
                         .max(1),
                 ));
             }
+        }
+        // The ask lands before anything decides on it, and only for an
+        // exchange that has survived every fence above.
+        //
+        // This is the ordering §1 names. Both engines call `observe` after
+        // `accept`, so the desired state `observe` records is always one
+        // exchange behind — harmless for every decision except the one
+        // immediately below. A single request may carry a new selection *and*
+        // an acknowledgement committing the successor staged for the previous
+        // one, and reading the ask afterwards means that commit is decided
+        // against a selection the viewer has already replaced. Extending
+        // `observe` cannot fix it: by the time `observe` runs the directive
+        // exists.
+        //
+        // Everything that returns earlier deliberately does not reach here. A
+        // replay is the same exchange arriving twice and advanced the ask the
+        // first time or not at all; a rate-limited, out-of-sequence or
+        // wrong-instance packet was never accepted, and a rejected packet must
+        // not be able to move what the viewer is understood to want.
+        if let Some(desired_digest) = desired_digest {
+            self.desired_digest = Some(desired_digest);
         }
         let terminal_directive = rollover_preparation.or_else(|| {
             self.record_terminal_preparation_acknowledgement(acknowledgement.as_ref(), now_unix_ms)
@@ -3374,6 +3730,26 @@ impl ControlState {
         if acknowledgement.action_id != *action_id {
             return None;
         }
+        // A commit must name the origin it was offered.
+        //
+        // `action_id` says which offer is being answered; it does not say the
+        // client built what that offer described. The ask is already compared
+        // at commit through `desired_digest`, which covers quality, codec,
+        // dynamic range and subtitles — but not position. So a successor
+        // prepared for one point in the film and acknowledged after the viewer
+        // seeked somewhere else arrived indistinguishable from a correct
+        // commit, and publishing it would present media nobody is waiting for
+        // using the client's own acknowledgement as the authority.
+        //
+        // Only `Committed` is checked. The earlier states report progress
+        // toward a successor that is not being published yet, and demanding an
+        // origin from a client that has not built one would make ordinary
+        // progress unreportable.
+        if acknowledgement.state == AcknowledgementState::Committed
+            && acknowledgement.committed_media_origin_ms != Some(binding.successor.media_origin_ms)
+        {
+            return None;
+        }
         let staged_incarnation_id = binding.successor.staged_incarnation_id.clone();
         Some(staged_incarnation_id)
     }
@@ -3449,6 +3825,23 @@ impl ControlState {
         }
     }
 
+    /// The ask acceptance has recorded.
+    ///
+    /// Test-only, and deliberately so. Nothing outside acceptance reads this
+    /// yet — `reserve_preparation_commit` is the only consumer and runs inside
+    /// the same call that writes it — so the placement of the write relative to
+    /// the fences has no consequence a test can observe from behaviour alone.
+    /// It will: the durable desired-ownership row §1 asks for is read outside
+    /// acceptance, and at that point a rejected packet that had advanced this
+    /// would be a rejected packet that had changed what the system believes the
+    /// viewer wants. The accessor exists so that property can be pinned now,
+    /// while the placement is being established, rather than after something
+    /// depends on it.
+    #[cfg(test)]
+    pub(crate) fn desired_digest_for_test(&self) -> Option<&str> {
+        self.desired_digest.as_deref()
+    }
+
     pub(crate) fn preparation_directive(&self) -> Option<PreparationDirective> {
         self.prior_preparation_directive.clone()
     }
@@ -3474,23 +3867,96 @@ impl ControlState {
     /// Both answers together, because a consumer that wants to know what the
     /// viewer changed also wants to know what the device can do about it —
     /// and reading either off the live exchange is wrong for the same reason.
+    /// Record what the viewer is asking for, and say whether it changed.
+    ///
+    /// "Changed" is answered on the normalized selection rather than on the
+    /// wire struct. Today the two agree exactly — the conversion is total and
+    /// injective, and a test pins that — so this changes no decision. What it
+    /// changes is what the word means: the comparison is now against a policy
+    /// that preserves Auto, Original and Manual as different asks, rather than
+    /// against a transport-shaped struct that happens not to carry transport
+    /// yet. Everything §1 needs to compare durably compares *this*.
     pub(crate) fn observe(
         &mut self,
         selection: &ClientSelection,
         capabilities: Option<&DynamicCapabilities>,
     ) -> SelectionObservation {
+        let desired = selection.desired();
         let changed = self
             .last_selection
             .as_ref()
-            .is_some_and(|previous| previous != selection);
+            .is_some_and(|previous| previous.desired() != desired);
+        let digest = desired.digest();
+        let dispatch_preparation = self.take_preparation_dispatch(&digest);
+        let persist_desired =
+            (self.persisted_digest.as_deref() != Some(digest.as_str())).then(|| PersistDesired {
+                canonical_form: desired.canonical_form(),
+                digest,
+            });
         self.last_selection = Some(selection.clone());
         if let Some(capabilities) = capabilities {
             self.last_capabilities = Some(capabilities.clone());
         }
         SelectionObservation {
             changed,
+            dispatch_preparation,
+            persist_desired,
             capabilities: self.last_capabilities.clone(),
         }
+    }
+
+    /// The durable row now names this ask.
+    ///
+    /// Recorded only after the write has landed, so a failed write leaves the
+    /// next exchange still asking for it rather than leaving the store one ask
+    /// behind with nothing to notice. A digest that is no longer the current
+    /// ask is accepted and ignored: by the time a slow write returns the
+    /// viewer may have moved on, and the next exchange will carry the newer
+    /// one.
+    pub(crate) fn record_desired_persisted(&mut self, digest: &str) {
+        if self
+            .last_selection
+            .as_ref()
+            .map(|selection| selection.desired().digest())
+            == Some(digest.to_owned())
+        {
+            self.persisted_digest = Some(digest.to_owned());
+        }
+    }
+
+    /// Whether to build a candidate for this ask now, recording it if so.
+    ///
+    /// Three answers, and the middle one is the fix.
+    ///
+    /// The first accepted exchange dispatches nothing: its ask is what the
+    /// session was created for, so there is no change to prepare for. It is
+    /// recorded as dispatched so the *next* different ask is the first real
+    /// one — which is exactly the first-exchange behaviour the old
+    /// `selection.changed` gate had, kept deliberately.
+    ///
+    /// An ask that has already been dispatched dispatches nothing. Candidates
+    /// cost two store reads and the exchange runs about once a second per
+    /// client, so the steady state has to be silent.
+    ///
+    /// An undispatched ask arriving while the slot is occupied is **left
+    /// undispatched**. That is the whole change. Staging would be refused —
+    /// the slot takes one successor — and under the old gate the ask was
+    /// reported changed exactly once, so the candidate was built, refused, and
+    /// never rebuilt: a viewer who changed quality while a successor was in
+    /// flight simply never got the one they asked for. Leaving it undispatched
+    /// means the first exchange after the slot frees picks it up, without a
+    /// wake-up path, a retained input struct, or a queue that could hold
+    /// something stale — the only ask that survives is the current one.
+    fn take_preparation_dispatch(&mut self, desired_digest: &str) -> bool {
+        let Some(dispatched) = self.dispatched_digest.as_deref() else {
+            self.dispatched_digest = Some(desired_digest.to_owned());
+            return false;
+        };
+        if dispatched == desired_digest || !matches!(self.preparation, PreparationSlot::Empty) {
+            return false;
+        }
+        self.dispatched_digest = Some(desired_digest.to_owned());
+        true
     }
 
     /// Record that a successor has been staged.
@@ -3508,6 +3974,7 @@ impl ControlState {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         if !matches!(self.preparation, PreparationSlot::Empty) {
             return false;
@@ -3516,6 +3983,7 @@ impl ControlState {
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
+            desired_digest,
         };
         self.prepared_action = None;
         true
@@ -3527,6 +3995,7 @@ impl ControlState {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         let Some(expected_owner_epoch) = u64::try_from(expected_owner_epoch)
             .ok()
@@ -3546,6 +4015,7 @@ impl ControlState {
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
+            desired_digest,
         )
     }
 
@@ -3573,11 +4043,30 @@ impl ControlState {
         now_unix_ms: i64,
     ) -> bool {
         match &self.preparation {
+            // The ask is compared as well as the identity and the deadline.
+            // Acceptance has already advanced `desired_digest` for this
+            // exchange, so a request carrying a new selection *and* this
+            // acknowledgement is judged against the new selection — which is
+            // the whole point, because committing here publishes media the
+            // viewer has just moved off and does it with the client's own
+            // acknowledgement as the authority.
+            //
+            // A slot staged before this state knew any ask carries `None` and
+            // is not second-guessed: an absent record is not evidence of a
+            // change, and refusing on it would strand successors that nothing
+            // is wrong with.
             PreparationSlot::Staged {
                 staged_incarnation_id: staged,
                 deadline_ms,
+                desired_digest,
                 ..
-            } if staged == staged_incarnation_id && now_unix_ms < *deadline_ms => {
+            } if staged == staged_incarnation_id
+                && now_unix_ms < *deadline_ms
+                && desired_digest
+                    .as_ref()
+                    .zip(self.desired_digest.as_ref())
+                    .is_none_or(|(staged_for, wanted)| staged_for == wanted) =>
+            {
                 self.preparation = PreparationSlot::Committing {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
                     deadline_ms: *deadline_ms,
@@ -3889,10 +4378,32 @@ pub(crate) enum ProducerDecisionReason {
     /// exit zero — that is the failure this whole effort is named after — and
     /// every timing reason tells a client to try again, which reproduces it.
     SourceDecodeFailed,
+    /// The file this rendition was planned against is no longer the file on
+    /// disk. VOD renditions are immutable and fragment-indexed, so a source
+    /// that changes underneath one invalidates the plan rather than the media.
+    SourceChanged,
+    /// The fragment-index engine moved under a rendition planned by the
+    /// previous one, so this node cannot serve that plan until it restarts.
+    ///
+    /// Permanent, and the one VOD reason that is. The engine baseline is a
+    /// per-process `OnceCell` established at start-up, so every rendition with
+    /// a cluster cache key fails identically for the life of this daemon: a
+    /// reopen replaces the rendition, re-plans, and gets the same verdict.
+    /// Telling a client to keep retrying that is telling it to poll until an
+    /// operator restarts the node.
+    EngineChanged,
+    /// The producer could not be started at all — the spawn failed, or the
+    /// child came up without the stdout the pipeline reads. Distinct from
+    /// `ProcessExit`, which is a process that ran and stopped.
+    ProducerLaunchFailed,
+    /// A produced fragment did not land at the film time the plan requires.
+    MediaLandingFailed,
+    /// The sink refused the bytes a running producer handed it.
+    ProducerWriteFailed,
 }
 
 impl ProducerDecisionReason {
-    fn status(self) -> &'static str {
+    pub(crate) fn status(self) -> &'static str {
         match self {
             Self::StartupDeadline => "startup_deadline",
             Self::ProgressDeadline => "progress_deadline",
@@ -3910,35 +4421,63 @@ impl ProducerDecisionReason {
             Self::ExecutorLost => "executor_lost",
             Self::SourceDecodeRetry => "source_decode_retry",
             Self::SourceDecodeFailed => "source_decode_failed",
+            Self::SourceChanged => "source_changed",
+            Self::EngineChanged => "engine_changed",
+            Self::ProducerLaunchFailed => "producer_launch_failed",
+            Self::MediaLandingFailed => "media_landing_failed",
+            Self::ProducerWriteFailed => "producer_write_failed",
         }
     }
 
-    /// Whether retrying this source, unchanged, can ever succeed.
+    /// Whether retrying, unchanged, can ever succeed on this node.
     ///
-    /// Thirteen of these sixteen reasons are timing, process, executor or
-    /// recovery facts: the same file on the same pipeline may well work on the
-    /// next attempt. Three are verdicts about the source itself — this
-    /// container cannot be carried by this pipeline, the recipe that was asked
-    /// for is not a legal one, or the decoder said the source did not decode
-    /// and there is nothing else to try — and no amount of retrying changes
-    /// any of them.
+    /// Seventeen of these twenty-one reasons are timing, process, executor or
+    /// plan facts: the same file on the same pipeline may well work on the
+    /// next attempt. Four cannot be retried into working.
     ///
-    /// The last of those three is the one to read carefully, because
-    /// [`Self::SourceDecodeRetry`] carries the *same finding* and sits on the
-    /// impermanent side. What separates them is not the evidence, which is
-    /// identical; it is whether this node holds a software-decode alternate to
-    /// install. A decode fault with an alternate is a retry the client should
-    /// wait through; the same fault without one is the answer.
+    /// Two are verdicts about the source itself — this container cannot be
+    /// carried by this pipeline, or the recipe that was asked for is not a
+    /// legal one. `EngineChanged` is a verdict about this *process*: the
+    /// fragment-index engine baseline is a per-process `OnceCell`, so once it
+    /// has moved, every planned rendition fails the same way until the node
+    /// restarts, and a reopen re-plans straight back into it. Telling that
+    /// client to retry is telling it to poll until an operator intervenes.
+    ///
+    /// `SourceDecodeFailed` is the fourth, and it is the one to read
+    /// carefully, because [`Self::SourceDecodeRetry`] carries the *same
+    /// finding* and sits on the impermanent side. What separates them is not
+    /// the evidence, which is identical; it is whether this node holds a
+    /// software-decode alternate to install. A decode fault with an alternate
+    /// is a retry the client should wait through; the same fault without one
+    /// is the answer.
+    ///
+    /// The other four VOD reasons are genuinely retryable, because a VOD
+    /// rendition is planned once against an exact source and an exact engine
+    /// and those failures are statements about *that plan* rather than about
+    /// the film — a fresh create re-plans and can succeed. `ProducerLaunchFailed`
+    /// is the awkward one and is deliberately retryable: a spawn that fails on
+    /// resource pressure succeeds on the next attempt, and a spawn that fails
+    /// because the binary is missing is an install fault an operator reads in
+    /// the same log line, not something the viewer's client should be told is
+    /// terminal.
+    ///
+    /// Note what permanence does and does not do today: all three reporters
+    /// stop *reporting* on `terminal` and deliberately leave the player alone,
+    /// because making `terminal` end playback is M5's work. So this split does
+    /// not yet change what a viewer sees — it is the fact M5 needs in order to.
     ///
     /// The distinction is the whole reason a client cannot decide for itself.
-    /// `producer_state` flattens all sixteen to the word `failed`, so a
+    /// `producer_state` flattens all twenty-one to the word `failed`, so a
     /// client seeing a failure has no way to tell "try again" from "this will
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
     pub(crate) fn is_permanent(self) -> bool {
         matches!(
             self,
-            Self::Unsupported | Self::InvalidConfiguration | Self::SourceDecodeFailed
+            Self::Unsupported
+                | Self::InvalidConfiguration
+                | Self::SourceDecodeFailed
+                | Self::EngineChanged
         )
     }
 
@@ -3955,7 +4494,12 @@ impl ProducerDecisionReason {
     ///   `FlowResumeDeadline`, `InstallDeadline` and `ExecutorLost` are facts
     ///   about this server, not about the file. Relabelling them would make a
     ///   permanent claim about a source over an outage that will pass.
-    /// * The three permanent reasons already know at least as much.
+    /// * The four VOD plan reasons — `SourceChanged`, `EngineChanged`,
+    ///   `ProducerLaunchFailed`, `MediaLandingFailed` and
+    ///   `ProducerWriteFailed` — belong to a rendition planned once against an
+    ///   exact source and engine. A decode fault latched under one of them is
+    ///   evidence about a plan this node is no longer running.
+    /// * The four permanent reasons already know at least as much.
     fn yields_to_decode_evidence(self) -> bool {
         matches!(
             self,
@@ -3967,7 +4511,7 @@ impl ProducerDecisionReason {
     }
 
     /// The bounded vocabulary, in the order the wire and metrics use.
-    pub(crate) const ALL: [Self; 16] = [
+    pub(crate) const ALL: [Self; 21] = [
         Self::StartupDeadline,
         Self::ProgressDeadline,
         Self::ExitClassificationDeadline,
@@ -3984,6 +4528,11 @@ impl ProducerDecisionReason {
         Self::ExecutorLost,
         Self::SourceDecodeRetry,
         Self::SourceDecodeFailed,
+        Self::SourceChanged,
+        Self::EngineChanged,
+        Self::ProducerLaunchFailed,
+        Self::MediaLandingFailed,
+        Self::ProducerWriteFailed,
     ];
 
     pub(crate) fn from_status(status: &str) -> Option<Self> {
@@ -4387,6 +4936,11 @@ pub(crate) struct PreparationExecutor {
     playback_id: String,
     expected_predecessor_owner_node_id: String,
     expected_predecessor_owner_epoch: i64,
+    /// The ask this staging is for, recorded on the slot so a later
+    /// acknowledgement can be judged against the ask that is current then.
+    /// `None` from the paths that stage without an observed selection; the
+    /// slot treats an absent record as no evidence rather than as a change.
+    desired_digest: Option<String>,
 }
 
 /// What a reservation attempt found.
@@ -4731,7 +5285,14 @@ impl PreparationExecutor {
             playback_id,
             expected_predecessor_owner_node_id,
             expected_predecessor_owner_epoch,
+            desired_digest: None,
         }
+    }
+
+    /// Record the ask this executor is staging for.
+    pub(crate) fn asking(mut self, desired_digest: Option<String>) -> Self {
+        self.desired_digest = desired_digest;
+        self
     }
 
     /// Stage a successor: durable row first, then the slot.
@@ -4761,6 +5322,7 @@ impl PreparationExecutor {
                 preparation.expected_predecessor_incarnation_id.clone(),
                 preparation.deadline_ms,
                 self.expected_predecessor_owner_epoch,
+                self.desired_digest.clone(),
             )
             .await
         {
@@ -4823,6 +5385,17 @@ impl PreparationExecutor {
                     now_ms,
                     lease_expires_at_ms,
                     control_receipt,
+                    // Read at the commit, not carried from the staging. The
+                    // gap between the two is a client round trip — announce,
+                    // prepare, acknowledge — and a viewer can change their
+                    // mind twice inside it.
+                    expected_desired_revision: self
+                        .store
+                        .desired_selection(self.user_id, &self.playback_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|desired| desired.revision),
                 },
             )
             .await?;
@@ -4988,6 +5561,13 @@ pub(crate) enum PreparationSlot {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        /// The ask this successor was built for.
+        ///
+        /// Recorded at staging rather than re-derived at commit time, for the
+        /// same reason `predecessor_incarnation_id` is: what matters is what
+        /// was true when the work was started, and a successor whose ask has
+        /// since been replaced is media nobody is waiting for.
+        desired_digest: Option<String>,
     },
     /// A matching, timely client acknowledgement won the actor race. Deadline
     /// and terminal cleanup may no longer abort this successor; the Store CAS
@@ -6893,11 +7473,18 @@ enum RollingControlCommand {
     },
     /// Take the preparation slot for a successor. `false` when it is already
     /// occupied or the playback is terminal.
+    /// The durable desired row now names this ask.
+    ///
+    /// Fire-and-forget: the write has already landed, and the only thing this
+    /// suppresses is a redundant repeat of it. A dropped command costs one
+    /// extra write on the next exchange, which is why it carries no reply.
+    RecordDesiredPersisted { digest: String },
     StagePreparation {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     /// Ask whether this exact successor may still be committed, immediately
@@ -7054,6 +7641,7 @@ impl RollingControlCommand {
             Self::ApplyProducerFlow { .. } => Some(19),
             Self::SettleProducerFlowSignal { .. } => Some(20),
             Self::StagePreparation { .. } => Some(21),
+            Self::RecordDesiredPersisted { .. } => None,
             Self::MayCommitPreparation { .. }
             | Self::BeginAbortPreparation { .. }
             | Self::RejectPreparationCommit { .. } => Some(22),
@@ -8512,6 +9100,7 @@ impl RollingControlActor {
                     &request.prepared_successor,
                     request.snapshot.acknowledgement.as_ref(),
                     request.snapshot.request_fingerprint.as_deref(),
+                    &request.snapshot.selection,
                 ),
             )?;
         let preparation_directive = self.control.preparation_directive();
@@ -9021,6 +9610,7 @@ impl RollingControlActor {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         if self.retired || self.terminal.is_some() {
             return false;
@@ -9029,6 +9619,7 @@ impl RollingControlActor {
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
+            desired_digest,
         )
     }
 
@@ -9038,6 +9629,7 @@ impl RollingControlActor {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         if self.retired || self.terminal.is_some() {
             return false;
@@ -9047,6 +9639,7 @@ impl RollingControlActor {
             predecessor_incarnation_id,
             deadline_ms,
             expected_owner_epoch,
+            desired_digest,
         )
     }
 
@@ -10731,11 +11324,15 @@ impl RollingControlActor {
                 } => {
                     let _ = reply.send(self.poll_producer_decision_at(after_sequence));
                 }
+                RollingControlCommand::RecordDesiredPersisted { digest } => {
+                    self.control.record_desired_persisted(&digest);
+                }
                 RollingControlCommand::StagePreparation {
                     staged_incarnation_id,
                     predecessor_incarnation_id,
                     deadline_ms,
                     expected_owner_epoch,
+                    desired_digest,
                     reply,
                 } => {
                     let staged = self.stage_preparation_for_owner(
@@ -10743,6 +11340,7 @@ impl RollingControlActor {
                         predecessor_incarnation_id,
                         deadline_ms,
                         expected_owner_epoch,
+                        desired_digest,
                     );
                     let _ = reply.send(staged);
                 }
@@ -12189,6 +12787,15 @@ impl RollingControlHandle {
         response.await.map_err(|_| ControlStateError::Unavailable)?
     }
 
+    /// The durable desired row now names this ask.
+    pub(crate) async fn record_desired_persisted(&self, digest: &str) {
+        let _ = self
+            .enqueue_command(RollingControlCommand::RecordDesiredPersisted {
+                digest: digest.to_owned(),
+            })
+            .await;
+    }
+
     /// Take the preparation slot for a successor whose durable row already
     /// exists. `false` when the slot is occupied or the playback is terminal —
     /// in both cases the caller must abort the row it just created, because
@@ -12199,12 +12806,14 @@ impl RollingControlHandle {
         staged_incarnation_id: String,
         predecessor_incarnation_id: String,
         deadline_ms: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         self.stage_preparation_for_owner(
             staged_incarnation_id,
             predecessor_incarnation_id,
             deadline_ms,
             1,
+            desired_digest,
         )
         .await
     }
@@ -12215,6 +12824,7 @@ impl RollingControlHandle {
         predecessor_incarnation_id: String,
         deadline_ms: i64,
         expected_owner_epoch: i64,
+        desired_digest: Option<String>,
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
@@ -12223,6 +12833,7 @@ impl RollingControlHandle {
                 predecessor_incarnation_id,
                 deadline_ms,
                 expected_owner_epoch,
+                desired_digest,
                 reply,
             })
             .await
@@ -12730,9 +13341,10 @@ static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// explain why no successor was staged.
 ///
 /// **Labelled by platform because the three clients are not interchangeable
-/// here.** Only the web client fills `observed_download_bps` at all, so an
-/// unlabelled counter would mix the one platform that can reach a throughput
-/// verdict with the two the client release is actually about, and no reader
+/// here.** All three now fill `observed_download_bps`, but only Apple reports
+/// `dual_player_preparation`, so an unlabelled counter would mix the one
+/// platform that can reach a prepared verdict with the two it is not about,
+/// and no reader
 /// could separate them again.
 ///
 /// Indexed `[platform][axis][outcome]`. Platform order is `ClientPlatform`'s
@@ -12970,6 +13582,86 @@ fn preparation_indices(decision: PreparationDecision) -> Option<(usize, usize)> 
         PreparationAxis::DynamicRange => 4,
     };
     Some((axis, outcome))
+}
+
+/// The durable half of recording an exchange: what a person would need after
+/// a restart to explain why a playback stopped.
+///
+/// [`record_action`] counts into process atomics, and those are gone the
+/// moment the daemon restarts — which is frequently the same moment somebody
+/// wants to know what happened. A viewer whose film was terminated at 21:04
+/// leaves no trace at all once the process that refused them has exited.
+///
+/// Deliberately not every exchange. A control exchange happens every few
+/// seconds per viewer, so persisting all of them would turn routine playback
+/// into a write-heavy workload and bury the four rows that matter under
+/// millions that do not. What is kept is the set a human asks about:
+///
+/// - **`terminal`** — the playback was told to stop. The single most
+///   important thing to be able to explain later, and today the least
+///   recoverable.
+/// - **`retry_resource`** — a producer decision made the client back off. It
+///   is transient by design, which is exactly why it leaves nothing behind.
+/// - **a hold that was withheld** — the server had something to say and the
+///   client had not declared the action, so it went unsaid. Silent
+///   degradation, invisible in a response that looks ordinary.
+/// - **a suppressed action** — same shape, for a decision rather than a hold.
+///
+/// An ordinary `hold`, `none`, and a successful `prepare` are not kept.
+/// Nothing is wrong in those, and a ledger that records the healthy path is
+/// one nobody can read.
+///
+/// Pure, and returning the event rather than writing it, because the decision
+/// of *what deserves to survive a restart* is the part worth testing — and
+/// because the call sites that hold a store are not the ones that resolve an
+/// action.
+pub(crate) fn durable_outcome(
+    action: &ControlAction,
+    delivery: &DeliveryView,
+    request: &ControlRequestV1,
+    metrics: &ActionMetrics,
+    at_unix_ms: i64,
+) -> Option<plurx_core::domain::PlaybackEvent> {
+    let (event, level, detail) = match action {
+        ControlAction::Terminal { code, message } => (
+            "control_terminal",
+            "error",
+            Some(format!("{}: {message}", code.status())),
+        ),
+        ControlAction::RetryResource { reason, after_ms } => (
+            "control_retry_resource",
+            "warn",
+            Some(format!("{} (retry after {after_ms}ms)", reason.status())),
+        ),
+        _ if metrics.recovery_withheld => (
+            "control_hold_withheld",
+            "warn",
+            metrics
+                .hold_reason
+                .map(|reason| format!("{reason:?} not sent: client does not accept hold")),
+        ),
+        _ if metrics.suppressed => (
+            "control_action_suppressed",
+            "warn",
+            Some("a decision this server could name was not sent".to_owned()),
+        ),
+        _ => return None,
+    };
+
+    Some(plurx_core::domain::PlaybackEvent {
+        at_unix_ms,
+        session_id: Some(request.client_instance_id.clone()),
+        event: event.to_owned(),
+        level: Some(level.to_owned()),
+        // The delivery facts that make a terminal explicable rather than just
+        // recorded: what the client had left, and what the server was
+        // managing to hand it.
+        runway_ds: Some(delivery.client_runway_ms / 100),
+        delivered_bps: delivery.delivered_bps,
+        hold_reason: delivery.hold_reason.clone(),
+        detail,
+        ..plurx_core::domain::PlaybackEvent::default()
+    })
 }
 
 /// Record what one accepted exchange's action was, and what it could not be.
@@ -13594,6 +14286,7 @@ mod tests {
 
     fn request() -> ControlRequestV1 {
         ControlRequestV1 {
+            intent: None,
             protocol: PROTOCOL_V1.to_owned(),
             generation: uuid::Uuid::new_v4().to_string(),
             control_epoch: 1,
@@ -13742,7 +14435,146 @@ mod tests {
         ready_ahead_end_ms: Option<i64>,
         fetched_end_ms: i64,
     ) -> HlsSessionInfo {
+        vod_status_delivering(published_end_ms, ready_ahead_end_ms, fetched_end_ms, None)
+    }
+
+    /// The same VOD status, carrying a recorded producer failure.
+    fn vod_status_failed(decision: ProducerDecisionReason) -> HlsSessionInfo {
+        let mut status = vod_status(Some(120_000), Some(120_000), 60_000);
+        let HlsSessionInfo::Vod(info) = &mut status else {
+            panic!("fixture was not VOD");
+        };
+        info.producer_state = "failed";
+        info.producer_hold = None;
+        info.producer_failed = Some("the producer stopped".to_owned());
+        info.producer_decision = Some(decision.status());
+        status
+    }
+
+    /// A reason this node has never heard of relays instead of collapsing the
+    /// exchange.
+    ///
+    /// The hazard is a rolling deploy: the owner runs the new build and the
+    /// ingress relaying for it runs the old one, so the ingress validates
+    /// against its own compiled vocabulary. Rejecting the response turns a
+    /// perfectly good exchange into a 503 `control_unavailable` carrying a
+    /// 500 ms retry, and that session then polls ten times faster than its own
+    /// cadence for the whole deploy window while learning nothing. Widening
+    /// the vocabulary is only safe because of this.
+    #[test]
+    fn a_relay_passes_on_a_decision_it_does_not_know() {
+        let (mut response, request) = relay_pair();
+        response.delivery.producer_decision = Some("a_reason_from_a_newer_build".to_owned());
+        assert!(
+            response.is_valid_for(&request),
+            "an unknown but well-formed reason is the client's to ignore, not \
+             the relay's to fail the exchange over"
+        );
+
+        for malformed in ["", "Has Caps", "has spaces", &"x".repeat(49)] {
+            response.delivery.producer_decision = Some(malformed.to_owned());
+            assert!(
+                !response.is_valid_for(&request),
+                "shape is still bounded: {malformed:?} is not a wire name"
+            );
+        }
+    }
+
+    /// P1-2. A VOD failure reaches the client as an action, not as silence.
+    ///
+    /// `vodserve` has always had a failure; what it did not have was a class,
+    /// so `DeliveryView::from_status` set `producer_decision: None` and
+    /// `resolve_action` had nothing to rank. Segment GETs returned a typed 5xx
+    /// while the control plane went on answering `action: none`, and every
+    /// client fell back on its own generic watchdog and reopen budget.
+    ///
+    /// This drives the whole path the review asks for — recorded class, into
+    /// the delivery view, through action selection, out as serialized JSON —
+    /// because the value of the class is entirely in the action it produces.
+    #[test]
+    fn a_classified_vod_failure_becomes_a_serialized_client_action() {
+        let (_, mut request) = stalled_starved();
+        request.buffered_through_ms = request.position_ms;
+        request.supported_actions = Some(vec![
+            HOLD_ACTION.to_owned(),
+            RETRY_RESOURCE_ACTION.to_owned(),
+            TERMINAL_ACTION.to_owned(),
+        ]);
+
+        for decision in ProducerDecisionReason::ALL {
+            let delivery = DeliveryView::from_status(
+                &vod_status_failed(decision),
+                &request,
+                "node",
+                1,
+                0,
+                None,
+            );
+            assert_eq!(
+                delivery.producer_decision.as_deref(),
+                Some(decision.status()),
+                "the class the rendition recorded is the class the view publishes"
+            );
+
+            let action = resolve_action(&ControlAction::None, &delivery, &request);
+            let wire = serde_json::to_value(&action).expect("the action serializes");
+            if decision.is_permanent() {
+                assert_eq!(wire["type"], "terminal");
+                assert_eq!(wire["code"], decision.status());
+            } else {
+                assert_eq!(wire["type"], "retry_resource");
+                assert_eq!(wire["reason"], decision.status());
+                assert!(
+                    wire["after_ms"].as_u64().is_some_and(|after| after > 0),
+                    "a retryable verdict must say when"
+                );
+            }
+        }
+    }
+
+    /// The silence this replaces: an unclassified VOD failure still produces
+    /// no action at all, so the test above cannot be passing on some other
+    /// signal in the fixture.
+    #[test]
+    fn an_unclassified_vod_failure_still_says_nothing() {
+        let (_, mut request) = stalled_starved();
+        request.buffered_through_ms = request.position_ms;
+        request.supported_actions = Some(vec![
+            RETRY_RESOURCE_ACTION.to_owned(),
+            TERMINAL_ACTION.to_owned(),
+        ]);
+
+        let mut status = vod_status_failed(ProducerDecisionReason::ReaderFailed);
+        let HlsSessionInfo::Vod(info) = &mut status else {
+            panic!("fixture was not VOD");
+        };
+        info.producer_decision = None;
+
+        let delivery = DeliveryView::from_status(&status, &request, "node", 1, 0, None);
+        assert_eq!(delivery.producer_decision, None);
+        assert_eq!(
+            resolve_action(&ControlAction::None, &delivery, &request),
+            ControlAction::None,
+            "a failure nobody classified is exactly what P1-2 was"
+        );
+    }
+
+    /// The same VOD status, with a measured delivery rate.
+    ///
+    /// `None` is the honest default and the state every VOD session was stuck
+    /// in before P1-3: no window has closed, so there is no rate.
+    fn vod_status_delivering(
+        published_end_ms: Option<i64>,
+        ready_ahead_end_ms: Option<i64>,
+        fetched_end_ms: i64,
+        delivered_bps: Option<i64>,
+    ) -> HlsSessionInfo {
         HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+            // A plausible total, not a rate divided by eight: a fixture that
+            // encodes the wrong unit is how the wrong unit gets copied.
+            delivered_bytes: delivered_bps.map_or(0, |_| 4_194_304),
+            delivered_bps,
+            delivered_idle_ms: 0,
             id: "vod-session".to_owned(),
             file_id: 7,
             target_height: 1080,
@@ -13751,6 +14583,7 @@ mod tests {
             producer_state: "held",
             producer_hold: Some("working_set"),
             producer_failed: None,
+            producer_decision: None,
             published_end_ms,
             ready_ahead_end_ms,
             fetched_end_ms,
@@ -13767,6 +14600,117 @@ mod tests {
             suspended: true,
             final_: false,
         }))
+    }
+
+    /// P1-3. A measured VOD rate reaches the control view, and an unmeasured
+    /// one stays unknown.
+    ///
+    /// Both halves matter. The first is what makes preparation reachable at
+    /// all on the primary presentation; the second is the constraint the
+    /// review states in the same breath — unknown must stay unknown, never
+    /// filled in from the encoder's configured target. On VOD the presentation
+    /// is a stream copy, so the encoder target describes nothing that was ever
+    /// delivered, and a substituted number would let the headroom decision
+    /// pass a client whose link nobody measured.
+    #[test]
+    fn a_measured_vod_delivery_reaches_the_control_view_and_an_unmeasured_one_stays_unknown() {
+        let (_, mut request) = stalled_starved();
+        request.buffered_through_ms = request.position_ms;
+
+        let measured = DeliveryView::from_status(
+            &vod_status_delivering(Some(120_000), Some(120_000), 60_000, Some(12_000_000)),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(measured.delivered_bps, Some(12_000_000));
+        assert_eq!(
+            measured.delivered_idle_ms,
+            Some(0),
+            "the idle age is what tells a stale rate from a dead link, so it \
+             travels with the rate rather than being dropped"
+        );
+
+        let unmeasured = DeliveryView::from_status(
+            &vod_status(Some(120_000), Some(120_000), 60_000),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            unmeasured.delivered_bps, None,
+            "a session that has closed no window reports no rate at all"
+        );
+    }
+
+    /// The refusal this removes. `headroom_refusal` needs a delivered rate;
+    /// with `None` it answers `ThroughputUnreported` for every VOD exchange,
+    /// which is every public session. A measured rate lets the real comparison
+    /// run — and still refuses when the link genuinely lacks headroom, so this
+    /// opens the decision rather than weakening it.
+    #[test]
+    fn a_measured_vod_rate_lets_the_headroom_decision_actually_run() {
+        let (_, mut request) = stalled_starved();
+        request.buffered_through_ms = request.position_ms;
+        let observed = 100_000_000_u64;
+
+        let unmeasured = DeliveryView::from_status(
+            &vod_status(Some(120_000), Some(120_000), 60_000),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            PreparationConditions {
+                observed_download_bps: Some(observed),
+                delivered_bps: unmeasured.delivered_bps,
+            }
+            .headroom_refusal(),
+            Some(FallbackReason::ThroughputUnreported),
+            "this is the state every VOD session was in"
+        );
+
+        let measured = DeliveryView::from_status(
+            &vod_status_delivering(Some(120_000), Some(120_000), 60_000, Some(12_000_000)),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            PreparationConditions {
+                observed_download_bps: Some(observed),
+                delivered_bps: measured.delivered_bps,
+            }
+            .headroom_refusal(),
+            None,
+            "a link with ten times the delivered rate has headroom"
+        );
+
+        let saturated = DeliveryView::from_status(
+            &vod_status_delivering(Some(120_000), Some(120_000), 60_000, Some(80_000_000)),
+            &request,
+            "node",
+            1,
+            0,
+            None,
+        );
+        assert_eq!(
+            PreparationConditions {
+                observed_download_bps: Some(observed),
+                delivered_bps: saturated.delivered_bps,
+            }
+            .headroom_refusal(),
+            Some(FallbackReason::ThroughputInsufficient),
+            "measuring the rate must not become a way to always pass"
+        );
     }
 
     #[test]
@@ -13826,6 +14770,7 @@ mod tests {
             resolve_action(&ControlAction::None, &unknown, &request),
             ControlAction::Hold {
                 reason: HoldReason::WorkingSet,
+                revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
             },
         );
     }
@@ -13859,8 +14804,12 @@ mod tests {
             let held = delivery_with_hold(Some(reason));
             assert_eq!(
                 resolve_action(&ControlAction::None, &held, &healthy),
-                ControlAction::Hold {
-                    reason: HoldReason::from_delivery(reason).expect("named reason"),
+                {
+                    let reason = HoldReason::from_delivery(reason).expect("named reason");
+                    ControlAction::Hold {
+                        reason,
+                        revisit_after_ms: reason.revisit_after_ms(),
+                    }
                 },
                 "{reason} must still be sent to a healthy client",
             );
@@ -13907,6 +14856,7 @@ mod tests {
                 resolve_action(&ControlAction::None, &delivery, &request),
                 ControlAction::Hold {
                     reason: HoldReason::Time,
+                    revisit_after_ms: HoldReason::Time.revisit_after_ms(),
                 },
                 "{name} alone must leave the hold in force",
             );
@@ -14023,12 +14973,18 @@ mod tests {
     }
 
     #[test]
-    fn only_a_verdict_about_the_source_itself_is_permanent() {
+    fn only_a_verdict_no_retry_can_change_is_permanent() {
         // The split that decides whether a client should ever be told to give
-        // up. Thirteen of the sixteen are timing, process, executor or
-        // recovery facts: the same file on the same pipeline may work on the
-        // next attempt. Three are verdicts about the source, and no retry
-        // changes those.
+        // up. Seventeen of the twenty-one are timing, process, executor or
+        // plan facts: the same file on the same pipeline may work on the next
+        // attempt. Four cannot be retried into working — two verdicts about
+        // the source, one about this daemon process, and one about the decode.
+        //
+        // `EngineChanged` is the process one, because the fragment-index
+        // engine baseline is a per-process `OnceCell`: once it has moved,
+        // every planned rendition fails identically until the node restarts,
+        // and a reopen re-plans straight back into it. Telling that client to
+        // retry is telling it to poll until an operator intervenes.
         //
         // `SourceDecodeRetry` sits on the impermanent side on purpose, and it
         // is the pair that is easiest to get backwards: it and
@@ -14036,17 +14992,18 @@ mod tests {
         // them is whether there is an alternate to install. One is a retry the
         // client should wait through; the other is the answer.
         //
-        // `SourceDecodeFailed` is the newest and the one that mattered most
-        // to get on this side of the line: it is produced when the decoder
-        // itself said the source did not decode, and the process very often
-        // exits zero. Classified as timing, a client reopens and reproduces
-        // it — which is the loop this whole effort exists to end.
+        // `SourceDecodeFailed` is the one that mattered most to get on this
+        // side of the line: it is produced when the decoder itself said the
+        // source did not decode, and the process very often exits zero.
+        // Classified as timing, a client reopens and reproduces it — which is
+        // the loop this whole effort exists to end.
         for reason in ProducerDecisionReason::ALL {
             let expected = matches!(
                 reason,
                 ProducerDecisionReason::Unsupported
                     | ProducerDecisionReason::InvalidConfiguration
                     | ProducerDecisionReason::SourceDecodeFailed
+                    | ProducerDecisionReason::EngineChanged
             );
             assert_eq!(
                 reason.is_permanent(),
@@ -14060,8 +15017,21 @@ mod tests {
                 .into_iter()
                 .filter(|reason| reason.is_permanent())
                 .count(),
-            3,
+            4,
         );
+        // A permanent reason must carry a sentence a viewer could be shown,
+        // not the wire name falling through `terminal_message`'s default.
+        for reason in ProducerDecisionReason::ALL
+            .into_iter()
+            .filter(|r| r.is_permanent())
+        {
+            assert_ne!(
+                terminal_message(reason),
+                reason.status(),
+                "{} is permanent and needs its own message",
+                reason.status(),
+            );
+        }
     }
 
     #[test]
@@ -14075,7 +15045,7 @@ mod tests {
                 Some(reason),
             );
         }
-        assert_eq!(ProducerDecisionReason::ALL.len(), 16);
+        assert_eq!(ProducerDecisionReason::ALL.len(), 21);
         // A variant present in the enum and absent from `ALL` is caught by
         // nothing else. `status` is exhaustive, so the compiler forces a
         // spelling to be written; `ALL` is a hand-maintained array it cannot
@@ -14103,7 +15073,12 @@ mod tests {
                 | ProducerDecisionReason::InstallDeadline
                 | ProducerDecisionReason::ExecutorLost
                 | ProducerDecisionReason::SourceDecodeRetry
-                | ProducerDecisionReason::SourceDecodeFailed => {}
+                | ProducerDecisionReason::SourceDecodeFailed
+                | ProducerDecisionReason::SourceChanged
+                | ProducerDecisionReason::EngineChanged
+                | ProducerDecisionReason::ProducerLaunchFailed
+                | ProducerDecisionReason::MediaLandingFailed
+                | ProducerDecisionReason::ProducerWriteFailed => {}
             }
         }
         assert_eq!(ProducerDecisionReason::from_status("invented"), None);
@@ -14397,7 +15372,10 @@ mod tests {
                     &delivery_with_hold(Some(delivery_reason)),
                     &accepting,
                 ),
-                ControlAction::Hold { reason: expected },
+                ControlAction::Hold {
+                    reason: expected,
+                    revisit_after_ms: expected.revisit_after_ms(),
+                },
                 "delivery reported {delivery_reason}",
             );
         }
@@ -14432,12 +15410,14 @@ mod tests {
             resolve_action(
                 &ControlAction::Hold {
                     reason: HoldReason::Demand,
+                    revisit_after_ms: HoldReason::Demand.revisit_after_ms(),
                 },
                 &delivery_with_hold(Some("bytes")),
                 &accepting,
             ),
             ControlAction::Hold {
                 reason: HoldReason::Demand,
+                revisit_after_ms: HoldReason::Demand.revisit_after_ms(),
             },
         );
     }
@@ -14465,14 +15445,477 @@ mod tests {
         assert_eq!(HoldReason::from_delivery("unheard_of"), None);
     }
 
+    /// A hold says when it is worth asking again, and `no_room` says a longer
+    /// number than the rest.
+    ///
+    /// Without an interval, `hold` is an instruction to wait with no end.
+    /// That is survivable for the reasons a client clears itself — it is
+    /// consuming buffer, so the answer changes because it changed it — and it
+    /// is not survivable for `no_room`, which only something outside this
+    /// rendition can clear. A client told to hold for that reason could sit
+    /// indefinitely with nothing to act on.
+    ///
+    /// The longer interval is the point rather than a detail. Asking again at
+    /// the ordinary cadence spends exchanges on a node that has already said
+    /// it has nothing to give, and the ask cannot change the answer.
+    ///
+    /// It is a revisit contract, not an expiry: nothing fails when the
+    /// interval passes. That distinction is why this is not a terminal, which
+    /// would tell a client to tear down a player over a server working
+    /// exactly as designed.
+    /// A buffer that does not reach the playhead is not runway.
+    ///
+    /// `buffered_through_ms` alone cannot tell a comfortable client from one
+    /// about to starve: it is the end of *a* buffered region, and whether that
+    /// region contains the playhead is a different fact. The case that matters
+    /// is an ordinary seek — the anchor moves to the target while the region
+    /// the client is describing is the one around where it was, so the
+    /// difference between them is the gap being seeked across, not buffer.
+    /// Counting it tells the server the viewer is fine at precisely the moment
+    /// they have nothing, and the server holds production on that.
+    ///
+    /// The two shapes below report an identical `buffered_through_ms` and must
+    /// not report identical runway. That is the whole property; everything
+    /// else here is making sure the honest cases are left alone.
+    #[test]
+    fn runway_counts_only_a_buffer_that_reaches_the_playhead() {
+        let contiguous = ControlRequestV1 {
+            position_ms: 10_000,
+            buffered_from_ms: Some(9_000),
+            buffered_through_ms: 40_000,
+            ..request()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&contiguous, 10_000),
+            30_000,
+            "a region containing the playhead is runway to its end",
+        );
+
+        let scattered = ControlRequestV1 {
+            buffered_from_ms: Some(25_000),
+            ..contiguous.clone()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&scattered, 10_000),
+            0,
+            "the same end, with a hole at the playhead, is not 30 seconds of \
+             comfort — it is nothing to play",
+        );
+
+        // A seek whose buffer is entirely behind the target is *not* tested
+        // here, and the reason is worth writing down: it cannot reach this
+        // function. `validate` refuses a request whose `buffered_through_ms`
+        // is below the anchor, and during a seek the anchor is the target — so
+        // a client holding 9s-20s while seeking to 600s is rejected at the
+        // door rather than arriving with a misleading runway. Asserting it
+        // anyway would be asserting a shape the wire forbids, which proves
+        // nothing about the system and quietly rots when the validator moves.
+        //
+        // What does reach here is the case above: a request that passes
+        // validation because its region ends past the anchor, while starting
+        // after it.
+
+        // No contiguity evidence is not a hole. Every client that predates the
+        // field sends this, and so does one that could not identify a region
+        // containing its playhead; telling either that it has nothing would
+        // stall production for clients that are fine.
+        let silent = ControlRequestV1 {
+            buffered_from_ms: None,
+            ..contiguous.clone()
+        };
+        assert_eq!(
+            contiguous_runway_ms(&silent, 10_000),
+            30_000,
+            "a client that says nothing about contiguity keeps the old reading",
+        );
+
+        // And a region starting exactly at the playhead is contiguous.
+        let exact = ControlRequestV1 {
+            buffered_from_ms: Some(10_000),
+            ..contiguous
+        };
+        assert_eq!(contiguous_runway_ms(&exact, 10_000), 30_000);
+    }
+
+    /// What survives a restart is the failures, and only the failures.
+    ///
+    /// `record_action` counts into process atomics, so a viewer terminated at
+    /// 21:04 leaves nothing behind once that process exits — which tends to be
+    /// the same restart that prompted the question. The durable half exists
+    /// for the person asking afterwards.
+    ///
+    /// Both halves of the rule are asserted, and the second is the one that
+    /// keeps the ledger readable: an exchange happens every few seconds per
+    /// viewer, so keeping the healthy path would bury the four rows that
+    /// matter under millions that do not, and turn ordinary playback into a
+    /// write-heavy workload.
+    #[test]
+    fn only_the_outcomes_worth_explaining_later_are_kept() {
+        let request = request();
+        let mut delivery = delivery_with_hold(None);
+        delivery.client_runway_ms = 2_500;
+        delivery.delivered_bps = Some(1_200_000);
+
+        let kept = |action: &ControlAction| {
+            let metrics = action_metrics(action, &delivery, &request, false);
+            durable_outcome(action, &delivery, &request, &metrics, 1_700_000_000_000)
+        };
+
+        let terminal = ControlAction::Terminal {
+            code: ProducerDecisionReason::Unsupported,
+            message: "the file is gone".to_owned(),
+        };
+        let event = kept(&terminal).expect("a terminal must outlive the process that sent it");
+        assert_eq!(event.event, "control_terminal");
+        assert_eq!(event.level.as_deref(), Some("error"));
+        assert!(
+            event
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("the file is gone")),
+            "the message the viewer's client was given is the thing being explained",
+        );
+        assert_eq!(
+            event.runway_ds,
+            Some(25),
+            "what the client had left is what makes a terminal explicable rather \
+             than merely recorded",
+        );
+        assert_eq!(event.delivered_bps, Some(1_200_000));
+
+        let retry = ControlAction::RetryResource {
+            after_ms: 4_000,
+            reason: ProducerDecisionReason::ProgressDeadline,
+        };
+        assert_eq!(
+            kept(&retry)
+                .expect("a backoff leaves nothing behind by design")
+                .event,
+            "control_retry_resource",
+        );
+
+        // The healthy path, which must not be written.
+        for quiet in [
+            ControlAction::None,
+            ControlAction::Hold {
+                reason: HoldReason::WorkingSet,
+                revisit_after_ms: NEXT_EXCHANGE_MS,
+            },
+        ] {
+            assert!(
+                kept(&quiet).is_none(),
+                "{quiet:?} is routine; a ledger that records the healthy path is \
+                 one nobody can read",
+            );
+        }
+    }
+
+    /// Silence is an outcome too, and it is the one nothing else records.
+    ///
+    /// Two different silences, and they are separate rows because they have
+    /// separate causes. A *withheld* recovery is one the ranking decided to
+    /// send and the client could not receive; a *suppressed* action is the
+    /// broader case of any decision this server could name going unsent. Both
+    /// leave a response that looks entirely ordinary on the wire, which is why
+    /// neither is visible without a row.
+    ///
+    /// Asserted by exact event name. An earlier version of this test accepted
+    /// either name, and disabling the withheld branch outright still passed it
+    /// — the case fell through to `suppressed` and nothing noticed. A test
+    /// that accepts two answers proves neither.
+    #[test]
+    fn a_withheld_recovery_and_a_suppressed_action_are_separate_rows() {
+        // The recovery ranking's own preconditions, so this is genuinely the
+        // withheld path rather than the general one wearing its name.
+        let mut stalled = request();
+        // Accepts hold — that is the point. A withheld recovery is a hold the
+        // client could have received and the ranking chose not to send,
+        // because production state must not veto fetching bytes already
+        // published. A client that cannot receive a hold is the *other* case.
+        stalled.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        stalled.render_state = RenderState::Stalled;
+        stalled.observation = Some(ClientObservation {
+            dropped_frames: None,
+            decoder_state: Some(DecoderState::Starved),
+            error_code: None,
+            error_detail: None,
+        });
+        let mut delivery = delivery_with_hold(Some("no_room"));
+        delivery.client_runway_ms = 0;
+        delivery.produced_through_ms = Some(120_000);
+        delivery.fetched_through_ms = 60_000;
+        assert!(
+            recovery_outranks_hold(&delivery, &stalled),
+            "the fixture must actually reach the withheld path",
+        );
+
+        let action = resolve_action(&ControlAction::None, &delivery, &stalled);
+        let metrics = action_metrics(&action, &delivery, &stalled, false);
+        assert!(metrics.recovery_withheld, "this is the withheld case");
+        let event = durable_outcome(&action, &delivery, &stalled, &metrics, 1_700_000_000_000)
+            .expect("the withholding is the fact worth keeping");
+        assert_eq!(event.event, "control_hold_withheld");
+        assert_eq!(event.level.as_deref(), Some("warn"));
+        assert_eq!(
+            event.hold_reason.as_deref(),
+            Some("no_room"),
+            "the reason the server could not pass on is the point of the row",
+        );
+
+        // And the broader case, which must not be filed under the narrow name.
+        let mut passive = request();
+        passive.supported_actions = Some(vec![]);
+        let ordinary = delivery_with_hold(Some("working_set"));
+        let action = resolve_action(&ControlAction::None, &ordinary, &passive);
+        let metrics = action_metrics(&action, &ordinary, &passive, false);
+        assert!(!metrics.recovery_withheld);
+        assert!(metrics.suppressed);
+        let event = durable_outcome(&action, &ordinary, &passive, &metrics, 1_700_000_000_000)
+            .expect("a decision that went unsent is still an outcome");
+        assert_eq!(event.event, "control_action_suppressed");
+    }
+
+    /// A commit proves what the client built, not what time it was.
+    ///
+    /// `Committed` used to require `first_frame_unix_ms`, which made a
+    /// wall-clock reading from an unsynchronised device the gate on a durable
+    /// server commit. It proves neither ownership, nor freshness, nor that
+    /// what was displayed is what was offered — a client whose clock is wrong
+    /// is not a client whose switch failed, and a client that lies about the
+    /// time still gets its commit.
+    ///
+    /// What the server can actually contradict is the origin. Between
+    /// `Prepare` and `Committed` its own intent can move — a seek, a quality
+    /// change, a new recipe — and an acknowledgement carrying only an
+    /// `action_id` cannot distinguish a client that committed to the current
+    /// offer from one that committed to a stale one and is about to present
+    /// media nobody asked for.
+    ///
+    /// First-frame time stays accepted, because it is genuinely useful for
+    /// diagnosis. It is simply not the proof.
+    /// A commit for a different origin is not this offer's commit.
+    ///
+    /// This is the assertion that makes the field worth carrying. Validation
+    /// only proves a client *said* something; refusing the mismatch is what
+    /// lets the server contradict a stale commit, and without this test the
+    /// field would be a required value nothing reads.
+    ///
+    /// The gap is narrower than it looks, and worth stating precisely: a
+    /// changed **ask** — quality, codec, dynamic range, subtitles — is already
+    /// refused at commit by `desired_digest`. What the digest does not cover
+    /// is **position**. So the case this closes is a successor prepared for
+    /// one point in the film and acknowledged after the viewer seeked
+    /// somewhere else: previously indistinguishable from a correct commit, and
+    /// published using the client's own acknowledgement as the authority.
+    #[test]
+    fn a_commit_naming_an_origin_the_offer_did_not_is_refused() {
+        let offered_origin_ms = 600_000;
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let staged = uuid::Uuid::new_v4().to_string();
+
+        let bound = |origin: Option<i64>, state| {
+            let control = ControlState {
+                prepared_action: Some(PreparedActionBinding {
+                    successor: PreparedSuccessorAction {
+                        staged_incarnation_id: staged.clone(),
+                        deadline_ms: i64::MAX,
+                        session_id: "session".to_owned(),
+                        playlist_url: "/hls/session/index.m3u8".to_owned(),
+                        media_origin_ms: offered_origin_ms,
+                        effective_selection: EffectiveSelection {
+                            quality_auto: true,
+                            height: 1080,
+                            audio_track: None,
+                            subtitle_burn: None,
+                            audio_offset_ms: 0,
+                            codec: "h264".to_owned(),
+                            dynamic_range: None,
+                        },
+                    },
+                    action: ControlAction::Prepare {
+                        action_id: action_id.clone(),
+                        session_id: "session".to_owned(),
+                        playlist_url: "/hls/session/index.m3u8".to_owned(),
+                        media_origin_ms: offered_origin_ms,
+                        effective_selection: EffectiveSelection {
+                            quality_auto: true,
+                            height: 1080,
+                            audio_track: None,
+                            subtitle_burn: None,
+                            audio_offset_ms: 0,
+                            codec: "h264".to_owned(),
+                            dynamic_range: None,
+                        },
+                    },
+                    acknowledgement: None,
+                }),
+                ..ControlState::default()
+            };
+            control.bound_preparation_acknowledgement(Some(&ActionAcknowledgement {
+                action_id: action_id.clone(),
+                state,
+                buffered_through_ms: None,
+                committed_media_origin_ms: origin,
+                first_frame_unix_ms: Some(1_700_000_000_000),
+            }))
+        };
+
+        assert_eq!(
+            bound(Some(offered_origin_ms), AcknowledgementState::Committed),
+            Some(staged.clone()),
+            "the commit that echoes the offer binds to the staged successor",
+        );
+        assert_eq!(
+            bound(
+                Some(offered_origin_ms + 30_000),
+                AcknowledgementState::Committed
+            ),
+            None,
+            "a successor built for a different point in the film is not this \
+             offer's commit, and must not publish on the strength of it",
+        );
+        assert_eq!(
+            bound(Some(0), AcknowledgementState::Committed),
+            None,
+            "zero is a real origin, not a wildcard",
+        );
+
+        // Progress toward a successor that is not being published yet reports
+        // no origin, and demanding one would make ordinary progress
+        // unreportable.
+        assert_eq!(
+            bound(None, AcknowledgementState::BufferReady),
+            Some(staged),
+            "only a commit is held to the offered origin",
+        );
+    }
+
+    #[test]
+    fn a_commit_carries_the_origin_it_adopted_and_not_a_wall_clock() {
+        let ack = |state, origin, first_frame| ActionAcknowledgement {
+            action_id: "8a1f2c3d-4b5e-6f70-8192-a3b4c5d6e7f8".to_owned(),
+            state,
+            buffered_through_ms: Some(30_000),
+            committed_media_origin_ms: origin,
+            first_frame_unix_ms: first_frame,
+        };
+
+        assert_eq!(
+            ack(
+                AcknowledgementState::Committed,
+                None,
+                Some(1_700_000_000_000)
+            )
+            .validate(),
+            Err("acknowledgement.committed_media_origin_ms"),
+            "a first-frame time is not a substitute for saying what was built",
+        );
+        assert_eq!(
+            ack(AcknowledgementState::Committed, Some(0), None).validate(),
+            Err("acknowledgement.first_frame_unix_ms"),
+            "and the origin does not replace the measurement either — this is \
+             additive, so a commit carries both",
+        );
+        assert!(
+            ack(
+                AcknowledgementState::Committed,
+                Some(600_000),
+                Some(1_700_000_000_000),
+            )
+            .validate()
+            .is_ok(),
+            "origin zero is an ordinary film start rather than a missing \
+             value, and a complete commit is accepted",
+        );
+        assert!(ack(AcknowledgementState::Committed, Some(0), Some(1))
+            .validate()
+            .is_ok(),);
+
+        // The other states are unchanged: only a commit claims to have built
+        // something, so only a commit has to say what.
+        assert!(ack(AcknowledgementState::MetadataReady, None, None)
+            .validate()
+            .is_ok(),);
+        assert!(
+            ack(AcknowledgementState::Failed, None, None)
+                .validate()
+                .is_ok(),
+            "a failure has no origin to report, and demanding one would make \
+             the client's own error unreportable",
+        );
+
+        // Range, so a garbage origin is refused at the door rather than
+        // compared against an offer it could never match.
+        assert_eq!(
+            ack(AcknowledgementState::Committed, Some(-1), None).validate(),
+            Err("acknowledgement.committed_media_origin_ms"),
+        );
+        assert_eq!(
+            ack(
+                AcknowledgementState::Committed,
+                Some(MAX_MEDIA_MILLIS + 1),
+                None,
+            )
+            .validate(),
+            Err("acknowledgement.committed_media_origin_ms"),
+        );
+    }
+
+    #[test]
+    fn a_hold_says_when_to_ask_again_and_no_room_says_later() {
+        for reason in [
+            HoldReason::Demand,
+            HoldReason::Time,
+            HoldReason::Bytes,
+            HoldReason::Global,
+            HoldReason::Ahead,
+            HoldReason::WorkingSet,
+        ] {
+            assert_eq!(
+                reason.revisit_after_ms(),
+                NEXT_EXCHANGE_MS,
+                "{reason:?} lifts as the client consumes, so the ordinary \
+                 cadence is the honest interval",
+            );
+        }
+        assert!(
+            HoldReason::NoRoom.revisit_after_ms() > NEXT_EXCHANGE_MS,
+            "nothing the client does clears no_room, so asking at the ordinary \
+             cadence is work spent on a node already out of room",
+        );
+
+        // And the resolved action carries it, so a client reads the interval
+        // from the action it was given rather than inferring one.
+        let delivery = delivery_with_hold(Some("no_room"));
+        let mut client = request();
+        client.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        let resolved = resolve_action(&ControlAction::None, &delivery, &client);
+        assert_eq!(
+            resolved,
+            ControlAction::Hold {
+                reason: HoldReason::NoRoom,
+                revisit_after_ms: NO_ROOM_REVISIT_MS,
+            },
+            "the hold a client receives says when to come back",
+        );
+    }
+
     #[test]
     fn the_action_is_tagged_on_the_wire() {
         assert_eq!(
             serde_json::to_value(ControlAction::Hold {
                 reason: HoldReason::WorkingSet,
+                revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
             })
             .expect("action json"),
-            serde_json::json!({"type": "hold", "reason": "working_set"}),
+            // Additive: a client that predates the field ignores it and holds
+            // exactly as it did, which is why this is a bound on the existing
+            // action rather than a new one every client has to learn.
+            serde_json::json!({
+                "type": "hold",
+                "reason": "working_set",
+                "revisit_after_ms": NEXT_EXCHANGE_MS,
+            }),
         );
         assert_eq!(
             serde_json::to_value(ControlAction::None).expect("action json"),
@@ -14816,6 +16259,475 @@ mod tests {
         }
     }
 
+    /// One request carrying a new ask and the old ask's commit does not commit
+    /// the old one.
+    ///
+    /// This is the ordering §1 names, and the reason it cannot be fixed by
+    /// extending `observe`. Both engines call `observe` *after* `accept`, so
+    /// the desired state `observe` records is one exchange behind every
+    /// decision `accept` takes — harmless everywhere except here. A client that
+    /// changes quality and, in the same packet, acknowledges the successor
+    /// staged for the previous quality, used to have that acknowledgement
+    /// accepted as authority to commit: the viewer's own message publishing
+    /// media the viewer had, in that same message, moved off. By the time
+    /// `observe` saw the new ask the commit directive already existed.
+    ///
+    /// So acceptance learns the ask first, and the slot records what it was
+    /// staged for. The acknowledgement is then judged against the ask that is
+    /// current at that instant, and a successor nobody is waiting for is torn
+    /// down rather than published — with `acknowledgement_rejected`, so the
+    /// response tells the client its commit did not happen instead of
+    /// reporting a success it did not get.
+    #[test]
+    fn a_new_ask_in_the_same_packet_refuses_the_old_asks_commit() {
+        let request = request();
+        let asked_for = selection_at(QualitySelection::Manual { height: 720 });
+        let moved_to = selection_at(QualitySelection::Manual { height: 1080 });
+        assert_ne!(
+            asked_for.desired().digest(),
+            moved_to.desired().digest(),
+            "the fixture must actually change the ask"
+        );
+
+        let commit_for = |staged_for: &ClientSelection, asking: &ClientSelection| {
+            let mut state = ControlState::default();
+            let started = Instant::now();
+            let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+            assert!(state.stage_preparation(
+                staged_incarnation_id.clone(),
+                request.generation.clone(),
+                i64::MAX,
+                Some(staged_for.desired().digest()),
+            ));
+            let prepared_session_id = uuid::Uuid::new_v4().to_string();
+            let successor = PreparedSuccessorAction {
+                staged_incarnation_id: staged_incarnation_id.clone(),
+                deadline_ms: i64::MAX,
+                session_id: prepared_session_id.clone(),
+                playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+                media_origin_ms: 42_000,
+                effective_selection: prepared_selection(),
+            };
+
+            // The exchange that announces the successor, under the ask it was
+            // staged for.
+            let announced = state
+                .accept_at(
+                    started,
+                    &request.generation,
+                    1,
+                    &request.client_instance_id,
+                    1,
+                    ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                        .asking(staged_for),
+                )
+                .expect("the successor is announced");
+            let ControlAction::Prepare {
+                action_id,
+                media_origin_ms: offered_origin_ms,
+                ..
+            } = &announced.2
+            else {
+                panic!("an occupied preparation slot announces its successor");
+            };
+
+            // And the next exchange: the client acknowledges that Prepare as
+            // committed, while asking for `asking`.
+            state
+                .accept_at(
+                    started + MIN_CONTROL_INTERVAL,
+                    &request.generation,
+                    1,
+                    &request.client_instance_id,
+                    2,
+                    ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                        .asking(asking)
+                        .acknowledging(ActionAcknowledgement {
+                            action_id: action_id.clone(),
+                            state: AcknowledgementState::Committed,
+                            buffered_through_ms: None,
+                            // Echo the offer this test announced; a commit naming a
+                            // different origin is refused.
+                            committed_media_origin_ms: Some(*offered_origin_ms),
+                            first_frame_unix_ms: None,
+                        }),
+                )
+                .expect("the acknowledgement is accepted as an exchange");
+            (state.preparation_directive(), staged_incarnation_id)
+        };
+
+        // Unchanged ask: this is the ordinary handover and it must still work.
+        let (directive, staged) = commit_for(&asked_for, &asked_for);
+        assert_eq!(
+            directive,
+            Some(PreparationDirective::Commit {
+                staged_incarnation_id: staged
+            }),
+            "a viewer who has not changed their mind still gets the successor they waited for"
+        );
+
+        // Changed ask in the same packet: the commit is refused and the
+        // successor torn down, and the client is told its acknowledgement was
+        // rejected rather than being reported a success.
+        let (directive, staged) = commit_for(&asked_for, &moved_to);
+        assert_eq!(
+            directive,
+            Some(PreparationDirective::Abort {
+                staged_incarnation_id: staged,
+                acknowledgement_rejected: true,
+            }),
+            "a successor built for an ask the viewer has left is not published by their own \
+             acknowledgement"
+        );
+    }
+
+    /// The ask is offered for persistence until it has been, and then not
+    /// again.
+    ///
+    /// Two failures this guards against, pulling in opposite directions. A
+    /// state that offered the ask on every exchange would put a durable write
+    /// on a path that runs about once a second per client, for a row that is
+    /// already correct — and a control exchange that can fail on a store
+    /// hiccup is a control exchange that fails on heartbeats. A state that
+    /// stopped offering it after the first *attempt* would leave the store one
+    /// ask behind whenever a write failed, with nothing left to notice: the
+    /// client has been refused, retries, and the retry says nothing needs
+    /// writing.
+    ///
+    /// So the offer is retired by [`ControlState::record_desired_persisted`]
+    /// and by nothing else, which is what makes a failed write cost exactly
+    /// one refused exchange rather than a silently stale row.
+    #[test]
+    fn an_ask_is_offered_for_persistence_until_the_write_has_landed() {
+        let mut state = ControlState::default();
+        let first = selection_at(QualitySelection::Auto);
+        let second = selection_at(QualitySelection::Manual { height: 720 });
+
+        // A session's opening ask has to be written too: without it the store
+        // holds nothing for a viewer who never changes their mind, and an
+        // admission point comparing against "no row" cannot tell that from a
+        // viewer who has asked for something new.
+        let offer = state
+            .observe(&first, None)
+            .persist_desired
+            .expect("the opening ask is offered");
+        assert_eq!(offer.digest, first.desired().digest());
+        assert_eq!(offer.canonical_form, first.desired().canonical_form());
+
+        // Still offered while the write has not landed — a refused exchange
+        // must leave the next one asking for the same thing.
+        assert_eq!(
+            state.observe(&first, None).persist_desired,
+            Some(offer.clone()),
+            "an unacknowledged write is still outstanding"
+        );
+
+        state.record_desired_persisted(&offer.digest);
+        assert_eq!(
+            state.observe(&first, None).persist_desired,
+            None,
+            "and once it has landed, a heartbeat repeating the same ask writes nothing"
+        );
+
+        // A new ask is offered again.
+        let next = state
+            .observe(&second, None)
+            .persist_desired
+            .expect("a changed ask is offered");
+        assert_ne!(next.digest, offer.digest);
+
+        // A stale acknowledgement — the viewer moved on while the write was in
+        // flight — does not retire the current offer. Accepting it would mark
+        // the row as naming an ask it does not name.
+        state.record_desired_persisted(&offer.digest);
+        assert_eq!(
+            state.observe(&second, None).persist_desired,
+            Some(next.clone()),
+            "a write that landed for an ask the viewer has already left retires nothing"
+        );
+        state.record_desired_persisted(&next.digest);
+        assert_eq!(state.observe(&second, None).persist_desired, None);
+    }
+
+    /// An ask that arrives while the slot is busy is not lost.
+    ///
+    /// The old gate asked "did this packet differ from the last one", which is
+    /// true for exactly one exchange. A viewer who changed quality while a
+    /// successor was already in flight therefore had their candidate built,
+    /// refused by the occupied slot, and never rebuilt — they simply never got
+    /// the thing they asked for, and nothing said so.
+    ///
+    /// The gate now asks "has the current ask been dispatched", which stays
+    /// true across exchanges until it has been. Coalescing falls out for free:
+    /// only the latest ask is ever held, so three changes while the slot is
+    /// busy leave one candidate to build rather than three.
+    #[test]
+    fn an_ask_arriving_while_the_slot_is_busy_is_dispatched_once_it_frees() {
+        let mut state = ControlState::default();
+        let first = selection_at(QualitySelection::Auto);
+        let second = selection_at(QualitySelection::Manual { height: 720 });
+        let third = selection_at(QualitySelection::Manual { height: 1080 });
+
+        // The session's own ask dispatches nothing: there is no change to
+        // prepare for, and this is the first-exchange behaviour the old gate
+        // had too.
+        assert!(!state.observe(&first, None).dispatch_preparation);
+        assert!(
+            !state.observe(&first, None).dispatch_preparation,
+            "an unchanged steady state stays silent"
+        );
+
+        // A real change, with the slot free.
+        assert!(state.observe(&second, None).dispatch_preparation);
+        assert!(
+            !state.observe(&second, None).dispatch_preparation,
+            "and is dispatched once, not on every exchange after it"
+        );
+
+        // That candidate takes the slot, and the viewer changes their mind
+        // again — three times, to prove the coalescing.
+        assert!(state.stage_preparation(
+            uuid::Uuid::new_v4().to_string(),
+            "predecessor".to_owned(),
+            i64::MAX,
+            Some(second.desired().digest()),
+        ));
+        for _ in 0..3 {
+            assert!(
+                !state.observe(&third, None).dispatch_preparation,
+                "an occupied slot cannot take a successor, so nothing is dispatched into it"
+            );
+        }
+
+        // The slot frees. The next exchange picks up the ask that has been
+        // waiting — without a wake-up path, and without having queued three
+        // copies of it.
+        let staged = state
+            .preparation
+            .staged_incarnation_id()
+            .expect("the fixture staged one")
+            .to_owned();
+        assert!(state.abort_preparation(&staged));
+        state.preparation = PreparationSlot::Empty;
+        assert!(
+            state.observe(&third, None).dispatch_preparation,
+            "the ask the viewer has been waiting on is built once the slot can take it"
+        );
+        assert!(
+            !state.observe(&third, None).dispatch_preparation,
+            "and only once"
+        );
+    }
+
+    /// A packet the server refused cannot move what the viewer is understood
+    /// to want.
+    ///
+    /// The ask is advanced inside acceptance, downstream of every fence. A
+    /// replay is the same exchange arriving twice and advanced the ask the
+    /// first time or not at all; a rate-limited packet was never accepted.
+    ///
+    /// This reads the field rather than a consequence, and the first version of
+    /// it did the opposite and proved nothing. Today the only consumer of the
+    /// ask — `reserve_preparation_commit` — runs inside the same call that
+    /// writes it, so a rejected packet advancing it is immediately overwritten
+    /// by the next accepted one and no behaviour differs. Moving the write
+    /// above the rate-limit fence passed that test. It fails this one.
+    ///
+    /// The property is worth pinning now anyway, because it stops being
+    /// unobservable the moment §1's durable desired-ownership row exists: that
+    /// row is read outside acceptance, and a rejected packet that had advanced
+    /// this would be a rejected packet that had changed what the system
+    /// believes the viewer wants. Establishing the placement before something
+    /// depends on it is cheaper than discovering it afterwards.
+    #[test]
+    fn a_refused_packet_cannot_advance_the_ask_and_strand_a_successor() {
+        let request = request();
+        let asked_for = selection_at(QualitySelection::Manual { height: 720 });
+        let never_asked = selection_at(QualitySelection::Manual { height: 1080 });
+
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            i64::MAX,
+            Some(asked_for.desired().digest()),
+        ));
+        let prepared_session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id: staged_incarnation_id.clone(),
+            deadline_ms: i64::MAX,
+            session_id: prepared_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+
+        let announced = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&asked_for),
+            )
+            .expect("announced");
+        let ControlAction::Prepare {
+            action_id,
+            media_origin_ms: offered_origin_ms,
+            ..
+        } = &announced.2
+        else {
+            panic!("an occupied preparation slot announces its successor");
+        };
+        let action_id = action_id.clone();
+
+        // A replay of that same sequence, claiming a different ask.
+        let replay = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&never_asked),
+            )
+            .expect("a replay is answered, not errored");
+        assert_eq!(replay.0, ControlDisposition::Replay);
+
+        // And a rate-limited packet, also claiming it.
+        assert!(matches!(
+            state.accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&never_asked),
+            ),
+            Err(ControlStateError::RateLimited(_))
+        ));
+
+        // Neither refused packet moved the ask.
+        assert_eq!(
+            state.desired_digest_for_test(),
+            Some(asked_for.desired().digest().as_str()),
+            "a replayed or rate-limited packet is not the viewer changing their mind"
+        );
+
+        // And the successor they are waiting for still commits.
+        state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&asked_for)
+                    .acknowledging(ActionAcknowledgement {
+                        action_id,
+                        state: AcknowledgementState::Committed,
+                        buffered_through_ms: None,
+                        // Echo the offer this test announced; a commit naming a
+                        // different origin is refused.
+                        committed_media_origin_ms: Some(*offered_origin_ms),
+                        first_frame_unix_ms: None,
+                    }),
+            )
+            .expect("accepted");
+        assert_eq!(
+            state.preparation_directive(),
+            Some(PreparationDirective::Commit {
+                staged_incarnation_id
+            }),
+            "a duplicated or throttled packet must not be able to strand a successor"
+        );
+    }
+
+    /// A slot staged before any ask was recorded is not second-guessed.
+    ///
+    /// Several paths stage without an observed selection — the plain
+    /// `stage_preparation`, and any staging that precedes the first control
+    /// exchange. An absent record is not evidence that the ask changed, and
+    /// refusing on it would strand successors with nothing wrong with them, so
+    /// the comparison is skipped rather than failed.
+    #[test]
+    fn a_successor_staged_without_a_recorded_ask_still_commits() {
+        let request = request();
+        let mut state = ControlState::default();
+        let started = Instant::now();
+        let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
+        assert!(state.stage_preparation(
+            staged_incarnation_id.clone(),
+            request.generation.clone(),
+            i64::MAX,
+            None,
+        ));
+        let prepared_session_id = uuid::Uuid::new_v4().to_string();
+        let successor = PreparedSuccessorAction {
+            staged_incarnation_id: staged_incarnation_id.clone(),
+            deadline_ms: i64::MAX,
+            session_id: prepared_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{prepared_session_id}/index.m3u8"),
+            media_origin_ms: 42_000,
+            effective_selection: prepared_selection(),
+        };
+        let announced = state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    .asking(&selection_at(QualitySelection::Auto)),
+            )
+            .expect("announced");
+        let ControlAction::Prepare {
+            action_id,
+            media_origin_ms: offered_origin_ms,
+            ..
+        } = &announced.2
+        else {
+            panic!("an occupied preparation slot announces its successor");
+        };
+        state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
+                    // A different ask, and still no record of what the slot was
+                    // staged for.
+                    .asking(&selection_at(QualitySelection::Manual { height: 480 }))
+                    .acknowledging(ActionAcknowledgement {
+                        action_id: action_id.clone(),
+                        state: AcknowledgementState::Committed,
+                        buffered_through_ms: None,
+                        // Echo the offer this test announced; a commit naming a
+                        // different origin is refused.
+                        committed_media_origin_ms: Some(*offered_origin_ms),
+                        first_frame_unix_ms: None,
+                    }),
+            )
+            .expect("accepted");
+        assert_eq!(
+            state.preparation_directive(),
+            Some(PreparationDirective::Commit {
+                staged_incarnation_id
+            }),
+            "an absent record is no evidence, and must not strand a successor"
+        );
+    }
+
     fn prepared_selection() -> EffectiveSelection {
         EffectiveSelection {
             quality_auto: false,
@@ -14833,6 +16745,73 @@ mod tests {
         assert!(prometheus().contains(
             "plurx_playback_control_actions_total{action=\"prepare\",platform=\"apple\"}"
         ));
+    }
+
+    /// The ask travels on this request twice, and the two copies must agree.
+    ///
+    /// This is the one property the optional envelope needs in order to be
+    /// worth having. `selection` and `intent.selection` are the same statement
+    /// in two shapes, so a request carrying both is either redundant or wrong,
+    /// and there is no third possibility to fall back on. Picking `selection`
+    /// would make the envelope decorative; picking the envelope would let a
+    /// client steer the recipe through a field this server's admission path
+    /// does not read yet. A 400 that names the field is the only answer a
+    /// client can act on, and the only one that cannot be wrong quietly.
+    ///
+    /// The agreement is asserted through `desired()` rather than field by
+    /// field, because that is the normalization the durable ask is built from:
+    /// two spellings that normalize the same *are* the same ask.
+    #[test]
+    fn an_envelope_that_contradicts_the_selection_beside_it_is_refused() {
+        use plurx_core::playback::{DesiredQuality, MediaIntentEnvelope};
+        let target = 60_000;
+
+        let mut agreeing = request();
+        agreeing.intent = Some(MediaIntentEnvelope {
+            lifetime_id: "lifetime-a".to_owned(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: agreeing.selection.desired(),
+        });
+        assert!(
+            agreeing.validate(None, target).is_ok(),
+            "an envelope that says what the selection says is accepted"
+        );
+
+        let mut contradicting = request();
+        let mut elsewhere = contradicting.selection.desired();
+        elsewhere.quality = DesiredQuality::Manual { height: 480 };
+        contradicting.intent = Some(MediaIntentEnvelope {
+            lifetime_id: "lifetime-a".to_owned(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: elsewhere,
+        });
+        assert_eq!(
+            contradicting.validate(None, target),
+            Err("intent.selection"),
+            "and one that says something else is refused, by name"
+        );
+
+        // An envelope that cannot mean anything is refused before its contents
+        // are compared at all — otherwise a zero revision would be reported as
+        // a selection disagreement, which is a different bug to chase.
+        let mut malformed = request();
+        malformed.intent = Some(MediaIntentEnvelope {
+            lifetime_id: String::new(),
+            recipe_revision: 1,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: malformed.selection.desired(),
+        });
+        assert_eq!(malformed.validate(None, target), Err("intent"));
+
+        // And the field stays optional: every deployed client sends none.
+        let mut absent = request();
+        absent.intent = None;
+        assert!(absent.validate(None, target).is_ok());
     }
 
     #[test]
@@ -14865,6 +16844,19 @@ mod tests {
         absent.supported_actions = None;
         assert!(absent.validate(None, target).is_ok());
         assert!(!absent.accepts_hold());
+    }
+
+    #[test]
+    fn original_quality_is_explicit_even_without_a_height() {
+        let original: QualitySelection = serde_json::from_value(serde_json::json!({
+            "mode": "original"
+        }))
+        .expect("explicit Original selection");
+        assert_eq!(original, QualitySelection::Original);
+        assert_eq!(
+            serde_json::to_value(original).expect("serialize Original"),
+            serde_json::json!({"mode": "original"})
+        );
     }
 
     #[test]
@@ -15055,6 +17047,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15151,6 +17144,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15180,6 +17174,7 @@ mod tests {
             action_id: action_id.clone(),
             state: AcknowledgementState::MetadataReady,
             buffered_through_ms: None,
+            committed_media_origin_ms: None,
             first_frame_unix_ms: None,
         };
         let progress = state
@@ -15207,6 +17202,7 @@ mod tests {
             action_id: action_id.clone(),
             state: AcknowledgementState::BufferReady,
             buffered_through_ms: Some(55_000),
+            committed_media_origin_ms: None,
             first_frame_unix_ms: None,
         };
         let buffered_response = state
@@ -15232,6 +17228,9 @@ mod tests {
             action_id: uuid::Uuid::new_v4().to_string(),
             state: AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer this test announced; a commit naming a
+            // different origin is refused.
+            committed_media_origin_ms: Some(successor.media_origin_ms),
             first_frame_unix_ms: Some(10),
         };
         let ignored = state
@@ -15251,6 +17250,9 @@ mod tests {
             action_id,
             state: AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer this test announced; a commit naming a
+            // different origin is refused.
+            committed_media_origin_ms: Some(successor.media_origin_ms),
             first_frame_unix_ms: Some(11),
         };
         let accepted = state
@@ -15305,6 +17307,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15341,6 +17344,7 @@ mod tests {
                         action_id,
                         state: AcknowledgementState::Failed,
                         buffered_through_ms: None,
+                        committed_media_origin_ms: None,
                         first_frame_unix_ms: None,
                     },
                 ),
@@ -15366,10 +17370,16 @@ mod tests {
         let mut request = request();
         request.demand = PlaybackDemand::End;
         request.playback_rate = 0.0;
+        // Well-formed on purpose. `ControlRequestV1::validate` runs the
+        // acknowledgement's own field checks before this rule, so an
+        // acknowledgement missing a field would trip on that instead and this
+        // test would stop exercising the rule it is named for while still
+        // passing.
         request.acknowledgement = Some(ActionAcknowledgement {
             action_id: uuid::Uuid::new_v4().to_string(),
             state: AcknowledgementState::Committed,
             buffered_through_ms: None,
+            committed_media_origin_ms: Some(0),
             first_frame_unix_ms: Some(1),
         });
         assert_eq!(request.validate(None, 6_000), Err("acknowledgement.state"));
@@ -15387,6 +17397,7 @@ mod tests {
                 staged_incarnation_id.clone(),
                 request.generation.clone(),
                 preparation_deadline,
+                None,
             ));
             let prepared_session_id = uuid::Uuid::new_v4().to_string();
             let successor = PreparedSuccessorAction {
@@ -15408,7 +17419,12 @@ mod tests {
                         .at_unix_ms(preparation_deadline - 1),
                 )
                 .expect("Prepare is announced");
-            let ControlAction::Prepare { action_id, .. } = first.2 else {
+            let ControlAction::Prepare {
+                action_id,
+                media_origin_ms: offered_origin_ms,
+                ..
+            } = first.2
+            else {
                 panic!("expected Prepare");
             };
             if abort_wins_first {
@@ -15427,6 +17443,9 @@ mod tests {
                             action_id,
                             state: AcknowledgementState::Committed,
                             buffered_through_ms: None,
+                            // Echo the offer this test announced; a commit naming a
+                            // different origin is refused.
+                            committed_media_origin_ms: Some(offered_origin_ms),
                             first_frame_unix_ms: Some(preparation_deadline),
                         }),
                 )
@@ -15471,6 +17490,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             preparation_deadline,
+            None,
         ));
         let prepared_session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15492,7 +17512,12 @@ mod tests {
                     .at_unix_ms(preparation_deadline - 1),
             )
             .expect("Prepare is announced");
-        let ControlAction::Prepare { action_id, .. } = first.2 else {
+        let ControlAction::Prepare {
+            action_id,
+            media_origin_ms: offered_origin_ms,
+            ..
+        } = first.2
+        else {
             panic!("expected Prepare");
         };
 
@@ -15521,6 +17546,9 @@ mod tests {
                         action_id,
                         state: AcknowledgementState::Committed,
                         buffered_through_ms: None,
+                        // Echo the offer this test announced; a commit naming a
+                        // different origin is refused.
+                        committed_media_origin_ms: Some(offered_origin_ms),
                         first_frame_unix_ms: Some(preparation_deadline + 1),
                     }),
             )
@@ -15545,6 +17573,7 @@ mod tests {
             request.generation.clone(),
             i64::MAX,
             1,
+            None,
         ));
         state
             .accept_at(
@@ -15595,6 +17624,7 @@ mod tests {
             request.generation,
             i64::MAX,
             2,
+            None,
         ));
     }
 
@@ -15608,6 +17638,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15660,6 +17691,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15719,6 +17751,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             i64::MAX,
+            None,
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15771,6 +17804,7 @@ mod tests {
             staged_incarnation_id.clone(),
             request.generation.clone(),
             10_000,
+            None,
         ));
         let session_id = uuid::Uuid::new_v4().to_string();
         let successor = PreparedSuccessorAction {
@@ -15951,6 +17985,50 @@ mod tests {
         );
     }
 
+    /// A valid relayed answer and the request it answers.
+    fn relay_pair() -> (ControlResponseV1, ControlRelayRequest) {
+        let request = relay_request();
+        let response = ControlResponseV1 {
+            protocol: PROTOCOL_V1.to_owned(),
+            generation: request.generation.clone(),
+            control_epoch: 1,
+            accepted_sequence: 1,
+            server_time_unix_ms: 1_000_000,
+            lease: PlaybackLeaseView {
+                state: "active".to_owned(),
+                renew_after_ms: NEXT_EXCHANGE_MS,
+                expires_at_unix_ms: 1_060_000,
+            },
+            delivery: DeliveryView {
+                presentation: "vod".to_owned(),
+                producer_state: "complete".to_owned(),
+                produced_through_ms: Some(7_200_000),
+                fetched_through_ms: 25_000,
+                delivered_bps: None,
+                delivered_idle_ms: None,
+                recent_producer_speed: None,
+                client_runway_ms: 15_000,
+                admitted: Some(true),
+                producer_decision: None,
+                hold_reason: None,
+                subtitle_readiness: None,
+                owner_node_hash: "n-0123456789abcdef".to_owned(),
+                owner_epoch: 1,
+            },
+            effective_selection: EffectiveSelection {
+                quality_auto: true,
+                height: 1080,
+                audio_track: Some(0),
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                codec: "source".to_owned(),
+                dynamic_range: Some("sdr".to_owned()),
+            },
+            action: ControlAction::None,
+        };
+        (response, request)
+    }
+
     fn relay_request() -> ControlRelayRequest {
         let control = request();
         ControlRelayRequest {
@@ -15980,6 +18058,75 @@ mod tests {
     /// The expensive half — two store reads to resolve a candidate — is what
     /// this exists to skip, on an exchange that runs about once a second per
     /// client under an absolute deadline.
+    /// A seek is not a change of ask, however hard it looks like one.
+    ///
+    /// The last of §1's eleven races, and the one whose absence was easiest to
+    /// miss: every other case moves *something* about the selection, so a
+    /// scheduler keying on the wrong field would be caught by one of them. A
+    /// seek moves nothing about it. The playhead jumps, the buffer empties and
+    /// refills, the render state goes to seeking and back — and the viewer has
+    /// not asked for a different recipe, so work in flight for the recipe they
+    /// *did* ask for has to survive it.
+    ///
+    /// Same-quality on purpose. A seek that also changed the quality would
+    /// pass with the two conflated, which is exactly the bug: the rule is that
+    /// a destination change is not a recipe change, and only a seek that
+    /// leaves the recipe alone can say whether that holds.
+    ///
+    /// Asserted on the recorded ask and not only on `changed`, because those
+    /// are different claims. `changed` is what the scheduler reads this
+    /// exchange; the digest is what survives to be compared against the next
+    /// one, and a seek that quietly advanced it would refuse a successor built
+    /// moments earlier for a recipe nobody has left.
+    #[test]
+    fn a_same_quality_seek_does_not_move_the_ask() {
+        let request = request();
+        let asked_for = selection_at(QualitySelection::Manual { height: 720 });
+        let mut state = ControlState::default();
+        let started = Instant::now();
+
+        state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None).asking(&asked_for),
+            )
+            .expect("the first exchange is accepted");
+        let settled = state
+            .desired_digest_for_test()
+            .map(str::to_owned)
+            .expect("the ask the viewer arrived with");
+
+        // The seek: a later exchange carrying the very same selection.
+        state
+            .accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None).asking(&asked_for),
+            )
+            .expect("the seek exchange is accepted");
+
+        assert_eq!(
+            state.desired_digest_for_test(),
+            Some(settled.as_str()),
+            "seeking is asking for a different position, not a different recipe"
+        );
+
+        // And what the scheduler reads agrees: nothing to rebuild, and no
+        // durable ask to write for a request the viewer never made.
+        let observation = state.observe(&asked_for, None);
+        assert!(
+            !observation.changed,
+            "a seek must not spend the work the gate exists to save"
+        );
+    }
+
     #[test]
     fn the_actor_reports_when_a_selection_moved() {
         let started = Instant::now();
@@ -16338,6 +18485,7 @@ mod tests {
             "successor-1".to_owned(),
             "current-1".to_owned(),
             i64::MAX,
+            None,
         ));
         (actor, started)
     }
@@ -16350,7 +18498,12 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX)
+                .stage_preparation(
+                    "successor-1".to_owned(),
+                    "current-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         assert!(
@@ -16422,7 +18575,12 @@ mod tests {
         assert!(handle.settle_preparation("successor-1", true).await);
         assert!(
             handle
-                .stage_preparation("successor-2".to_owned(), "successor-1".to_owned(), i64::MAX,)
+                .stage_preparation(
+                    "successor-2".to_owned(),
+                    "successor-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await,
             "a committed successor frees the slot for the next preparation"
         );
@@ -16440,6 +18598,7 @@ mod tests {
                     staged_incarnation_id.clone(),
                     request.generation.clone(),
                     i64::MAX,
+                    None,
                 )
                 .await
         );
@@ -16470,7 +18629,12 @@ mod tests {
             )
             .await
             .expect("Prepare accepted");
-        let ControlAction::Prepare { action_id, .. } = first.action else {
+        let ControlAction::Prepare {
+            action_id,
+            media_origin_ms: offered_origin_ms,
+            ..
+        } = first.action
+        else {
             panic!("expected Prepare");
         };
         tokio::time::sleep(MIN_CONTROL_INTERVAL).await;
@@ -16480,6 +18644,9 @@ mod tests {
             action_id,
             state: AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer this test announced; a commit naming a
+            // different origin is refused.
+            committed_media_origin_ms: Some(offered_origin_ms),
             first_frame_unix_ms: Some(crate::media_sessions::unix_ms()),
         });
         let (reply, response) = tokio::sync::oneshot::channel();
@@ -16525,7 +18692,12 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX,)
+                .stage_preparation(
+                    "successor-1".to_owned(),
+                    "current-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         assert!(handle.settle_preparation("successor-1", false).await);
@@ -16535,7 +18707,12 @@ mod tests {
         );
         assert!(
             handle
-                .stage_preparation("successor-2".to_owned(), "current-1".to_owned(), i64::MAX,)
+                .stage_preparation(
+                    "successor-2".to_owned(),
+                    "current-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         handle.abort_actor_for_test();
@@ -16548,7 +18725,12 @@ mod tests {
         let handle = RollingControlHandle::spawn("session-start");
         assert!(
             handle
-                .stage_preparation("successor-1".to_owned(), "current-1".to_owned(), i64::MAX,)
+                .stage_preparation(
+                    "successor-1".to_owned(),
+                    "current-1".to_owned(),
+                    i64::MAX,
+                    None
+                )
                 .await
         );
         assert!(
@@ -16577,6 +18759,7 @@ mod tests {
             "successor-2".to_owned(),
             "current-1".to_owned(),
             i64::MAX,
+            None,
         ));
         assert_eq!(
             actor.control.preparation.staged_incarnation_id(),
@@ -16672,6 +18855,7 @@ mod tests {
                 "successor-2".to_owned(),
                 "current-1".to_owned(),
                 i64::MAX,
+                None,
             ));
         }
     }
@@ -19952,6 +22136,7 @@ mod tests {
         held.delivery.hold_reason = Some("working_set".to_owned());
         held.action = ControlAction::Hold {
             reason: HoldReason::WorkingSet,
+            revisit_after_ms: HoldReason::WorkingSet.revisit_after_ms(),
         };
         assert!(held.is_valid_for(&accepting));
 
@@ -20455,6 +22640,7 @@ mod tests {
             .expect("assign owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
             recovery_epoch: String::new(),
+            expected_desired_revision: None,
             incarnation_id: incarnation.clone(),
             session_id: session.clone(),
             user_id: 7,
@@ -21015,6 +23201,117 @@ mod tests {
         })
     }
 
+    /// The normalized selection loses nothing the wire struct distinguishes.
+    ///
+    /// `observe` now answers "did the viewer ask for something else" by
+    /// comparing normalized selections rather than wire structs, so that claim
+    /// has to be proved rather than asserted in a comment: if the conversion
+    /// collapsed any two distinct legal asks, a real change would be reported
+    /// as unchanged and the successor it should have staged would never be
+    /// staged at all.
+    ///
+    /// Proved by injectivity over every legal shape rather than by a handful
+    /// of examples. The cross product below is exhaustive per axis — three
+    /// quality policies including Original beside a manual pick, every codec,
+    /// every dynamic range, the default audio track beside two named ones, a
+    /// zero and two signed offsets, and every subtitle mode with each of two
+    /// track numbers — and every member is validated first, so the claim is
+    /// scoped to exactly the selections this server accepts. Distinct wire
+    /// selections must produce distinct normalized ones, and distinct digests;
+    /// the converse is free, because the conversion is a function.
+    #[test]
+    fn the_normalized_selection_distinguishes_every_ask_the_wire_does() {
+        let qualities = [
+            QualitySelection::Auto,
+            QualitySelection::Original,
+            QualitySelection::Manual { height: 720 },
+        ];
+        let codecs = [
+            CodecPolicy::Auto,
+            CodecPolicy::H264,
+            CodecPolicy::Hevc,
+            CodecPolicy::Av1,
+        ];
+        let ranges = [
+            DynamicRangePolicy::Auto,
+            DynamicRangePolicy::DolbyVision,
+            DynamicRangePolicy::Hdr10,
+            DynamicRangePolicy::Hlg,
+            DynamicRangePolicy::Sdr,
+        ];
+        let audio_tracks = [None, Some(0), Some(2)];
+        let offsets = [0, -250, 1_000];
+        let subtitles = {
+            let mut shapes = vec![SubtitleSelection {
+                mode: SubtitleMode::Off,
+                track: None,
+            }];
+            for mode in [
+                SubtitleMode::Native,
+                SubtitleMode::Overlay,
+                SubtitleMode::Burn,
+            ] {
+                for track in [0, 3] {
+                    shapes.push(SubtitleSelection {
+                        mode,
+                        track: Some(track),
+                    });
+                }
+            }
+            shapes
+        };
+
+        let mut wire = Vec::new();
+        for quality in qualities {
+            for codec in codecs {
+                for dynamic_range in ranges {
+                    for audio_track in audio_tracks {
+                        for audio_offset_ms in offsets {
+                            for subtitle in &subtitles {
+                                wire.push(ClientSelection {
+                                    quality,
+                                    audio_track,
+                                    subtitle: subtitle.clone(),
+                                    audio_offset_ms,
+                                    codec,
+                                    dynamic_range,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            wire.len(),
+            qualities.len()
+                * codecs.len()
+                * ranges.len()
+                * audio_tracks.len()
+                * offsets.len()
+                * subtitles.len()
+        );
+
+        let mut normalized = std::collections::BTreeSet::new();
+        let mut digests = std::collections::BTreeSet::new();
+        for selection in &wire {
+            selection
+                .validate()
+                .expect("every shape in the cross product is one the server accepts");
+            let desired = selection.desired();
+            assert!(
+                normalized.insert(desired.canonical_form()),
+                "two distinct asks normalized to the same policy: {selection:?}"
+            );
+            assert!(
+                digests.insert(desired.digest()),
+                "two distinct policies digested the same: {selection:?}"
+            );
+        }
+        assert_eq!(normalized.len(), wire.len());
+        assert_eq!(digests.len(), wire.len());
+    }
+
     fn selection_at(quality: QualitySelection) -> ClientSelection {
         ClientSelection {
             quality,
@@ -21076,6 +23373,19 @@ mod tests {
             ),
             PreparationDecision::Unchanged,
         );
+    }
+
+    #[test]
+    fn original_keeps_a_copy_and_revokes_automatic_authority() {
+        let current = converting_copy();
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Original),
+            2160,
+            None,
+        );
+        assert_eq!(candidate.kind, current.kind);
+        assert!(!candidate.automatic);
     }
 
     /// A copy has no rung, so a manual rung that is not the source's own is a
@@ -21423,9 +23733,12 @@ mod tests {
         // too tight" and "nobody measured the link" are opposite findings, and
         // a counter that reported them as one number would read as evidence
         // for the throughput rule while measuring only its own missing inputs.
-        // On today's fleet the unreported cases are effectively all of it: the
-        // native clients send no `observed_download_bps` and VOD sessions
-        // carry no `delivered_bps`.
+        // This was once effectively all of it, for two separate reasons that
+        // have both since been fixed: the native clients now send
+        // `observed_download_bps` (Apple from AVFoundation's access log,
+        // Android off the wire), and VOD sessions now carry a measured
+        // `delivered_bps`. What remains unreported is a session too young for
+        // a window to have closed.
         let refusals = [
             (
                 "no margin at all",
@@ -21583,6 +23896,7 @@ mod tests {
         now_ms: i64,
     ) -> plurx_core::domain::MediaSessionPreparation {
         plurx_core::domain::MediaSessionPreparation {
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),
             user_id: 7,
@@ -21711,6 +24025,34 @@ mod tests {
         // the publication fence is still at the sentinel, and arming it is
         // `arm_media_session_handoff`'s job, exactly as it is for an
         // activated replacement.
+        //
+        // **And nothing calls it, which is a hole rather than a design.** An
+        // activation has `settle_activation_predecessor` to finish the job; a
+        // commit has no equivalent, so the successor this test just made
+        // current is refused on both planes from its very first request —
+        // `classify_durable_route` answers `OwnerTransition` for any non-zero
+        // fence and `control_owner_refusal` refuses control on the same
+        // predicate. The pointer moved and the viewer got nothing.
+        //
+        // **Do not fix that by publishing here.** Publishing is only half the
+        // transaction and the wrong half first. A committed successor has no
+        // local worker, because nothing primes one — `stage_prepared_successor`
+        // is stage-only. Moving the row off the sentinel puts it into
+        // `owned_media_sessions`, and the lease loop renews only sessions that
+        // are *live*: `take_stale_settlement_candidates` selects exactly the
+        // inventory rows that are not, and `end_media_session_if_owner` ends
+        // them `replaced` **and deletes the playback pointer in the same
+        // transaction**. Publishing a workerless successor therefore trades a
+        // stalled pointer for a deleted one, seconds after the commit instead
+        // of minutes. That was measured, not reasoned about: the call was
+        // written, the suite passed, and an adversarial pass found the sweep.
+        //
+        // The publication belongs to §5.1's phase 3 alongside the priming that
+        // gives the successor a worker, and it needs the predecessor's
+        // terminal projection that `settle_activation_predecessor` waits for
+        // before it may use `PredecessorAcknowledged` at all.
+        // `docs/playback-control/M6-SERVER-PRIME-HANDOFF.md` §4 carries the
+        // whole shape.
         let committed = store
             .media_session_route_by_incarnation(&successor)
             .await
@@ -21728,6 +24070,7 @@ mod tests {
                     uuid::Uuid::new_v4().to_string(),
                     successor.clone(),
                     i64::MAX,
+                    None,
                 )
                 .await,
             "the slot is free again, so the next preparation can take it",
@@ -21755,6 +24098,7 @@ mod tests {
         let winner = uuid::Uuid::new_v4().to_string();
         let advance = plurx_core::domain::MediaSessionActivation {
             recovery_epoch: String::new(),
+            expected_desired_revision: None,
             incarnation_id: winner.clone(),
             session_id: uuid::Uuid::new_v4().to_string(),
             user_id: 7,
@@ -21850,7 +24194,7 @@ mod tests {
         assert_eq!(abandoned.terminal_reason.as_deref(), Some("replaced"));
         assert!(
             control
-                .stage_preparation(uuid::Uuid::new_v4().to_string(), winner, i64::MAX)
+                .stage_preparation(uuid::Uuid::new_v4().to_string(), winner, i64::MAX, None)
                 .await,
             "and the actor's slot with it",
         );
@@ -21909,7 +24253,7 @@ mod tests {
         let replacement = uuid::Uuid::new_v4().to_string();
         assert!(
             control
-                .stage_preparation(replacement.clone(), predecessor, i64::MAX)
+                .stage_preparation(replacement.clone(), predecessor, i64::MAX, None)
                 .await,
             "the slot is free, so the next preparation can take it",
         );

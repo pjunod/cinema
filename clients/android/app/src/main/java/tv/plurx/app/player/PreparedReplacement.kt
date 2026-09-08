@@ -12,7 +12,7 @@ package tv.plurx.app.player
  * [controlCapabilities]'s `dualPlayerPreparation`), so a test is the only place
  * it is ever exercised.
  *
- * `docs/M6-CLIENT-REPLACEMENT-CONTRACT.md` §C7 and §C8 are what this encodes.
+ * `docs/playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md` §C7 and §C8 are what this encodes.
  */
 
 /**

@@ -1,0 +1,21 @@
+version = 1
+
+[[coverage]]
+commits = ["e5efa892"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "identity.access",
+  "server.api",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+]
+reason = "The persistent cluster/WAL lane proves automatic activation without a credential mutation, exact-claim-bound SQL, delayed local claim application before roster observation, inclusion of a newly committed member, global proof invalidation, and fail-closed rollback behavior. Static operations contracts require every named regression, while the membership web suite pins the no-feature-gate operator enablement guidance."

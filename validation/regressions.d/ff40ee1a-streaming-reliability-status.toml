@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ff40ee1a"]
+reason = "Status-only checkpoint; it changed no executable behavior."
+ignore = true

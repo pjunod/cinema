@@ -1,6 +1,6 @@
 # Integration — plurx's seams with monarr, and how to prove they work
 
-Companion to [INTEGRATION-PLAN.md](INTEGRATION-PLAN.md) (the master plan and
+Companion to [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) (the master plan and
 why each seam exists) and [OPERATIONS.md](OPERATIONS.md) (running it day to
 day) — this is *what each seam does, where you look at it, and the exact
 command that proves it*. The trust model behind the scoped-key wall is in

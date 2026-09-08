@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["aa181c85"]
+points = []
+checks = []
+reason = "CI configuration only: the disk preflight's default threshold moves from 30G to the measured 25G after 30G refused a job on a runner that had 30G free and nothing left to prune. No runtime behaviour changes."
+ignore = true

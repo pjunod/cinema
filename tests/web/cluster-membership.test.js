@@ -6,7 +6,7 @@
 // What this file is actually protecting: the WORDS. The membership API already
 // has its own Rust gate for lifecycle, admin gating, and refusal codes. The
 // thing only this surface can get wrong is telling an operator that two voters
-// are redundancy — docs/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated
+// are redundancy — docs/cluster/CLUSTERING-PLAN.md §7.2 makes two-node HA a stated
 // non-goal precisely because two voters need both machines for every write and
 // therefore survive no failure. A settings screen that renders that as a green
 // "highly available" is the single most damaging bug this panel can ship, and
@@ -52,6 +52,7 @@ const BORROWED = [
   "clenv",
   "fmtAgo",
   "fmtBytes",
+  "clusterOpsElapsed",
   "replicationText",
   "clusterNodeOperationsBadge",
   "clusterNodeOperationsHtml",
@@ -93,6 +94,7 @@ const BORROWED = [
 // the next assertion.
 function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [] } = {}) {
   const source = `
+    const CLUSTER_OPS_RECEIVED_AT = new WeakMap();
     let ME = ${JSON.stringify({ is_admin: isAdmin })};
     let CLUSTER_REFUSAL = ${JSON.stringify(refusal)};
     let CLUSTER_TOKEN = ${JSON.stringify(token)};
@@ -332,6 +334,1324 @@ function operationStatus(membership, { safe = true, unreachable = false } = {}) 
     })),
   };
 }
+
+function transportOps(observations) {
+  return {
+    nodes: [
+      {
+        observation: "answered",
+        status: {},
+        transport: {
+          observing_node_id: observations[0]?.observing_node_id ?? 2,
+          observations,
+        },
+      },
+    ],
+  };
+}
+
+function privateTransportOps(observations) {
+  return {
+    nodes: [
+      {
+        observation: "unreachable",
+        status: null,
+        transport: {
+          observing_node_id: observations[0]?.observing_node_id ?? 2,
+          observations,
+        },
+      },
+    ],
+  };
+}
+
+function transportObservation(phase, extra = {}) {
+  return {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    raft_group: "sqlite",
+    direction: "inbound",
+    sample_age_ms: 40,
+    age_uncertainty_ms: 0,
+    phase,
+    ...extra,
+  };
+}
+
+test("transport recovery phases stay distinct from bounded-read authority", () => {
+  const ui = sandbox();
+  const active = ui.clusterTransportExplanation(
+    transportOps([transportObservation("transferring")]),
+    2,
+    false,
+  );
+  const installing = ui.clusterTransportExplanation(
+    transportOps([transportObservation("installing")]),
+    2,
+    false,
+  );
+  const retrying = ui.clusterTransportExplanation(
+    transportOps([transportObservation("retrying")]),
+    2,
+    false,
+  );
+  const recovered = ui.clusterTransportExplanation(
+    transportOps([transportObservation("complete")]),
+    2,
+    true,
+  );
+  const idle = ui.clusterTransportExplanation(transportOps([]), 2, true);
+  const unavailable = ui.clusterTransportExplanation(transportOps([]), 2, false);
+
+  assert.deepEqual(
+    [active.text, installing.text, retrying.text, recovered.text, idle.text, unavailable.text],
+    [
+      "receiving snapshot",
+      "installing snapshot",
+      "retrying snapshot",
+      "snapshot recovered",
+      "transport idle; bounded-read proof ready",
+      "progress unavailable",
+    ],
+  );
+  assert.equal(active.observation.observing_node_id, 2);
+  assert.equal(active.code, "transferring");
+  assert.equal(idle.code, "idle");
+  assert.equal(unavailable.code, "unavailable");
+});
+
+test("transport direction keeps sender and receiver explanations honest", () => {
+  const ui = sandbox();
+  const outbound = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("transferring", {
+        observing_node_id: 1,
+        peer_node_id: 2,
+        direction: "outbound",
+      }),
+    ]),
+    2,
+    false,
+  );
+  const inboundComplete = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("complete", {
+        direction: "inbound",
+        locally_received_bytes: 3145728,
+        acknowledged_offset: null,
+      }),
+    ]),
+    2,
+    false,
+  );
+
+  assert.equal(outbound.text, "transferring snapshot");
+  assert.equal(inboundComplete.text, "snapshot received; sender acknowledgement unconfirmed");
+});
+
+test("transport recovery is attributed only to the receiving node", () => {
+  const ui = sandbox();
+  const inbound = transportObservation("installing", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+  });
+  const outbound = transportObservation("transferring", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+  });
+
+  assert.equal(
+    ui.clusterTransportExplanation(transportOps([inbound]), 1, false).observation,
+    null,
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(transportOps([outbound]), 1, false).observation,
+    null,
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(transportOps([inbound]), 2, false).observation,
+    inbound,
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(transportOps([outbound]), 2, false).observation,
+    outbound,
+  );
+});
+
+test("private cluster-listener evidence survives a closed public listener", () => {
+  const ui = sandbox();
+  const recovery = ui.clusterTransportExplanation(
+    privateTransportOps([transportObservation("installing")]),
+    2,
+    false,
+  );
+  assert.equal(recovery.code, "installing");
+  assert.equal(recovery.text, "installing snapshot");
+});
+
+test("private transport renders while public status is closed for learners and voters", () => {
+  const ui = sandbox();
+  for (const role of ["learner", "voter"]) {
+    const target = node("node-b", 2, role, { bounded_read_ready: false });
+    const membership = status("degraded", [
+      node("node-a", 1, "voter", { is_leader: true }),
+      target,
+    ]);
+    const operations = operationStatus(membership, { unreachable: true });
+    operations.nodes[1].transport = {
+      observing_node_id: 2,
+      observations: [
+        transportObservation("installing", {
+          sample_age_ms: 65_000,
+          snapshot_id: "snapshot-private",
+        }),
+      ],
+    };
+
+    const operationsHtml = ui.clusterNodeOperationsHtml(target, operations);
+    assert.match(operationsHtml, /Not observed/);
+    assert.match(
+      operationsHtml,
+      /Transport<\/span>snapshot stalled · observer 2 · 35s ago/,
+    );
+    const nodeHtml = ui.clusterNodeRow(target, "node-a", true, {
+      operations,
+      lifecycleLocked: false,
+    });
+    assert.match(
+      nodeHtml,
+      /Transport<\/span>snapshot stalled · observer 2 · 35s ago/,
+      `${role} node card hides private transport evidence`,
+    );
+  }
+});
+
+test("rejected public and wrong-observer transport evidence cannot reappear", () => {
+  const ui = sandbox();
+  const rejectedPublic = {
+    nodes: [{
+      observation: "answered",
+      transport: null,
+      status: {
+        transport: {
+          observing_node_id: 7,
+          observations: [transportObservation("installing", { observing_node_id: 7 })],
+        },
+      },
+    }],
+  };
+  assert.equal(ui.clusterTransportExplanation(rejectedPublic, 2, false).code, "unavailable");
+
+  const wrongNestedObserver = {
+    nodes: [{
+      observation: "answered",
+      status: {},
+      transport: {
+        observing_node_id: 2,
+        observations: [transportObservation("installing", { observing_node_id: 7 })],
+      },
+    }],
+  };
+  assert.equal(
+    ui.clusterTransportExplanation(wrongNestedObserver, 2, false).code,
+    "unavailable",
+  );
+});
+
+test("transport status shows outbound evidence and expires stale samples", () => {
+  const ui = sandbox();
+  const outbound = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("awaiting_acknowledgement", {
+        observing_node_id: 1,
+        peer_node_id: 2,
+        direction: "outbound",
+      }),
+    ]),
+    2,
+    false,
+  );
+  assert.equal(outbound.text, "waiting for snapshot acknowledgement");
+  assert.equal(outbound.observation.observing_node_id, 1);
+
+  const expired = ui.clusterTransportExplanation(
+    transportOps([transportObservation("transferring", { sample_age_ms: 330001 })]),
+    2,
+    false,
+  );
+  assert.equal(expired.code, "unavailable");
+  assert.equal(expired.observation, null);
+
+  const watermark = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("complete", {
+        observing_node_id: 1,
+        peer_node_id: 2,
+        direction: "outbound",
+        acknowledged_offset: 3145728,
+      }),
+    ]),
+    2,
+    false,
+  );
+  assert.equal(watermark.code, "startup_watermark");
+  assert.equal(watermark.text, "waiting for startup watermark");
+});
+
+test("retained transport evidence ages, stalls, and expires while refreshes fail", () => {
+  const ui = sandbox();
+  const inactiveObservation = transportObservation("failed", {
+    sample_age_ms: 40,
+    active_deadline_remaining_ms: null,
+  });
+  const inactive = transportOps([inactiveObservation]);
+
+  let current = ui.clusterTransportExplanation(inactive, 2, false, 299_960);
+  assert.equal(current.code, "failed");
+  assert.equal(current.observation.sample_age_ms, 300_000);
+  assert.equal(
+    ui.clusterTransportExplanation(inactive, 2, false, 299_961).code,
+    "unavailable",
+  );
+  assert.equal(inactiveObservation.sample_age_ms, 40, "client aging must not renew the retained payload");
+
+  const fallbackObservation = transportObservation("retrying", {
+    sample_age_ms: 1_000,
+    active_deadline_remaining_ms: null,
+    operation_owns_work: true,
+  });
+  const fallback = transportOps([fallbackObservation]);
+  current = ui.clusterTransportExplanation(fallback, 2, false, 28_999);
+  assert.equal(current.code, "retrying");
+  assert.equal(current.observation.active_deadline_remaining_ms, 1);
+  current = ui.clusterTransportExplanation(fallback, 2, false, 29_000);
+  assert.equal(current.code, "stalled");
+  assert.equal(current.observation.sample_age_ms, 0);
+  assert.equal(current.observation.active_deadline_remaining_ms, 0);
+  assert.equal(
+    ui.clusterTransportExplanation(fallback, 2, false, 329_000).code,
+    "stalled",
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(fallback, 2, false, 329_001).code,
+    "unavailable",
+  );
+
+  const activeObservation = transportObservation("installing", {
+    sample_age_ms: 301_000,
+    attempt_age_ms: 302_000,
+    last_local_receive_age_ms: 50,
+    active_deadline_remaining_ms: 1_000,
+    operation_owns_work: true,
+  });
+  const active = transportOps([activeObservation]);
+
+  current = ui.clusterTransportExplanation(active, 2, false, 999);
+  assert.equal(current.code, "installing");
+  assert.equal(current.observation.sample_age_ms, 301_999);
+  assert.equal(current.observation.attempt_age_ms, 302_999);
+  assert.equal(current.observation.last_local_receive_age_ms, 1_049);
+  assert.equal(current.observation.active_deadline_remaining_ms, 1);
+
+  current = ui.clusterTransportExplanation(active, 2, false, 1_000);
+  assert.equal(current.code, "stalled");
+  assert.equal(current.observation.sample_age_ms, 0);
+  assert.equal(current.observation.active_deadline_remaining_ms, 0);
+  assert.equal(current.observation.last_error_category, "snapshot_stalled");
+
+  assert.equal(
+    ui.clusterTransportExplanation(active, 2, false, 301_000).code,
+    "stalled",
+    "the projected stall remains visible through its complete diagnostic window",
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(active, 2, false, 301_001).code,
+    "unavailable",
+  );
+  assert.equal(activeObservation.phase, "installing", "projection must not rewrite cached evidence");
+
+  const serverProjectedStall = transportOps([
+    transportObservation("stalled", {
+      sample_age_ms: 0,
+      active_deadline_remaining_ms: 0,
+      operation_owns_work: true,
+    }),
+  ]);
+  assert.equal(
+    ui.clusterTransportExplanation(serverProjectedStall, 2, false, 300_000).code,
+    "stalled",
+    "a server-projected stall keeps its complete post-deadline diagnostic window",
+  );
+  assert.equal(
+    ui.clusterTransportExplanation(serverProjectedStall, 2, false, 300_001).code,
+    "unavailable",
+  );
+});
+
+test("client-local receipt time ignores browser clocks ahead or behind the daemon", () => {
+  const realNow = Date.now;
+  try {
+    for (const [label, browserWall, serverWall] of [
+      ["browser ahead", 9_000_000, 1_000_000],
+      ["browser behind", 1_000_000, 9_000_000],
+    ]) {
+      let monotonicNow = 100;
+      const clock = { now: () => monotonicNow };
+      const receipt = new Function(
+        "performance",
+        `const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
+         ${shippedSource("clusterOpsReceived")}
+         ${shippedSource("clusterOpsElapsed")}
+         return {received:clusterOpsReceived,elapsed:clusterOpsElapsed};`,
+      )(clock);
+      const operations = transportOps([
+        transportObservation("installing", {
+          active_deadline_remaining_ms: 1_000,
+          operation_owns_work: true,
+        }),
+      ]);
+      operations.observed_at_unix_ms = serverWall;
+      const serialized = JSON.stringify(operations);
+      Date.now = () => browserWall;
+      receipt.received(operations);
+      assert.equal(JSON.stringify(operations), serialized, `${label}: receipt metadata entered JSON`);
+
+      monotonicNow += 1_000;
+      assert.equal(receipt.elapsed(operations), 1_000, label);
+      assert.equal(
+        PANEL.clusterTransportExplanation(operations, 2, false, receipt.elapsed(operations)).code,
+        "stalled",
+        label,
+      );
+      monotonicNow += 300_001;
+      assert.equal(
+        PANEL.clusterTransportExplanation(operations, 2, false, receipt.elapsed(operations)).code,
+        "unavailable",
+        `${label}: retained evidence did not expire from client elapsed time`,
+      );
+    }
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("receiver completion outranks every unacknowledged sender predecessor", () => {
+  const ui = sandbox();
+  const snapshotId = "snapshot-split-view";
+  const snapshotFingerprint = "1".repeat(64);
+  const receiverComplete = transportObservation("complete", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+    snapshot_id: snapshotId,
+    snapshot_fingerprint: snapshotFingerprint,
+    acknowledged_offset: null,
+  });
+  const node = (observation) => ({
+    transport: {
+      observing_node_id: observation.observing_node_id,
+      observations: [observation],
+    },
+  });
+
+  for (const phase of [
+    "failed",
+    "retrying",
+    "stalled",
+    "installing",
+    "awaiting_acknowledgement",
+  ]) {
+    const senderPredecessor = transportObservation(phase, {
+      observing_node_id: 1,
+      peer_node_id: 2,
+      direction: "outbound",
+      snapshot_id: snapshotId,
+      snapshot_fingerprint: snapshotFingerprint,
+      acknowledged_offset: null,
+    });
+    for (const observations of [
+      [senderPredecessor, receiverComplete],
+      [receiverComplete, senderPredecessor],
+    ]) {
+      const operations = { nodes: observations.map(node) };
+      const waitingForAck = ui.clusterTransportExplanation(operations, 2, false);
+      assert.equal(waitingForAck.observation.phase, "complete", `${phase}: phase`);
+      assert.equal(waitingForAck.observation.direction, "inbound", `${phase}: direction`);
+      assert.equal(
+        waitingForAck.text,
+        "snapshot received; sender acknowledgement unconfirmed",
+        phase,
+      );
+      const recovered = ui.clusterTransportExplanation(operations, 2, true);
+      assert.equal(recovered.observation.phase, "complete", `${phase}: recovered phase`);
+      assert.equal(recovered.text, "snapshot recovered", `${phase}: recovered text`);
+    }
+  }
+
+  // A sender Complete carrying the flushed acknowledgement remains causally
+  // stronger than the receiver's local completion in either row order.
+  const senderAcknowledged = transportObservation("complete", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: snapshotId,
+    snapshot_fingerprint: snapshotFingerprint,
+    acknowledged_offset: 4096,
+  });
+  for (const observations of [
+    [senderAcknowledged, receiverComplete],
+    [receiverComplete, senderAcknowledged],
+  ]) {
+    const acknowledged = ui.clusterTransportExplanation(
+      { nodes: observations.map(node) },
+      2,
+      false,
+    );
+    assert.equal(acknowledged.observation.phase, "complete");
+    assert.equal(acknowledged.observation.direction, "outbound");
+    assert.equal(acknowledged.observation.acknowledged_offset, 4096);
+    assert.equal(acknowledged.text, "waiting for startup watermark");
+  }
+});
+
+test("fresh snapshot identity outranks stale failure evidence from another observer", () => {
+  const ui = sandbox();
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("stalled", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: "former-leader-snapshot",
+              snapshot_fingerprint: "2".repeat(64),
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("installing", {
+              observing_node_id: 2,
+              peer_node_id: 1,
+              direction: "inbound",
+              snapshot_id: "current-leader-snapshot",
+              snapshot_fingerprint: "3".repeat(64),
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "installing");
+  assert.equal(current.observation.snapshot_id, "current-leader-snapshot");
+  assert.equal(current.observation.observing_node_id, 2);
+});
+
+test("fresh attempt wins over a stale stall for the same snapshot fingerprint", () => {
+  const ui = sandbox();
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("stalled", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: "same-snapshot",
+              snapshot_fingerprint: "4".repeat(64),
+              boot_id: "former-boot",
+              attempt_id: 4,
+              socket_epoch: 2,
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("installing", {
+              snapshot_id: "same-snapshot",
+              snapshot_fingerprint: "4".repeat(64),
+              boot_id: "current-boot",
+              attempt_id: 9,
+              socket_epoch: 7,
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "installing");
+  assert.equal(current.observation.boot_id, "current-boot");
+});
+
+test("sub-five-second successor attempt outranks same-fingerprint stalled predecessor", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "e".repeat(64);
+  const predecessor = transportObservation("stalled", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "restarted-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-boot",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 4_000,
+    attempt_age_ms: 60_000,
+  });
+  const successor = transportObservation("installing", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+    snapshot_id: "restarted-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-boot",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 0,
+    attempt_age_ms: 1_000,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [[predecessor, successor], [successor, predecessor]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "current-boot");
+    assert.equal(current.observation.attempt_id, 9);
+  }
+});
+
+test("late predecessor failure cannot hide an already-started successor attempt", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "f".repeat(64);
+  const predecessor = transportObservation("failed", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "late-cancelled-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 0,
+    attempt_age_ms: 60_000,
+  });
+  const successor = transportObservation("installing", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+    snapshot_id: "late-cancelled-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-receiver",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 6_000,
+    attempt_age_ms: 10_000,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [[predecessor, successor], [successor, predecessor]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "current-receiver");
+    assert.equal(current.observation.attempt_id, 9);
+  }
+});
+
+test("late predecessor failure cannot hide a newer different-snapshot successor", () => {
+  const ui = sandbox();
+  const predecessor = transportObservation("failed", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "former-snapshot",
+    snapshot_fingerprint: "1".repeat(64),
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 0,
+    attempt_age_ms: 60_000,
+  });
+  const successor = transportObservation("installing", {
+    observing_node_id: 2,
+    peer_node_id: 1,
+    direction: "inbound",
+    snapshot_id: "successor-snapshot",
+    snapshot_fingerprint: "2".repeat(64),
+    boot_id: "current-receiver",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 500,
+    attempt_age_ms: 1_000,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [[predecessor, successor], [successor, predecessor]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.snapshot_id, "successor-snapshot");
+  }
+});
+
+test("response transit uncertainty cannot make a delayed predecessor look newer", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "9".repeat(64);
+  const delayedPredecessor = transportObservation("failed", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "transit-delayed-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 900,
+    attempt_age_ms: 1_900,
+    age_uncertainty_ms: 900,
+  });
+  const successor = transportObservation("installing", {
+    snapshot_id: "transit-delayed-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-receiver",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 900,
+    attempt_age_ms: 1_400,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [
+    [delayedPredecessor, successor],
+    [successor, delayedPredecessor],
+  ]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "current-receiver");
+  }
+});
+
+test("an uncertain bridge cannot promote a provably older attempt", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "b".repeat(64);
+  const newest = transportObservation("installing", {
+    snapshot_id: "partial-order-frontier",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "newest",
+    attempt_id: 3,
+    socket_epoch: 3,
+    sample_age_ms: 0,
+    attempt_age_ms: 0,
+    age_uncertainty_ms: 0,
+    active_deadline_remaining_ms: 60_000,
+  });
+  const uncertainBridge = transportObservation("failed", {
+    snapshot_id: "partial-order-frontier",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "uncertain-bridge",
+    attempt_id: 2,
+    socket_epoch: 2,
+    sample_age_ms: 100,
+    attempt_age_ms: 100,
+    age_uncertainty_ms: 100,
+  });
+  const provablyOlder = transportObservation("stalled", {
+    snapshot_id: "partial-order-frontier",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "provably-older",
+    attempt_id: 1,
+    socket_epoch: 1,
+    sample_age_ms: 100,
+    attempt_age_ms: 100,
+    age_uncertainty_ms: 0,
+  });
+
+  for (const observations of [
+    [newest, uncertainBridge, provablyOlder],
+    [newest, provablyOlder, uncertainBridge],
+    [uncertainBridge, newest, provablyOlder],
+    [uncertainBridge, provablyOlder, newest],
+    [provablyOlder, newest, uncertainBridge],
+    [provablyOlder, uncertainBridge, newest],
+  ]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "newest");
+  }
+});
+
+test("late predecessor acknowledgement cannot hide a restarted receiver", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "a".repeat(64);
+  const predecessor = transportObservation("complete", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "restarted-after-ack",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 0,
+    attempt_age_ms: 60_000,
+    acknowledged_offset: 4_096,
+  });
+  const successor = transportObservation("installing", {
+    snapshot_id: "restarted-after-ack",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-receiver",
+    attempt_id: 9,
+    socket_epoch: 7,
+    sample_age_ms: 500,
+    attempt_age_ms: 1_000,
+    active_deadline_remaining_ms: 60_000,
+  });
+
+  for (const observations of [[predecessor, successor], [successor, predecessor]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing");
+    assert.equal(current.observation.boot_id, "current-receiver");
+  }
+});
+
+test("mixed-version attempt ages use one permutation-invariant event-age fallback", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "3".repeat(64);
+  const evidence = {
+    currentA: transportObservation("retrying", {
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "current-a",
+      attempt_id: 11,
+      socket_epoch: 5,
+      sample_age_ms: 100,
+      attempt_age_ms: 1_000,
+    }),
+    currentB: transportObservation("retrying", {
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "current-b",
+      attempt_id: 12,
+      socket_epoch: 6,
+      sample_age_ms: 0,
+      attempt_age_ms: 2_000,
+    }),
+    legacy: transportObservation("retrying", {
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "legacy",
+      attempt_id: 3,
+      socket_epoch: 2,
+      sample_age_ms: 50,
+      attempt_age_ms: null,
+    }),
+  };
+  const permutations = [
+    ["currentA", "currentB", "legacy"],
+    ["currentA", "legacy", "currentB"],
+    ["currentB", "currentA", "legacy"],
+    ["currentB", "legacy", "currentA"],
+    ["legacy", "currentA", "currentB"],
+    ["legacy", "currentB", "currentA"],
+  ];
+
+  for (const order of permutations) {
+    const operations = {
+      nodes: order.map((name) => ({
+        transport: {
+          observing_node_id: evidence[name].observing_node_id,
+          observations: [evidence[name]],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.observation.boot_id, "current-b", order.join(","));
+  }
+});
+
+test("bounded display collisions do not correlate distinct snapshot fingerprints", () => {
+  const ui = sandbox();
+  const collidingDisplay = `sha256:${"a".repeat(64)}`;
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("failed", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: collidingDisplay,
+              snapshot_fingerprint: "5".repeat(64),
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("complete", {
+              snapshot_id: collidingDisplay,
+              snapshot_fingerprint: "6".repeat(64),
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "failed");
+  assert.equal(current.observation.snapshot_fingerprint, "5".repeat(64));
+});
+
+test("legacy snapshot labels without fingerprints remain attempt-local", () => {
+  const ui = sandbox();
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("failed", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: "legacy-shared-label",
+              boot_id: "current-sender",
+              attempt_id: 12,
+              socket_epoch: 8,
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("complete", {
+              snapshot_id: "legacy-shared-label",
+              boot_id: "former-receiver",
+              attempt_id: 3,
+              socket_epoch: 1,
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "failed");
+  assert.equal(current.observation.boot_id, "current-sender");
+});
+
+test("transport selection is permutation invariant across fingerprint cohorts", () => {
+  const ui = sandbox();
+  const evidence = {
+    stale: transportObservation("stalled", {
+      observing_node_id: 1,
+      peer_node_id: 2,
+      direction: "outbound",
+      snapshot_id: "snapshot-a",
+      snapshot_fingerprint: "7".repeat(64),
+      boot_id: "stale-a",
+      attempt_id: 1,
+      socket_epoch: 1,
+      sample_age_ms: 299_000,
+    }),
+    freshA: transportObservation("transferring", {
+      snapshot_id: "snapshot-a",
+      snapshot_fingerprint: "7".repeat(64),
+      boot_id: "fresh-a",
+      attempt_id: 2,
+      socket_epoch: 2,
+      sample_age_ms: 40,
+    }),
+    freshB: transportObservation("installing", {
+      snapshot_id: "snapshot-b",
+      snapshot_fingerprint: "8".repeat(64),
+      boot_id: "fresh-b",
+      attempt_id: 3,
+      socket_epoch: 3,
+      sample_age_ms: 40,
+    }),
+  };
+  const permutations = [
+    ["stale", "freshA", "freshB"],
+    ["stale", "freshB", "freshA"],
+    ["freshA", "stale", "freshB"],
+    ["freshA", "freshB", "stale"],
+    ["freshB", "stale", "freshA"],
+    ["freshB", "freshA", "stale"],
+  ];
+
+  for(const order of permutations){
+    const operations = {
+      nodes: order.map(name=>({
+        transport: {
+          observing_node_id: evidence[name].observing_node_id,
+          observations: [evidence[name]],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "installing", order.join(","));
+    assert.equal(current.observation.boot_id, "fresh-b", order.join(","));
+  }
+});
+
+test("fresh acknowledged sender completion outranks stale receiver completion", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "9".repeat(64);
+  const operations = {
+    nodes: [
+      {
+        transport: {
+          observing_node_id: 1,
+          observations: [
+            transportObservation("complete", {
+              observing_node_id: 1,
+              peer_node_id: 2,
+              direction: "outbound",
+              snapshot_id: "completed-snapshot",
+              snapshot_fingerprint: snapshotFingerprint,
+              acknowledged_offset: 4096,
+              sample_age_ms: 40,
+            }),
+          ],
+        },
+      },
+      {
+        transport: {
+          observing_node_id: 2,
+          observations: [
+            transportObservation("complete", {
+              snapshot_id: "completed-snapshot",
+              snapshot_fingerprint: snapshotFingerprint,
+              acknowledged_offset: null,
+              sample_age_ms: 299_000,
+            }),
+          ],
+        },
+      },
+    ],
+  };
+
+  const current = ui.clusterTransportExplanation(operations, 2, false);
+  assert.equal(current.code, "startup_watermark");
+  assert.equal(current.text, "waiting for startup watermark");
+  assert.equal(current.observation.direction, "outbound");
+  assert.equal(current.observation.acknowledged_offset, 4096);
+});
+
+test("acknowledged completion supersedes every cached predecessor phase in any row order", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "a".repeat(64);
+  const acknowledged = transportObservation("complete", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "causally-complete-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-sender",
+    attempt_id: 20,
+    socket_epoch: 9,
+    acknowledged_offset: 4096,
+    sample_age_ms: 40,
+  });
+  const phases = [
+    ["connecting", "outbound"],
+    ["transferring", "inbound"],
+    ["awaiting_acknowledgement", "outbound"],
+    ["installing", "inbound"],
+    ["retrying", "inbound"],
+    ["stalled", "inbound"],
+    ["failed", "inbound"],
+    ["complete", "inbound"],
+  ];
+
+  for (const [phase, direction] of phases) {
+    const predecessor = transportObservation(phase, {
+      observing_node_id: direction === "outbound" ? 3 : 2,
+      peer_node_id: direction === "outbound" ? 2 : 1,
+      direction,
+      snapshot_id: "causally-complete-snapshot",
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: `cached-${phase}`,
+      attempt_id: 4,
+      socket_epoch: 2,
+      acknowledged_offset: null,
+      sample_age_ms: 4_000,
+      active_deadline_remaining_ms: phase === "complete" || phase === "failed" ? null : 60_000,
+    });
+    for (const observations of [[acknowledged, predecessor], [predecessor, acknowledged]]) {
+      const operations = {
+        nodes: observations.map((observation) => ({
+          transport: {
+            observing_node_id: observation.observing_node_id,
+            observations: [observation],
+          },
+        })),
+      };
+      const current = ui.clusterTransportExplanation(operations, 2, false);
+      assert.equal(current.code, "startup_watermark", `${phase}: ${observations[0].direction} first`);
+      assert.equal(current.observation.direction, "outbound", phase);
+      assert.equal(current.observation.acknowledged_offset, 4096, phase);
+    }
+  }
+});
+
+test("acknowledged completion never crosses distinct, legacy, or malformed identities", () => {
+  const ui = sandbox();
+  const identities = [
+    ["b".repeat(64), "c".repeat(64), "distinct fingerprints"],
+    [undefined, undefined, "legacy attempts"],
+    ["not-a-fingerprint", "not-a-fingerprint", "malformed fingerprints"],
+  ];
+
+  for (const [ackFingerprint, stalledFingerprint, label] of identities) {
+    const acknowledged = transportObservation("complete", {
+      observing_node_id: 1,
+      peer_node_id: 2,
+      direction: "outbound",
+      snapshot_id: "shared-display-label",
+      snapshot_fingerprint: ackFingerprint,
+      boot_id: "sender",
+      attempt_id: 7,
+      socket_epoch: 4,
+      acknowledged_offset: 4096,
+      sample_age_ms: 40,
+    });
+    const stalled = transportObservation("stalled", {
+      snapshot_id: "shared-display-label",
+      snapshot_fingerprint: stalledFingerprint,
+      boot_id: "receiver",
+      attempt_id: 3,
+      socket_epoch: 2,
+      sample_age_ms: 40,
+    });
+    for (const observations of [[acknowledged, stalled], [stalled, acknowledged]]) {
+      const operations = {
+        nodes: observations.map((observation) => ({
+          transport: {
+            observing_node_id: observation.observing_node_id,
+            observations: [observation],
+          },
+        })),
+      };
+      const current = ui.clusterTransportExplanation(operations, 2, false);
+      assert.equal(current.code, "stalled", label);
+      assert.equal(current.observation.direction, "inbound", label);
+    }
+  }
+});
+
+test("stale completion evidence never suppresses a newer same-fingerprint successor", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "d".repeat(64);
+  const staleAcknowledged = transportObservation("complete", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "retried-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-leader",
+    attempt_id: 4,
+    socket_epoch: 2,
+    acknowledged_offset: 4096,
+    sample_age_ms: 4_000,
+  });
+  const successors = [
+    transportObservation("installing", {
+      snapshot_id: "retried-snapshot",
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "current-receiver",
+      attempt_id: 9,
+      socket_epoch: 7,
+      sample_age_ms: 40,
+      active_deadline_remaining_ms: 60_000,
+    }),
+    transportObservation("failed", {
+      snapshot_id: "retried-snapshot",
+      snapshot_fingerprint: snapshotFingerprint,
+      boot_id: "current-receiver",
+      attempt_id: 10,
+      socket_epoch: 8,
+      sample_age_ms: 40,
+      active_deadline_remaining_ms: null,
+    }),
+  ];
+
+  for (const successor of successors) {
+    for (const observations of [[staleAcknowledged, successor], [successor, staleAcknowledged]]) {
+      const operations = {
+        nodes: observations.map((observation) => ({
+          transport: {
+            observing_node_id: observation.observing_node_id,
+            observations: [observation],
+          },
+        })),
+      };
+      const current = ui.clusterTransportExplanation(operations, 2, false);
+      assert.equal(current.code, successor.phase, `${successor.phase}: ${observations[0].boot_id} first`);
+      assert.equal(current.observation.boot_id, "current-receiver", successor.phase);
+    }
+  }
+});
+
+test("older receiver completion never suppresses a newer outbound failure", () => {
+  const ui = sandbox();
+  const snapshotFingerprint = "e".repeat(64);
+  const staleReceiver = transportObservation("complete", {
+    snapshot_id: "retried-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "former-receiver",
+    attempt_id: 4,
+    socket_epoch: 2,
+    sample_age_ms: 4_000,
+  });
+  const currentFailure = transportObservation("failed", {
+    observing_node_id: 1,
+    peer_node_id: 2,
+    direction: "outbound",
+    snapshot_id: "retried-snapshot",
+    snapshot_fingerprint: snapshotFingerprint,
+    boot_id: "current-sender",
+    attempt_id: 10,
+    socket_epoch: 8,
+    sample_age_ms: 40,
+  });
+
+  for (const observations of [[staleReceiver, currentFailure], [currentFailure, staleReceiver]]) {
+    const operations = {
+      nodes: observations.map((observation) => ({
+        transport: {
+          observing_node_id: observation.observing_node_id,
+          observations: [observation],
+        },
+      })),
+    };
+    const current = ui.clusterTransportExplanation(operations, 2, false);
+    assert.equal(current.code, "failed", observations[0].direction);
+    assert.equal(current.observation.boot_id, "current-sender");
+  }
+});
+
+test("stalled transport renders its observer and sample age", () => {
+  const ui = sandbox();
+  const membership = status("degraded", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "learner", { bounded_read_ready: false }),
+  ]);
+  const operations = operationStatus(membership);
+  operations.nodes[0].transport = {
+    observing_node_id: 1,
+    observations: [
+      transportObservation("stalled", {
+        observing_node_id: 1,
+        peer_node_id: 2,
+        direction: "outbound",
+        sample_age_ms: 65_000,
+      }),
+    ],
+  };
+
+  const html = ui.clusterNodeOperationsHtml(membership.nodes[1], operations);
+  assert.match(html, /Transport<\/span>snapshot stalled · observer 1 · 1m ago/);
+  assert.match(
+    html,
+    /Bounded-read recovery evidence<\/dt><dd>snapshot stalled · observer 1 · 1m ago/,
+  );
+});
+
+test("active transport stays visible through its server-projected deadline", () => {
+  const ui = sandbox();
+  const installing = ui.clusterTransportExplanation(
+    transportOps([
+      transportObservation("installing", {
+        sample_age_ms: 300001,
+        active_deadline_remaining_ms: 3299000,
+        operation_owns_work: true,
+      }),
+    ]),
+    2,
+    false,
+  );
+
+  assert.equal(installing.code, "installing");
+  assert.equal(installing.text, "installing snapshot");
+});
 
 // ---- the two-voter state is the point -------------------------------------
 
@@ -696,9 +2016,16 @@ test("every observation code the aggregator can emit has a sentence", () => {
   assert.ok(codes.includes("refused"), `refused missing from ${codes.join(", ")}`);
   assert.ok(codes.includes("unreachable"));
   assert.ok(codes.length >= 7, `only found ${codes.length} codes`);
-  // Plus the two classes the join stamps directly rather than through the map,
+  // Plus the classes the join stamps directly rather than through the map,
   // and the panel's own "no row at all" case.
-  for (const code of [...codes, "raft_identity_mismatch", "stale_peer_sample", "not_observed"]) {
+  for (const code of [
+    ...codes,
+    "raft_identity_mismatch",
+    "stale_peer_sample",
+    "cache_unavailable",
+    "cache_stale",
+    "not_observed",
+  ]) {
     if (code === "none") continue;
     const sentence = PANEL.clusterObservationReason(code);
     assert.notEqual(
@@ -1407,7 +2734,7 @@ test("the Cluster tab is registered and dispatched", () => {
   // absent from every other tab's dependency wave.
   assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\["clusterOps"\]\}/);
   assert.match(SHIPPED_UI, /cluster:\(\)=>api\("\/cluster\/nodes"\)/);
-  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status"\)/);
+  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status",\{keepSessionOn401:true\}\)/);
   assert.equal(
     /Promise\.all\(\[[^\]]*cluster\/nodes/.test(SHIPPED_UI),
     false,
@@ -2611,11 +3938,34 @@ test("the projection ignores what moves on its own and nothing else", () => {
   assert.equal(ui.clusterOpsProjection(shuffled), ui.clusterOpsProjection(first));
 });
 
+test("transport observer age advances the repaint projection", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const first = operationStatus(cluster);
+  first.nodes[0].transport = {
+    observing_node_id: 1,
+    observations: [transportObservation("transferring", { sample_age_ms: 1_000 })],
+  };
+  const later = JSON.parse(JSON.stringify(first));
+  later.nodes[0].transport.observations[0].sample_age_ms = 61_000;
+
+  assert.notEqual(
+    ui.clusterOpsProjection(later),
+    ui.clusterOpsProjection(first),
+    "rendered transport observer age must repaint even when all other evidence is identical",
+  );
+});
+
 // A settingsTick harness that can actually run the cluster branch: the tick
 // itself is shipped source, everything it reaches for is supplied here.
 function tickHarness({ cluster, ops, now }) {
   const requests = [];
   const painted = [];
+  const paintedTransport = [];
   const readingAge = { innerHTML: "local now · watermark now" };
   const dialogs = [];
   const document = {
@@ -2627,12 +3977,19 @@ function tickHarness({ cluster, ops, now }) {
   };
   const harness = new Function(
     "document", "location", "api", "settingsTab", "settingsCurrent", "refreshLogs",
-    "refreshClusterLogs", "paintTrakt", "renderSettings", "PlurxClusterPanel", "clock", "dialogs",
+    "refreshClusterLogs", "paintTrakt", "recordRender", "PlurxClusterPanel", "clock", "dialogs",
     `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,
        TRAKT=null,CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=0,
        SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
      const cacheTrakt=(value)=>value;
      const Date={now:clock};
+     const performance={now:clock};
+     const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
+     ${shippedSource("clusterOpsReceived")}
+     ${shippedSource("clusterOpsElapsed")}
+     clusterOpsReceived(SETTINGS_DATA.clusterOps);
+     const renderSettings=()=>recordRender(
+       SETTINGS_DATA.clusterOps,clusterOpsElapsed(SETTINGS_DATA.clusterOps));
      ${shippedSource("isSettingsRoute")}
      ${shippedSource("clusterOpsInterval")}
      ${shippedSource("clusterOpsStamp")}
@@ -2660,12 +4017,18 @@ function tickHarness({ cluster, ops, now }) {
     async () => {},
     async () => {},
     () => {},
-    () => painted.push("render"),
+    (renderedOps, elapsed) => {
+      painted.push("render");
+      paintedTransport.push(
+        PANEL.clusterTransportExplanation(renderedOps, 2, false, elapsed).code,
+      );
+      readingAge.innerHTML = "rendered";
+    },
     PANEL,
     () => now.value,
     dialogs,
   );
-  return { harness, requests, painted, readingAge, dialogs };
+  return { harness, requests, painted, paintedTransport, readingAge, dialogs };
 }
 
 test("the direct status collects on its own gate, and never overlaps", async () => {
@@ -2725,7 +4088,7 @@ test("the gate is fifteen seconds, and a single machine is never polled", async 
   assert.deepEqual(requests, [], "a non-clustered install polls nothing");
 });
 
-test("a refused collection still moves the freshness row", async () => {
+test("a refused collection repaints retained transport unless a dialog owns the DOM", async () => {
   // A failing collection is exactly when the age of the reading on screen
   // matters most, so the row whose only job is freshness must not be the one
   // that freezes.
@@ -2734,9 +4097,20 @@ test("a refused collection still moves the freshness row", async () => {
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
+  const ops = operationStatus(cluster);
+  ops.nodes[0].transport = {
+    observing_node_id: 1,
+    observations: [transportObservation("installing", {
+      observing_node_id: 1,
+      peer_node_id: 2,
+      direction: "outbound",
+      active_deadline_remaining_ms: 1_000,
+      operation_owns_work: true,
+    })],
+  };
   const now = { value: 1_000_000 };
-  const { harness, requests, painted, readingAge } = tickHarness({
-    cluster, ops: operationStatus(cluster), now,
+  const { harness, requests, painted, paintedTransport, readingAge } = tickHarness({
+    cluster, ops, now,
   });
   readingAge.innerHTML = "frozen";
   now.value += 15_000;
@@ -2744,17 +4118,59 @@ test("a refused collection still moves the freshness row", async () => {
   requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
   await refused;
   assert.notEqual(readingAge.innerHTML, "frozen");
-  assert.deepEqual(painted, [], "a refusal does not repaint the tab");
+  assert.deepEqual(painted, ["render"], "the locally projected stall is repainted");
+  assert.deepEqual(paintedTransport, ["stalled"]);
   assert.equal(harness.stamped(), now.value, "the retry is the next gate, not the next tick");
 
-  // A 401 is not an ordinary refusal: it belongs to the logout transition, and
-  // swallowing it here would leave the tab rendering after auth is gone.
+  // A modal is an operator decision in progress. Keep it intact even after
+  // the retained observation expires, while continuing to patch its age row.
+  harness.openDialog(true);
+  readingAge.innerHTML = "frozen under modal";
+  now.value += 286_001;
+  const held = harness.settingsTick(1, "cluster");
+  requests[1].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await held;
+  assert.deepEqual(painted, ["render"], "the open modal prevented a repaint");
+  assert.notEqual(readingAge.innerHTML, "frozen under modal");
+
+  // Once the modal closes, another failed refresh must pay the deferred local
+  // projection and remove the expired transport evidence from the visible UI.
+  harness.openDialog(false);
+  now.value += 15_000;
+  const expired = harness.settingsTick(1, "cluster");
+  requests[2].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await expired;
+  assert.deepEqual(painted, ["render", "render"]);
+  assert.deepEqual(paintedTransport, ["stalled", "unavailable"]);
+
+  // A 401 from THIS read is not the logout transition. Its guard answers from
+  // a process-local proof cache, so a refusal describes the cluster — and when
+  // the cluster had not finished activating its credential-revocation protocol
+  // the refusal was permanent, arrived on every tick, and used to end the
+  // operator's session on a Settings page they had every right to be on.
+  // It takes the ordinary path now: keep the evidence, keep its age honest,
+  // try again on the next gate.
   now.value += 15_000;
   const unauthorized = harness.settingsTick(1, "cluster");
-  requests[1].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
+  readingAge.innerHTML = "frozen after a refusal";
+  requests[3].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
   await unauthorized;
-  assert.deepEqual(painted, [], "a 401 paints nothing here either");
-  assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
+  assert.deepEqual(
+    painted,
+    ["render", "render", "render"],
+    "a refused recovery read repaints like any other refusal",
+  );
+  assert.notEqual(readingAge.innerHTML, "frozen after a refusal");
+  // Scoped to this branch: the sibling branches poll ordinary admin routes,
+  // where a 401 really is the credential and must still end the session.
+  const clusterBranch = shippedSource("settingsTick")
+    .split('api("/cluster/status"')[1]
+    .split("await Promise.all(secondary)")[0];
+  assert.doesNotMatch(
+    clusterBranch,
+    /status===401\) throw error;/,
+    "rethrowing here only ever existed to reach a logout that must not happen",
+  );
 });
 
 test("the two-second roster poll holds its sample under a dialog too", async () => {
@@ -2814,7 +4230,8 @@ test("the restart poll holds its sample under a dialog, and still reads it", asy
   const state = { clusterOps: null };
   const poll = new Function(
     "api", "settingsCurrent", "SETTINGS_DATA", "SETTINGS_LOADED", "renderSettings",
-    "repaintClusterPreserving", "clusterOpsStamp", "clusterRepaintDeferred", "setTimeout",
+    "repaintClusterPreserving", "clusterOpsStamp", "clusterOpsReceived",
+    "clusterRepaintDeferred", "setTimeout",
     `${shippedSource("pollLocalRestart")} return pollLocalRestart;`,
   )(
     () => {
@@ -2827,6 +4244,7 @@ test("the restart poll holds its sample under a dialog, and still reads it", asy
     () => painted.push("render"),
     (paint) => paint(),
     () => {},
+    (value) => value,
     () => served === 1,
     (resolve) => resolve(),
   );
@@ -2839,17 +4257,185 @@ test("the restart poll holds its sample under a dialog, and still reads it", asy
   assert.deepEqual(state.clusterOps, drained, "and it stored exactly what it painted");
 });
 
-test("the manual refresh always paints what it stores", () => {
-  // The fourth repaint path deliberately has no deferral: the election dialog is
-  // modal, so the button that reaches this code cannot be clicked while one is
-  // open. What it must never do is store without painting.
-  const refresh = shippedSource("refreshClusterOperations");
-  const stored = refresh.indexOf("SETTINGS_DATA.clusterOps=ops;");
-  const paints = refresh.indexOf("repaintClusterPreserving(renderSettings)");
-  assert.notEqual(stored, -1);
-  assert.notEqual(paints, -1);
-  assert.ok(paints > stored, "the store is not followed by a repaint");
-  assert.doesNotMatch(refresh, /clusterRepaintDeferred/);
+test("initial secondary status hydration holds its staged result under a force-election decision", () => {
+  const loader = shippedSource("loadSettingsTab");
+  assert.match(loader, /const staged=tab==="cluster"&&key==="clusterOps"/);
+  assert.match(loader, /loadSettingsKey\(key,generation,!staged\)/);
+  assert.match(loader, /patchSettingsSecondary\(tab,key,value\)/);
+  let dialogOpen = true;
+  let readingAgePatches = 0;
+  const loaded = new Set();
+  const painted = [];
+  const next = { sample: "new" };
+  const harness = new Function(
+    "clusterRepaintDeferred", "patchClusterReadingAge", "repaintClusterPreserving",
+    "loaded", "record",
+    `let SETTINGS_DATA={};
+     const SETTINGS_LOADED=loaded;
+     const renderSettings=()=>record("render");
+     ${shippedSource("patchSettingsSecondary")}
+     return {patch:patchSettingsSecondary,ops:()=>SETTINGS_DATA.clusterOps};`,
+  )(
+    () => dialogOpen,
+    () => { readingAgePatches += 1; },
+    (paint) => paint(),
+    loaded,
+    (value) => painted.push(value),
+  );
+
+  harness.patch("cluster", "clusterOps", next);
+  assert.equal(harness.ops(), undefined, "the held initial sample was cached without a paint");
+  assert.equal(loaded.has("clusterOps"), false);
+  assert.deepEqual(painted, []);
+  assert.equal(readingAgePatches, 1);
+
+  dialogOpen = false;
+  harness.patch("cluster", "clusterOps", next);
+  assert.equal(harness.ops(), next);
+  assert.equal(loaded.has("clusterOps"), true);
+  assert.deepEqual(painted, ["render"]);
+});
+
+test("a manual refresh holds a success if force election opens after the request starts", async () => {
+  let resolveRequest;
+  let dialogOpen = false;
+  let readingAgePatches = 0;
+  let requestStarted = false;
+  const previous = { sample: "painted" };
+  const next = { sample: "new" };
+  const loaded = new Set(["clusterOps"]);
+  const painted = [];
+  const mount = { innerHTML: "previous" };
+  const request = new Promise((resolve) => {
+    resolveRequest = resolve;
+  });
+  const harness = new Function(
+    "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
+    "clusterOperationsCard", "clusterOperationsUnavailable", "esc",
+    "clusterRepaintDeferred", "patchClusterReadingAge", "initialOps", "loaded", "record",
+    `let PAGE_RENDER_GENERATION=1;
+     let SETTINGS_DATA={clusterOps:initialOps};
+     const SETTINGS_LOADED=loaded;
+     const renderSettings=()=>record("render");
+     ${shippedSource("refreshClusterOperations")}
+     return {refresh:refreshClusterOperations,ops:()=>SETTINGS_DATA.clusterOps};`,
+  )(
+    { getElementById: () => mount },
+    (_key, _generation, cacheResult) => {
+      assert.equal(cacheResult, false, "the response was stored before the modal check");
+      requestStarted = true;
+      return request;
+    },
+    () => true,
+    (paint) => paint(),
+    () => "collecting",
+    (message) => `UNAVAILABLE:${message}`,
+    (value) => value,
+    () => dialogOpen,
+    () => { readingAgePatches += 1; },
+    previous,
+    loaded,
+    (value) => painted.push(value),
+  );
+
+  const pending = harness.refresh(null);
+  assert.equal(requestStarted, true);
+  dialogOpen = true;
+  resolveRequest(next);
+  await pending;
+  assert.deepEqual(painted, [], "the late success repainted over the decision");
+  assert.equal(harness.ops(), previous, "the held success was stored without being painted");
+  assert.equal(loaded.has("clusterOps"), false);
+  assert.equal(readingAgePatches, 1);
+
+  dialogOpen = false;
+  await harness.refresh(null);
+  assert.deepEqual(painted, ["render"], "the retry after the dialog closed did not repaint");
+  assert.equal(harness.ops(), next);
+  assert.equal(loaded.has("clusterOps"), true);
+});
+
+test("a failed manual refresh ages transport unless force election opens after request start", async () => {
+  const run = async (elapsed, expected, openAfterStart = false) => {
+    const operations = transportOps([
+      transportObservation("installing", {
+        active_deadline_remaining_ms: 1_000,
+        operation_owns_work: true,
+      }),
+    ]);
+    let monotonicNow = 100;
+    let dialogOpen = false;
+    let rejectRequest;
+    let readingAgePatches = 0;
+    const mount = { innerHTML: "previous" };
+    const painted = [];
+    const request = new Promise((_resolve, reject) => {
+      rejectRequest = reject;
+    });
+    const refresh = new Function(
+      "document", "loadSettingsKey", "settingsCurrent", "repaintClusterPreserving",
+      "clusterOperationsCard", "clusterOperationsUnavailable", "esc", "record",
+      "PlurxClusterPanel", "performance", "initialOps", "clusterRepaintDeferred",
+      "patchClusterReadingAge",
+      `let PAGE_RENDER_GENERATION=1;
+       let SETTINGS_DATA={clusterOps:initialOps};
+       const SETTINGS_LOADED=new Set(["clusterOps"]);
+       const CLUSTER_OPS_RECEIVED_AT=new WeakMap();
+       ${shippedSource("clusterOpsReceived")}
+       ${shippedSource("clusterOpsElapsed")}
+       clusterOpsReceived(initialOps);
+       const renderSettings=()=>record(PlurxClusterPanel.clusterTransportExplanation(
+         SETTINGS_DATA.clusterOps,2,false,clusterOpsElapsed(SETTINGS_DATA.clusterOps)).code);
+       ${shippedSource("refreshClusterOperations")}
+       return refreshClusterOperations;`,
+    )(
+      { getElementById: () => mount },
+      (_key, _generation, cacheResult) => {
+        assert.equal(cacheResult, false, "the response was stored before the modal check");
+        return request;
+      },
+      () => true,
+      (paint) => paint(),
+      () => "collecting",
+      (message) => `UNAVAILABLE:${message}`,
+      (value) => value,
+      (code) => painted.push(code),
+      PANEL,
+      { now: () => monotonicNow },
+      operations,
+      () => dialogOpen,
+      () => { readingAgePatches += 1; },
+    );
+
+    monotonicNow += elapsed;
+    const pending = refresh(null);
+    dialogOpen = openAfterStart;
+    rejectRequest(new Error("gateway"));
+    await pending;
+    assert.deepEqual(painted, openAfterStart ? [] : [expected]);
+    assert.equal(readingAgePatches, openAfterStart ? 1 : 0);
+    assert.equal(mount.innerHTML, "UNAVAILABLE:gateway");
+  };
+
+  await run(1_000, "stalled");
+  await run(301_001, "unavailable");
+  await run(1_000, null, true);
+});
+
+test("every cluster status success receives a client-local monotonic baseline", () => {
+  assert.match(
+    SHIPPED_UI,
+    /clusterOps:\(\)=>api\("\/cluster\/status",\{keepSessionOn401:true\}\)\.then\(ops=>\{\s*clusterOpsStamp\(\); return clusterOpsReceived\(ops\);/,
+  );
+  assert.match(
+    shippedSource("settingsTick"),
+    /const ops=clusterOpsReceived\(await api\("\/cluster\/status",\{keepSessionOn401:true\}\)\);/,
+  );
+  assert.match(
+    shippedSource("pollLocalRestart"),
+    /const ops=clusterOpsReceived\(await api\("\/cluster\/status",\{keepSessionOn401:true\}\)\);/,
+  );
+  assert.doesNotMatch(shippedSource("clusterOpsReceived"), /observed_at_unix_ms|Object\.defineProperty/);
 });
 
 test("the panel's own controls and dialogs are the only ones it reaches for", () => {
@@ -2944,11 +4530,12 @@ test("a fetch is not a repaint, and the freshness row still ages", async () => {
 });
 
 test("every repaint on this tab preserves what the operator was looking at", () => {
-  // Three paths repaint the Cluster tab and all three must behave the same,
+  // Every asynchronous status path repaints the Cluster tab the same way,
   // because a 15s cadence turns "the scroll jumps" from a papercut into an
   // unusable panel. Pin the call sites: a helper nothing calls is the failure
   // mode this suite has already caught once.
   assert.match(shippedSource("settingsTick"), /repaintClusterPreserving\(renderSettings\)/);
+  assert.match(shippedSource("patchSettingsSecondary"), /repaintClusterPreserving\(renderSettings\)/);
   assert.match(shippedSource("refreshClusterOperations"), /repaintClusterPreserving\(renderSettings\)/);
   assert.match(shippedSource("pollLocalRestart"), /repaintClusterPreserving\(renderSettings\)/);
   // …and the restart poll stamps the same clock, so the two never probe at once.
@@ -3029,22 +4616,33 @@ test("the ledger's freshness cell is addressable, and the clock is stamped where
   // Stamped where the request happens. loadSettingsKey serves a cached
   // aggregate without a request, so stamping where the value is PAINTED would
   // let a tab switch every ten seconds starve the refresh indefinitely.
-  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{ clusterOpsStamp\(\); return ops; \}\)/);
+  const clusterOpsEndpoint = SHIPPED_UI
+    .split("clusterOps:()=>")[1]
+    .split("\n};")[0];
+  assert.match(
+    clusterOpsEndpoint,
+    /^api\("\/cluster\/status",\{keepSessionOn401:true\}\)\.then\(ops=>\{\s*clusterOpsStamp\(\); return clusterOpsReceived\(ops\);\s*\}\)/,
+  );
+  // A refused fan-out stamps too: the retry is the next gate, not the next
+  // tick, and the age of the reading on screen still has to move.
+  assert.match(clusterOpsEndpoint, /\.catch\(error=>\{[\s\S]*clusterOpsStamp\(\);/);
+  assert.match(clusterOpsEndpoint, /unavailable:true/);
   assert.doesNotMatch(shippedSource("patchSettingsSecondary"), /clusterOpsStamp\(\)/);
 });
 
 test("every path that rewrites this tab goes through the preserving repaint", () => {
   // A bare renderSettings() on the Cluster tab throws away the roster scroll,
   // the open drill-downs, and the half-filled token form. Both branches of the
-  // tick, the manual refresh, the restart poll, and the three controls that
-  // repaint from inside the rail all use the helper.
+  // tick, initial secondary hydration, the manual refresh, the restart poll,
+  // and the three controls that repaint from inside the rail all use the helper.
   const tick = shippedSource("settingsTick");
   assert.equal(
     (tick.match(/repaintClusterPreserving\(renderSettings\)/g) || []).length,
-    2,
-    "both the roster branch and the direct-status branch preserve",
+    3,
+    "the roster and both successful and failed direct-status branches preserve",
   );
   for (const handler of [
+    "patchSettingsSecondary",
     "refreshClusterOperations",
     "pollLocalRestart",
     "toggleClusterRailPanel",

@@ -215,6 +215,9 @@ master regression so far. Reasoning and the failure they target are in
 
 ## Reference — health & API surfaces
 
+The few you type by hand. [API.md](API.md) is the complete list — every route,
+the credential it takes, and what comes back.
+
 | Path | Purpose |
 |---|---|
 | `GET /healthz` | Liveness |

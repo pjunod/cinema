@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Report the one cache on this runner that nothing in a job can bound.
+#
+# A Forgejo runner serves `actions/cache` from a directory of its own —
+# `cache.dir` in its config.yml, a `bolt.db` index beside a `cache/` tree of
+# blobs. `forgejo-runner` 13.1.0 has no eviction for it: its own
+# `generate-config` offers `enabled`, `dir`, `host`, `proxy_port` and the shared
+# secrets, and nothing else. No size cap, no TTL, no garbage collection. Every
+# entry the server is handed is kept until somebody with root deletes it.
+#
+# Which is why this reports and does not delete. The index and the blobs have to
+# go together — remove a blob and leave its row, and the next job that matches
+# that key is told the entry exists and then fails to download it. Removing them
+# together means stopping the runner, and a job cannot stop the runner it is
+# running on. That belongs to the fleet's janitor timer; see
+# docs/ci/RUNNER-DISK.md.
+#
+# What a job can do is make the number visible while it is still small. The
+# fleet found this the other way round on 2026-09-06: three runners hit
+# `No space left on device` in one afternoon and reported it as a linker bus
+# error, and nobody could see the 41G of cache blobs that had accumulated behind
+# the jobs because nothing had ever printed it.
+set -euo pipefail
+
+die() { echo "ci-runner-cache-audit: $*" >&2; exit 1; }
+
+[ "$#" -eq 2 ] || die "usage: ci-runner-cache-audit <runner-root> <warn-gb>"
+requested_root=$1
+warn_gb=$2
+[[ "$warn_gb" =~ ^[1-9][0-9]*$ ]] || die "warn threshold must be whole gigabytes"
+
+# Never fatal past this point. This is a diagnostic on a path that varies by
+# runner deployment, and a job must not fail because a report could not be made.
+runner_root=$(cd -P -- "$requested_root" 2>/dev/null && pwd -P) || exit 0
+cache_root="$runner_root/cache"
+[ -d "$cache_root" ] || exit 0
+[ -f "$cache_root/bolt.db" ] || exit 0
+
+blobs="$cache_root/cache"
+[ -d "$blobs" ] || exit 0
+
+used_kb=$(du -sk "$cache_root" 2>/dev/null | awk '{ print $1 }') || exit 0
+[[ "$used_kb" =~ ^[0-9]+$ ]] || exit 0
+entries=$(find "$blobs" -type f ! -name '*.tmp' 2>/dev/null | wc -l | tr -d ' ')
+oldest=$(find "$blobs" -type f -printf '%TF\n' 2>/dev/null | sort | head -1)
+used_gb=$((used_kb / 1024 / 1024))
+runner="${RUNNER_NAME:-$(hostname)}"
+
+{
+  echo "### Runner cache server"
+  echo
+  echo "- runner: \`$runner\`"
+  echo "- directory: \`$cache_root\`"
+  echo "- retained: ${used_gb} GiB in ${entries} entries"
+  [ -n "$oldest" ] && echo "- oldest entry: $oldest"
+  echo "- eviction: none — this runner's cache server never deletes anything"
+} >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+if [ "$used_gb" -ge "$warn_gb" ]; then
+  echo "::warning::${runner}'s cache server holds ${used_gb}G in ${entries} entries and evicts nothing; the fleet janitor should reset it"
+fi
+
+exit 0

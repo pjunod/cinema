@@ -22,9 +22,17 @@ runs:
         if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
           python3 -m pip install "$requirement"
           python3 -m playwright install --with-deps chromium
-          exit 0
+        else
+          actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
+          test "$requirement" = "playwright==$actual"
+          python3 -m playwright install chromium
         fi
 
-        actual="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')"
-        test "$requirement" = "playwright==$actual"
-        python3 -m playwright install chromium
+        # playback-lab intentionally drives Chromium over raw CDP instead of
+        # importing Playwright. Export the exact executable the pinned package
+        # installed so every later Make/validation invocation uses that bundle
+        # instead of guessing at distro-specific paths. This environment is
+        # job-scoped and survives the composite action boundary.
+        chromium="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+        test -x "$chromium"
+        echo "PLURX_PLAYBACK_CHROME=$chromium" >> "$GITHUB_ENV"

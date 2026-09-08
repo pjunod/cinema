@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Step 0 of the copied-Dolby-Vision ladder (docs/APPLE-NATIVE-SUBTITLES-PLAN.md
+# Step 0 of the copied-Dolby-Vision ladder (docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md
 # §5.4): capture the evidence nobody has looked at yet.
 #
 # The symptom is narrow and strange. A copy session's child media playlist
@@ -77,7 +77,7 @@ api "$SERVER/api/v1/files/$FILE_ID/decision" > "$OUT/decision.json" \
 
 # --- 1. Create a copy session, DV preserved, native subtitles on ----------
 # Exactly the shape the Apple client sends on the failing path
-# (docs/APPLE-NATIVE-SUBTITLES-PLAN.md §3.1).
+# (docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md §3.1).
 printf '· create session\n'
 api -X POST -H 'Content-Type: application/json' \
   -d "{\"playback_id\":\"dv-evidence\",\"start\":$START,\"copy\":true,\"preserve_dolby_vision\":true,\"native_subtitles\":true}" \

@@ -685,7 +685,7 @@ mod tests {
         }
         let budgets = Budgets {
             working_set_bytes: 1 << 30,
-            completed_cache_bytes: 1 << 40,
+            admission_sizing_bytes: 1 << 40,
             admission_share: 1.0,
         };
         manifest.reserve(&budgets).expect("reserve");
@@ -794,7 +794,7 @@ mod tests {
         }
         let budgets = Budgets {
             working_set_bytes: 1 << 30,
-            completed_cache_bytes: 1 << 40,
+            admission_sizing_bytes: 1 << 40,
             admission_share: 1.0,
         };
         manifest.reserve(&budgets).expect("reserve");

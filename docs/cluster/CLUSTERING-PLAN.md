@@ -1,0 +1,1118 @@
+# Clustering transition — from one plurxd node to Phase 4
+
+**Status:** executing — M0 through M3 are complete; M4's production fences,
+real-process singleton pause/takeover proof, and distinct serving-process
+partition proof are staged; the non-voting learner role now has readiness,
+bounded read/media eligibility, promotion, removal, capacity reporting, and a
+real-process lifecycle proof (see
+[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7), while the
+later client failover milestones remain
+· **Executes:** Phase 4 from [ROADMAP.md](../ROADMAP.md) and REQ-HA-1–6 from
+[REQUIREMENTS.md](../REQUIREMENTS.md) · **Written:** 2026-08-06 · **Revised:**
+2026-08-25
+
+Companion to [PHASE3-SPIKE.md](PHASE3-SPIKE.md), which chose hiqlite and
+proved restart-at-boundary media behavior; [PERF-PLAN.md](../performance/PERF-PLAN.md) §7,
+which owns the transcode-takeover protocol; and
+[ARCHITECTURE.md](../ARCHITECTURE.md) §2, which owns the system shape. Execute
+this document milestone by milestone. If a step appears to require replicating
+media, artwork, subtitle, or segment bytes through raft, stop and flag it:
+replicate ownership facts and recipes, then proxy, share, or regenerate bytes.
+
+## 1. Objective — earn the power-pull demo without hiding one-node cost
+
+Phase 4 is complete when three `plurxd` processes form one logical server,
+serve API traffic and streams concurrently, preserve every acknowledged
+durable write through one node loss, run singleton work once, and resume a
+viewer within 10 seconds after the serving node dies. Web, Apple, and Android
+must all consume the same node-list and retry contract before REQ-HA-6 is done.
+
+One node remains the default deployment and uses the same one-voter replicated
+store as three nodes. Zero configuration means no required cluster stanza or
+manual secret generation; it does not mean zero physical overhead. The
+single-node gate is:
+
+| Measure | Budget against the SQLite baseline | Why this is the gate |
+|---|---:|---|
+| p95 `put_progress_at` latency | ≤25 ms and ≤max(2× baseline, baseline + 0.5 ms) | A five-second player beat must not become visible UI latency; the additive branch is derived from the measured fixed Raft tax, while the ratio branch takes over on slower storage. |
+| Idle RSS after warm-up | ≤100 MiB additional | The recommended third voter includes Pi/NAS-class hardware. |
+| 10,000 incoming progress beats | ≤512 bytes/beat (5,120,000 bytes total) after production-threshold snapshot, purge, and WAL-settle cycles | Pre-compaction log size is not disk occupancy; the gate compares equally compacted states so retained WAL allocation is not mistaken for growth. |
+| Physical progress commits under that load | ≤64 commits/active stream (5,120 for the 80-stream fixture) | The 125 beats represent 620 seconds at the shipped five-second cadence: 63 commit windows per stream, plus one window of scheduling headroom. A disk-size result can stay small after compaction even when every heartbeat reached consensus, so the same gate rejects lost coalescing directly. |
+| Watch-state commit rate | ≤1 commit / 10 s / active stream | [ARCHITECTURE.md](../ARCHITECTURE.md) §2.2 already promises coalescing; clustering must make it true. |
+
+M0 records the raw SQLite baseline and hiqlite result on the same machine. M2's
+bounded `make cluster-growth` command records the coalesced result under the
+production 10,000-log snapshot policy. A budget change requires measured
+evidence in this plan and [PHASE3-SPIKE.md](PHASE3-SPIKE.md), not a quietly
+wider threshold.
+
+## 2. Starting point — the seams exist, eight assumptions do not
+
+| Existing seam | Current truth | Phase 4 consequence |
+|---|---|---|
+| `Arc<dyn Store>` | All durable application state crosses the 120-method composed traits in [`store/mod.rs`](../../crates/plurx-core/src/store/mod.rs); a compile-time coercion keeps that object-safety claim executable. | Keep handlers stable, but port the methods in reviewable groups rather than one backend rewrite. |
+| `instance.id` | Stable logical-server identifier in settings; new installs mint a UUID, but the schema historically accepted arbitrary strings. It is also passed as `AppState::node_id`. | Split the concepts without changing the first node's existing cache/offline ownership key. |
+| Cache/offline `node_id` | Existing rows are keyed by the current `instance.id`. | An existing install seeds local `node.id` from that exact string; changing it would strand rows and let orphan cleanup delete bytes. |
+| `Recipe<'a>` | Borrowed, node-specific cache-key input; its hash includes ffmpeg build, encoder, and pipeline. | The hash is a node-local cache address, not a cluster recipe. Replicate owned request inputs and rebuild against the survivor's pipeline. |
+| Session takeover | [PERF-PLAN.md](../performance/PERF-PLAN.md) §7.3 defines owner epoch, lease, playable/fetched frontiers, overlap, and playlist sequence. | Adopt that contract; do not invent a smaller `ReplicatedSession`. |
+| Scheduler | Every daemon starts scans, metadata, cleanup, and production. | Fence replicated publishing work; keep byte materialization per node. |
+| Artwork/cache bytes | Rows may replicate while bytes are local. | Missing bytes proxy to a holder and enqueue local repair; a replicated filename is not proof of a local file. |
+| Discovery | mDNS/GDM derive hostname and service name from shared identity/name. | Advertise each node under a node-specific hostname with one logical id and the full node list. |
+
+M0 now provides tolerated cluster configuration and local node identity; M1a
+provides the full backend-neutral parity inventory; M1b provides the first
+hiqlite auth/settings backend; M1c adds libraries, media, watch state,
+node-local FTS, and bounded root-aware reconciliation; and M1d completes the
+120-method store plus the progress write-rate gate. M2 adds the
+content-addressed source backup, fresh-target import with per-table parity,
+fsynced completion marker, and atomic one-voter activation; after that verified
+import, the daemon selects Hiqlite instead of SQLite. Membership/join,
+lease-fenced publication and serving self-fencing are implemented. Replicated
+session takeover and client failover remain open.
+
+## 3. Contracts — safety lives in signatures and transactions
+
+### 3.1 Logical identity, application node identity, and raft id are separate
+
+```rust
+pub struct ClusterIdentity {
+    pub cluster_id: String, // replicated settings key: instance.id
+    pub node_id: String,    // local UUID file: <data_dir>/node.id
+    pub raft_id: u64,       // hiqlite membership id; non-zero by raft convention
+}
+
+pub struct StoreHandle {
+    pub store: Arc<dyn Store>,
+    pub identity: ClusterIdentity,
+    pub cluster: Arc<dyn ClusterCoordinator>,
+}
+
+pub async fn open_store(config: &Config) -> Result<StoreHandle, StoreError>;
+```
+
+Re-verify these signatures against [`config.rs`](../../crates/plurx-core/src/config.rs),
+[`store/mod.rs`](../../crates/plurx-core/src/store/mod.rs), and
+[`main.rs`](../../crates/plurxd/src/main.rs) when M0 begins.
+
+New and joining nodes use UUID strings for `node.id`. On an existing data
+directory, create it atomically from the exact current `instance.id`, including
+an older non-UUID value; the concepts become separate while every cache
+location and offline package keeps its key. Equivalent UUID spellings normalize
+to the exact `instance.id` ownership key. On a fresh or joining node, generate a
+new UUID.
+Write with mode `0600` because copied local identity can impersonate a member.
+Never place it in replicated settings. `raft_id` is allocated by membership
+and is not used as a filesystem-ownership key.
+
+A copied data directory must not create a duplicate member. Startup refuses a
+`node.id` already held by a live member and prints the explicit regenerate
+command. It never silently changes ids on a directory containing cache or
+offline rows.
+
+### 3.2 Configuration is rollback-compatible and secrets stay local
+
+M0 adds a tolerated, default-empty `ClusterConfig` before any release requires
+its keys. Older M0 binaries therefore accept later `[cluster]` files during a
+rollback. `Config` continues rejecting typos in known top-level and server
+settings; only the cluster section is designed for versioned extension.
+`ClusterConfig` is `#[serde(default)]` without `deny_unknown_fields`;
+`Config`, `ServerConfig`, and `StorageConfig` keep their strict unknown-field
+checks. M0 pins both sides: `[cluster]\nsome_future_key = 1` loads, while the
+existing `[server]\nnmae = "typo"` rejection remains unchanged.
+
+```toml
+[cluster]
+raft_bind = "0.0.0.0:32401"      # raft replication, adjacent to public 32400
+api_bind = "0.0.0.0:32402"       # authenticated node-to-node requests
+advertise_host = ""              # empty keeps a never-joined voter on loopback
+join_url = ""                    # empty derives the public API URL above
+artwork_url = ""                 # empty derives a node-specific artwork URL
+join_token_file = ""             # absent bootstraps/reopens one voter
+trusted_network = ""             # required if transport is not TLS
+```
+
+The shipped build keeps `secret_raft` and `secret_api` in mode-`0600` files
+beside `node.id`, generated atomically. Hiqlite's `enc_keys` field is compiled
+out because plurx uses `default-features = false`; it returns only if a later
+M3 backup/dashboard design deliberately enables and threat-models that feature.
+These secrets are never logged, exposed in settings, or stored in replicated
+SQL. A single-use join token contains cluster id,
+bootstrap addresses, expiry, the new raft id, and an encrypted envelope for
+those secrets; the one-time token secret wraps the envelope and is invalidated
+after membership commits.
+
+**Delivered 2026-08-15 (M3a).** The admin API mints an opaque token whose
+payload is authenticated and encrypted with XChaCha20-Poly1305. Replicated SQL
+keeps only its SHA-256 digest, expiry, assigned Raft id, and redemption state.
+The joining daemon reads the token from `join_token_file`, creates a distinct
+`node.id`, enters through Hiqlite's authenticated learner-to-voter path, and
+deletes the token file only after voter membership and token finalization both
+commit. Expired and finalized tokens have the stable, distinct codes
+`join_token_expired` and `join_token_reused`; token material is absent from
+logs, status, node records, and TOML. The joining node opens the complete token
+locally and sends only its SHA-256 digest to redeem/finalize, so the secrets in
+the envelope never cross the public HTTP request. `membership.json` keeps that
+digest as the local crash-resume gate; a foreign leftover token warns and is
+ignored on an already healthy voter.
+
+Trakt is the exception to the otherwise hash-only credential rows: its access
+and refresh tokens are live bearer secrets. Replicating plaintext would copy
+them into every voter database, raft WAL, snapshot, and backup, where row
+deletion cannot erase historical log entries.
+
+**Delivered 2026-08-14.** Both columns are envelope-encrypted before they reach
+the `Store`: `TraktAuth` carries `SealedSecret`, not `String`, and outside
+`plurx-core` sealing with the key is the only way to make one. Because the
+upgrade path must still be able to read a pre-encryption row, the durable write
+also refuses a value that is not an envelope, so the guarantee does not rest on
+the type alone. The SQLite→Hiqlite importer does not go through that write, so
+it audits its source's credential columns up front and refuses a pre-encryption
+backup rather than replicating one. Only ciphertext, key id, and non-secret
+metadata enter raft, and a copied voter disk is not sufficient to use a
+household's Trakt account.
+
+```toml
+[cluster]
+credential_key_file = ""         # empty means <data_dir>/credentials.key
+```
+
+The wrapping key is a 32-byte mode-`0600` file beside `node.id`, minted on
+first boot and never written to a durable row. It is node-local configuration
+in the §3.2 sense — not replicated, and distributed to other voters out of band
+exactly like `secret_raft` and `secret_api`. Being an addition to `[cluster]`,
+it also inherits this section's rollback rule: an M0 binary reading a config
+that sets it still loads.
+
+The envelope is `plxenc:v1:<key id>:<hex nonce‖ciphertext‖tag>` under
+XChaCha20-Poly1305, with the row's `user_id` as authenticated additional data
+so a re-pointed row fails to open rather than yielding another user's account.
+The refresh-token compare-and-set in `update_trakt_tokens` and
+`delete_trakt_auth_if_current` operates on the stored envelope, so a rotation
+race is still decided by exact equality on bytes every voter already agrees on
+— no voter has to hold the key to arbitrate one.
+
+Unwrapping happens only at an outbound call. There is no cleartext fallback
+anywhere: `open_trakt` returns an error for an unwrapped value rather than the
+value, and startup refuses outright when sealed rows exist and the key file
+does not, instead of minting a key that cannot open them.
+
+M0 must verify hiqlite 0.14's transport support. If it cannot provide TLS, the
+first clustering release is explicit: authenticated-but-cleartext inter-node
+traffic is allowed only on `trusted_network`, startup rejects a public bind,
+and [SECURITY.md](../SECURITY.md) documents the exposure. NTP is a deployment
+prerequisite for useful lease expiry and logs, although fence safety never
+depends on synchronized clocks.
+
+### 3.3 One migration dialect, with protocol guards before membership
+
+The replicated backend replays the same `MIGRATIONS` array as SQLite, once by
+the leader. Replicated SQL binds timestamps as parameters; it does not use
+`unixepoch()` inside consensus statements. Generated ids use `RETURNING`, not
+connection-local `last_insert_rowid()`. FTS5 is derived node-local state rebuilt
+from replicated `items` unless M0 proves hiqlite replicates its virtual table
+and triggers deterministically.
+
+Every member advertises protocol version and `MIGRATIONS.len()`. A voter
+refuses an incoming migration above its binary's schema ceiling, marks itself
+degraded, and cannot become leader. A leader refuses to migrate while any
+voter is below the required protocol/schema version. These rules land with the
+first three-voter store slice, not in the final operations milestone.
+
+### 3.4 One lease primitive fences jobs and sessions
+
+```rust
+pub struct Lease {
+    pub resource: String,
+    pub owner_node_id: String,
+    pub fence: u64,
+    pub revision: u64,
+    pub expires_at_unix_ms: i64,
+}
+
+#[async_trait]
+pub trait ClusterCoordinator: Send + Sync + 'static {
+    async fn members(&self) -> Result<Vec<ClusterMember>, StoreError>;
+    async fn acquire(
+        &self,
+        resource: &str,
+        ttl: Duration,
+    ) -> Result<Option<Lease>, StoreError>;
+    async fn renew(&self, lease: &Lease, ttl: Duration) -> Result<Lease, StoreError>;
+    async fn release(&self, lease: &Lease) -> Result<(), StoreError>;
+    async fn claim_session(
+        &self,
+        session_id: &str,
+        expected_owner_epoch: u64,
+        next: &SessionOwner,
+        ttl: Duration,
+    ) -> Result<Lease, SessionConflict>;
+    async fn get_session(&self, session_id: &str)
+        -> Result<Option<SessionOwner>, StoreError>;
+}
+```
+
+`job_leases(resource PRIMARY KEY, owner_node, fence, revision, expires_at)` is
+replicated. Every ownership takeover increments `fence`; every takeover,
+renewal, and release advances the dedicated monotone `revision`. Renew and
+release exact-CAS `resource`, `owner_node`, `fence`, `revision`, and the
+previous expiry, so delayed same-fence operations and recurring expiry values
+cannot resurrect old authority. Publishing methods such as scan-batch upsert,
+cursor advance, cache completion, and queue completion take `&Lease`. The same
+replicated transaction first validates `resource`, `owner_node`, and `fence`;
+zero matching rows aborts the entire write. A pre-write check is not a fence.
+Clock skew may delay takeover, but it cannot let an old owner commit.
+
+Membership removal composes with this lease contract. The transaction that
+publishes a pending-removal fence also invalidates every current job token for
+that node and stores a permanent owner tombstone. Invalidation rewrites the
+lease-row owner, so it remains effective even if the revision counter is
+exhausted or a delayed command carries an observation from before expiry.
+Replicated insert/update triggers enforce the tombstone for rolling-upgrade
+clients whose lease SQL predates this check; current acquire and renew calls
+also fail explicitly. Startup and idempotent removal backfill tombstones made
+by earlier binaries. Rolling back a definitively rejected membership change
+removes the owner tombstone but leaves the old tokens stale.
+
+`claim_session` is compare-and-set. Two survivors reading epoch 5 cannot both
+write epoch 6: one commits the higher lease fence and the other receives
+`SessionConflict { current }`. Session publication carries that same fence,
+so an old ffmpeg process cannot publish a playlist, segment location, or cache
+location after takeover.
+
+For a `session:<playback_id>` resource, the lease `fence` **is**
+`SessionOwner.owner_epoch`. There is one monotone counter per session,
+allocated by `claim_session`; `expected_owner_epoch` is compared with it in
+the same replicated transaction.
+
+In M4 the publishing surface is explicit: `upsert_item`, `claim_cache_entry`,
+`complete_cache_entry`, `forget_cache_entry`, `claim_next_offline_package`,
+`complete_offline_package`, and the scan-cursor writers gain a leading
+`lease: &Lease` parameter. A publishing method without that parameter is a
+review failure, because a check performed outside the write transaction is
+not a fence.
+
+### 3.5 Session takeover adopts PERF-PLAN §7.3, including playlist state
+
+The canonical contract is [PERF-PLAN.md](../performance/PERF-PLAN.md) §7.3. Clustering owns
+its storage and CAS, not a second spelling:
+
+```rust
+pub struct SessionOwner {
+    pub session_id: String,
+    pub owner_node_id: String,
+    pub owner_epoch: u64,
+    pub lease_expires_at_unix_ms: i64,
+    pub recipe: SessionRecipeInputs,
+    pub produced_playable_through_ms: i64,
+    pub fetched_through_ms: i64,
+    pub media_origin_ms: i64,
+    pub media_sequence: u64,
+    pub discontinuity_sequence: u64,
+}
+
+pub struct SessionRecipeInputs {
+    pub file_id: i64,
+    pub target_height: i64,
+    pub video_bitrate_kbps: u32,
+    pub audio_channels: u32,
+    pub audio_bitrate_kbps: u32,
+    pub audio_index: Option<i64>,
+    pub subtitle_burn: Option<SubtitleBurnInput>,
+    pub tone_map_required: bool,
+    pub audio_copied: bool,
+}
+```
+
+This is an owned wire type rebuilt from `TranscodeOptions`; it is not the
+borrowed `Recipe<'a>`. The survivor loads `file_id`, rebuilds its own
+`PipelineDigest`, chooses a locally valid encoder/pipeline, and computes its
+own node-local `recipe_hash`. Mixed ffmpeg/encoder fleets therefore retain
+takeover correctness but do not share cache entries unless their local digests
+match.
+
+These field names are also the canonical spelling in
+[PERF-PLAN.md](../performance/PERF-PLAN.md) §7.3. `tone_map_required = false` means the
+session started with `ToneMap::None`; `true` asks the survivor to select a
+locally valid `Zscale` or `Libplacebo` pipeline. The initial
+`TranscodeOptions::start_seconds` is deliberately not replicated: takeover
+resumes from the published and fetched frontiers, not from the session's
+original seek point.
+
+The owner renews its six-second lease and publishes both frontiers every two
+seconds. Watch progress is coalesced separately to at most one durable commit
+per 10 seconds per stream. On takeover, restart one segment before
+`fetched_through_ms`, publish exactly that overlap, retain the trusted prefix,
+advance `MEDIA-SEQUENCE`, emit one `EXT-X-DISCONTINUITY`, and advance
+`EXT-X-DISCONTINUITY-SEQUENCE`. For fMP4, re-declare a generation-specific
+`EXT-X-MAP`; never overwrite an init URI a client may have cached. Re-report
+`media_origin_ms` after the new keyframe snap. A playlist never names bytes no
+owner durably published.
+
+The survivor's writer starts at the replicated sequence, not at zero: both
+HLS argument builders pass `-start_number {media_sequence}`, and the copy
+segmenter names its first output with that same index. `served_live_playlist`
+continues deriving `MEDIA-SEQUENCE` from the retained filename index, which is
+then correct by construction. Whenever a prefix is dropped it also emits
+`EXT-X-DISCONTINUITY-SEQUENCE` from
+`SessionOwner.discontinuity_sequence`; otherwise pruning the failover marker
+silently renumbers every remaining discontinuity.
+
+### 3.6 Quorum, discovery, and local bytes have explicit failure behavior
+
+On quorum loss or lease-renewal failure, a node fails `/readyz`, terminates
+session children, and self-fences every media byte path—including native and
+Plex direct play. M4 deliberately returns a topology-free `503` with
+`Retry-After: 1`: it has quorum proof but not yet the M5 discovery contract,
+so exposing cached peer addresses would turn stale topology into an API.
+
+M5 adds healthy node addresses to that response. Only then may an immutable
+direct-byte request remain available when it cannot mutate progress and the
+client already has the current node list; self-fence remains the default,
+because stale serving hides failed writes.
+
+Each node advertises a hostname derived from `node.id`, not `instance.id`.
+Bonjour includes the logical server id, node id, protocol version, and
+replicated name. GDM uses the node id as Plex `Resource-Identifier` so Plex
+clients do not deduplicate the voters, and retains the logical server id in
+`Logical-Identifier`. `server.name` moves into replicated settings; the config
+value is only the bootstrap seed. Node-specific records therefore remain
+addressable without losing their logical-server grouping.
+
+Replicated state never implies local bytes exist. Segment and artwork requests
+proxy to a known holder when local bytes are absent. Artwork repair is per-node
+materialization from replicated facts, not a singleton. If no holder exists,
+the current leader arbitrates one provider repair under a term fence; an
+elected successor waits a full local monotonic lease before replacing an older
+term. Provider-origin and catalogue writes compare that replicated
+owner/term/generation and the exact `provider:artwork` singleton lease inside
+the mutation, so a timed-out command submitted by an old owner, job lease, or
+attempt becomes a no-op even if Raft applies it later. Finishing or timing out
+conditionally advances that generation before the scheduler continues. Home
+and Books nodes recreate already-published bytes only from media they can read
+locally and never republish catalogue fields from that path. The request queues
+local repair and returns the existing bounded error. This keeps
+provider-fetched art offline-safe while avoiding raft byte storage or
+cross-host wall-clock arbitration.
+Each voter scans its local artwork cache for orphan generations every six
+hours. It deletes only exact Plurx-managed names older than 24 hours, after a
+consistent per-filename catalogue recheck under the publication reservation;
+user-managed files are outside that cleanup contract.
+
+## 4. Data migration — quiesced, staged, verified, and reversible
+
+Re-verify `MIGRATIONS.len()` in
+[`store/sqlite/mod.rs`](../../crates/plurx-core/src/store/sqlite/mod.rs) at build
+time. Migration runs before background tasks and before HTTP bind:
+
+1. Refuse a source database newer than the binary.
+2. Quiesce by construction: no scheduler, scanner, Trakt outbox, listener, or
+   offline producer exists yet.
+3. Remove any abandoned `data/hiqlite.incoming` from a previous failed import.
+4. Copy `plurx.db` to `data/migration/`, fsync file and parent directory, and
+   record its SHA-256.
+5. Create a fresh one-voter target at `data/hiqlite.incoming`; never import
+   into the active target directory.
+6. Apply the shared migration chain, import durable tables in foreign-key
+   order, bind timestamps/ids explicitly, and rebuild derived FTS state.
+7. Compare ordered content hashes for users, settings, libraries, items,
+   files, watch state, Trakt/outbox, cache locations, and offline packages;
+   run `foreign_key_check` and M1a's full parity suite.
+8. Write and fsync a completion marker containing source checksum, schema
+   version, imported table hashes, and cluster id.
+9. Atomically rename `hiqlite.incoming` to the active target and fsync its
+   parent. Keep the original backup.
+
+Any failure removes the incoming target, leaves `plurx.db` active, exits
+non-zero, and names the rollback command. File-copy rollback is supported only
+before a second member joins. After membership, restore is a quorum-aware
+cluster operation specified and drilled in M6.
+
+Only `plurxd run` may perform this import. `refresh-metadata` refuses an
+unmigrated data directory instead of starting an import from a second process
+beside the server. `reset-password` now refuses before Store connection on all
+activated targets: a sidecar write cannot invalidate daemon-local cache-only
+admin proofs, and no authenticated daemon-owned console control path exists.
+
+## 5. Requirement traceability — every HA promise has an owner
+
+| Requirement | Milestone | Acceptance evidence |
+|---|---|---|
+| REQ-HA-1 · one or 3+, no two-node claim | M0 · M1b · M3 | One-voter budget table passes; two voters report degraded; three retain quorum after one loss. |
+| REQ-HA-2 · active-active API and streams | M3 · M5 | Three simultaneous streams enter through three nodes; direct, remux, and transcode continue during one-node loss. |
+| REQ-HA-3 · replicated durable/session state, embedded only | M1b–M1d · M5 | Replica table hashes match; acknowledged writes and CAS session state survive a voter loss. |
+| REQ-HA-4 · ≤10 s stream failover, zero acknowledged-write loss | M5 | Power-pull corpus proves direct/remux/transcode resume budget and monotone progress. |
+| REQ-HA-5 · one identity/name/settings/activity surface and join token | M3 | One cluster id/name is advertised by three node-specific records; admin shows leader, lag, voters, degraded state, and viewers from every node. |
+| REQ-HA-6 · client node lists plus VIP/k8s patterns | M5 · M6 · M7 | Web, Apple, and Android use the same retry corpus; keepalived and Service/Ingress runbooks are exercised. |
+
+## 6. Milestones — each leaves a reviewable boundary
+
+### 6.1 M0 — identity compatibility, dependency proof, and baselines
+
+**Delivered 2026-08-07.** PRs 82–83 establish the identity, semantic spike,
+cost record, replicated-SQL guardrails, and the then-114-method parity
+inventory this plan requires.
+
+Add the default-empty tolerated cluster section, `ClusterIdentity`, and
+crash-safe `node.id` seeding. Keep `SqliteStore` in production. Isolate
+hiqlite 0.14 in a non-shipping spike crate and prove FTS5/triggers,
+`RETURNING`, transaction CAS, statement-vs-row replication semantics,
+transport authentication, and log compaction. Record the §1 baselines. Update
+`validation/points.toml` with any new daemon module in the same commit.
+
+**Acceptance:** `make check` plus `make validate-staged`; a populated v14
+fixture with cleanup enabled retains every cache row, offline package, and
+byte across identity initialization; two fresh data directories get distinct
+node ids; restarts preserve ids; the feature spike records every result in
+[PHASE3-SPIKE.md](PHASE3-SPIKE.md). The config fixture accepts an unknown key
+inside `[cluster]` while the existing unknown-key rejection for `[server]`
+continues to pass.
+
+### 6.2 M1a — add backend parity before porting a backend
+
+**Delivered 2026-08-07.** The `store_contract` inventory and
+`store::replicated` policies are the executable port boundary.
+
+Add a parallel store contract suite behind an `Arc<dyn Store>` harness while
+SQLite is the only implementation; retain the deeper SQLite-specific tests.
+Classify explicit transaction boundaries and define the replicated CAS pattern
+once. Rule connection-, clock-, and RNG-dependent values out of replicated
+SQL.
+
+**Acceptance:** the additive suite exercises every method against in-memory
+and file SQLite with no behavior change; `make check` remains the gate. The
+inventory reached 118 methods when M1c added reconciliation, root-reset, and
+derived-search recovery contracts; M1d's progress and Trakt compare-and-set
+operations bring the current boundary to 120.
+
+The executable M1a contract is `store_contract`: each scenario receives only
+`Arc<dyn Store>`, and its name inventory fails unless every `async fn` declared
+in `src/store/mod.rs` remains represented. `store::replicated` owns the shared
+replicated-SQL policy, single-row CAS result contract, and source-pinned
+classification of every explicit production SQLite transaction boundary.
+
+### 6.3 M1b — settings, users, and API keys on three voters
+
+Implement the smallest security-bearing store surface first and introduce
+`make cluster-check`. Bring up three voters now, not after the full port.
+Land schema/protocol election guards and quorum-aware `/readyz` here.
+
+**Acceptance:** writes through every node produce byte-identical table dumps
+on all replicas; kill leader and follower in separate runs; acknowledged
+writes survive; an older-schema process fails the remote preflight. M3 owns
+making that preflight an enforced gate on real membership and elections.
+
+**Backend slice delivered 2026-08-07; daemon activation remains open.**
+`HiqliteAuthStore` implements the 23 settings, user/token, and API-key methods
+with bound timestamps, `RETURNING` ids, consistent reads, and fail-closed scope
+decoding. `make cluster-check` starts three separate voter processes, drives
+the lifecycle through every node, compares SHA-256 digests of ordered local
+table dumps, kills a follower and leader in fresh runs, and proves both
+acknowledged-write survival and no-quorum readiness failure. A remote
+schema/protocol preflight rejects an incompatible client before it starts a
+voter. The M1b harness does not dynamically add that process to membership;
+M3 must place this preflight in the join/start coordinator and prove a rejected
+node never appears in `voter_ids()`.
+
+This type intentionally cannot satisfy the complete `Store` trait yet. Its
+dependency is behind the `hiqlite-store` feature, enabled only by the cluster
+harness, so the ordinary daemon dependency closure remains unchanged until
+the full M1d/M2 activation. `plurxd` therefore still drives `/readyz` through
+SQLite. The hiqlite
+`SettingsStore::ping` is quorum-aware and is the route's eventual backend, but
+claiming the production route before the remaining store composition lands
+would create a hybrid source of truth. Full daemon activation stays with the
+M1d/M2 switch.
+
+### 6.4 M1c — media plus node-local FTS
+
+Port libraries/media/watch state and rebuild `items_fts` locally from
+replicated `items`. Bind all timestamps and use `RETURNING` for generated ids.
+Add media-root fingerprints; a leased scanner refuses reconciliation when its
+mounted root does not match cluster truth, and a configured prune bound stops a
+stale-but-present mount from deleting a library cluster-wide.
+
+**Acceptance:** all three nodes return identical browse/search results; delete
+and rebuild one node's FTS index; run a stale-root fixture and prove no prune
+commits.
+
+**Backend slice delivered 2026-08-07; daemon activation remains open.**
+`HiqliteAuthStore` now also implements all library, media, and watch methods.
+Authoritative reads are quorum-consistent; search reads each voter's derived
+contentless FTS index. A missing local index can no longer make an authoritative
+item delete fail. `reconcile_library` records root identity and puts
+the root comparison, prune budget, vanished-file delete, and empty-hierarchy
+prune in one transaction. The ordinary scanner now publishes through that
+boundary with `storage.scan_prune_percent` (10% by default); a root mismatch or
+over-budget scan records an error and commits no delete. An empty first scan of
+an upgraded library cannot establish root trust. Editing paths clears the old
+identity, and the admin root-reset action covers a verified mount replacement.
+
+`make cluster-check` writes catalogue and watch state through every voter,
+compares ordered local table digests, and compares voter-local authoritative
+catalogue digests and search results. It then deletes voter 2's FTS
+rows directly, proves authoritative truth remains unchanged while the full
+derived-state digest and local search change, invokes the product rebuild
+contract, and requires all three views to converge before the existing
+follower-loss and leader-loss cases continue. The remaining lease token is
+deliberately M4's
+signature change: M1c owns root identity and the atomic publication boundary;
+M4 makes that same boundary reject an expired scanner.
+
+### 6.5 M1d — remaining store contracts and write-rate gates
+
+Port Trakt/outbox, transcode cache, offline packages, and the remaining watch
+methods. Implement the 10-second progress coalescer and storage-class-scoped
+cache ownership. Run the full parity suite against SQLite and three voters.
+
+**Acceptance:** all store contracts pass on both backends; §1 write-rate,
+latency, RSS, and growth budgets pass; offline/cache rows retain node-local
+ownership on all replicas.
+
+**Implementation complete; daemon activation remains open.**
+`HiqliteAuthStore` now implements all 120 `Store` methods. Trakt credentials,
+the watched outbox, cache recipes and locations, offline packages, and offline
+leases use deterministic replicated writes. Trakt refresh and unlink are
+compare-and-set operations, and watched delivery rows carry short claims so
+several voters cannot settle the same attempt over one another. Cache and
+offline rows replicate ownership, state, recipe, and path metadata; the named
+node's media, cache, and package bytes remain node-local. Offline admission
+applies complete request idempotency, row limits, per-user bytes, and a
+per-node byte budget in one conditional statement; one consistent fallback
+snapshot classifies a refusal. Lease creation and renewal keep the durable
+token and ephemeral guard in one transaction.
+
+`make cluster-check` first runs the same `Arc<dyn Store>` contract scenarios
+against memory SQLite, file SQLite, and a three-voter Hiqlite cluster. Its
+separate-process loss harness then varies user and node identity; verifies
+refused-state postconditions, cache heartbeat cutoffs, every Trakt/outbox
+field, and terminal offline-state guards; and compares independently hashed
+replica dumps both before and after follower or leader loss. The server-side
+progress coalescer commits the leading beat, replaces intermediate beats with
+one trailing value, and flushes that newest value at the ten-second boundary.
+A new 95% watched transition commits synchronously. Manual writes cannot be
+overwritten by a delayed flush, dated offline imports remain ordered facts,
+and graceful shutdown makes a bounded drain attempt.
+
+The existing raw-write cost record measures 0.083333 ms p95 progress latency,
+6,832,128 bytes (6.52 MiB) additional idle RSS, and 8,309,777 bytes of data
+growth for 10,000 direct store writes. The committed `make cluster-growth`
+gate now drives 10,000 incoming beats through the production
+`ProgressCoalescer`: 80 user/item streams × 125 beats at a deterministic
+five-second cadence represent 620 seconds of playback per stream. The real
+ten-second window produces 63 commits per stream, or 5,040 total; the gate
+allows one extra window per stream, for a 5,120-commit budget. Injecting only
+the monotonic clock keeps the ratio honest without turning the CI gate into a
+ten-minute campaign; every store read, compare-and-set, and replicated write
+remains real.
+
+With hiqlite's production 10,000-log snapshot policy, two successive
+snapshot/purge cycles normalize retained WAL rollover before each directory
+comparison. The 2026-08-14 record is 3,832,601 bytes before, 8,273,961 bytes
+after, and 4,441,360 bytes of compacted growth — 444.136 bytes/incoming beat
+against the measured 512-byte budget. The same run bypasses the coalescer: its
+10,000 commits produce 8,454,240 compacted bytes (845.424 bytes/beat), so the
+live control must violate both the 5,120-commit and 5,120,000-byte limits.
+Paused-time tests still prove the ten-second window and terminal watched
+exception independently. M2 also owns importing an existing SQLite store and
+selecting the complete backend at startup.
+
+### 6.6 M2 — migrate an existing install
+
+Implement §4 and make one-voter hiqlite the default only after the import gate
+passes. Do not write required cluster keys into config until the M0-compatible
+binary is the documented rollback floor.
+
+**Acceptance:** migrate populated v14 and failure-injected fixtures; compare
+content hashes and full parity behavior; kill each import step and prove the
+next boot either resumes from the completed atomic target or deletes incoming
+state and starts SQLite unchanged.
+
+**M2 delivered 2026-08-14.** `prepare_sqlite_import` refuses a future schema
+before mutation, removes an abandoned incoming directory, and publishes a
+fsynced,
+content-addressed SQLite online backup with committed WAL pages included. The
+backup uses canonical delete journaling, so later verification never creates
+an untracked WAL sidecar beside immutable source material.
+
+`HiqliteAuthStore::import_sqlite_backup` accepts only a fresh bootstrapped
+target whose `instance.id` matches the source. It imports all 17 shared durable
+tables in foreign-key order and byte-measured Raft transactions, preserving
+explicit ids, timestamps, nullable text, and integer values. Both chunk
+producers — offset paging and the parent-first item-id path — feed rows through
+one transaction builder that accumulates their serialized size and submits
+before the next row would cross a byte budget derived from
+`HIQLITE_WAL_SIZE_BYTES`: one quarter of the usable per-entry payload, capped
+at the measured replication ceiling. The production segment is 16 MiB, whose
+exact usable payload is 16,777,182 bytes. Routine import transactions therefore
+remain at 512 KiB rather than scaling to 4 MiB with the larger WAL; the extra
+capacity exists for an indivisible large row, not to spend the store's
+three-second timeout. OpenRaft's
+`max_payload_entries = 128` limits entries per append request rather than bytes
+inside one entry, and Hiqlite transports append requests in WebSocket binary
+frames without a smaller configured byte cap. The cap remains because a
+transaction must still replicate to every voter inside the store's three-second
+timeout, and about 1 MiB failed to do so on a loaded host while about 512 KiB
+completed. A row count cannot bound this. One transaction becomes one Raft
+entry, `files.probe_json` holds whole ffprobe documents, and `hiqlite` panics its
+WAL writer on an entry past the usable capacity: 64 rows of a real library
+serialized to 3,137,236 bytes, and a 16-row bound overflowed the former 2 MiB
+segment whenever 16 adjacent rows averaged more than ~131 KB — which is how
+node `m6` exited mid-import and restarted into unreplicated SQLite while
+reporting healthy.
+`IMPORT_CHUNK_ROWS` survives as a secondary bound only: it is the source read
+page and a ceiling on rows per transaction, no longer the safety property. A
+single row too large for any transaction is refused before submission, naming
+the table, an identifier that is never imported payload, the measured size, and
+the limit — an operator-actionable refusal beats a crash into a silently
+unreplicated backend. The WAL tuning, importer budget, and three-voter contract
+now derive from the single exported `HIQLITE_WAL_SIZE_BYTES` production
+constant, so a retune moves the runtime and its regression together. Items
+compute their parent-first
+id order in one recursive source pass, then load each bounded page through
+indexed point reads; numeric id order cannot violate their self-reference, and
+large catalogues do not re-run and re-sort the full tree for every page. A
+parent-first run split across several transactions still submits in order, so a
+child never precedes its parent. A v14 source contributes empty
+scan-reconciliation tables and zero outbox claim deadlines; v15–v17 preserve
+their newer durable facts.
+`playback_events`, `items_fts`, and `offline_lease_guards` never cross the
+boundary: telemetry is node-local, FTS is rebuilt, and the lease guard is an
+internal transaction scratch table.
+
+The importer runs source and target foreign-key checks, rebuilds FTS, compares
+the exact ordered JSON rows for every imported table, and returns the row count
+and SHA-256 for each table only after parity. Source validation, row loading,
+and digest scans share one blocking worker, so synchronous SQLite work never
+occupies an async runtime worker. Row data crosses that boundary in bounded
+chunks; one parent-first item-id ordering remains O(items) so the importer does
+not rebuild and re-sort the full item tree for every read page. Target parity
+advances through 64-row `PARITY_PAGE_ROWS` primary-key pages — a separate
+constant that stays 64 because parity pages are consistent reads that never
+enter a Raft transaction, so the WAL payload cap does not apply to them — and
+feeds an incremental digest instead of returning a whole table through the
+leader. Each page is a
+consistent read against the quiescent incoming target; activation does not
+start a concurrent writer before parity succeeds.
+
+The three-voter contract imports populated v14 and current fixtures, including
+single- and multi-column primary-key tables large enough to cross the import
+and parity page boundary. It covers a child id that sorts before its parent,
+nonzero current outbox claims, current scan state, checksum refusal,
+merge-style retry refusal, identity mismatch, the v14 schema floor, cyclic
+parent refusal, injected target corruption before parity, source playback
+telemetry exclusion, and runtime multi-column keyset progress. Unit tests pin
+the keyset SQL shape and prove async-executor responsiveness while SQLite is
+blocked.
+
+`plurxd run` now completes steps 2, 5, 8, and 9 before probes, background
+producers, or HTTP bind. It creates a fresh one-voter target under
+`hiqlite.incoming`, imports and verifies it, writes a fsynced marker carrying
+the source checksum, schema, cluster id, row count, and table hashes, then
+renames it to `hiqlite` and fsyncs the data directory. The source database and
+content-addressed backup remain unchanged.
+
+Four process-exit failpoints cover quiescence, incoming startup, marker
+publication, and rename. Before rename, the next boot removes partial incoming
+state and consumes one SQLite recovery boot; after rename, the completed marker
+makes the replicated target authoritative. `refresh-metadata` never imports: it
+refuses an unmigrated directory and uses an authenticated client to the running
+voter after activation. `reset-password` is disabled before Store connection
+until a daemon-owned authenticated control path can propagate cache-proof
+revocation safely.
+
+An ambiguous active target fails closed rather than reverting to SQLite: a
+missing, malformed, unsupported, or identity-mismatched marker, or a `hiqlite`
+path that is not a directory, refuses the boot. The scope of that check is the
+marker's own shape and the recorded cluster identity. It deliberately does
+**not** re-verify the recorded table hashes against live target contents on
+every boot — parity is an import-time property, proven once before the rename,
+and re-hashing every table at startup would put a full scan in front of every
+restart. Detecting later corruption *within* an activated target is M6's
+backup-and-restore work, not M2's.
+
+Activation is one-way per data directory. Because the retained `plurx.db` is a
+rollback source rather than a current one, a directory that has activated
+records `hiqlite-activated.json` beside it, and a boot that finds that record
+without its target refuses instead of re-importing stale rows. Deleting that
+file is the deliberate way to accept a rollback and the data loss it implies.
+`migration/` keeps only the three newest source backups, so a repeatedly failing
+activation cannot fill the data volume with database copies.
+
+Both cluster listeners bind loopback only, and a port already in use is reported
+by name before the voter starts rather than surfacing as a start timeout.
+
+**Trakt credential encryption is no longer a blocker (2026-08-14).** Both
+bearer columns are envelope-encrypted under a node-local key file before they
+reach the `Store` (§3.2), and a direct upgrade seals a legacy cleartext row
+while startup is still quiescent and before publishing the immutable import
+backup. The importer independently audits that backup and refuses cleartext
+before submitting any application row to Raft. A boot whose key is missing,
+replaced, or too broadly readable refuses instead of falling back to cleartext.
+
+The post-coalescer blocker is also closed by the 2026-08-14
+`make cluster-growth` record: 4,441,360 compacted bytes for 10,000 incoming
+beats at five-second logical cadence (444.136 bytes/beat), 5,040 physical
+commits for 80 streams, and a raw 10,000-write control that violates both the
+commit and byte budgets. No §6.6 activation blocker remains outstanding.
+
+Before M3 introduces peers, both cluster listeners are loopback-only; no
+replication traffic exists to expose and no remote consumer exists to serve.
+The API listener keeps automatic TLS and its authenticating secret, but before
+M3 it ignored a non-loopback `api_bind` and `advertise_host`: its only consumer
+was a maintenance command on the same machine, so honouring the `0.0.0.0`
+default would have opened a LAN port on every single-node install at upgrade
+with nothing on the other end. M3 keeps that default closed and opens the
+listeners only when the operator sets `advertise_host` as the explicit first
+step toward admitting a peer.
+
+### 6.7 M3 — membership, secrets, discovery, and one settings surface
+
+Add single-use join, add/remove, health, server-name replication, node-specific
+mDNS/GDM, and the admin membership surface. Two voters are a visible degraded
+reconfiguration state, never supported HA.
+
+**M3a delivered 2026-08-15.** A running voter can issue a bounded, single-use
+join token; a fresh daemon consumes it to join as a real voter without changing
+the replicated `instance.id`. The admin-only membership API exposes the actual
+short machine hostname, the advertised host without its listener port
+(`localhost` for loopback), stable node id, current-leader marker, Raft id,
+voter/learner role, reachability, and last-seen, then embeds the existing
+§6.6/#233 replication projection as its only lag answer. Both remote cluster
+listeners use automatic TLS, and the listener
+policy refuses a public cleartext bind. A never-joined installation remains on
+loopback until the operator sets `advertise_host`; a sole voter then rebuilds
+only its one-node Raft metadata from a verified Hiqlite snapshot so the
+committed address, not merely `membership.json`, becomes reachable. The
+transition is refused after a learner or peer exists, and later remote listener
+host or port drift is refused rather than validating one address and silently
+binding another. Follower removal is allowed only from three or more voters;
+the resulting two-voter set reports `degraded_reconfiguration`, and any 2→1
+removal is deliberately refused with `removal_would_lose_quorum` until a later
+milestone proves a downgrade protocol.
+
+**M3c delivered.** Node removal resolves the offline work owned by that node
+before the membership change commits, closing the activation blocker M3a
+answered with a blanket refusal. A package still cannot be silently re-homed,
+because its replicated `source_path` does not prove the survivor has the same
+mount — so the proof is made rather than assumed. The departing node's `queued`
+and `preparing` packages are probed against every reachable survivor, and each
+candidate answers by opening the snapshotted source and matching its size and
+mtime. Those answers live in `offline_source_probes`, a cluster-only table
+written by the node that actually looked.
+
+A package with a fresh affirmative answer is requeued on that node. Ownership
+of the *task* moves; the operator's file is never touched. Everything else is
+marked failed with the stable `node_removed` code, which releases its
+reservation so neither the user's nor the node's byte budget is held until the
+seven-day expiry. Silence is not proof: a survivor that does not answer inside
+the bounded wait is not a re-homing target, and unanimous refusal ends the wait
+immediately rather than burning it.
+
+A `ready` package is never requeued. Its bytes exist only in the departing
+node's cache, and §7 non-goal 4 declines to promise byte-identical transcodes
+across mixed encoders — so re-producing it behind its stable lease URL could
+hand a resuming downloader a different generation's bytes. It fails with
+`node_removed`, which stops the cluster advertising a package it can no longer
+serve; the client's retry creates a fresh package with a fresh URL. An already
+`failed` package is terminal, holds no reservation, and no longer blocks
+removal at all.
+
+One snapshot is not enough, because the departing node keeps serving its API
+until the change commits and a package is created owned by whichever node
+answered the request. A download requested during the bounded probe wait would
+exit a single-pass removal owned by a tombstone, holding its reservation until
+the seven-day expiry — the exact stranded state this section calls an
+activation blocker. So the removal re-reads the node's work after applying a
+plan and resolves again, for a bounded number of rounds; a node admitting new
+downloads faster than they can be resolved gets a refusal naming that reason
+rather than an unbounded wait.
+
+The durable INSERT in `create_offline_package` now includes an explicit
+`AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $node AND
+removed_at IS NOT NULL)` clause, so a removed-but-running node that keeps
+receiving download requests is refused at the write path before any admission
+or quota step. The response is `OfflineCreateOutcome::NodeIsTombstone`, which
+maps to HTTP 503 Service Unavailable with the stable `node_removed` code — the same code
+packages from a clean removal use. A package never enters the queue or holds a
+reservation against a tombstone. The single-node SQLite path has no
+`cluster_nodes` table and never returns this variant.
+
+Anything created inside the last narrow window, between the final re-read and
+the committed change, is still failed `node_removed` once the node is out of
+the roster: it was never probed, re-homing it would guess at a mount, and the
+membership change can no longer be refused.
+
+The refusal survives, narrowed to what the policy genuinely cannot resolve: a
+download in flight from that node right now. Cutting it off is neither allowed
+outcome, so removal refuses and names the count so the operator can wait or
+delete. Lifting the blanket refusal must not become "removal always succeeds".
+
+Re-homing also fences the old producer. `fail_offline_package`,
+`mark_offline_package_ready`, `requeue_offline_package`, and
+`update_offline_progress` all take the owning node id, because the departing
+node's encoder may still be running when ownership moves; without that guard
+its late write would terminate or publish work a survivor has taken over, yield
+a survivor's claimed package back to the queue, or flap the progress the
+survivor is reporting.
+
+None of this exists on a single-node SQLite install. There is no node to
+remove, no survivor to re-home onto, and no SQLite table backs the probe
+protocol. Its offline behavior is unchanged and remains a valid rollback
+target.
+
+**M3d delivered.** `server.name` is now a replicated setting. The node-local
+TOML value atomically seeds an empty store, preserving an existing install's
+name on upgrade; after that, the replicated winner is authoritative and a
+joining node's config cannot rename the server. An admin rename writes through
+the `Store` boundary and converges on every voter. Cluster-enabled processes
+publish one record per `node.id`: Bonjour uses a node-derived hostname,
+node-suffixed service label, and `node_id` TXT property. GDM publishes the node
+id as Plex `Resource-Identifier`, repeats it in `Node-Identifier`, and retains
+the replicated `instance.id` in `Logical-Identifier`; the Plex `/identity`
+facade returns the same node id clients discovered. Native APIs retain the
+logical `instance.id` and name. A never-joined install omits the node fields and
+keeps its historical discovery bytes. The host-network `plurxd advertise`
+companion reads this complete public identity from the daemon, so it applies
+the same clustered-versus-legacy rule without opening the replicated store.
+
+**Acceptance:** grow one node to three without changing `instance.id`; reject
+expired/reused tokens and public cleartext binds; advertise three distinct
+node records under one logical identity/name; remove one follower while
+preserving quorum. Removing a node that owns offline work succeeds and resolves
+every package by the rule above: a verified source requeues and then completes
+on its new owner, an unverifiable one fails `node_removed` with its reservation
+released, a `ready` one stops advertising itself, and the departing node can no
+longer publish work a survivor has taken over. A download requested on that
+node *while the removal is resolving* is resolved too, not stranded by the
+opening snapshot. An in-flight transfer still refuses, with the reason visible
+to the operator. The activity page aggregates
+direct-play and session rows from all healthy nodes instead of exposing only
+the process that answered the request.
+
+**M3e transport delivered.** Membership retains each node's explicitly
+configured plurxd URL in a cluster-internal table while the public status shape
+continues to omit every address. A narrow read-only activity snapshot route is
+authorized by a short-lived sender/target-bound Ed25519 signature from a
+durable per-node private key plus a current-voter check, never by a forwarded
+household bearer or the cluster-wide API secret. The pre-wired client races at
+most 64 bounded peer reads under one two-second deadline, refuses redirects,
+caps each response at an exact 256 KiB serialized budget, and returns
+answered, unhealthy, unreachable, invalid, or timed-out. The aggregation above
+can therefore degrade visibly without guessing ports or silently dropping
+nodes. SQLite and never-joined one-node paths construct no peer work. Snapshot
+rows deliberately omit HLS session capability ids.
+
+**M3e aggregation delivered.** The two public activity reads overlap their
+local work with that one bounded peer round. The summary reports the total
+direct, remux, HLS-copy, and transcode deliveries from every node that answered.
+The detail response keeps the native-client `sessions` array byte-for-byte in
+its established node-local shape and aggregates through the additive
+`deliveries` array instead. Clustered delivery rows add only the stable
+`node_id`; remote rows carry no stop capability. The additive `activity_nodes`
+array records `answered`, `unhealthy`, `unreachable`, `timed_out`, or
+`invalid_response` for each known voter. A peer-directory failure is also a
+visible unavailable state. The web page leads with that incomplete-state
+warning and names each known node that did not answer instead of presenting a
+short list as complete. When the peer directory is empty, both public payloads
+retain the exact pre-M3e shape.
+
+### 6.8 M4 — transactional fences and materialization ownership
+
+Put scans, metadata refresh, genre backfill, scheduled cache production, and
+offline queue ownership behind fenced leases. A scan resumes by restarting
+from zero until a replicated cursor is deliberately added. Keep cleanup and
+artwork materialization per node; proxy missing local bytes to a holder and
+queue repair.
+
+**Acceptance:** `SIGSTOP` an owner past TTL, acquire elsewhere, `SIGCONT`, and
+prove its resumed write is rejected inside the transaction. Kill a scan owner
+and observe one successor restart. Partition a serving node and prove it fails
+readiness, kills children, and stops capability-URL serving.
+
+The retained singleton slice uses three real voter processes and the exact
+daemon lease-heartbeat source. A follower begins a blocked provider request,
+both peers are refused without making another physical call, and the follower
+is stopped past the expiry read from the authoritative lease row. One surviving
+peer takes over with the next fence, publishes a distinct response, and the
+resumed production task self-fences. Replaying the pre-takeover token is
+rejected by the atomic successor-generation transaction independently of its
+former wall-clock TTL. Both live peers contest takeover, exactly
+one observes acquisition while the other observes its new fence, and the proof
+allows exactly two provider calls and at most eight post-baseline Raft entries.
+The retained serving slice starts a distinct process with a remote Hiqlite
+client behind raw TCP cut-points, while all three voter processes remain
+directly reachable. Its production quorum watermark drives `/readyz`, the
+mutable-media and direct-play gates, progressive-remux cancellation, and HLS
+child retirement without a Store request on the loss path. Cutting every
+serving connection must leave `/healthz` at 200, move readiness and the
+capability to 503 with `Retry-After`, expose no cluster address, and reap the
+live child. The controller then commits a setting and reads it from every
+voter's local replica through the intact majority, restores the serving links,
+and requires readiness and capability recovery.
+
+That remote serving monitor is intentionally quorum-authority-only. It does
+not poll a voter-management metrics endpoint, claim a local replica, or emit an
+apply-lag value. The short proof can gate media readiness, but cannot authorize
+a bounded local catalogue read; that later optimization requires a fresh local
+term, leader, epoch, and applied-index binding on an embedded replica.
+
+M4's fenced leases decide *who takes a turn*, not *who is allowed one*. Since
+[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7 PR-1, a
+non-voting member exists that holds the same shared cluster credential and would
+win a lease exactly as often, so eligibility is asked first, re-derived from
+committed Raft membership on every decision, and every leased singleton passes
+through the one gate. The same harness proves it against a real learner process:
+the learner is refused while the lease row is absent, and a voter then takes the
+same resource. That refusal prevents duplicated work; it is not authorization,
+for the reason recorded in §7 non-goal 7.
+
+### 6.9 M5 — web failover for direct, remux, and transcode
+
+Implement the exact §3.5/[PERF-PLAN.md](../performance/PERF-PLAN.md) §7.3 contract. Proxy
+non-owner requests first; add web node-list retry after the server corpus is
+green. Update `validation/points.toml` and the operations contract whenever
+new ports or daemon files enter governed surfaces.
+
+M5's client node lists and retry budgets remain voter lists. P6 gives a learner
+an explicit server-side bounded-read/media matrix and lets internal media
+placement use a fresh ready learner, but it does not advertise that learner as
+an unrestricted client failover origin. P7 owns proxy routing against those
+stable readiness contracts. A learner must never be counted as voter
+redundancy or used for an authority mutation before explicit promotion.
+
+**Acceptance:** kill the serving node during direct, copy-remux, and transcode,
+including mid-segment response. Resume within 10 seconds with one
+discontinuity, correct `DISCONTINUITY-SEQUENCE`, a generation-specific fMP4
+map, monotone watch progress, and no URI whose bytes were never published.
+Across the session lifetime, no two identical segment URIs may name different
+bytes. After the failover discontinuity slides out of the live window, a
+reloading client must still observe the same discontinuity numbering for the
+remaining segments. Run three concurrent streams entering through three
+different nodes.
+
+### 6.10 M6 — operations, backup/restore, upgrades, and drills
+
+Add three-node Compose and Helm examples, keepalived and k8s Service/Ingress
+runbooks, rolling-upgrade rules, secret rotation, quorum-aware backup/restore,
+and deterministic drills for leader/follower loss, netsplit, disk-full, stale
+owner, mixed versions, and one-node recovery.
+
+Expose leader id, voter health, commit index, applied-vs-committed lag, lease
+acquisitions/rejections, fence rejections, takeover count/duration, and
+compaction growth. Every number includes a sentence in
+[OPERATIONS.md](../OPERATIONS.md) explaining healthy and actionable shapes.
+
+M6's mixed-version drill has a concrete subject since
+[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7 PR-1: the
+cluster carries an active protocol *range*, a node participates only when its
+binary covers all of it, and narrowing that range is an explicit admin step that
+is refused while any active node's running binary is unproven. `make
+cluster-check` runs that drill as separate processes. Two rolling-upgrade rules
+follow and belong in the runbook rather than in a drill script. First, a node
+that is down is refused by its own rule and not by the unproven-binary one: the
+capability row carries the heartbeat's own timestamp, so a node that proved the
+capability and then stopped keeps both timestamps frozen and equal and reads as
+proven forever. Activation therefore refuses separately for any member silent
+for over two minutes — start it or remove it — rather than leaving it to the
+unproven-binary roster, which would activate straight past it. Second, once a
+learner is admitted the protocol rollback is unavailable until every learner is
+either safely removed or promoted after readiness/storage preflight; only a
+zero-non-voter roster may deactivate protocol 5.
+
+P6's complete lifecycle makes those two verbs crash-safe. Promotion refreshes
+the durability probe periodically, crosses a new target-local apply barrier on
+every indeterminate retry, and does not change the replicated admission role
+until the promoted target has fsynced downgrade-readable voter records in both
+`membership.json` and `hiqlite/activation.json`. Learner removal applies the
+same route/placement/job-owner fence as voter removal, ends active media
+ownership using the session schema's terminal `ended` state, then removes the
+non-voting member without voter-quorum arithmetic. The real-process drill
+restarts the promoted node before allowing protocol deactivation.
+
+P7 closes the proxy and loss-drill portion without blessing one load-balancer
+product. The contract probes `/readyz`, keeps HLS and segments sticky, bounds
+backend connect/drain time, and permits automatic retries only for `GET` and
+`HEAD`. `make cluster-check` now applies the fixed 64-write workload around
+both follower and leader loss, pauses a real learner until it leaves read
+rotation, and runs a two-backend local HTTP fixture that preserves one HLS
+discontinuity while proving a failed `POST` is attempted once. CI retains the
+closed-schema `cluster-failure-drills.json`; its 10-second leader-recovery gate
+is a semantic election budget, not a named-host latency result.
+
+**Acceptance:** `make cluster-check` exercises the failure harness; a fresh
+operator reaches three healthy nodes in under 10 minutes; backup, destroy, and
+restore preserves the content hashes from M2; rolling upgrade never elects an
+incompatible leader.
+
+### 6.11 M7 — Apple and Android consume the proven failover contract
+
+Only after the web corpus is green, implement the same node-list, retry budget,
+and server error semantics in both native clients. Do not translate node loss
+into their existing compatibility-fallback ladders.
+
+**Acceptance:** the shared fixture corpus plus physical iPhone/iPad, Apple TV,
+Android, and Google TV runs survive one serving-node loss in every delivery
+mode without lowering quality or losing selected tracks.
+
+## 7. Non-goals — guardrails for the first clustering release
+
+1. **Do not replicate media or derived bytes through raft.** Consensus owns
+   facts; shared storage, proxying, and regeneration own bytes.
+2. **Do not support two-node HA.** Two voters survive no failure and create a
+   confidence trap.
+3. **Do not add PostgreSQL, etcd, Redis, or a broker.** The embedded deployment
+   shape is a product constraint.
+4. **Do not require byte-identical transcodes across mixed encoders.** The
+   output protocol must match; node-local recipe hashes may differ.
+5. **Do not combine clustering with adaptive quality or TV ports.** Those
+   changes obscure the induced failure each milestone must prove.
+6. **Do not call a VIP the failover implementation.** A VIP locates a process;
+   replicated state, fencing, and takeover let it continue the film.
+7. **Do not call a learner a security boundary.** Since
+   [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7 PR-1 a
+   non-voting role exists, and it is a capacity decision. `secret_api` is at
+   once the membership-mutation credential, the replicated read/write client
+   credential, and the artwork HMAC key, and it ships whole inside the join
+   token; a learner holding it can promote itself through vendored Hiqlite's
+   `become_member`, which honours nothing else. Every plurx-side refusal is
+   defence in depth. Splitting the credential is
+   [MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
+8. **Do not treat a learner as a spare voter.** Before explicit promotion it
+   adds a replicated copy and possibly read/media capacity, never failure
+   tolerance. Promotion is a planned membership change after catch-up,
+   barrier, and storage proof; it is not automatic failover. Non-goal 2 still
+   governs — two voters plus a learner is two voters.
+
+## 8. Handoff checkpoint — M3 owns the complete membership surface
+
+M0 through M2 provide the complete one-voter path: exact import parity, a
+durable activation marker, atomic target selection, failure-injected SQLite
+recovery, replicated daemon startup, and credential sealing before the
+immutable source backup is published. The post-coalescer compacted-growth and
+credential-encryption gates are closed. M3 adds bounded single-use admission,
+real learner-to-voter growth, replicated privacy-safe node records, health,
+safe removal with deliberate offline-work resolution, one replicated server
+name, node-specific discovery, and an activity surface that names both the node
+performing each delivery and every voter that did not answer. M4 owns
+singleton-job fencing and materialization ownership; later milestones retain
+their separate media-placement and failover boundaries.
+
+```bash
+make check                    # M0 and every milestone: repository baseline
+make validate-staged          # changed behavior contracts
+make cluster-check            # M1b-M4 state, membership, singleton, and loss gate
+make cluster-growth           # 10,000-beat compacted growth + raw control
+cargo run --locked -p plurx-cluster-check -- membership
+                              # focused real-process 1 -> 3 -> 2 lifecycle
+cargo run --locked -p plurx-cluster-check -- learner
+                              # focused real-process three-voter-plus-learner proof
+cargo run --locked -p plurx-cluster-check -- singleton
+                              # focused SIGSTOP/TTL/takeover/stale-token proof
+cargo run --locked -p plurx-cluster-check -- serving-partition
+                              # focused serving-only cut, child reap, majority-write, recovery proof
+cargo test -p plurx-core store::sqlite::tests:: -- --nocapture
+                              # explicit local M2 database-upgrade gate
+```
+
+No milestone is complete because three processes stayed up. It is complete
+when the failure it owns is induced and the promised state survives it.

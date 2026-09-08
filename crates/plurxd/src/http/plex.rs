@@ -149,7 +149,7 @@ pub async fn sections(
 ) -> Result<Response, ApiError> {
     let libs = state.catalogue.list_libraries().await?;
     // Home libraries are skipped: the façade has no honest Plex section type
-    // for a folder tree of camera files (see docs/HOMEVIDEO-PLAN.md §2).
+    // for a folder tree of camera files (see docs/features/HOMEVIDEO-PLAN.md §2).
     let dirs = libs.iter().filter_map(map::section_directory).collect();
     Ok(xml(plex::container(dirs)))
 }
@@ -271,6 +271,7 @@ pub async fn part(
     _user: PlexUser,
     State(state): State<AppState>,
     Path((file_id, _mtime, _name)): Path<(i64, String, String)>,
+    method: axum::http::Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let file = state
@@ -278,7 +279,7 @@ pub async fn part(
         .get_file(file_id)
         .await?
         .ok_or(ApiError::NotFound("part"))?;
-    super::stream::serve_file_range(&file.path, &headers).await
+    super::stream::serve_file_range(&file.path, &headers, &method).await
 }
 
 /// GET /library/metadata/:key/thumb  and  /art — serve cached artwork.

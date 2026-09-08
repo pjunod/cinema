@@ -22,6 +22,8 @@ READ BEFORE CHANGING CODE
 
 - README.md for scope, development entry points, and non-goals.
 - docs/REQUIREMENTS.md and docs/ROADMAP.md for product scope and sequencing.
+- docs/README.md for what else exists: every document under docs/, the
+  question it answers, and whether it is live, open, built, or done.
 - docs/ARCHITECTURE.md for subsystem boundaries and load-bearing decisions.
 - docs/VALIDATION.md for path ownership, required evidence, and gate profiles.
 - docs/SECURITY.md for auth, exposure, and trust-boundary work.

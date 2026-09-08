@@ -174,6 +174,12 @@ pub(super) const MEDIA_PLAYBACK_POINTERS_SCHEMA: &str =
     playback_id            TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),
     current_incarnation_id TEXT NOT NULL UNIQUE,
     updated_at_ms          INTEGER NOT NULL,
+    -- The ask this pointer was written against. Nullable, and the null means
+    -- the playback had no recorded ask -- see the fence triggers, which read a
+    -- null on a playback that *does* have one as a writer from before this
+    -- column. A fresh install declares it here; an upgrade adds it by `ALTER`,
+    -- and the two have to end in the same shape.
+    desired_revision       INTEGER,
     PRIMARY KEY (user_id, playback_id)
 ) STRICT";
 
@@ -278,6 +284,10 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
         super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
         super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
+        super::MEDIA_PLAYBACK_DESIRED_SCHEMA,
+        // Last, because both fence triggers reference the ask table above.
+        super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER,
+        super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER,
     ] {
         validate_sql(sql)?;
         for result in timeout_store(client.batch(sql)).await? {
@@ -346,6 +356,71 @@ impl From<&mut Row<'_>> for PointerRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(row.get("current_incarnation_id"))
     }
+}
+
+struct PointerRevisionRow(Option<i64>);
+
+impl From<&mut Row<'_>> for PointerRevisionRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("desired_revision"))
+    }
+}
+
+struct DesiredRow(crate::domain::DesiredOwnership);
+
+impl From<&mut Row<'_>> for DesiredRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(crate::domain::DesiredOwnership {
+            user_id: row.get("user_id"),
+            playback_id: row.get("playback_id"),
+            revision: row.get("revision"),
+            digest: row.get("digest"),
+            canonical_form: row.get("canonical_form"),
+            updated_at_ms: row.get("updated_at_ms"),
+        })
+    }
+}
+
+/// The bounds the table's own CHECK constraints enforce.
+///
+/// Deliberately identical to the SQLite backend's: the two have to refuse the
+/// same inputs, or a replicated import disagrees with the node it imported
+/// from and the disagreement only surfaces as a constraint violation during a
+/// restore.
+fn validate_desired_selection(
+    playback_id: &str,
+    digest: &str,
+    canonical_form: &str,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let valid = (1..=128).contains(&playback_id.len())
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && (1..=512).contains(&canonical_form.len())
+        && now_ms > 0;
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Task("invalid desired selection".to_owned()))
+    }
+}
+
+async fn desired_row(
+    store: &HiqliteAuthStore,
+    user_id: i64,
+    playback_id: &str,
+) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+    let sql = "SELECT user_id, playback_id, revision, digest, canonical_form, updated_at_ms
+          FROM media_playback_desired
+         WHERE user_id = $1 AND playback_id = $2";
+    validate_sql(sql)?;
+    Ok(store
+        .client()
+        .query_consistent_map::<DesiredRow, _>(sql, params!(user_id, playback_id))
+        .await?
+        .into_iter()
+        .next()
+        .map(|row| row.0))
 }
 
 struct StagedRow(crate::domain::MediaSessionStagedGeneration);
@@ -523,6 +598,19 @@ fn prepare_statements(
 ) -> Vec<(&'static str, hiqlite::Params)> {
     let prepare_lease_resource = format!("session:{}", preparation.incarnation_id);
     let removed_owner_key = removed_job_owner_key(&preparation.owner_node_id);
+    // Zero is "no expectation", and it can never collide with a real one:
+    // `media_playback_desired.revision` is CHECK (revision > 0). Carrying a
+    // sentinel rather than a NULL keeps the predicate readable — a comparison
+    // against NULL is neither true nor false, and a reviewer should not have
+    // to reason about three-valued logic to see that an absent ask admits.
+    //
+    // The predicate itself is deliberately `NOT EXISTS (... revision != $n)`
+    // rather than `EXISTS (... revision = $n)`. Those differ exactly where the
+    // row is missing, and missing must admit: a playback that predates this
+    // schema, or one whose viewer has never sent an intent-changing request,
+    // has no ask to disagree with. An upgraded node that fenced every session
+    // older than itself would be a worse failure than the one this closes.
+    let expected_desired_revision = preparation.expected_desired_revision.unwrap_or(0);
     vec![
         (
             // Every statement carries the same fixed preconditions. A
@@ -551,6 +639,8 @@ fn prepare_statements(
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $7 AND owner_node_id = $13
                     AND owner_epoch = $14 AND state = 'active')
+                AND ($15 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                  WHERE user_id = $5 AND playback_id = $6 AND revision != $15))
              ON CONFLICT(resource) DO UPDATE SET
                 expires_at_ms = excluded.expires_at_ms,
                 revision = job_leases.revision + 1,
@@ -573,7 +663,8 @@ fn prepare_statements(
                 MAX_OWNED,
                 removed_owner_key.as_str(),
                 preparation.expected_predecessor_owner_node_id.as_str(),
-                preparation.expected_predecessor_owner_epoch
+                preparation.expected_predecessor_owner_epoch,
+                expected_desired_revision
             ),
         ),
         (
@@ -616,6 +707,8 @@ fn prepare_statements(
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $13 AND owner_node_id = $18
                     AND owner_epoch = $19 AND state = 'active')
+                AND ($20 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                  WHERE user_id = $3 AND playback_id = $4 AND revision != $20))
              RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id",
             params!(
                 preparation.incarnation_id.as_str(),
@@ -636,7 +729,8 @@ fn prepare_statements(
                 MAX_OWNED,
                 removed_owner_key.as_str(),
                 preparation.expected_predecessor_owner_node_id.as_str(),
-                preparation.expected_predecessor_owner_epoch
+                preparation.expected_predecessor_owner_epoch,
+                expected_desired_revision
             ),
         ),
         (
@@ -657,7 +751,9 @@ fn prepare_statements(
                   AND pointer.current_incarnation_id = $4
                   AND predecessor.owner_node_id = $10
                   AND predecessor.owner_epoch = $11
-                  AND predecessor.state = 'active')",
+                  AND predecessor.state = 'active')
+               AND ($12 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                 WHERE user_id = $1 AND playback_id = $2 AND revision != $12))",
             params!(
                 preparation.user_id,
                 preparation.playback_id.as_str(),
@@ -669,7 +765,8 @@ fn prepare_statements(
                 preparation.owner_node_id.as_str(),
                 MEDIA_SESSION_PUBLICATION_BLOCKED,
                 preparation.expected_predecessor_owner_node_id.as_str(),
-                preparation.expected_predecessor_owner_epoch
+                preparation.expected_predecessor_owner_epoch,
+                expected_desired_revision
             ),
         ),
     ]
@@ -914,7 +1011,13 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         && activation.response_json.len() <= 64 * 1024
         && activation.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
         && (0..=MAX_MEDIA_MILLIS).contains(&activation.media_origin_ms)
-        && activation.lease_expires_at_ms > activation.now_ms;
+        && activation.lease_expires_at_ms > activation.now_ms
+        // Byte-identical to the SQLite twin, for the same reason every other
+        // validator here is: two backends that refuse different inputs only
+        // disagree during a restore.
+        && activation
+            .expected_desired_revision
+            .is_none_or(|revision| revision > 0);
     valid
         .then_some(())
         .ok_or_else(|| StoreError::Task("invalid media-session activation".to_owned()))
@@ -1466,7 +1569,19 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $5 AND session_id = $6
                         AND owner_node_id = $7 AND state = 'active')
-                    AND $8 != '' AND incarnation_id = $8",
+                    AND $8 != '' AND incarnation_id = $8
+                    -- The same ask the pointer write is gated on, and it has
+                    -- to be here too. A replicated transaction cannot branch:
+                    -- every statement applies or refuses on its own predicates.
+                    -- Gating only the pointer left this one free to end the
+                    -- predecessor while the pointer stayed put, so a refused
+                    -- activation stopped the viewer's session and started
+                    -- nothing — strictly worse than the race the compare was
+                    -- added to prevent. The three-voter lane caught it; the
+                    -- single-writer backend cannot, because there the refusal
+                    -- is a rollback.
+                    AND ($9 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                      WHERE user_id = $3 AND playback_id = $4 AND revision != $9))",
                 params!(
                     activation.now_ms,
                     MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -1475,7 +1590,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.incarnation_id.as_str(),
                     activation.session_id.as_str(),
                     activation.owner_node_id.as_str(),
-                    predecessor_incarnation
+                    predecessor_incarnation,
+                    activation.expected_desired_revision.unwrap_or(0)
                 ),
             ),
             (
@@ -1517,8 +1633,15 @@ impl MediaSessionStore for HiqliteAuthStore {
             ),
             (
                 "INSERT INTO media_playback_pointers
-                    (user_id, playback_id, current_incarnation_id, updated_at_ms)
-                 SELECT $1, $2, $3, $4 WHERE EXISTS (
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms,
+                     desired_revision)
+                 SELECT $1, $2, $3, $4,
+                        -- See the SQLite twin: the row records the ask current
+                        -- when it was written, and only a writer without the
+                        -- column can leave a null here.
+                        (SELECT revision FROM media_playback_desired
+                          WHERE user_id = $1 AND playback_id = $2)
+                  WHERE EXISTS (
                    SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND session_id = $5
                      AND owner_node_id = $6 AND state = 'active')
                    AND (($7 = '' AND NOT EXISTS (
@@ -1527,9 +1650,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                      SELECT 1 FROM media_playback_pointers
                       WHERE user_id = $1 AND playback_id = $2
                         AND current_incarnation_id IN ($7, $3)))
+                   -- On the `SELECT` only. A row the `SELECT` does not produce
+                   -- cannot conflict, so the same predicate on the `ON CONFLICT`
+                   -- arm is unreachable, and a guard no test can tell from its
+                   -- absence is not a guard. Matches the SQLite twin exactly.
+                   AND ($8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                     WHERE user_id = $1 AND playback_id = $2 AND revision != $8))
                  ON CONFLICT(user_id, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
-                    updated_at_ms = excluded.updated_at_ms
+                    updated_at_ms = excluded.updated_at_ms,
+                    desired_revision = excluded.desired_revision
                   WHERE media_playback_pointers.current_incarnation_id IN ($7, $3)
                     AND media_playback_pointers.current_incarnation_id
                         != excluded.current_incarnation_id",
@@ -1540,7 +1670,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.now_ms,
                     activation.session_id.as_str(),
                     activation.owner_node_id.as_str(),
-                    predecessor_incarnation
+                    predecessor_incarnation,
+                    activation.expected_desired_revision.unwrap_or(0)
                 ),
             ),
             (
@@ -1746,6 +1877,93 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Ok(None);
         };
         Ok(Some(route))
+    }
+
+    async fn record_desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        digest: &str,
+        canonical_form: &str,
+        now_ms: i64,
+    ) -> Result<crate::domain::DesiredOwnership, StoreError> {
+        validate_desired_selection(playback_id, digest, canonical_form, now_ms)?;
+        // The revision decision is made by the statement, not by a read
+        // followed by a write. Two exchanges for the same playback can
+        // otherwise both observe revision 3 and both write 4, which turns a
+        // monotone revision into a number two different asks share — and this
+        // is a replicated store, so the two exchanges need not even be on the
+        // same node.
+        let sql = "INSERT INTO media_playback_desired
+                 (user_id, playback_id, revision, digest, canonical_form, updated_at_ms)
+             VALUES ($1, $2, 1, $3, $4, $5)
+             ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                 revision = CASE
+                     WHEN media_playback_desired.digest = excluded.digest
+                         THEN media_playback_desired.revision
+                     ELSE media_playback_desired.revision + 1
+                 END,
+                 digest = excluded.digest,
+                 canonical_form = excluded.canonical_form,
+                 updated_at_ms = CASE
+                     WHEN media_playback_desired.digest = excluded.digest
+                         THEN media_playback_desired.updated_at_ms
+                     ELSE excluded.updated_at_ms
+                 END";
+        validate_sql(sql)?;
+        timeout_store(self.client().execute(
+            sql,
+            params!(user_id, playback_id, digest, canonical_form, now_ms),
+        ))
+        .await?;
+        desired_row(self, user_id, playback_id)
+            .await?
+            .ok_or_else(|| StoreError::Database("desired selection vanished".to_owned()))
+    }
+
+    async fn validation_playback_pointer_desired_revision(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let rows: Vec<PointerRevisionRow> = timeout_store(self.client().query_consistent_map(
+            "SELECT desired_revision FROM media_playback_pointers
+              WHERE user_id = $1 AND playback_id = $2",
+            params!(user_id, playback_id),
+        ))
+        .await?;
+        Ok(rows.first().and_then(|row| row.0))
+    }
+
+    async fn validation_write_legacy_playback_pointer(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        // The replicated twin of the same pre-v49 statement.
+        let sql = "INSERT INTO media_playback_pointers
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                    current_incarnation_id = excluded.current_incarnation_id,
+                    updated_at_ms = excluded.updated_at_ms";
+        validate_sql(sql)?;
+        timeout_store(
+            self.client()
+                .execute(sql, params!(user_id, playback_id, incarnation_id, now_ms)),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+        desired_row(self, user_id, playback_id).await
     }
 
     async fn rejoin_media_session_preparation(
@@ -2085,6 +2303,12 @@ impl MediaSessionStore for HiqliteAuthStore {
             .control_receipt
             .as_ref()
             .map_or(0, |receipt| receipt.updated_at_ms);
+        // Same sentinel and same shape as the admission predicate: zero is no
+        // expectation, and a missing row admits. The gap this closes is the
+        // client round trip between announcing a successor and acknowledging
+        // it, which is where a viewer changes their mind while a commit is
+        // already in flight.
+        let expected_desired_revision = request.expected_desired_revision.unwrap_or(0);
         // The pointer advance and the predecessor's retirement in one
         // transaction, both fenced on the exact recorded predecessor. Nothing
         // here reads the pointer to decide what to reap; a pointer that no
@@ -2093,7 +2317,9 @@ impl MediaSessionStore for HiqliteAuthStore {
         let mut statements: Vec<(&str, hiqlite::Params)> = vec![
             (
                 "UPDATE media_playback_pointers
-                    SET current_incarnation_id = $1, updated_at_ms = $2
+                    SET current_incarnation_id = $1, updated_at_ms = $2,
+                        desired_revision = (SELECT revision FROM media_playback_desired
+                          WHERE user_id = $3 AND playback_id = $4)
                   WHERE user_id = $3 AND playback_id = $4
                     AND current_incarnation_id = $5
                     AND EXISTS (SELECT 1 FROM media_sessions predecessor
@@ -2117,6 +2343,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                           AND client_instance_id = $12 AND sequence = $13
                           AND request_fingerprint = $14 AND response_json = $15
                           AND expires_at_ms = $16 AND updated_at_ms = $17))
+                    AND ($18 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                      WHERE user_id = $3 AND playback_id = $4 AND revision != $18))
                   RETURNING current_incarnation_id",
                 params!(
                     staged.staged_incarnation_id.as_str(),
@@ -2135,7 +2363,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     receipt_request_fingerprint,
                     receipt_response_json,
                     receipt_expires_at_ms,
-                    receipt_updated_at_ms
+                    receipt_updated_at_ms,
+                    expected_desired_revision
                 ),
             ),
             (
@@ -3854,7 +4083,9 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
         let statements = vec![
             // A preparation expires on its own deadline; see the SQLite
-            // backend's maintenance for why nothing else enforces it.
+            // backend's maintenance for why this is the durable enforcement.
+            // (It said "nothing else enforces it" until 2026-09-08; an
+            // in-process timer also fires, for the actor's in-memory slot.)
             (
                 "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
                         publication_ready_at_ms = $2, updated_at_ms = $1
@@ -4319,6 +4550,7 @@ mod tests {
 
     fn statement_test_preparation() -> crate::domain::MediaSessionPreparation {
         crate::domain::MediaSessionPreparation {
+            expected_desired_revision: None,
             incarnation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
             session_id: "session".to_owned(),
             user_id: 1,

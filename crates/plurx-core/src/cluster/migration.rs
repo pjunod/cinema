@@ -32,7 +32,10 @@ use crate::error::StoreError;
 use crate::store::SQLITE_SCHEMA_VERSION;
 
 #[cfg(feature = "hiqlite-store")]
-use crate::config::{Config, DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS};
+use crate::config::{
+    Config, DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS, DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS,
+    DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+};
 #[cfg(feature = "hiqlite-store")]
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
@@ -43,7 +46,7 @@ use crate::store::{
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
 #[cfg(feature = "hiqlite-store")]
-use hiqlite::{Client, Node, NodeConfig};
+use hiqlite::{Client, LocalSnapshotTransportStatus, Node, NodeConfig};
 #[cfg(feature = "hiqlite-store")]
 use serde::{Deserialize, Serialize};
 
@@ -1673,7 +1676,7 @@ async fn acquire_daemon_lock_within(data_dir: &Path, window: Duration) -> Result
                 ));
             }
             Err(std::fs::TryLockError::Error(error)) => {
-                return Err(migration_io("locking", &path, error))
+                return Err(migration_io("locking", &path, error));
             }
         }
     }
@@ -2002,26 +2005,11 @@ async fn start_voter(
     // target-local applied watch. The deadline allows an abandoned in-flight
     // snapshot RPC to reach its configured soft cancellation point, reconnect,
     // and complete one clean transfer.
-    let catchup_timeout = Duration::from_secs(config.cluster.install_snapshot_timeout_secs)
-        .saturating_add(SNAPSHOT_CATCHUP_GRACE);
+    let catchup_timeout = snapshot_catchup_timeout(
+        config.cluster.snapshot_transfer_timeout_secs,
+        config.cluster.install_snapshot_timeout_secs,
+    );
     let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
-    let catchup_target = loop {
-        match client.db_quorum_watermark().await {
-            Ok(watermark) => break watermark.committed_index,
-            Err(error) if tokio::time::Instant::now() < catchup_deadline => {
-                tracing::debug!(%error, "waiting for startup quorum watermark");
-            }
-            Err(error) => {
-                let _ = shutdown_voter(&client, active_transport).await;
-                return Err(StoreError::Database(format!(
-                    "node {} could not obtain a startup quorum watermark within \
-                     {catchup_timeout:?}: {error}",
-                    identity.node_id
-                )));
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
     let local_metrics = match client.local_db_raft_metrics() {
         Ok(metrics) => metrics,
         Err(error) => {
@@ -2030,6 +2018,61 @@ async fn start_voter(
                 "reading target-local startup progress: {error}"
             )));
         }
+    };
+    let local_transport = client.local_snapshot_transport_status().ok();
+    let mut next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
+    let catchup_target = loop {
+        if startup_wait_log_is_due(&mut next_wait_log) {
+            log_startup_transport_wait(
+                &identity.node_id,
+                identity.raft_id,
+                None,
+                local_metrics.snapshot().last_applied_index,
+                local_transport.as_ref(),
+            );
+        }
+        let watermark = tokio::time::timeout_at(catchup_deadline, client.db_quorum_watermark());
+        tokio::pin!(watermark);
+        let watermark = loop {
+            tokio::select! {
+                biased;
+                result = &mut watermark => break result,
+                () = tokio::time::sleep_until(next_wait_log) => {
+                    if startup_wait_log_is_due(&mut next_wait_log) {
+                        log_startup_transport_wait(
+                            &identity.node_id,
+                            identity.raft_id,
+                            None,
+                            local_metrics.snapshot().last_applied_index,
+                            local_transport.as_ref(),
+                        );
+                    }
+                }
+            }
+        };
+        match watermark {
+            Ok(Ok(watermark)) => break watermark.committed_index,
+            Ok(Err(error)) if tokio::time::Instant::now() < catchup_deadline => {
+                tracing::debug!(%error, "waiting for startup quorum watermark");
+            }
+            Ok(Err(error)) => {
+                let _ = shutdown_voter(&client, active_transport).await;
+                return Err(StoreError::Database(format!(
+                    "node {} could not obtain a startup quorum watermark within \
+                     {catchup_timeout:?}: {error}",
+                    identity.node_id
+                )));
+            }
+            Err(_) => {
+                let _ = shutdown_voter(&client, active_transport).await;
+                return Err(StoreError::Database(format!(
+                    "node {} could not obtain a startup quorum watermark within \
+                     {catchup_timeout:?}: deadline expired",
+                    identity.node_id
+                )));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     };
     loop {
         let applied = local_metrics
@@ -2047,6 +2090,15 @@ async fn start_voter(
                 identity.node_id
             )));
         }
+        if startup_wait_log_is_due(&mut next_wait_log) {
+            log_startup_transport_wait(
+                &identity.node_id,
+                identity.raft_id,
+                Some(catchup_target),
+                Some(applied),
+                local_transport.as_ref(),
+            );
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     if role.is_learner() {
@@ -2058,6 +2110,86 @@ async fn start_voter(
         );
     }
     Ok((client, local))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn startup_wait_log_is_due(next_wait_log: &mut tokio::time::Instant) -> bool {
+    let now = tokio::time::Instant::now();
+    if now < *next_wait_log {
+        return false;
+    }
+    *next_wait_log = now + Duration::from_secs(10);
+    true
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn log_startup_transport_wait(
+    node_id: &str,
+    raft_id: u64,
+    startup_target: Option<u64>,
+    local_applied_index: Option<u64>,
+    transport: Option<&LocalSnapshotTransportStatus>,
+) {
+    let observation = transport
+        .map(LocalSnapshotTransportStatus::snapshot)
+        .and_then(|snapshot| {
+            snapshot
+                .observations
+                .into_iter()
+                .filter(|observation| observation.raft_group == "sqlite")
+                .min_by_key(|observation| observation.sample_age_ms)
+        });
+    tracing::info!(
+        node_id,
+        raft_id,
+        startup_target,
+        local_applied_index,
+        observing_node_id = observation
+            .as_ref()
+            .map(|observation| observation.observing_node_id),
+        peer_node_id = observation
+            .as_ref()
+            .map(|observation| observation.peer_node_id),
+        snapshot_id = observation
+            .as_ref()
+            .and_then(|observation| observation.snapshot_id.as_deref()),
+        phase = ?observation.as_ref().map(|observation| observation.phase),
+        attempted_offset = observation
+            .as_ref()
+            .and_then(|observation| observation.attempted_offset),
+        acknowledged_offset = observation
+            .as_ref()
+            .and_then(|observation| observation.acknowledged_offset),
+        locally_received_bytes = observation
+            .as_ref()
+            .and_then(|observation| observation.locally_received_bytes),
+        sample_age_ms = observation
+            .as_ref()
+            .map(|observation| observation.sample_age_ms),
+        "waiting for cluster startup catch-up"
+    );
+}
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod startup_wait_logging_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn immediate_watermark_errors_cannot_starve_due_startup_log() {
+        let mut next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut due_logs = 0;
+        for _ in 0..100 {
+            due_logs += usize::from(startup_wait_log_is_due(&mut next_wait_log));
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        due_logs += usize::from(startup_wait_log_is_due(&mut next_wait_log));
+
+        assert_eq!(
+            due_logs, 1,
+            "the due ten-second log must survive fast errors"
+        );
+        assert!(!startup_wait_log_is_due(&mut next_wait_log));
+    }
 }
 
 /// The Raft, WAL, and read-pool settings every plurx voter runs with.
@@ -2079,6 +2211,10 @@ pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> Node
         health_check_delay_secs: 0,
         wal_size: HIQLITE_WAL_SIZE_BYTES,
         read_pool_size,
+        snapshot_chunk_timeout: snapshot_timeout_duration(DEFAULT_SNAPSHOT_CHUNK_TIMEOUT_SECS),
+        snapshot_transfer_timeout: snapshot_timeout_duration(
+            DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS,
+        ),
         // Snapshot frequency, disaster-recovery retention, and WAL sync retain
         // Hiqlite's established values. The heartbeat/election window above
         // admits measured durable recovery responses; the snapshot transfer
@@ -2096,10 +2232,30 @@ fn install_snapshot_timeout_ms(seconds: u64) -> u64 {
 }
 
 #[cfg(feature = "hiqlite-store")]
+fn snapshot_catchup_timeout(transfer_seconds: u64, install_seconds: u64) -> Duration {
+    Duration::from_secs(transfer_seconds)
+        .saturating_add(Duration::from_secs(install_seconds))
+        .saturating_add(SNAPSHOT_CATCHUP_GRACE)
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn snapshot_timeout_duration(seconds: u64) -> Duration {
+    Duration::from_millis(
+        seconds
+            .checked_mul(1_000)
+            .expect("validated snapshot timeout seconds must fit milliseconds"),
+    )
+}
+
+#[cfg(feature = "hiqlite-store")]
 fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
     let mut defaults = production_hiqlite_defaults_with_read_pool(config.cluster.read_pool_size);
     defaults.raft_config.install_snapshot_timeout =
         install_snapshot_timeout_ms(config.cluster.install_snapshot_timeout_secs);
+    defaults.snapshot_chunk_timeout =
+        snapshot_timeout_duration(config.cluster.snapshot_chunk_timeout_secs);
+    defaults.snapshot_transfer_timeout =
+        snapshot_timeout_duration(config.cluster.snapshot_transfer_timeout_secs);
     defaults
 }
 
@@ -3426,6 +3582,18 @@ mod tests {
         assert_eq!(defaults.raft_config.max_in_snapshot_log_to_keep, 1);
         assert_eq!(defaults.raft_config.purge_batch_size, 1);
         assert_eq!(defaults.raft_config.install_snapshot_timeout, 120_000);
+        assert_eq!(defaults.snapshot_chunk_timeout, Duration::from_secs(30));
+        assert_eq!(
+            defaults.snapshot_transfer_timeout,
+            Duration::from_secs(1_200)
+        );
+        assert_eq!(
+            snapshot_catchup_timeout(
+                config.cluster.snapshot_transfer_timeout_secs,
+                config.cluster.install_snapshot_timeout_secs,
+            ),
+            Duration::from_secs(1_365)
+        );
         assert!(
             format!("{:?}", defaults.raft_config.snapshot_policy).contains("10000"),
             "snapshot policy must stay at 10,000 entries"
@@ -3436,9 +3604,20 @@ mod tests {
             "read-pool tuning must not change immediate-async WAL sync"
         );
 
+        config.cluster.snapshot_chunk_timeout_secs = 45;
+        config.cluster.snapshot_transfer_timeout_secs = 900;
         config.cluster.install_snapshot_timeout_secs = 300;
         let tuned = production_hiqlite_defaults(&config);
         assert_eq!(tuned.raft_config.install_snapshot_timeout, 300_000);
+        assert_eq!(tuned.snapshot_chunk_timeout, Duration::from_secs(45));
+        assert_eq!(tuned.snapshot_transfer_timeout, Duration::from_secs(900));
+        assert_eq!(
+            snapshot_catchup_timeout(
+                config.cluster.snapshot_transfer_timeout_secs,
+                config.cluster.install_snapshot_timeout_secs,
+            ),
+            Duration::from_secs(1_245)
+        );
     }
 
     /// Once the active voter exists, every later initialization error must
@@ -5748,11 +5927,13 @@ pub mod status {
 
     pub use hiqlite::{
         BoundedWalError, DbSnapshotHistogram, DbSnapshotLastOutcome, DbSnapshotMetricsSnapshot,
+        SnapshotTransportObservation, SnapshotTransportPhase, SnapshotTransportStatus,
         WalRecoveryObservation, WalRuntimeState, WalStatusSnapshot,
         DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS,
     };
     use hiqlite::{
         Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
+        LocalSnapshotTransportStatus,
     };
     use std::sync::{Arc, Mutex};
 
@@ -5869,6 +6050,30 @@ pub mod status {
         pub watermark_local_reads_supported: bool,
         pub watermark_errors: u64,
         pub snapshot_metrics: Option<DbSnapshotMetricsSnapshot>,
+    }
+
+    /// One quorum proof, captured while this node was eligible to serve on it.
+    ///
+    /// Held so serving can continue on a proof that is still inside its own
+    /// lease when a *newer* watermark arrives that this node has not applied
+    /// yet. Publishing a newer watermark overwrites the anchor in the atomics,
+    /// so without this copy the older proof's original deadline is simply lost
+    /// and eligibility drops the instant apply falls one entry behind — even
+    /// though the proof the node was already serving under had not expired.
+    ///
+    /// Opaque to the holder. Every field is compared, never read back out and
+    /// never rewritten: `started_nanos` in particular is the *original* anchor
+    /// and the only deadline this proof will ever have. A catch-up does not
+    /// restamp it, a newer watermark does not extend it, and a sampling error
+    /// does not refresh it — the proof simply expires when it was always going
+    /// to expire.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ServingProof {
+        term: u64,
+        leader: u64,
+        local_observation_epoch: u64,
+        committed_index: u64,
+        started_nanos: u64,
     }
 
     /// Private, single-operation state retained across one local query.
@@ -6093,6 +6298,105 @@ pub mod status {
                 watermark_started_nanos: state.watermark_started_nanos,
                 max_apply_lag_entries,
             })
+        }
+
+        /// The proof this node is serving under, if it is eligible right now.
+        ///
+        /// Eligible here means what serving eligibility has always meant on a
+        /// locally bound voter: a valid watermark whose committed index this
+        /// node has actually applied. Capturing it only in that state is what
+        /// makes the retention below a *continuation* of an eligibility this
+        /// node already had, rather than a new claim to one it never earned.
+        ///
+        /// `None` for a remote-authority process, which has no local replica
+        /// to fall behind and therefore never loses eligibility this way, and
+        /// for the plain SQLite backend, which is not quorum managed at all.
+        pub fn eligible_serving_proof(&self) -> Option<ServingProof> {
+            let elapsed = self.started_at.elapsed();
+            self.eligible_serving_proof_at(elapsed.as_secs(), duration_nanos(elapsed))
+        }
+
+        fn eligible_serving_proof_at(
+            &self,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+        ) -> Option<ServingProof> {
+            // Zero lag is the eligibility condition, and `bounded_replica_state_at`
+            // already answers it consistently under the seqlock: a budget of
+            // zero grants state only when the applied index has reached the
+            // committed one. Reusing it keeps one definition of an eligible
+            // locally bound proof rather than a second that can drift from it.
+            let state = self.bounded_replica_state_at(elapsed_seconds, elapsed_nanos, 0)?;
+            Some(ServingProof {
+                term: state.current_term,
+                leader: state.leader_id,
+                local_observation_epoch: state.local_observation_epoch,
+                committed_index: state.committed_index,
+                started_nanos: state.watermark_started_nanos,
+            })
+        }
+
+        /// Whether a captured proof may still be served under.
+        ///
+        /// Deliberately shaped after `BoundedReplicaPermit::remains_valid_at`,
+        /// because it is answering the same question about the same kind of
+        /// capability. Two differences, both intended:
+        ///
+        /// - the apply-lag budget is not consulted, which is the entire point:
+        ///   this proof is being retained *because* apply is behind, and the
+        ///   bounded-replica read path — which does need freshness — is
+        ///   untouched and still refuses on lag;
+        /// - the committed index may have advanced past the captured one,
+        ///   since a newer watermark arriving is the ordinary cause of this
+        ///   path, but it may never have gone backwards.
+        ///
+        /// Everything else is a hard drop: the original deadline, an explicit
+        /// invalidation, a term or leader or epoch that no longer matches the
+        /// generation this proof was issued in, a local sample that has gone
+        /// stale, or a node that no longer knows its leader.
+        pub fn serving_proof_remains_valid(&self, proof: &ServingProof) -> bool {
+            let elapsed = self.started_at.elapsed();
+            self.serving_proof_remains_valid_at(proof, elapsed.as_secs(), duration_nanos(elapsed))
+        }
+
+        fn serving_proof_remains_valid_at(
+            &self,
+            proof: &ServingProof,
+            elapsed_seconds: u64,
+            elapsed_nanos: u64,
+        ) -> bool {
+            // The original anchor, and the only deadline this proof has. It is
+            // never rewritten, so a catch-up cannot restamp it and a newer
+            // watermark cannot extend it. The window this opens is therefore
+            // strictly no longer than the one the proof already had, and
+            // strictly shorter than the one the newer proof would have
+            // granted — an isolated node still loses authority at exactly the
+            // moment it loses it today.
+            if elapsed_nanos.saturating_sub(proof.started_nanos)
+                >= duration_nanos(QUORUM_WATERMARK_LEASE)
+            {
+                return false;
+            }
+            // Any lag is admissible for this question, so the budget is
+            // saturated rather than zero. Freshness, binding, invalidation and
+            // generation are all still enforced inside.
+            //
+            // Two consequences of reusing that function, both wanted. It also
+            // requires the *current* watermark to be inside its own lease,
+            // which costs nothing — a retained anchor is never later than the
+            // current one, so it expires first — and it means an isolated node
+            // loses authority at exactly the instant it loses it today. And it
+            // requires the watermark source to speak this binary's local-read
+            // protocol, so during a mixed-version window where the leader is
+            // older this retention simply does not apply and the node falls
+            // back to today's behaviour. Both are strictly closed directions.
+            self.bounded_replica_state_at(elapsed_seconds, elapsed_nanos, u64::MAX)
+                .is_some_and(|current| {
+                    current.current_term == proof.term
+                        && current.leader_id == proof.leader
+                        && current.local_observation_epoch == proof.local_observation_epoch
+                        && current.committed_index >= proof.committed_index
+                })
         }
 
         fn bounded_replica_state_at(
@@ -6627,6 +6931,7 @@ pub mod status {
         local_metrics: Option<LocalDbRaftMetrics>,
         wal_status: Option<hiqlite::WalStatusHandle>,
         passive_metrics: PassiveRaftMetrics,
+        local_transport: Option<LocalSnapshotTransportStatus>,
         previous: Arc<Mutex<Option<ReplicationStatus>>>,
     }
 
@@ -6640,6 +6945,7 @@ pub mod status {
                 local_metrics: None,
                 wal_status: None,
                 passive_metrics: PassiveRaftMetrics::new(false),
+                local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6650,6 +6956,7 @@ pub mod status {
             let local_metrics = client.local_db_raft_metrics().ok();
             let snapshot_metrics = client.local_db_snapshot_metrics().ok();
             let wal_status = client.local_db_wal_status().ok();
+            let local_transport = client.local_snapshot_transport_status().ok();
             let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
                 .with_snapshot_metrics(snapshot_metrics);
             Self {
@@ -6658,6 +6965,7 @@ pub mod status {
                 local_metrics,
                 wal_status,
                 passive_metrics,
+                local_transport,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6675,6 +6983,7 @@ pub mod status {
                 local_metrics: None,
                 wal_status: None,
                 passive_metrics: PassiveRaftMetrics::remote_authority(),
+                local_transport: None,
                 previous: Arc::new(Mutex::new(None)),
             }
         }
@@ -6691,6 +7000,32 @@ pub mod status {
             self.wal_status
                 .as_ref()
                 .map(hiqlite::WalStatusHandle::snapshot)
+        }
+
+        /// Copy the embedded node's bounded process-local snapshot transport
+        /// observations without Store, filesystem, or network IO.
+        #[must_use]
+        pub fn transport_status_snapshot(&self) -> Option<SnapshotTransportStatus> {
+            self.local_transport
+                .as_ref()
+                .map(LocalSnapshotTransportStatus::snapshot)
+        }
+
+        /// Read a peer's node-owned transport status through the authenticated
+        /// private Hiqlite listener. This remains available when the peer's
+        /// public daemon listener is intentionally closed during recovery.
+        pub async fn peer_transport_status(
+            &self,
+            peer_node_id: u64,
+        ) -> Result<Option<SnapshotTransportStatus>, String> {
+            let client = self
+                .client
+                .as_ref()
+                .ok_or_else(|| "peer transport status requires replicated storage".to_owned())?;
+            client
+                .snapshot_transport_status_sqlite(peer_node_id)
+                .await
+                .map_err(|error| error.to_string())
         }
 
         /// Keep the atomics-only metrics projection fresh from the local Raft
@@ -7280,6 +7615,230 @@ pub mod status {
             assert!(
                 !permit.remains_valid_at(10, 10_500_000_000),
                 "the second phase must enforce the configured lag budget too"
+            );
+        }
+
+        /// A proof this node was already serving under survives a newer
+        /// watermark it has not applied, and only until its own deadline.
+        ///
+        /// This is the self-inflicted outage the continuity change exists to
+        /// stop. Publishing a newer committed index overwrites the anchor in
+        /// the atomics, so the older proof's original deadline is simply gone
+        /// and eligibility drops the instant apply falls one entry behind —
+        /// on a node that is in the quorum, holding a live proof, with nothing
+        /// actually wrong with it. Every session on it is then torn down.
+        ///
+        /// The retained proof keeps the *original* anchor and nothing else.
+        /// The assertions walk right up to that deadline and one nanosecond
+        /// past it, from a captured proof whose replacement is comfortably
+        /// fresh — so a lease measured from the newer watermark, or restamped
+        /// on catch-up, fails here rather than in a partition.
+        #[test]
+        fn a_serving_proof_outlives_a_newer_unapplied_watermark_until_its_own_deadline() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let proof = metrics
+                .eligible_serving_proof_at(10, 10_200_000_000)
+                .expect("a node serving at zero lag holds a proof");
+
+            // The newer watermark lands, anchored 300 ms later, and local
+            // apply has not moved. Today this is the moment serving is lost.
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 46),
+                10_300_000_000,
+                10_400_000_000,
+            ));
+            assert_eq!(
+                metrics
+                    .snapshot_at_times(10, 10_500_000_000)
+                    .watermark
+                    .expect("a watermark")
+                    .apply_lag_entries,
+                Some(1),
+                "the fixture must actually put local apply behind"
+            );
+            assert!(
+                metrics.serving_proof_remains_valid_at(&proof, 10, 10_500_000_000),
+                "the proof this node was already serving under has not expired"
+            );
+
+            // Catching up does not restamp it, and neither does the newer
+            // watermark: the deadline is the original anchor plus the lease,
+            // to the nanosecond.
+            assert!(metrics.publish_at(&local_sample(7, Some(46), Some(1)), 11));
+            assert!(
+                metrics.serving_proof_remains_valid_at(&proof, 11, 10_999_999_999),
+                "valid to the last nanosecond of its own lease"
+            );
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 11, 11_000_000_000),
+                "and never one nanosecond past it, however fresh the replacement is"
+            );
+
+            // The replacement proof is still perfectly good at that instant,
+            // which is what makes the expiry above the original one rather
+            // than an artefact of everything having gone stale together.
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(11, 11_000_000_000)
+                    .is_some(),
+                "the caught-up node earns a fresh proof of its own"
+            );
+        }
+
+        /// Every way a retained proof must die, from one fixture each.
+        ///
+        /// Continuity widens exactly one thing — apply lag — and nothing else.
+        /// A term change, a leader change, an epoch change, an explicit
+        /// invalidation and a stale local sample are all still hard drops, and
+        /// they are checked against live state on every poll rather than
+        /// trusted from the moment of capture.
+        #[test]
+        fn a_retained_serving_proof_dies_on_every_generation_change() {
+            let captured = || {
+                let metrics = PassiveRaftMetrics::new(true);
+                assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+                assert!(metrics.publish_watermark_at(
+                    watermark(7, 1, 45),
+                    10_000_000_000,
+                    10_100_000_000,
+                ));
+                let proof = metrics
+                    .eligible_serving_proof_at(10, 10_200_000_000)
+                    .expect("a proof");
+                assert!(
+                    metrics.serving_proof_remains_valid_at(&proof, 10, 10_200_000_000),
+                    "the fixture starts from a proof that is actually valid"
+                );
+                (metrics, proof)
+            };
+
+            let (metrics, proof) = captured();
+            assert!(metrics.publish_at(&local_sample(8, Some(45), Some(1)), 10));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_300_000_000),
+                "a new term is a new generation"
+            );
+
+            let (metrics, proof) = captured();
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(2)), 10));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_300_000_000),
+                "a new leader is a new generation"
+            );
+
+            let (metrics, proof) = captured();
+            assert!(metrics.publish_at(&local_sample(7, Some(45), None), 10));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_300_000_000),
+                "a node that has lost sight of its leader is not serving on this"
+            );
+
+            // Losing the leader and seeing the same one again does not
+            // resurrect the proof, and this is the case the observation epoch
+            // exists for rather than the invalidation flag. The flap sets
+            // `watermark_invalidated`, but the *next successful watermark
+            // publish clears it* — so after a flap and a fresh sample the only
+            // thing still distinguishing the old proof from a current one is
+            // the epoch it was captured under. Without that comparison a proof
+            // from before the flap is honoured after it.
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_400_000_000,
+                10_450_000_000,
+            ));
+            assert!(
+                metrics
+                    .eligible_serving_proof_at(10, 10_500_000_000)
+                    .is_some(),
+                "the fixture must reach a state where a fresh proof is earnable, \
+                 or it is testing the invalidation flag rather than the epoch"
+            );
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_500_000_000),
+                "a proof captured before a leader flap is not valid after it"
+            );
+
+            let (metrics, proof) = captured();
+            // A successor generation invalidates the retained proof even
+            // though its own publish is rejected.
+            assert!(!metrics.publish_watermark_at(
+                watermark(8, 2, 46),
+                10_250_000_000,
+                10_260_000_000,
+            ));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 10_300_000_000),
+                "an explicit invalidation is a hard drop"
+            );
+
+            let (metrics, proof) = captured();
+            assert!(
+                !metrics.serving_proof_remains_valid_at(
+                    &proof,
+                    10 + PASSIVE_METRICS_FRESHNESS_SECS + 1,
+                    10_300_000_000
+                ),
+                "a local sample this stale cannot bind anything"
+            );
+        }
+
+        /// Continuity must never let a node serve past what an election could
+        /// finish, and the arithmetic that guarantees it is not obvious.
+        ///
+        /// The retained anchor is by construction never later than the current
+        /// watermark's, so a retained proof always expires first, and the
+        /// window it opens is bounded by the same `QUORUM_WATERMARK_LEASE`
+        /// that bounds every proof. Which means the existing invariant — a
+        /// lease shorter than the vendor election floor — covers this change
+        /// without being relaxed, and the previous release's 1,500 ms floor
+        /// still holds for a mixed-version cluster.
+        #[test]
+        fn retained_serving_proofs_cannot_outlive_the_election_floors() {
+            const PREVIOUS_RELEASE_ELECTION_FLOOR_MS: u128 = 1_500;
+            let config = hiqlite::NodeConfig::default_raft_config(1_000);
+            assert!(
+                QUORUM_WATERMARK_LEASE.as_millis() < u128::from(config.election_timeout_min),
+                "retention is bounded by the same lease, so it cannot outlast an election"
+            );
+            assert!(
+                QUORUM_WATERMARK_LEASE.as_millis() < PREVIOUS_RELEASE_ELECTION_FLOOR_MS,
+                "and it must still hold against the previous release's floor"
+            );
+
+            // A retained anchor is never later than the current watermark's,
+            // so retention never reaches further than trusting the current
+            // proof would have.
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(45), Some(1)), 10));
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 45),
+                10_000_000_000,
+                10_100_000_000,
+            ));
+            let proof = metrics
+                .eligible_serving_proof_at(10, 10_200_000_000)
+                .expect("a proof");
+            assert!(metrics.publish_watermark_at(
+                watermark(7, 1, 46),
+                10_600_000_000,
+                10_700_000_000,
+            ));
+            assert!(
+                !metrics.serving_proof_remains_valid_at(&proof, 10, 11_000_000_000),
+                "the retained proof is gone while the newer one is still live"
+            );
+            assert!(
+                metrics
+                    .snapshot_at_times(10, 11_000_000_000)
+                    .watermark_valid,
+                "which is the point: retention expires first, never last"
             );
         }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """plurx playback benchmark — the fixture matrix, run against a real server.
 
-Why this exists: every performance claim in docs/PERF-PLAN.md is a claim about
+Why this exists: every performance claim in docs/performance/PERF-PLAN.md is a claim about
 numbers, and until now the only way to check one was to watch a film and form
 an impression. An impression cannot tell 0.9x from 1.1x, and that difference is
 the whole question — below realtime a session drains the viewer's reserve until

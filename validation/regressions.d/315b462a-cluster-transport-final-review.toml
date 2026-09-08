@@ -1,0 +1,22 @@
+version = 1
+
+[[coverage]]
+commits = ["315b462a"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "The focused cluster/WAL lane proves deadline-relative stalled aging, exact-fence-bounded planned-outage admission settlement, atomic promotion/password/token revocation, and the bounded replicated cache-admin anti-replay watermark. Operations and membership-web contracts pin every new exact regression and the two previously omitted vendored snapshot-executor checks."

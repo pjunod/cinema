@@ -10,7 +10,7 @@
 #
 # Every line here is technical debt, not an exemption on principle. Nothing in
 # this file says a pair is fine; it says the decision to fix it is open. That
-# decision is §8 box 4 of docs/UI-LAYOUTS-IMPLEMENTATION.md ("Fix shipped
+# decision is §8 box 4 of docs/clients/UI-LAYOUTS-IMPLEMENTATION.md ("Fix shipped
 # light-theme contrast": all · statuses only, waive brand accents · leave them
 # alone), and §7 of the same document already carries the exact darkened values
 # that pass. When the box is ticked, this file shrinks accordingly.

@@ -154,7 +154,9 @@ pub enum Termination {
 /// soon, and resuming costs nothing where restarting costs a reposition. The
 /// other two are cleared by another rendition releasing bytes, on no schedule
 /// this producer controls or can predict.
-fn clears_on_its_own(hold: Hold) -> bool {
+/// Whether a hold ends by itself, or only because something outside this
+/// rendition changed.
+pub fn clears_on_its_own(hold: Hold) -> bool {
     match hold {
         Hold::Ahead { .. } => true,
         Hold::WorkingSetFull { .. } | Hold::NoRoom { .. } => false,

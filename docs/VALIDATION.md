@@ -36,7 +36,8 @@ Task PRs into `effort/**` use `make effort-rust-check` plus affected client and
 web compile/static checks instead of a validation profile. That lane is a
 deliberate integration proof, not release evidence. The final `effort/**` to
 `main` PR runs the full CI fan-out and writes an exact-tree qualification
-record.
+record. A conflict-resolution branch named `integration/*-into-main` uses the
+same qualification lane so resolving the merge does not discard that evidence.
 
 ## CI control plane — Forgejo is authoritative
 
@@ -126,7 +127,7 @@ executed with identical feature resolution.
 | Profile | Intended use | Additional evidence |
 |---|---|---|
 | `commit` | Pre-commit and ordinary local work | Mandatory Rust/catalog baseline; shared API wire check; web syntax, contrast, golden, and accessibility when affected |
-| `ci` | Main-bound PRs and `main` | Ordinary PRs scope to the diff; `effort/**` qualification PRs and push events enable every surface. Task PRs into `effort/**` use the separate compile-only workflow |
+| `ci` | Main-bound PRs and `main` | Ordinary PRs scope to the diff; `effort/**` and `integration/*-into-main` qualification PRs plus push events enable every surface. Task PRs into `effort/**` use the separate compile-only workflow |
 | `full` | Before a risky merge or release | Browser playback; both native-client suites; Android device tests when an explicit disposable device is selected; container startup/restart |
 | `nightly` | Scheduled deep regression search | Exhaustive playback and restart matrix; interrupted-production recovery; resource bounds; all runnable full checks; a gating 15-minute PGS parser fuzz campaign; report-only mutation sampling over Rust files changed in the last seven days |
 
@@ -182,7 +183,7 @@ one baseline job. Browser layout, Android JVM, Apple simulator, Android device,
 release-build, and container checks run as parallel jobs only when the diff can
 affect their contracts. Coverage runs after merge on `main`, where its badge is
 published; a pull request does not rerun the Rust suite merely to discard the
-number. [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) records the
+number. [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md) records the
 measured failure history and the remaining suite-splitting, invalidation,
 rebase-evidence, and telemetry milestones.
 
@@ -449,6 +450,7 @@ host it runs on is part of the experiment:
 
 | Check | Point | What the host can change |
 |---|---|---|
+| `hiqlite-vendor-clippy` (`make hiqlite-vendor-clippy`) | `cluster.auth` | Compiles the excluded vendored Hiqlite production snapshot-transport matrix with warnings denied. It runs in the effort Rust compile job and the main topology job, so a vendored refactor cannot bypass Clippy merely because the crate is outside the root workspace. |
 | `cluster-auth` (`make cluster-check`) | `cluster.auth` · `persistence.upgrades` | Three voters run as separate processes and every call carries a three-second per-operation deadline (`STORE_TIMEOUT` in `crates/plurx-core/src/store/hiqlite.rs`). Under a full `make validate` those voters compete with every other check for the same cores, and that deadline is reachable by scheduling pressure alone |
 
 The catalog gives this aggregate check a 3,600-second outer budget. That budget
@@ -817,7 +819,7 @@ evidence:
   the production-to-test relationship;
 - for other runtime corrections after that baseline, an explicit regression
   mapping or anchor names the current evidence; or
-- a fragment in [`validation/regressions.d/`](../validation/regressions.d/)
+- a fragment in [`validation/regressions.d/`](../validation/regressions.d)
   explicitly maps the commit to a current functionality point and runnable
   check.
 
@@ -957,7 +959,7 @@ exactly the ones the sweep above already reads:
 | --- | --- |
 | `clients/apple/project.yml` | `CURRENT_PROJECT_VERSION` — the only load-bearing claim |
 | `clients/apple/README.md` | the anchored `> Status:` line |
-| `docs/APPLE-CLIENT-PARITY.md` | the anchored `> Status (date):` line |
+| `docs/clients/APPLE-CLIENT-PARITY.md` | the anchored `> Status (date):` line |
 | `docs/STATUS.html` | the viewers tile and the `👤 Paul` TestFlight upload item |
 
 Per-build narrative is **not** one of them. It lives in `docs/apple-builds/`,

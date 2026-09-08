@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["89ff94ec"]
+points = ["core.media", "cluster.auth", "cluster.membership", "metadata.enrichment"]
+checks = ["rust-gate"]
+reason = "main was failing its own fast Rust gate on three tests, none of them a product bug. the_roster_projection_reads_locally_and_the_decisions_do_not sliced source text from status()'s signature to the doc comment of whatever method followed it; two cache-revocation methods were added in between and one reads consistently for its own reason, so the slice swallowed them and failed on a query_consistent_map 100 lines outside the method under test. status() ends 154 lines in and the marker had moved to 258, so the slice now ends at the method's own closing brace by brace matching, and making status() genuinely read consistently still fails it. every_sqlite_transaction_site_is_classified found two real unregistered boundaries in users.rs, reset_password_and_revoke_tokens and promote_user_and_reset_password, each pairing a password change with revoking that user's tokens; either half alone leaves old tokens outliving a reset or an account locked out with the old password valid, so both are classified and the registry count moves to 69. cancelling_a_thumbnail_reaps_the_encoder allowed one second for a fixture process to write a pid file, which bounded the test rather than the product and failed only on loaded runners; it is thirty seconds now."

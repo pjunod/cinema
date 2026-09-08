@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Install the runner janitor on this host. One command, root, idempotent.
+#
+#   sudo deploy/runner-janitor/install
+#
+# Installs the script to /usr/local/bin, the unit and timer to
+# /etc/systemd/system, enables the timer, and runs one pass in --dry-run so the
+# install ends by telling you what it would have done rather than by claiming
+# success.
+set -euo pipefail
+
+[ "$(id -u)" -eq 0 ] || { echo "install: run me as root" >&2; exit 1; }
+here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+
+install -m 0755 "$here/plurx-ci-janitor" /usr/local/bin/plurx-ci-janitor
+install -m 0644 "$here/plurx-ci-janitor.service" /etc/systemd/system/
+install -m 0644 "$here/plurx-ci-janitor.timer" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now plurx-ci-janitor.timer
+
+# A graceful stop must outlive a running job, or systemd kills the job at its
+# default 90 seconds and the janitor becomes the thing that breaks CI.
+for unit in $(systemctl list-units --type=service --no-legend --all 'forgejo-runner*' | awk '{ print $1 }'); do
+  dropin="/etc/systemd/system/${unit}.d"
+  mkdir -p "$dropin"
+  printf '[Service]\n# A runner must finish the job it is running before it stops.\nTimeoutStopSec=30min\n' \
+    > "$dropin/10-graceful-stop.conf"
+done
+systemctl daemon-reload
+
+echo
+systemctl list-timers plurx-ci-janitor.timer --no-pager || true
+echo
+/usr/local/bin/plurx-ci-janitor --dry-run

@@ -634,7 +634,45 @@ pub struct CreateSession {
     /// With `presentation:"vod"`: the client's ceiling for one blocking
     /// segment fetch, in seconds. Clamped server-side.
     pub block_budget_secs: Option<f64>,
+    /// What the viewer is asking for, as an orderable ask rather than as the
+    /// flat scalars above.
+    ///
+    /// The scalars stay, and they still drive the pipeline — this does not
+    /// replace them and a client that sends neither behaves exactly as before.
+    /// What it adds is the one thing they cannot express: a complete normalized
+    /// selection that keeps Auto, Original and Manual apart, carrying a
+    /// revision that says which of two asks is later.
+    ///
+    /// It is on *create* and not only on control because the control protocol
+    /// can be switched off, and a session created that way has no control
+    /// channel at all. In that configuration the create body is the only thing
+    /// the server ever learns about what the viewer wants, so an ask that
+    /// arrives only through control is, there, an ask that never arrives.
+    pub intent: Option<plurx_core::playback::MediaIntentEnvelope>,
 }
+
+/// Test-only seam that freezes one create after it has recorded its viewer's
+/// ask and before its activation runs.
+///
+/// The property it exists to prove cannot be observed any other way. `create`
+/// carries the revision it *recorded* into the activation rather than one read
+/// at activation time, and those two values are identical except in the window
+/// between them — so a test that cannot stop inside that window cannot tell the
+/// correct implementation from the broken one. Modelled on the replicated
+/// store's `ACTIVATION_POINTER_READ_PAUSE`, which exists for the same reason.
+///
+/// One waiter at a time, taken rather than cloned, so a test that forgets to
+/// arm it cannot accidentally inherit another test's pause.
+#[cfg(test)]
+type CreateAskRecordedPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+static CREATE_ASK_RECORDED_PAUSE: std::sync::LazyLock<
+    std::sync::Mutex<Option<CreateAskRecordedPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 impl CreateSession {
     /// `height` is initially resolved by the caller — Auto answered, explicit
@@ -1399,7 +1437,7 @@ fn admit_restart(
 /// Shared by `resolve_plan` and by M6's candidate, because it is the one part
 /// of resolving a recipe that needs the store, the ladder ceiling and the
 /// network prior — see
-/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.3 on why
+/// [M6-CALLER-HANDOFF.md](../../../../docs/playback-control/M6-CALLER-HANDOFF.md) §3.3 on why
 /// the rest of `resolve_plan` is not what a candidate wants.
 pub(crate) async fn resolve_height(
     state: &AppState,
@@ -1428,7 +1466,7 @@ pub(crate) async fn resolve_height(
 /// honoured, what would we deliver?"* without creating anything, and that is
 /// the same question `create` answers on its way to admission. Answered once,
 /// here, rather than twice in two places that agree today —
-/// [M6-CALLER-HANDOFF.md](../../../../docs/M6-CALLER-HANDOFF.md) §3.2. **Do
+/// [M6-CALLER-HANDOFF.md](../../../../docs/playback-control/M6-CALLER-HANDOFF.md) §3.2. **Do
 /// not grow a second resolver.** The drift would be invisible, because both
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
@@ -1570,6 +1608,64 @@ pub async fn create(
             "live_presentation_removed",
             "the growing live HLS presentation has been removed; request VOD",
         ));
+    }
+    // The ask is made durable before anything is built for it, and before this
+    // request can be answered.
+    //
+    // Placed here, above every other decision, rather than beside the response:
+    // a create that goes on to fail is still a viewer who asked, and the row
+    // records the asking, not the outcome. The order that matters is the one
+    // §1 names — canonical desired ownership persisted *before* an
+    // intent-changing request is reported accepted — and answering first would
+    // tell a client its selection was taken while nothing anywhere had recorded
+    // it. A restart or an owner change in that window loses the ask entirely.
+    //
+    // A failed write refuses the create for the same reason the control
+    // exchange refuses: a retry costs one request, and a phantom acceptance
+    // costs a viewer their selection with nothing to point at.
+    // `None` for a body that carried no ask: a playback with nothing recorded
+    // must still activate, or the first play of every title would be refused.
+    let mut recorded_ask_revision: Option<i64> = None;
+    if let Some(intent) = req.intent.as_ref() {
+        intent
+            .validate()
+            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+        let selection = intent.selection;
+        recorded_ask_revision = Some(
+            state
+                .store
+                .record_desired_selection(
+                    user.id,
+                    &req.playback_id,
+                    &intent.digest(),
+                    &selection.canonical_form(),
+                    unix_ms(),
+                )
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        playback = %req.playback_id,
+                        "recording the viewer's selection on create failed: {error}"
+                    );
+                    ApiError::ServiceUnavailable(
+                        "this selection could not be recorded; retry shortly".to_owned(),
+                    )
+                })?
+                .revision,
+        );
+        #[cfg(test)]
+        {
+            let pause = {
+                let mut slot = CREATE_ASK_RECORDED_PAUSE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                slot.take()
+            };
+            if let Some((reached, release)) = pause {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+        }
     }
     let ingress_serving_authority = state.serving.authority();
     let ingress_serving_generation = ingress_serving_authority.admit().ok_or_else(|| {
@@ -2329,6 +2425,14 @@ pub async fn create(
         // the session start above needs the same epoch this row is about to
         // be given.
         recovery_epoch: recovery_epoch.clone(),
+        // The revision this create recorded, not the one that is current now.
+        //
+        // Re-reading here would defeat the compare: a control exchange that
+        // advanced the ask while this create was in flight would be read back
+        // as the expectation, and the pointer would advance to a session built
+        // for the selection the viewer has left. What this activation was
+        // decided against is what create wrote at its very first step.
+        expected_desired_revision: recorded_ask_revision,
         incarnation_id: incarnation_id.clone(),
         session_id: info.session_id.clone(),
         user_id: user.id,
@@ -4007,6 +4111,7 @@ pub async fn start(
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
 ) -> Result<Json<StartResponse>, ApiError> {
     let legacy = CreateSession {
+        intent: None,
         // No control exchange precedes a legacy start, so there is no
         // ordering for it to be stale against.
         control_sequence: None,
@@ -4874,6 +4979,32 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
             // a probe anyway.
             None,
         );
+        // Persist the outcome before the commit machinery, because a terminal
+        // is the thing most worth explaining after a restart and the atomics
+        // that count it do not survive one. `durable_outcome` decides what
+        // deserves a row; this only carries it to the store.
+        //
+        // Not awaited and not fatal: `emit` spawns, and a telemetry write that
+        // fails must not turn a terminal the viewer's client is waiting on
+        // into an error. Losing the row is worse than not having it only if
+        // the alternative is losing the terminal.
+        {
+            let metrics = crate::playback_control::action_metrics(
+                &response.action,
+                &response.delivery,
+                &self.request,
+                result.action_suppressed,
+            );
+            if let Some(event) = crate::playback_control::durable_outcome(
+                &response.action,
+                &response.delivery,
+                &self.request,
+                &metrics,
+                server_time_unix_ms,
+            ) {
+                crate::telemetry::emit(Arc::clone(&self.store), event);
+            }
+        }
         let response_json = serde_json::to_string(&RetainedTerminalResponse {
             platform: result.platform,
             response: response.clone(),
@@ -6014,6 +6145,62 @@ async fn control_local_with_settlement_capacity(
             ),
         )
     };
+    // The ask becomes durable before this exchange is reported accepted.
+    //
+    // §1's rule, and the window it closes is narrow but real: a client told
+    // its new selection was taken, with nothing durable saying so, leaves
+    // every later admission decision comparing against an ask that never
+    // landed — and a restart or an owner change in that window loses the
+    // request entirely, with the session continuing to serve the old
+    // selection and nothing anywhere recording that anything was asked.
+    //
+    // Only an exchange whose ask the row does not already name pays for this.
+    // A heartbeat repeats the same selection, so it writes nothing and cannot
+    // fail here; the cost falls on the exchange that actually changed
+    // something, which is the one that has something to lose.
+    //
+    // A failed write refuses the exchange rather than answering it. That is
+    // the whole point of "before reported accepted": answering anyway would
+    // be reporting a request taken that nothing has recorded, which is worse
+    // than a client retrying one exchange.
+    if let Some(desired) = result.selection.persist_desired.clone() {
+        match state
+            .store
+            .record_desired_selection(
+                route.user_id,
+                &route.playback_id,
+                &desired.digest,
+                &desired.canonical_form,
+                unix_ms(),
+            )
+            .await
+        {
+            Ok(_) => {
+                state
+                    .transcode
+                    .record_desired_persisted(&route.session_id, &desired.digest)
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session = %crate::transcode::session_log_id(&route.session_id),
+                    "recording the viewer's selection failed: {error}"
+                );
+                crate::playback_control::record(
+                    crate::playback_control::MetricOutcome::Unavailable,
+                );
+                return control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "this selection could not be recorded; retry shortly",
+                    Some(route.incarnation_id.clone()),
+                    Some(owner_epoch),
+                    Some(500),
+                    None,
+                );
+            }
+        }
+    }
     let outcome = match result.disposition {
         crate::playback_control::ControlDisposition::Accepted => {
             crate::playback_control::MetricOutcome::Accepted
@@ -6079,10 +6266,35 @@ async fn control_local_with_settlement_capacity(
             ),
         );
     }
-    if result.selection.changed {
+    // Not `selection.changed`: an ask that arrived while the preparation slot
+    // was busy is "changed" for exactly one exchange and then never again, so
+    // the successor the viewer actually asked for was built once, refused, and
+    // forgotten. This stays true until the ask has been dispatched.
+    if result.selection.dispatch_preparation {
         crate::playback_control::record_preparation_observation(
             crate::playback_control::PreparationSeam::InSession,
         );
+        // The film time this exchange accepted, bounded by the film itself.
+        //
+        // `validate` is deliberately looser than that: it allows the duration
+        // plus one target duration of slack, so a client reporting the final
+        // segment's *end* is not refused, and it falls back to
+        // `MAX_MEDIA_MILLIS` when the duration is unknown. Neither is a place a
+        // successor may begin. Staging past the end would hold this playback's
+        // one preparation slot, a durable row and an admission slot for a full
+        // `PREPARATION_DEADLINE_MS` on a resume no viewer can ever reach — and
+        // this value is now client-reported rather than derived from what the
+        // server observed itself delivering, so the seam is where it earns a
+        // bound. `.max(0)` cannot fire on a validated envelope; it is here so a
+        // future caller that has not validated cannot serialize a negative
+        // `start_seconds`.
+        let accepted_film_time_ms = {
+            let asked = request.seek_target_ms.unwrap_or(request.position_ms).max(0);
+            match start.duration_ms {
+                Some(duration) if duration > 0 => asked.min(duration),
+                _ => asked,
+            }
+        };
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
         tokio::spawn(process_preparation_candidate(
@@ -6102,6 +6314,7 @@ async fn control_local_with_settlement_capacity(
                 // not start and would then leave the measurement
                 // unattributable.
                 platform: result.platform,
+                accepted_film_time_ms,
             },
         ));
     }
@@ -6304,6 +6517,30 @@ struct PreparationCandidateInputs {
     delivered_bps: Option<i64>,
     capabilities: Option<crate::playback_control::DynamicCapabilities>,
     platform: crate::playback_control::ClientPlatform,
+    /// Where the viewer actually is, in absolute film time, according to the
+    /// envelope this exchange **accepted**.
+    ///
+    /// Captured here rather than read from the route because only the envelope
+    /// knows it. A route carries `fetched_through_ms`, which is a high-water
+    /// fetch frontier: it advances to the *end* of a segment the moment the
+    /// client asks for it, clients prefetch and retry, and after a backward
+    /// seek it stays far ahead of the playhead. Staging from it hands the
+    /// viewer a successor that begins past film they have not watched.
+    ///
+    /// `seek_target_ms` wins over `position_ms` for the same reason
+    /// [`ControlRequestV1::validate`] anchors the buffer on it: while a seek is
+    /// in flight the reported position is still the old one, and the target is
+    /// where this viewer is going.
+    ///
+    /// Already absolute — the control plane's positions are source-timeline
+    /// values, not offsets into this session — so nothing downstream may add
+    /// `media_origin_ms` to it.
+    ///
+    /// Bounded at the seam by the film's own duration, not by `validate`:
+    /// validation allows a target duration of slack past the end so a client
+    /// reporting the final segment's end is not refused, and that is not a
+    /// place a successor may begin.
+    accepted_film_time_ms: i64,
 }
 
 /// Evaluate and, when admitted, durably stage this selection change.
@@ -6333,6 +6570,7 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
         delivered_bps,
         capabilities,
         platform,
+        accepted_film_time_ms,
     } = exchange;
     #[cfg(test)]
     struct Completion(String);
@@ -6379,6 +6617,10 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
     // invent a server-driven change and attribute it to the viewer.
     let height = match selection.quality {
         crate::playback_control::QualitySelection::Auto => delivered.height,
+        crate::playback_control::QualitySelection::Original => source
+            .as_ref()
+            .and_then(|file| file.height)
+            .unwrap_or(delivered.height),
         crate::playback_control::QualitySelection::Manual { height } => {
             resolve_height(
                 &state,
@@ -6452,6 +6694,10 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
             &recipe,
             &candidate,
             source.as_ref(),
+            AcceptedAsk {
+                film_time_ms: accepted_film_time_ms,
+                desired_digest: Some(selection.desired().digest()),
+            },
         )
         .await;
     }
@@ -6465,12 +6711,29 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
 /// behaving exactly as the protocol permits. One lease plus a margin covers a
 /// slow client without covering a gone one.
 ///
-/// **This bound is enforced here, not by the store.** Maintenance retires an
-/// expired row only `TAKEOVER_RECOVERY_MS` after its lease lapses and ticks
-/// every five minutes, so waiting for it would hold a successor's admission
-/// slot and the playback's one preparation slot for several minutes past the
-/// deadline — and would never free the actor's slot at all, because nothing
-/// in that path settles it. The timer armed at stage time does both.
+/// **Correction, 2026-09-08: the store does enforce this bound, and this
+/// paragraph used to say it did not.** It read *"This bound is enforced here,
+/// not by the store. Maintenance retires an expired row only
+/// `TAKEOVER_RECOVERY_MS` after its lease lapses…"*, and that was
+/// **already false when it was committed**: `1d55c976`, "a preparation expires
+/// on its own deadline", landed at 02:47:33 and `27e77824`, which added this
+/// paragraph, at 04:14:45 the same morning — eighty-seven minutes later. The
+/// belief was true when its author formed it; the tree moved underneath them
+/// before they wrote it down, which is the ordinary way a comment is born
+/// wrong rather than a way it goes stale.
+///
+/// `sqlite/sessions.rs` ends a staged row keyed on `deadline_ms` directly, and
+/// `hiqlite_sessions.rs` mirrors it — *"A preparation expires on **its own
+/// deadline**"* — and the lease loop refuses
+/// to renew any incarnation carrying a preparation row, so the deadline cannot
+/// be postponed.
+///
+/// So what the timer below is actually for is narrower than it looks: it frees
+/// **the actor's in-memory slot**, which nothing in the store path settles,
+/// and it shaves up to one maintenance tick (five minutes) off the durable
+/// reap. Both are worth having. Neither is "the only thing enforcing the
+/// bound", and building on that belief is how a reader concludes the durable
+/// side is unprotected.
 const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_MS as i64 + 30_000;
 
 /// M6 §3.4 — stage the successor the decision just admitted.
@@ -6489,6 +6752,23 @@ const PREPARATION_DEADLINE_MS: i64 = crate::playback_control::VOD_LEASE_TIMEOUT_
 /// successor that appears when it should not costs a saturated user real
 /// admission headroom, which is why every refusal below returns rather than
 /// retries.
+/// What the accepted control exchange said the viewer wants.
+///
+/// The two travel together because they are facts about the same exchange and
+/// are both wrong if taken from different ones: staging at the film time from
+/// one exchange under the ask from another builds a successor for a moment and
+/// a selection that never coexisted.
+struct AcceptedAsk {
+    /// The absolute film time the accepted envelope settled on — the viewer's
+    /// seek target where they asked for one, their playhead otherwise.
+    film_time_ms: i64,
+    /// The normalized ask, recorded on the preparation slot so an
+    /// acknowledgement arriving later is judged against the ask that is
+    /// current then. `None` where the caller stages without an observed
+    /// selection.
+    desired_digest: Option<String>,
+}
+
 async fn stage_prepared_successor(
     state: &AppState,
     session_id: &str,
@@ -6496,7 +6776,12 @@ async fn stage_prepared_successor(
     predecessor: &RemoteStartRequest,
     candidate: &crate::transcode::SessionRequest,
     source: Option<&plurx_core::domain::MediaFile>,
+    accepted: AcceptedAsk,
 ) {
+    let AcceptedAsk {
+        film_time_ms: accepted_film_time_ms,
+        desired_digest,
+    } = accepted;
     // The actor owns the slot. No live local worker means no slot to take, and
     // an expired, remote-owned or retired playback stages nothing.
     let Some(gate) = state.transcode.session_preparation_gate(session_id).await else {
@@ -6517,14 +6802,29 @@ async fn stage_prepared_successor(
     let now_ms = crate::media_sessions::unix_ms();
     let staged_incarnation_id = uuid::Uuid::new_v4().to_string();
     let staged_session_id = uuid::Uuid::new_v4().to_string();
-    // Where the successor actually begins: the frontier the predecessor has
-    // reached, not the position it was created at. `candidate` is the
-    // predecessor's request with the selection fields overwritten, so its
-    // `start_seconds` is the *original* start — committing that would restart
-    // the film for a viewer forty minutes in.
-    let resume_ms = route
-        .media_origin_ms
-        .saturating_add(route.fetched_through_ms.max(0));
+    // Where the successor actually begins: **where the viewer is**, not where
+    // the predecessor was created and not how far it has fetched.
+    //
+    // `candidate` is the predecessor's request with only the selection fields
+    // overwritten, so its `start_seconds` is the *original* start — committing
+    // that would restart the film for a viewer forty minutes in. That much was
+    // always true. What this previously did instead was
+    // `media_origin_ms + fetched_through_ms`, and that is the other error:
+    // the fetched frontier is a high-water mark, not a presentation time. It
+    // reaches the end of a segment as soon as the client requests that segment,
+    // it survives prefetch and retry, and after a backward seek it stays where
+    // the client had already reached. Resuming there hands the viewer a
+    // successor that starts past film they have never been shown — the very
+    // discontinuity a prepared handoff exists to avoid. `OwnerLossResume`
+    // documents the same hazard and pulls its frontier back by a whole segment
+    // precisely because that path has no envelope to ask; this one does.
+    //
+    // `accepted_film_time_ms` is already absolute source-timeline film time, so
+    // `media_origin_ms` must **not** be added back: the predecessor's origin is
+    // baked into the position the client reported against it, and adding it
+    // again would push a viewer thirty seconds into a film that started at
+    // 00:01:30 out to 00:02:30.
+    let resume_ms = accepted_film_time_ms;
     let staged_request = crate::transcode::SessionRequest {
         request_id: Some(staged_incarnation_id.clone()),
         start_seconds: resume_ms as f64 / 1_000.0,
@@ -6586,7 +6886,11 @@ async fn stage_prepared_successor(
         route.playback_id.clone(),
         route.owner_node_id.clone(),
         route.owner_epoch,
-    );
+    )
+    // The ask this successor is being built for, recorded on the slot so an
+    // acknowledgement arriving later is judged against the ask that is current
+    // then rather than against the one that started the work.
+    .asking(desired_digest);
     let preparation = plurx_core::domain::MediaSessionPreparation {
         incarnation_id: staged_incarnation_id,
         session_id: staged_session_id,
@@ -6606,6 +6910,19 @@ async fn stage_prepared_successor(
         response_json,
         media_origin_ms: resume_ms,
         now_ms,
+        // Read here rather than carried from the exchange that triggered this,
+        // and re-compared inside the admission transaction. The awaits between
+        // that exchange and this line — the source file read, the height
+        // resolution — are exactly where a newer ask lands, and a value
+        // captured before them would prove only that the ask had not changed
+        // before the work started.
+        expected_desired_revision: state
+            .store
+            .desired_selection(route.user_id, &route.playback_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|desired| desired.revision),
         deadline_ms: now_ms.saturating_add(PREPARATION_DEADLINE_MS),
     };
     match executor.stage(&preparation).await {
@@ -6635,6 +6952,21 @@ async fn stage_prepared_successor(
 /// committed — the store's abort names an incarnation that is no longer
 /// staged and changes nothing — so the timer does not race the commit path
 /// §3.5 will add.
+///
+/// **What this does NOT protect, and why it is not urgent (2026-09-08).** The
+/// spawn is detached and its timer is monotonic and in-memory, so a process
+/// restart loses it. That is survivable today for two reasons that will both
+/// stop being true: the store enforces `deadline_ms` on its own (see the
+/// constant above), and a restart discards the actor slot along with the whole
+/// `ControlState`, so there is nothing left to free. `abort_inherited_preparation`
+/// handles the durable remnant on takeover.
+///
+/// It stops being survivable the day *reserve and prime* exists, because then
+/// a staged successor owns a worker and an ffmpeg, and a lost timer leaks them
+/// until the idle sweep. `M6-SERVER-PRIME-HANDOFF.md` §6 step 1 is that move —
+/// fold the deadline into the actor's `next_deadline()` — and it is
+/// deliberately ordered before the thing that needs it. Do not read it as
+/// fixing a live leak: **there is no worker here today.**
 fn arm_preparation_deadline(
     executor: crate::playback_control::PreparationExecutor,
     staged_incarnation_id: String,
@@ -8785,7 +9117,7 @@ fn advertises_dolby_vision(context: &crate::transcode::HlsContext) -> bool {
 /// in between, so this is where it is caught. Chrome ignores the box;
 /// VideoToolbox honours it, and Safari answers 4K10 HEVC so labelled with a
 /// software decode on hardware that has a dedicated block for it
-/// (`docs/STUTTER-4K.md` §6).
+/// (`docs/streaming/STUTTER-4K.md` §6).
 ///
 /// Gated on what the playlist says rather than on how the session was built,
 /// deliberately. The serve path has no copy options in hand, and the question
@@ -9771,12 +10103,30 @@ fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiError {
                 format!("the segment is being produced; retry in {secs}s"),
             )
         }
-        VodError::Busy => {
-            log("segment_wait_busy", "blocked-GET caps reached");
+        // Two caps, two answers. The client can act on the difference — one
+        // says this player is asking for too much at once and should slow its
+        // own requests, the other says the node has no parked-request capacity
+        // left and retrying harder makes it worse — and an operator reading
+        // these refusals needs them apart to tell one seek storm from a
+        // ceiling sized for a smaller deployment. They were one code, so
+        // neither could.
+        VodError::Busy(crate::waitpool::WaitRefused::SessionBusy) => {
+            log(
+                "segment_wait_busy",
+                "this session's blocked-GET cap reached",
+            );
             ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "segment_wait_busy",
                 "too many blocked fetches for this session; retry shortly",
+            )
+        }
+        VodError::Busy(crate::waitpool::WaitRefused::PoolFull) => {
+            log("node_wait_capacity", "the node's blocked-GET cap reached");
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "node_wait_capacity",
+                "this server is at its limit for waiting fetches; retry shortly",
             )
         }
         VodError::ProducerFailed(reason) => {
@@ -10183,6 +10533,10 @@ async fn vod_segment_response_before(
         publication_deadline,
     )
     .await?;
+    // Taken before `ready.file` is moved into the reader: the pump outlives
+    // this function, and the session registry lock is long released by the
+    // time it runs.
+    let delivery = std::sync::Arc::clone(&ready.delivery);
     let reader = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(ready.file, len));
     let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
     let (sender, receiver) =
@@ -10304,6 +10658,19 @@ async fn vod_segment_response_before(
             if !accepted {
                 return;
             }
+            // Counted here — where the bytes actually left. `accepted` is the
+            // downstream acknowledgement, so nothing is credited to this
+            // viewer's rate until the chunk has been taken. A meter advanced
+            // at read time instead would measure the disk.
+            //
+            // The buffered init object is deliberately *not* counted. It is
+            // handed to the response whole, so crediting it would date bytes
+            // at handoff rather than at delivery and inflate the first window
+            // of a session that has delivered nothing yet. One small object
+            // missing from the total is the honest trade; the rate is what
+            // `headroom_refusal` reads, and an unmeasured session correctly
+            // reports no rate at all rather than a fast one.
+            delivery.note(bytes_len);
             delivered = delivered.saturating_add(bytes_len);
             if delivered == len {
                 if let Some((manager, session, authorization, complete_object, permit)) =
@@ -11737,6 +12104,7 @@ mod tests {
             updated_at_ms: unix_ms(),
         };
         let request = crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation,
             control_epoch: 1,
@@ -11792,6 +12160,7 @@ mod tests {
             &fixture.store,
             MediaSessionActivation {
                 recovery_epoch: String::new(),
+                expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -11913,6 +12282,7 @@ mod tests {
             &fixture.store,
             MediaSessionActivation {
                 recovery_epoch: String::new(),
+                expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -11977,6 +12347,7 @@ mod tests {
             &fixture.store,
             MediaSessionActivation {
                 recovery_epoch: String::new(),
+                expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -12075,6 +12446,7 @@ mod tests {
             &fixture.store,
             MediaSessionActivation {
                 recovery_epoch: String::new(),
+                expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -12345,6 +12717,7 @@ mod tests {
             &fixture.store,
             MediaSessionActivation {
                 recovery_epoch: String::new(),
+                expected_desired_revision: None,
                 incarnation_id: generation.clone(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -12364,6 +12737,7 @@ mod tests {
         )
         .await;
         let request = crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation: generation.clone(),
             control_epoch: 1,
@@ -12577,6 +12951,7 @@ mod tests {
                 &fixture.store,
                 MediaSessionActivation {
                     recovery_epoch: String::new(),
+                    expected_desired_revision: None,
                     incarnation_id: generation.clone(),
                     session_id: session_id.clone(),
                     user_id: user.id,
@@ -12596,6 +12971,7 @@ mod tests {
             )
             .await;
             let request = crate::playback_control::ControlRequestV1 {
+                intent: None,
                 protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
                 generation: generation.clone(),
                 control_epoch: 1,
@@ -13816,6 +14192,7 @@ mod tests {
                 let now_ms = crate::media_sessions::unix_ms();
                 plurx_core::domain::MediaSessionActivation {
                     recovery_epoch: String::new(),
+                    expected_desired_revision: None,
                     incarnation_id: incarnation.to_owned(),
                     // A restart is a new session taking over one playback, so
                     // the session id moves and the playback id is what the
@@ -13982,6 +14359,109 @@ mod tests {
             );
             running().await;
             assert_eq!(count(), 3);
+
+            hold.add_permits(8);
+            crate::subtitles::release_session_window(session_id).await;
+        }
+
+        /// Abandoning a window stops the flight and leaves the session able to
+        /// start the next one; releasing stops it and fences the id.
+        ///
+        /// That difference is the whole reason the second operation exists.
+        /// Reattachment moves a viewer to a different rendition under the same
+        /// session id, so the flight they left is extracting a span for the
+        /// recipe they moved off and is worth stopping — but the id belongs to
+        /// somebody still watching. Releasing it fences that id for
+        /// `WINDOW_RELEASE_FENCE`, which would refuse the first window of the
+        /// attachment that just replaced it: a recipe change costing half a
+        /// minute of subtitles. Reaching for `release_session_window` there
+        /// looks like the tidy fix and is a regression.
+        ///
+        /// The named flight matters too. A successor claiming the session
+        /// between the read and the stop carries a different id and must
+        /// survive, or a viewer who reattaches twice quickly loses the second
+        /// attachment's work to the first one's cleanup.
+        #[tokio::test]
+        async fn abandoning_a_window_stops_the_flight_without_fencing_the_session() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let session_id = &uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), session_id).await;
+            let started = Arc::new(tokio::sync::Semaphore::new(0));
+            let hold = Arc::new(tokio::sync::Semaphore::new(0));
+
+            let warm = |sequence: Option<u64>, anchor: i64| {
+                let started = Arc::clone(&started);
+                let hold = Arc::clone(&hold);
+                let subs_dir = fixture.state.subs_dir.clone();
+                let file = file.clone();
+                let session_id = session_id.clone();
+                async move {
+                    crate::subtitles::warm_vtt_window_with(
+                        &session_id,
+                        sequence,
+                        &subs_dir,
+                        &file,
+                        0,
+                        anchor,
+                        WINDOW_SECONDS,
+                        move |_tmp, _, _, _, _| async move {
+                            started.add_permits(1);
+                            hold.acquire().await.expect("hold").forget();
+                            Ok(())
+                        },
+                    )
+                    .await
+                }
+            };
+            let running = || {
+                let started = Arc::clone(&started);
+                async move {
+                    tokio::time::timeout(Duration::from_secs(5), started.acquire())
+                        .await
+                        .expect("a producer starts")
+                        .expect("started semaphore remains open")
+                        .forget();
+                }
+            };
+
+            assert!(warm(Some(5), 600).await, "a first claim starts a flight");
+            running().await;
+            let flight = crate::subtitles::session_window_flight(session_id)
+                .expect("the flight is named while it is live");
+
+            // A stale identity names nothing: the live flight is untouched.
+            crate::subtitles::abandon_session_window(session_id, flight.wrapping_add(1)).await;
+            assert_eq!(
+                crate::subtitles::session_window_flight(session_id),
+                Some(flight),
+                "an identity that is not this flight's stops nothing"
+            );
+
+            crate::subtitles::abandon_session_window(session_id, flight).await;
+            assert!(
+                crate::subtitles::owned_window_for_test(session_id).is_none(),
+                "the named flight is stopped and settled"
+            );
+
+            // The difference from release, stated as the viewer experiences
+            // it: the very next window is admitted rather than refused for
+            // half a minute.
+            assert!(
+                warm(Some(6), 900).await,
+                "abandoning does not fence the session that is still watching"
+            );
+            running().await;
+            assert_eq!(
+                crate::subtitles::owned_window_for_test(session_id)
+                    .expect("the replacement owns the slot")
+                    .0,
+                900
+            );
+            assert_eq!(
+                crate::subtitles::peak_window_flights_for_test(session_id),
+                1,
+                "and the abandoned flight settled before the replacement started"
+            );
 
             hold.add_permits(8);
             crate::subtitles::release_session_window(session_id).await;
@@ -14555,6 +15035,7 @@ mod tests {
             &fixture.store,
             MediaSessionActivation {
                 recovery_epoch: String::new(),
+                expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -14634,6 +15115,7 @@ mod tests {
 
     fn control_request(generation: String) -> crate::playback_control::ControlRequestV1 {
         crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation,
             control_epoch: 1,
@@ -14740,6 +15222,7 @@ mod tests {
             &fixture.store,
             MediaSessionActivation {
                 recovery_epoch: String::new(),
+                expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -14785,6 +15268,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
 
@@ -14836,6 +15323,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged = fixture
@@ -14981,6 +15472,7 @@ mod tests {
         };
         let now_ms = unix_ms();
         let preparation = plurx_core::domain::MediaSessionPreparation {
+            expected_desired_revision: None,
             incarnation_id: staged_incarnation_id.clone(),
             session_id: staged_session_id,
             user_id: route.user_id,
@@ -15051,6 +15543,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let mut request = control_request(route.incarnation_id.clone());
@@ -15140,6 +15636,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
 
@@ -15268,6 +15768,7 @@ mod tests {
                     dual_player_preparation: true,
                 }),
                 platform: crate::playback_control::ClientPlatform::Apple,
+                accepted_film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
             },
         )
         .await;
@@ -15502,6 +16003,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let first = fixture
@@ -15520,6 +16025,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         assert_eq!(
@@ -15551,6 +16060,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         assert!(
@@ -15579,6 +16092,10 @@ mod tests {
             &staged_predecessor_recipe(route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15620,6 +16137,14 @@ mod tests {
             action_id,
             state,
             buffered_through_ms: None,
+            // Only a commit carries an origin, and it must be the offered one.
+            committed_media_origin_ms: (state
+                == crate::playback_control::AcknowledgementState::Committed)
+                .then(|| {
+                    prepare_body["action"]["media_origin_ms"]
+                        .as_i64()
+                        .expect("offer origin")
+                }),
             first_frame_unix_ms: (state
                 == crate::playback_control::AcknowledgementState::Committed)
                 .then(unix_ms),
@@ -15758,6 +16283,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15794,6 +16323,8 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer: a commit naming a different origin is refused.
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
         delay_next_preparation_settlement(&route.incarnation_id, Duration::from_millis(300));
@@ -15842,6 +16373,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged_incarnation_id = fixture
@@ -15878,6 +16413,8 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer: a commit naming a different origin is refused.
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
 
@@ -15968,6 +16505,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged_incarnation_id = fixture
@@ -16051,6 +16592,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged = fixture
@@ -16136,6 +16681,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         assert!(
@@ -16187,6 +16736,10 @@ mod tests {
                     &staged_predecessor_recipe(&route),
                     &staged_candidate_request(),
                     Some(&staged_source_file()),
+                    AcceptedAsk {
+                        film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                        desired_digest: None,
+                    },
                 )
                 .await;
                 let mut request = control_request(route.incarnation_id.clone());
@@ -16213,6 +16766,14 @@ mod tests {
                         AcknowledgementState::Failed
                     },
                     buffered_through_ms: None,
+                    // The origin the offer named. A commit that does not
+                    // echo it is refused, so the fixture has to answer the
+                    // Prepare it was actually given.
+                    committed_media_origin_ms: committed.then(|| {
+                        body["action"]["media_origin_ms"]
+                            .as_i64()
+                            .expect("offer origin")
+                    }),
                     first_frame_unix_ms: committed.then(unix_ms),
                 });
                 let slots = Arc::new(tokio::sync::Semaphore::new(1));
@@ -16310,6 +16871,10 @@ mod tests {
                 &staged_predecessor_recipe(&route),
                 &staged_candidate_request(),
                 Some(&staged_source_file()),
+                AcceptedAsk {
+                    film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                    desired_digest: None,
+                },
             )
             .await;
             let staged = fixture
@@ -16342,6 +16907,11 @@ mod tests {
                     AcknowledgementState::Failed
                 },
                 buffered_through_ms: None,
+                committed_media_origin_ms: committed.then(|| {
+                    body["action"]["media_origin_ms"]
+                        .as_i64()
+                        .expect("offer origin")
+                }),
                 first_frame_unix_ms: committed.then(unix_ms),
             });
             let key = preparation_settlement_key(
@@ -16441,6 +17011,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &candidate,
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged = fixture
@@ -16479,6 +17053,8 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer: a commit naming a different origin is refused.
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
         let committed_request = request.clone();
@@ -16590,6 +17166,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let staged = fixture
@@ -16626,6 +17206,8 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // Echo the offer: a commit naming a different origin is refused.
+            committed_media_origin_ms: prepare_body["action"]["media_origin_ms"].as_i64(),
             first_frame_unix_ms: Some(unix_ms()),
         });
         delay_next_preparation_settlement(&route.incarnation_id, Duration::from_millis(700));
@@ -16728,6 +17310,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let first_staged = fixture
@@ -16797,6 +17383,7 @@ mod tests {
             action_id,
             state: crate::playback_control::AcknowledgementState::Failed,
             buffered_through_ms: None,
+            committed_media_origin_ms: None,
             first_frame_unix_ms: None,
         });
         let (status, body) = control_body(
@@ -16841,6 +17428,10 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
         )
         .await;
         let replacement = fixture
@@ -16853,17 +17444,86 @@ mod tests {
         assert_ne!(replacement.staged_incarnation_id, first_staged);
     }
 
-    /// The successor resumes where the viewer is, not where the predecessor
-    /// started. `candidate_request` clones the predecessor's request and
-    /// overwrites only the selection, so its `start_seconds` is the *original*
-    /// start — committing that restarts the film for a viewer forty minutes
-    /// in.
+    /// The one arrangement that tells the three candidate resume points apart.
+    ///
+    /// A session whose film begins at 00:01:30, a viewer 30 seconds into it,
+    /// and a client that has fetched 150 seconds of it:
+    ///
+    /// | quantity | route-relative | absolute film time |
+    /// |---|---|---|
+    /// | session origin | — | 90 000 |
+    /// | accepted playhead | 30 000 | **120 000** |
+    /// | fetch frontier | 150 000 | 240 000 |
+    ///
+    /// Each wrong answer lands on its own number, so no assertion here can
+    /// pass for the wrong reason: the fetch frontier gives 240 000, adding the
+    /// origin back to an already-absolute playhead gives 210 000, and the
+    /// predecessor's untouched `start_seconds` gives 0.
+    const RESUME_ORIGIN_MS: i64 = 90_000;
+    const RESUME_FETCHED_THROUGH_MS: i64 = 150_000;
+    const RESUME_ACCEPTED_PLAYHEAD_MS: i64 = 120_000;
+    const RESUME_FETCH_FRONTIER_MS: i64 = RESUME_ORIGIN_MS + RESUME_FETCHED_THROUGH_MS;
+    const RESUME_DOUBLE_COUNTED_ORIGIN_MS: i64 = RESUME_ORIGIN_MS + RESUME_ACCEPTED_PLAYHEAD_MS;
+
+    /// Every place a staged successor's resume is written, in absolute film
+    /// time: the route's `media_origin_ms`, the recipe's `start_seconds`, and
+    /// the bootstrap response's `start_seconds`.
+    ///
+    /// All three are returned because `stage_prepared_successor` writes them
+    /// from `resume_ms` in three separate statements, and a partial correction
+    /// would leave a successor whose row, whose recipe and whose bootstrap
+    /// disagree about where the film starts. The response's `start_seconds` in
+    /// particular is what the client is told when it reads the staged route,
+    /// and it had no assertion anywhere in the suite before this. Staging is
+    /// what establishes them; a commit needs a separately accepted client
+    /// acknowledgement these tests deliberately do not supply.
+    async fn staged_resume_ms(
+        fixture: &HlsDeliveryFixture,
+        route: &MediaSessionRoute,
+    ) -> (i64, f64, f64) {
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+        let successor = fixture
+            .state
+            .store
+            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
+            .await
+            .expect("staged route")
+            .expect("successor");
+        let recipe =
+            serde_json::from_str::<RemoteStartRequest>(&successor.recipe_json).expect("recipe");
+        let bootstrap = serde_json::from_str::<StartResponse>(&successor.response_json)
+            .expect("the staged response parses as a StartResponse");
+        (
+            successor.media_origin_ms,
+            recipe.request.start_seconds,
+            bootstrap.start_seconds,
+        )
+    }
+
+    /// P1-6. The successor resumes **where the viewer is**, not at the
+    /// predecessor's original start and not at its fetch frontier.
+    ///
+    /// The original start was always excluded — `candidate_request` clones the
+    /// predecessor's request and overwrites only the selection, so committing
+    /// its `start_seconds` restarts the film for a viewer forty minutes in.
+    /// The frontier is what this test now also excludes: `fetched_through_ms`
+    /// reaches the *end* of a segment the moment the client asks for it and
+    /// survives prefetch, retry and backward seeks, so a successor staged
+    /// there begins past film the viewer has never been shown. That is the
+    /// forward jump a prepared handoff exists to prevent, which is why the
+    /// frontier assertion this replaces was pinning the defect in place.
     #[tokio::test]
-    async fn a_staged_successor_resumes_at_the_frontier_not_the_original_start() {
+    async fn a_staged_successor_resumes_at_the_accepted_playhead_not_the_fetch_frontier() {
         let dir = crate::test_tempdir().expect("state dir");
         let (fixture, session_id, mut route) = staging_fixture(dir.path()).await;
-        route.media_origin_ms = 90_000;
-        route.fetched_through_ms = 2_400_000;
+        route.media_origin_ms = RESUME_ORIGIN_MS;
+        route.fetched_through_ms = RESUME_FETCHED_THROUGH_MS;
 
         stage_prepared_successor(
             &fixture.state,
@@ -16872,36 +17532,280 @@ mod tests {
             &staged_predecessor_recipe(&route),
             &staged_candidate_request(),
             Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: RESUME_ACCEPTED_PLAYHEAD_MS,
+                desired_digest: None,
+            },
         )
         .await;
-        let staged = fixture
-            .state
-            .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
-            .await
-            .expect("ledger read")
-            .expect("a successor is staged");
-        // Frontier selection is established by staging. A commit requires a
-        // separately accepted client acknowledgement, which this test does
-        // not supply; inspecting the staged route proves the actual contract.
-        let successor = fixture
-            .state
-            .store
-            .media_session_route_by_incarnation(&staged.staged_incarnation_id)
-            .await
-            .expect("staged route")
-            .expect("successor");
-        assert_eq!(
-            successor.media_origin_ms, 2_490_000,
-            "origin is the predecessor's origin plus what the client fetched"
+
+        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+            staged_resume_ms(&fixture, &route).await;
+        assert_ne!(
+            origin_ms, RESUME_FETCH_FRONTIER_MS,
+            "the fetch frontier is a high-water mark, never a presentation time"
         );
-        let recipe =
-            serde_json::from_str::<RemoteStartRequest>(&successor.recipe_json).expect("recipe");
+        assert_ne!(
+            origin_ms, RESUME_DOUBLE_COUNTED_ORIGIN_MS,
+            "the accepted playhead is already absolute — the origin is in it once"
+        );
+        assert_eq!(
+            origin_ms, RESUME_ACCEPTED_PLAYHEAD_MS,
+            "the successor begins at the film time the viewer is actually at"
+        );
         assert!(
-            (recipe.request.start_seconds - 2_490.0).abs() < 0.001,
-            "the successor starts at the frontier, not at {}",
+            (start_seconds - RESUME_ACCEPTED_PLAYHEAD_MS as f64 / 1_000.0).abs() < 0.001,
+            "the recipe must agree with the row, not restart at {}",
             staged_candidate_request().start_seconds,
         );
+        assert!(
+            (bootstrap_start_seconds - RESUME_ACCEPTED_PLAYHEAD_MS as f64 / 1_000.0).abs() < 0.001,
+            "the bootstrap the client reads must agree with the row too"
+        );
+    }
+
+    /// The same proof at the **production control-to-staging boundary**.
+    ///
+    /// The helper test above would still pass if the exchange handed it the
+    /// wrong number, because nothing in it exercises the capture. This drives
+    /// two real `control_local_inner` exchanges — the first establishing a
+    /// preparation-capable client and a delivered selection, the second asking
+    /// for a height that crosses both resolution and delivery method — and
+    /// lets the detached candidate run exactly as production spawns it.
+    #[tokio::test]
+    async fn the_control_seam_stages_from_the_accepted_playhead_not_the_route_frontier() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, mut route) = staging_fixture(dir.path()).await;
+        route.media_origin_ms = RESUME_ORIGIN_MS;
+        route.fetched_through_ms = RESUME_FETCHED_THROUGH_MS;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut request = preparing_control_request(&route);
+        // A viewer 30 seconds into this session whose client has already
+        // fetched 150 seconds of it: the two numbers the resume must tell
+        // apart, carried on the envelope the exchange accepts.
+        request.position_ms = RESUME_ACCEPTED_PLAYHEAD_MS;
+        request.buffered_through_ms = RESUME_FETCH_FRONTIER_MS;
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        await_preparation_candidate(&route).await;
+
+        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+            staged_resume_ms(&fixture, &route).await;
+        assert_eq!(
+            origin_ms, RESUME_ACCEPTED_PLAYHEAD_MS,
+            "the exchange's own accepted position is what reaches the ledger"
+        );
+        let expected_seconds = RESUME_ACCEPTED_PLAYHEAD_MS as f64 / 1_000.0;
+        assert!((start_seconds - expected_seconds).abs() < 0.001);
+        assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
+    }
+
+    /// A backward seek is the case the fetch frontier cannot survive: the
+    /// client has already fetched far past where the viewer just asked to go,
+    /// so the frontier stays high while the intended position drops. Resuming
+    /// at the frontier would drop the viewer back at the point they seeked
+    /// *away from*.
+    ///
+    /// `seek_target_ms` wins over `position_ms` here for the reason
+    /// `ControlRequestV1::validate` anchors the buffer on it: mid-seek the
+    /// reported position is still the old one.
+    #[tokio::test]
+    async fn a_backward_seek_stages_from_the_seek_target_at_the_control_seam() {
+        const SEEK_TARGET_MS: i64 = 105_000;
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, mut route) = staging_fixture(dir.path()).await;
+        route.media_origin_ms = RESUME_ORIGIN_MS;
+        route.fetched_through_ms = RESUME_FETCHED_THROUGH_MS;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut request = preparing_control_request(&route);
+        request.position_ms = 200_000;
+        request.buffered_through_ms = RESUME_FETCH_FRONTIER_MS;
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        // Still reporting the old position, as a seeking client does.
+        request.render_state = crate::playback_control::RenderState::Seeking;
+        request.seek_target_ms = Some(SEEK_TARGET_MS);
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        await_preparation_candidate(&route).await;
+
+        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+            staged_resume_ms(&fixture, &route).await;
+        assert_eq!(
+            origin_ms, SEEK_TARGET_MS,
+            "a backward seek resumes where the viewer is going, not where they left"
+        );
+        let expected_seconds = SEEK_TARGET_MS as f64 / 1_000.0;
+        assert!((start_seconds - expected_seconds).abs() < 0.001);
+        assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
+    }
+
+    /// A resume is bounded by the film, not by what `validate` will accept.
+    ///
+    /// `validate` deliberately allows one target duration of slack past the
+    /// end so a client reporting the final segment's *end* is not refused, and
+    /// this value is client-reported rather than derived from what the server
+    /// observed itself delivering. Staging past the end would hold this
+    /// playback's one preparation slot, a durable row and an admission slot
+    /// for a full `PREPARATION_DEADLINE_MS` on a resume nobody can reach.
+    ///
+    /// 2 000 ms of slack is the smallest the clamp in `validate` can be, so
+    /// this position is accepted whatever the fixture's target duration.
+    #[tokio::test]
+    async fn a_resume_past_the_end_of_the_film_is_bounded_by_the_film() {
+        const FIXTURE_DURATION_MS: i64 = 6_000_000;
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, route) = staging_fixture(dir.path()).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut request = preparing_control_request(&route);
+        request.position_ms = FIXTURE_DURATION_MS + 2_000;
+        request.buffered_through_ms = FIXTURE_DURATION_MS + 2_000;
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the envelope itself is valid — the bound under test is the resume, not the exchange"
+        );
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        await_preparation_candidate(&route).await;
+
+        let (origin_ms, start_seconds, bootstrap_start_seconds) =
+            staged_resume_ms(&fixture, &route).await;
+        assert_eq!(
+            origin_ms, FIXTURE_DURATION_MS,
+            "a successor may begin at the end of the film, never past it"
+        );
+        let expected_seconds = FIXTURE_DURATION_MS as f64 / 1_000.0;
+        assert!((start_seconds - expected_seconds).abs() < 0.001);
+        assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
+    }
+
+    /// A control envelope that will be admitted for preparation: a client that
+    /// can hold two pipelines, on a link with headroom, naming the action.
+    fn preparing_control_request(
+        route: &MediaSessionRoute,
+    ) -> crate::playback_control::ControlRequestV1 {
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
+        request.observed_download_bps = Some(100_000_000);
+        request.capabilities = Some(crate::playback_control::DynamicCapabilities {
+            platform: crate::playback_control::ClientPlatform::Apple,
+            max_height: 2160,
+            codecs: vec![crate::playback_control::CodecPolicy::H264],
+            dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+            dual_player_preparation: true,
+        });
+        request
+    }
+
+    /// Sleep past the per-session control budget.
+    ///
+    /// A second exchange inside `playback_control::MIN_CONTROL_INTERVAL` is
+    /// answered 429 and never reaches the selection engine, so a preparation
+    /// test that skipped this would assert an empty ledger against a request
+    /// the server declined to consider — and would read as "staging is broken".
+    ///
+    /// 260 ms rather than the constant itself, because that constant is
+    /// private and the fifteen exchange-floor sleeps already in this module
+    /// all spell it this way. Widening a production constant's visibility for
+    /// one test helper, while leaving fifteen literals beside it, would buy a
+    /// second idiom rather than remove one. Migrating all sixteen is worth
+    /// doing — in a change that is not also correcting a resume.
+    async fn pace_control_exchanges() {
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+    }
+
+    /// Wait for the detached candidate keyed to this exact predecessor.
+    ///
+    /// Keyed rather than counted: the process-global in-flight count may still
+    /// be zero before the spawned future receives its first poll, so polling it
+    /// would let an assertion run against a ledger nothing had written yet.
+    async fn await_preparation_candidate(route: &MediaSessionRoute) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if take_preparation_candidate_completion(&route.incarnation_id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached preparation candidate completed");
     }
 
     /// A VOD session — which is what every public create actually is — has a
@@ -16936,6 +17840,14 @@ mod tests {
             "the VOD engine serves every public session and must answer here"
         );
     }
+
+    /// A plausible accepted playhead for the staging tests that are not about
+    /// *where* the successor resumes.
+    ///
+    /// Deliberately nonzero: the fixture route starts at `media_origin_ms` 0
+    /// with nothing fetched, so a zero here would let a resume computed from
+    /// entirely the wrong quantity agree with the right one by accident.
+    const STAGED_ACCEPTED_FILM_TIME_MS: i64 = 30_000;
 
     /// The fixture's own source row. The seam reads it, and staging refuses
     /// without a snapshot — `0/0` is the sentinel that would refuse the
@@ -17032,6 +17944,7 @@ mod tests {
             &fixture.store,
             MediaSessionActivation {
                 recovery_epoch: String::new(),
+                expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
                 user_id: user.id,
@@ -17180,6 +18093,58 @@ mod tests {
         assert_eq!(body["code"], "owner_transition");
     }
 
+    /// The two blocked-GET caps answer a client differently, because they mean
+    /// different things to it.
+    ///
+    /// Both used to answer `segment_wait_busy` with a message about "this
+    /// session", which was wrong for half of them: a node at its own ceiling is
+    /// not this player asking for too much, and a client told to slow its own
+    /// requests does the wrong thing about it. Both still answer 503 — the
+    /// retry ladder is unchanged — but the code and the sentence say which
+    /// limit was reached.
+    #[tokio::test]
+    async fn the_two_blocked_get_caps_answer_a_client_apart() {
+        use crate::waitpool::WaitRefused;
+
+        let (viewer_status, viewer) = error_body(vod_error(
+            "sess-a",
+            crate::vodserve::VodError::Busy(WaitRefused::SessionBusy),
+        ))
+        .await;
+        assert_eq!(viewer_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(viewer["code"], "segment_wait_busy");
+        assert!(
+            viewer["message"]
+                .as_str()
+                .expect("a message")
+                .contains("this session"),
+            "the per-viewer refusal says whose limit it was"
+        );
+
+        let (node_status, node) = error_body(vod_error(
+            "sess-a",
+            crate::vodserve::VodError::Busy(WaitRefused::PoolFull),
+        ))
+        .await;
+        assert_eq!(
+            node_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "still retryable — the ladder does not change"
+        );
+        assert_eq!(node["code"], "node_wait_capacity");
+        assert_ne!(
+            node["code"], viewer["code"],
+            "a client cannot act on a distinction it cannot see"
+        );
+        assert!(
+            node["message"]
+                .as_str()
+                .expect("a message")
+                .contains("server"),
+            "and the node refusal does not blame the player for it"
+        );
+    }
+
     /// The detail object is data. A route that somehow carried a `code` field
     /// must not be able to rename the error a client dispatches on.
     #[tokio::test]
@@ -17246,6 +18211,7 @@ mod tests {
         let response_json = r#"{"session":"confirmed"}"#.to_owned();
         let activation = MediaSessionActivation {
             recovery_epoch: String::new(),
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
             user_id: 7,
@@ -17877,13 +18843,151 @@ mod tests {
         path: &std::path::Path,
         advertised_len: u64,
     ) -> crate::vodserve::SegmentReady {
+        vod_ready_metered(
+            path,
+            advertised_len,
+            std::sync::Arc::new(crate::meter::Meter::new()),
+        )
+        .await
+    }
+
+    /// The same answer, against a meter the caller keeps a handle to.
+    ///
+    /// Production takes this meter from the session the segment was opened
+    /// for, so holding it here is what lets a test read the same counter the
+    /// control view will publish.
+    async fn vod_ready_metered(
+        path: &std::path::Path,
+        advertised_len: u64,
+        delivery: std::sync::Arc<crate::meter::Meter>,
+    ) -> crate::vodserve::SegmentReady {
         crate::vodserve::SegmentReady {
+            delivery,
             file: tokio::fs::File::open(path)
                 .await
                 .expect("open VOD response object"),
             len: advertised_len,
             etag: format!("http-test-{advertised_len}"),
         }
+    }
+
+    /// P1-3. A VOD body counts the bytes it hands over, where they leave.
+    ///
+    /// The counter must not move when the segment is merely opened, and must
+    /// not move when the response is merely built: it moves as the body is
+    /// drained, because that is the only moment a byte has actually reached
+    /// this viewer. Without it `DeliveryView` reported `delivered_bps: None`
+    /// on every VOD session, and `headroom_refusal` refused every preparation
+    /// with `throughput_unreported`.
+    #[tokio::test]
+    async fn a_vod_body_counts_its_delivered_bytes_where_they_leave() {
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let headers = RelayHeaders::default();
+        let session_id = "vod-metered";
+        let owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+
+        let path = dir.path().join("metered.m4s");
+        let bytes = vec![7_u8; 24 * 1024];
+        tokio::fs::write(&path, &bytes).await.expect("VOD object");
+
+        let delivery = std::sync::Arc::new(crate::meter::Meter::new());
+        let response = vod_segment_response(
+            &fixture.state,
+            session_id,
+            "seg00004.m4s",
+            &headers,
+            vod_ready_metered(&path, bytes.len() as u64, std::sync::Arc::clone(&delivery)).await,
+            owner,
+        )
+        .await
+        .expect("VOD response");
+        assert_eq!(
+            delivery.total_bytes(),
+            0,
+            "opening a segment and building a response delivers nothing"
+        );
+
+        let drained = axum::body::to_bytes(response.into_body(), bytes.len() + 1)
+            .await
+            .expect("VOD body")
+            .len();
+        assert_eq!(drained, bytes.len());
+        assert_eq!(
+            delivery.total_bytes(),
+            bytes.len() as i64,
+            "every byte the viewer took is counted, and only those"
+        );
+    }
+
+    /// An abandoned body credits exactly what the client actually took.
+    ///
+    /// A viewer who walks away mid-segment must not leave behind a rate built
+    /// from bytes that went nowhere — that is what would make a stalled link
+    /// look fast enough to stage a successor against. The assertion is an
+    /// equality rather than an upper bound: "less than the whole segment"
+    /// holds for a counter that never moved at all, which is how a version of
+    /// this test proved nothing.
+    ///
+    /// What it does **not** pin is the ordering of the `note` against the
+    /// downstream acknowledgement. The local body channel holds one chunk and
+    /// the pump awaits each chunk's acknowledgement before reading the next,
+    /// so it never reads ahead of what it has sent, and counting at read time
+    /// is externally indistinguishable from counting at acknowledgement time.
+    /// That ordering is argued from the code, not proved here; pinning it
+    /// would need a downstream this test can park mid-chunk.
+    #[tokio::test]
+    async fn an_abandoned_vod_body_counts_nothing_it_did_not_hand_over() {
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let headers = RelayHeaders::default();
+        let session_id = "vod-abandoned";
+        let owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+
+        let path = dir.path().join("abandoned.m4s");
+        let bytes = vec![9_u8; 512 * 1024];
+        tokio::fs::write(&path, &bytes).await.expect("VOD object");
+
+        let delivery = std::sync::Arc::new(crate::meter::Meter::new());
+        let response = vod_segment_response(
+            &fixture.state,
+            session_id,
+            "seg00005.m4s",
+            &headers,
+            vod_ready_metered(&path, bytes.len() as u64, std::sync::Arc::clone(&delivery)).await,
+            owner,
+        )
+        .await
+        .expect("VOD response");
+
+        // Take a prefix and abandon the rest. Asserting only "less than the
+        // whole" would hold for a counter that never moved at all, and would
+        // also hold if bytes were counted at read time — the exact defect the
+        // acknowledgement ordering exists to prevent. The prefix has to be
+        // counted *exactly*: everything handed over, nothing that was not.
+        let mut body = response.into_body().into_data_stream();
+        let mut taken = 0_i64;
+        for _ in 0..2 {
+            let chunk = futures_util::StreamExt::next(&mut body)
+                .await
+                .expect("a chunk")
+                .expect("chunk bytes");
+            taken += chunk.len() as i64;
+        }
+        drop(body);
+        tokio::task::yield_now().await;
+
+        assert!(taken > 0, "the fixture must actually hand over a prefix");
+        assert!(
+            taken < bytes.len() as i64,
+            "the fixture must abandon the body before it completes"
+        );
+        assert_eq!(
+            delivery.total_bytes(),
+            taken,
+            "exactly the bytes the viewer took — a reader that counted at read \
+             time would be ahead of this, and one that never counted behind it"
+        );
     }
 
     async fn vod_fetched_segment(fixture: &HlsDeliveryFixture, session_id: &str) -> Option<i64> {
@@ -18783,8 +19887,25 @@ mod tests {
             serde_json::from_value(manual_without_height).expect("create body");
         assert!(!create.into_request(17, 720).automatic);
 
-        // Every shipped client omits the field, so the old inference has to
-        // survive untouched in both of its arms.
+        // Android Original+copy has no height by design. Its explicit false
+        // must override the legacy heightless-body inference or the server
+        // silently changes the viewer's mode back to Auto.
+        let original_copy = serde_json::json!({
+            "playback_id": "android-player",
+            "copy": true,
+            "quality_auto": false,
+        });
+        let create: CreateSession =
+            serde_json::from_value(original_copy).expect("original copy body");
+        let request = create.into_request(17, 2160);
+        assert!(!request.automatic);
+        assert!(matches!(
+            request.kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ));
+
+        // Legacy clients omit the field, so the old inference has to survive
+        // untouched in both of its arms.
         let silent_auto = serde_json::json!({ "playback_id": "apple-player" });
         let create: CreateSession = serde_json::from_value(silent_auto).expect("create body");
         assert!(create.into_request(17, 720).automatic);
@@ -19383,6 +20504,7 @@ mod tests {
     /// A create body with nothing set, to be spread over.
     fn bare_create() -> CreateSession {
         CreateSession {
+            intent: None,
             control_sequence: None,
             playback_id: String::new(),
             request_id: None,
@@ -19428,6 +20550,557 @@ mod tests {
             Default::default(),
             std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
         )
+    }
+
+    fn envelope(
+        recipe: u64,
+        quality: plurx_core::playback::DesiredQuality,
+    ) -> plurx_core::playback::MediaIntentEnvelope {
+        use plurx_core::playback::{
+            DesiredCodec, DesiredDynamicRange, DesiredSelection, DesiredSubtitles,
+            MediaIntentEnvelope,
+        };
+        MediaIntentEnvelope {
+            lifetime_id: "lifetime-a".to_owned(),
+            recipe_revision: recipe,
+            destination_revision: 1,
+            transport_revision: 1,
+            selection: DesiredSelection {
+                quality,
+                codec: DesiredCodec::Auto,
+                dynamic_range: DesiredDynamicRange::Auto,
+                audio_track: None,
+                audio_offset_ms: 0,
+                subtitles: DesiredSubtitles::Off,
+            },
+        }
+    }
+
+    fn a_viewer() -> plurx_core::domain::User {
+        plurx_core::domain::User {
+            id: 7,
+            username: "paul".to_owned(),
+            password_hash: String::new(),
+            is_admin: false,
+            created_at: 0,
+        }
+    }
+
+    async fn create_with(
+        state: &AppState,
+        body: CreateSession,
+    ) -> Result<Json<StartResponse>, ApiError> {
+        create(
+            crate::http::extract::AuthUser(a_viewer()),
+            State(state.clone()),
+            AxPath(404_404),
+            HeaderMap::new(),
+            super::super::network::RemoteAddress(None),
+            Json(body),
+        )
+        .await
+    }
+
+    /// The ask is durable before the create is answered — proved by a create
+    /// that is never answered successfully at all.
+    ///
+    /// §1 asks for canonical desired ownership persisted *before* an
+    /// intent-changing request is reported accepted. A test on a create that
+    /// succeeds cannot tell that ordering from the opposite one, because both
+    /// end with a row and a 200. This one asks for a file that does not exist,
+    /// so the create fails — and the row is there anyway. That is only true if
+    /// the write happens before the request is decided, which is the property.
+    ///
+    /// It also happens to be the honest behaviour: a viewer who asked for
+    /// something asked for it, whether or not the session they asked through
+    /// could be built.
+    /// An `AppState` whose store can actually serve a create.
+    ///
+    /// `HlsDeliveryFixture` cannot: its file is `/media/Heat.mkv`, a path with
+    /// no bytes behind it, so no fragment index can exist for it and every
+    /// create against it stops at `vod_index_pending` before reaching anything
+    /// worth testing. That is fine for what that fixture is for and fatal for
+    /// a test about what a create *decides*, because a create refused for an
+    /// unrelated reason is indistinguishable from one refused for the right
+    /// one.
+    ///
+    /// So this puts a real encoded source behind a real file row and indexes
+    /// it, which is the combination the vodserve suite already builds and the
+    /// HTTP suite never had. It costs an ffmpeg index build, which is why it
+    /// is a helper rather than something every test pays for.
+    async fn servable_state() -> (AppState, plurx_core::domain::User, i64) {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        plurx_core::testfixtures::require_ffmpeg();
+        let source = plurx_core::testfixtures::source("clean-cra");
+        let store: Arc<dyn plurx_core::store::Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "L".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let metadata = std::fs::metadata(&source).expect("the fixture source exists");
+        let file_id = store
+            .upsert_file(
+                item,
+                source.to_str().expect("a utf-8 fixture path"),
+                metadata.len() as i64,
+                1,
+                &ProbeResult {
+                    duration_ms: Some(12_000),
+                    ..ProbeResult::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("read back")
+            .expect("the file row is there");
+
+        // The index the VOD path refuses without, built once for the whole
+        // test binary.
+        //
+        // Not a micro-optimisation. Indexing runs ffmpeg over the fixture, and
+        // doing that once per test put enough CPU into this binary to tip two
+        // timing-sensitive `seek_coalescing` tests over on the coverage runner,
+        // where instrumentation makes everything slower — they passed before
+        // this fixture existed and failed after. The index is the same bytes
+        // every time, so building it three times was only ever cost, and the
+        // cost landed on someone else's test.
+        static INDEX: tokio::sync::OnceCell<plurx_core::segplan::FragmentIndex> =
+            tokio::sync::OnceCell::const_new();
+        let index = INDEX
+            .get_or_init(|| async {
+                let runtime = crate::test_tempdir().expect("runtime cache dir");
+                let outcome = crate::fragindex::build(
+                    &file,
+                    plurx_core::transcode::CopyVideoOptions::new(
+                        crate::ffmpeg::has_dovi_rpu().await,
+                        false,
+                    ),
+                    runtime.path(),
+                    Duration::from_secs(120),
+                )
+                .await;
+                let crate::fragindex::IndexOutcome::Built(index) = outcome else {
+                    panic!("the fixture must index: {outcome:?}");
+                };
+                *index
+            })
+            .await;
+        store
+            .put_fragment_index(file_id, index)
+            .await
+            .expect("store the index");
+
+        let user = store
+            .create_user("servable", "hash", false)
+            .await
+            .expect("viewer");
+        let root = crate::test_temp_path(format!("plurx-servable-{}", uuid::Uuid::new_v4()));
+        let state = AppState::new(
+            "test".to_owned(),
+            Arc::clone(&store),
+            crate::state::Dirs {
+                artwork: root.join("artwork"),
+                transcode: root.join("transcode"),
+                cache: root.join("cache"),
+                subs: root.join("subs"),
+                runtime_cache: root.join("runtime"),
+                renditions: root.join("renditions"),
+            },
+            "test-node".to_owned(),
+            Default::default(),
+            Default::default(),
+            std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        (state, user, file_id)
+    }
+
+    /// A create carries the ask it recorded, not one re-read at activation.
+    ///
+    /// This is the difference the whole ordering rests on, and it is invisible
+    /// outside one window. `create` records the viewer's ask at its first step
+    /// and activates much later; an activation that re-read the ask instead of
+    /// carrying the recorded one would read back whatever has been asked for
+    /// *since* and agree with itself — advancing the pointer to a session built
+    /// for a selection the viewer has already left, which is the exact failure
+    /// the compare exists to prevent.
+    ///
+    /// So the create is frozen between the two, the ask is moved underneath it,
+    /// and the activation has to refuse.
+    ///
+    /// The control is not optional and its absence is why the first version of
+    /// this test was deleted rather than fixed: on a fixture that cannot serve
+    /// a create at all, "the create was refused" is true for reasons that have
+    /// nothing to do with the ask, and the test passes with the compare removed
+    /// entirely. The unraced create below has to be *accepted*, or the refusal
+    /// above means nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_create_is_refused_when_the_ask_moves_before_it_activates() {
+        use plurx_core::playback::DesiredQuality;
+        let (state, user, file_id) = servable_state().await;
+        let playback = "moving-ask-player";
+
+        // The control first, so a fixture that has stopped being servable
+        // fails here rather than passing the refusal for the wrong reason.
+        let control = create(
+            crate::http::extract::AuthUser(user.clone()),
+            State(state.clone()),
+            AxPath(file_id),
+            HeaderMap::new(),
+            super::super::network::RemoteAddress(None),
+            Json(CreateSession {
+                playback_id: "control-player".into(),
+                intent: Some(envelope(1, DesiredQuality::Original)),
+                copy: Some(true),
+                ..bare_create()
+            }),
+        )
+        .await;
+        assert!(
+            control.is_ok(),
+            "an unraced create must be accepted, or the refusal below proves \
+             nothing: {:?}",
+            control.err()
+        );
+
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut slot = super::CREATE_ASK_RECORDED_PAUSE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = Some((reached_tx, release_rx));
+        }
+
+        let creating = {
+            let state = state.clone();
+            let user = user.clone();
+            tokio::spawn(async move {
+                create(
+                    crate::http::extract::AuthUser(user),
+                    State(state),
+                    AxPath(file_id),
+                    HeaderMap::new(),
+                    super::super::network::RemoteAddress(None),
+                    Json(CreateSession {
+                        playback_id: playback.into(),
+                        intent: Some(envelope(1, DesiredQuality::Original)),
+                        copy: Some(true),
+                        ..bare_create()
+                    }),
+                )
+                .await
+                .is_ok()
+            })
+        };
+
+        tokio::time::timeout(Duration::from_secs(60), reached_rx)
+            .await
+            .expect("the create must reach the seam")
+            .expect("seam signal");
+
+        // The viewer changes their mind while it is frozen.
+        let moved = state
+            .store
+            .record_desired_selection(
+                user.id,
+                playback,
+                &"9".repeat(64),
+                "v1;quality=manual:720",
+                9_000,
+            )
+            .await
+            .expect("the viewer's new ask");
+        assert_eq!(
+            moved.revision, 2,
+            "the ask moved while the create was frozen"
+        );
+
+        let _ = release_tx.send(());
+        let completed = tokio::time::timeout(Duration::from_secs(120), creating)
+            .await
+            .expect("the create must finish once released")
+            .expect("create task");
+
+        assert!(
+            !completed,
+            "a create whose ask moved underneath it must not be answered as accepted"
+        );
+        assert!(
+            state
+                .store
+                .media_session_route_for_playback(user.id, playback)
+                .await
+                .expect("route")
+                .is_none(),
+            "and it must leave the playback pointing nowhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ask_on_create_is_recorded_before_the_create_is_answered() {
+        use plurx_core::playback::DesiredQuality;
+        let state = resolver_state();
+        let ask = envelope(1, DesiredQuality::Original);
+
+        let answer = create_with(
+            &state,
+            CreateSession {
+                playback_id: "player-a".into(),
+                intent: Some(ask.clone()),
+                ..bare_create()
+            },
+        )
+        .await;
+        assert!(
+            answer.is_err(),
+            "this create names a file that does not exist and cannot succeed"
+        );
+
+        let recorded = state
+            .store
+            .desired_selection(7, "player-a")
+            .await
+            .expect("reading the desired row");
+        let recorded = recorded.expect("the ask is recorded even though the create failed");
+        assert_eq!(
+            recorded.digest,
+            ask.digest(),
+            "and it is the ask the viewer actually made"
+        );
+        assert_eq!(
+            recorded.canonical_form,
+            ask.selection.canonical_form(),
+            "stored beside its digest so an operator can read it back"
+        );
+    }
+
+    /// The control protocol being off must not make the ask disappear.
+    ///
+    /// This is the configuration the handoff singles out. With the setting off
+    /// a session gets no control bootstrap and therefore no control channel, so
+    /// every rule that lives on the control path stops running. `resolver_state`
+    /// has never written the setting, so it is off here in exactly the way it is
+    /// off in production by default — and the row still lands, because the write
+    /// is on create and reads nothing about control.
+    /// The revision a create records reaches the pointer it eventually writes.
+    ///
+    /// Three things have to line up for the fence to mean anything: a create
+    /// records the ask, an activation compares a revision, and a pointer stores
+    /// one. Each was proved alone, and nothing ran all three against a real
+    /// source — so an activation handed a re-read, or a pointer filled from
+    /// anywhere but the ask table, would look correct from either end.
+    #[tokio::test]
+    async fn a_created_playback_points_at_the_ask_its_create_recorded() {
+        use plurx_core::playback::DesiredQuality;
+        let (state, user, file_id) = servable_state().await;
+        let ask = envelope(1, DesiredQuality::Original);
+
+        let accepted = create(
+            crate::http::extract::AuthUser(user.clone()),
+            State(state.clone()),
+            AxPath(file_id),
+            HeaderMap::new(),
+            super::super::network::RemoteAddress(None),
+            Json(CreateSession {
+                playback_id: "chain-player".into(),
+                intent: Some(ask.clone()),
+                copy: Some(true),
+                ..bare_create()
+            }),
+        )
+        .await
+        .expect("the create must be accepted");
+        assert!(
+            !accepted.0.session_id.is_empty(),
+            "a create answers with a session"
+        );
+
+        let recorded = state
+            .store
+            .desired_selection(user.id, "chain-player")
+            .await
+            .expect("reading the ask")
+            .expect("the create recorded its viewer's ask");
+        assert_eq!(recorded.digest, ask.digest());
+
+        // The pointer's own revision is what the fence reads. A pointer written
+        // for a playback with an ask must carry that ask's revision, or the
+        // next legitimate write is refused as though it came from an old
+        // binary — the guard turned against the thing it protects.
+        let carried = state
+            .store
+            .validation_playback_pointer_desired_revision(user.id, "chain-player")
+            .await
+            .expect("reading the pointer revision");
+        assert_eq!(
+            carried,
+            Some(recorded.revision),
+            "the pointer carries the ask that was current when it was written"
+        );
+    }
+
+    /// Two creates for one playback, with the control protocol off.
+    ///
+    /// The configuration §1 singles out, and the one where nothing else can
+    /// help: with control off there is no channel, no `ControlState`, and no
+    /// exchange — the create body is the entire record of what the viewer
+    /// wants. Two of them for the same playback is the shape a viewer produces
+    /// by changing their selection while the first is still starting.
+    ///
+    /// Exactly one may end up owning the pointer, and the pointer must name the
+    /// ask that owner was built for. "Either could win" is the correct
+    /// expectation and "both did" is the bug: two pointers cannot exist, but a
+    /// pointer advanced by the loser after the winner landed is a viewer
+    /// watching the selection they abandoned.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn overlapping_creates_with_control_off_settle_on_one_ask() {
+        use plurx_core::playback::DesiredQuality;
+        let (state, user, file_id) = servable_state().await;
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                .await
+                .expect("reading the control setting"),
+            None,
+            "the control protocol is off, which is the case under test"
+        );
+        let playback = "overlapping-player";
+
+        let spawn_create = |quality| {
+            let state = state.clone();
+            let user = user.clone();
+            tokio::spawn(async move {
+                create(
+                    crate::http::extract::AuthUser(user),
+                    State(state),
+                    AxPath(file_id),
+                    HeaderMap::new(),
+                    super::super::network::RemoteAddress(None),
+                    Json(CreateSession {
+                        playback_id: playback.into(),
+                        intent: Some(envelope(1, quality)),
+                        copy: Some(true),
+                        ..bare_create()
+                    }),
+                )
+                .await
+                .is_ok()
+            })
+        };
+        let first = spawn_create(DesiredQuality::Original);
+        let second = spawn_create(DesiredQuality::Manual { height: 720 });
+        let (first, second) = tokio::join!(first, second);
+        let accepted = [first.expect("first task"), second.expect("second task")]
+            .into_iter()
+            .filter(|accepted| *accepted)
+            .count();
+        assert!(
+            accepted >= 1,
+            "with control off, a viewer who asks twice must still get a session"
+        );
+
+        // Whatever the pointer ended up naming, it names the ask that is
+        // recorded for the playback. A pointer carrying anything else is a
+        // session serving a selection nothing says the viewer wants.
+        let recorded = state
+            .store
+            .desired_selection(user.id, playback)
+            .await
+            .expect("reading the ask")
+            .expect("two creates recorded an ask between them");
+        let carried = state
+            .store
+            .validation_playback_pointer_desired_revision(user.id, playback)
+            .await
+            .expect("reading the pointer revision");
+        if let Some(carried) = carried {
+            assert_eq!(
+                carried, recorded.revision,
+                "the pointer names the ask the store has recorded, not an \
+                 earlier one a loser advanced it to"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_ask_refuses_the_create_and_records_nothing() {
+        use plurx_core::playback::DesiredQuality;
+        let state = resolver_state();
+        let mut broken = envelope(1, DesiredQuality::Auto);
+        broken.recipe_revision = 0;
+
+        let answer = create_with(
+            &state,
+            CreateSession {
+                playback_id: "player-bad".into(),
+                intent: Some(broken),
+                ..bare_create()
+            },
+        )
+        .await;
+        match answer {
+            Err(ApiError::BadRequest(message)) => assert!(
+                message.contains("recipe"),
+                "the refusal names the axis that is wrong, got {message}"
+            ),
+            Err(other) => panic!("a zero revision must be a 400, got {other:?}"),
+            Ok(_) => panic!("a zero revision must be refused, not answered"),
+        }
+        assert!(
+            state
+                .store
+                .desired_selection(7, "player-bad")
+                .await
+                .expect("reading the desired row")
+                .is_none(),
+            "nothing may be recorded for an ask that was refused"
+        );
+    }
+
+    /// A body with no envelope is the body every deployed client sends, and it
+    /// must behave exactly as it did before the field existed.
+    #[tokio::test]
+    async fn a_create_without_an_ask_records_nothing() {
+        let state = resolver_state();
+        let _ = create_with(
+            &state,
+            CreateSession {
+                playback_id: "player-legacy".into(),
+                ..bare_create()
+            },
+        )
+        .await;
+        assert!(
+            state
+                .store
+                .desired_selection(7, "player-legacy")
+                .await
+                .expect("reading the desired row")
+                .is_none(),
+            "an older client asked for nothing new and owns no desired row"
+        );
     }
 
     async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
@@ -20262,6 +21935,7 @@ mod tests {
     #[test]
     fn playback_audio_offset_is_bounded_and_carried_by_the_session() {
         let request = CreateSession {
+            intent: None,
             control_sequence: None,
             playback_id: "player".into(),
             request_id: Some("attempt".into()),
@@ -20294,6 +21968,7 @@ mod tests {
     #[test]
     fn bitmap_fallback_still_carries_an_explicit_burn_request() {
         let request = CreateSession {
+            intent: None,
             control_sequence: None,
             playback_id: "apple-bitmap".into(),
             request_id: None,

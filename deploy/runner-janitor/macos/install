@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Install the runner janitor on a Mac. One command, root, idempotent.
+#
+#   sudo deploy/runner-janitor/macos/install
+#
+# Ends in a --dry-run so the install finishes by telling you what it would have
+# done rather than by claiming success.
+set -euo pipefail
+
+[ "$(id -u)" -eq 0 ] || { echo "install: run me as root" >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] || {
+  echo "install: this is the macOS janitor; use ../install on Linux" >&2
+  exit 1
+}
+here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+
+install -m 0755 "$here/plurx-ci-janitor" /usr/local/bin/plurx-ci-janitor
+install -m 0644 "$here/tv.plurx.ci-janitor.plist" /Library/LaunchDaemons/
+chown root:wheel /Library/LaunchDaemons/tv.plurx.ci-janitor.plist
+
+launchctl bootout system/tv.plurx.ci-janitor 2>/dev/null || true
+launchctl bootstrap system /Library/LaunchDaemons/tv.plurx.ci-janitor.plist
+
+echo
+launchctl print system/tv.plurx.ci-janitor | sed -n '1,12p' || true
+echo
+/usr/local/bin/plurx-ci-janitor --dry-run

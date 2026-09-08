@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["33f3b00d"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "resource-bounds"]
+reason = "cache.max_gb reads like a ceiling on the completed rendition cache and is not one: nothing compares the node's total admitted bytes against it, and the only thing the number feeds is admission_threshold, which multiplies it by the admission share to decide whether one rendition may ever be published. The Budgets field is renamed admission_sizing_bytes and both it and the settings field state what they do not bound. a_full_cache_admits_another_rendition pins the behaviour — two renditions, each admissible alone, together more than the number the setting names, both completing — so an unbounded cache stays a recorded decision rather than drifting into one; if a total is ever enforced that test fails and its replacement has to name which viewer's cache hit is evicted."

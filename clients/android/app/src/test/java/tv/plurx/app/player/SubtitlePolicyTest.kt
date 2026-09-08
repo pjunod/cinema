@@ -1,5 +1,7 @@
 package tv.plurx.app.player
 
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -607,7 +609,7 @@ class SubtitlePolicyTest {
     }
 
     @Test
-    fun explicitQualityBurnOmitQualityAuto() {
+    fun explicitQualityBurnSendsQualityAutoFalse() {
         val body = subtitleSessionBody(
             playbackId = "pb", requestId = "rq", startSeconds = 4.0,
             delivery = SubtitleDelivery.Burn, subtitleIndex = 1,
@@ -615,11 +617,11 @@ class SubtitlePolicyTest {
             audioIndex = 0, audioOffsetMs = 0,
             quality = PlaybackQuality.Q720, sourceHeight = 2160,
         )
-        assertNull("manual quality burn does not need quality_auto", body.quality_auto)
+        assertEquals(false, body.quality_auto)
     }
 
     @Test
-    fun autoPlanSessionWithoutBurnOmitQualityAuto() {
+    fun autoPlanSessionWithoutBurnSendsQualityAutoTrue() {
         val body = subtitleSessionBody(
             playbackId = "pb", requestId = "rq", startSeconds = 4.0,
             delivery = SubtitleDelivery.Plan, subtitleIndex = null,
@@ -627,7 +629,7 @@ class SubtitlePolicyTest {
             audioIndex = 0, audioOffsetMs = 0,
             quality = PlaybackQuality.Auto, sourceHeight = 2160,
         )
-        assertNull("no height sent means no quality_auto needed", body.quality_auto)
+        assertEquals(true, body.quality_auto)
     }
 
     @Test
@@ -639,7 +641,24 @@ class SubtitlePolicyTest {
             audioIndex = 0, audioOffsetMs = 0,
             quality = PlaybackQuality.Q1080, sourceHeight = 2160,
         )
-        assertNull("explicit 1080p rung is not a promise-height", body.quality_auto)
+        assertEquals(false, body.quality_auto)
+    }
+
+    @Test
+    fun originalCopySessionExplicitlyRefusesLegacyAutoInferenceOnTheWire() {
+        val body = subtitleSessionBody(
+            playbackId = "pb", requestId = "rq-original", startSeconds = 4.0,
+            delivery = SubtitleDelivery.NativeSession, subtitleIndex = 2,
+            copyableVideo = true, aac = false, preserveDolbyVision = true,
+            audioIndex = 0, audioOffsetMs = 0,
+            quality = PlaybackQuality.Original, sourceHeight = 2160,
+        )
+        val encoded = Json.encodeToString(body)
+
+        assertEquals(true, body.copy)
+        assertNull(body.height)
+        assertEquals(false, body.quality_auto)
+        assertTrue(encoded.contains("\"quality_auto\":false"))
     }
 
     @Test
@@ -671,13 +690,13 @@ class SubtitlePolicyTest {
     }
 
     @Test
-    fun qualityAutoIsFalseForAutoPlan() {
-        assertEquals(false, qualityAuto(PlaybackQuality.Auto, SubtitleDelivery.Plan))
+    fun qualityAutoIsTrueForAutoPlan() {
+        assertEquals(true, qualityAuto(PlaybackQuality.Auto, SubtitleDelivery.Plan))
     }
 
     @Test
-    fun qualityAutoIsFalseForAutoNativeSession() {
-        assertEquals(false, qualityAuto(PlaybackQuality.Auto, SubtitleDelivery.NativeSession))
+    fun qualityAutoIsTrueForAutoNativeSession() {
+        assertEquals(true, qualityAuto(PlaybackQuality.Auto, SubtitleDelivery.NativeSession))
     }
 
     @Test

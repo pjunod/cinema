@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::dto::UserDto;
 use super::error::ApiError;
 use super::extract::{AuthUser, RawToken};
+use super::internal_auth_revocation::ClusterCacheRevocation;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -31,6 +32,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
+    let proof_ticket = state.cache_only_admin_proofs.authentication_ticket();
     let user = state.store.get_user_by_username(&req.username).await?;
     // Verify even on unknown user to keep timing uniform.
     let (ok, user) = match user {
@@ -52,8 +54,18 @@ pub async fn login(
     let hash = auth::hash_token(&token);
     state
         .store
-        .create_token(&hash, user.id, req.device.as_deref())
-        .await?;
+        .create_token_if_password_matches(
+            &hash,
+            user.id,
+            req.device.as_deref(),
+            &user.password_hash,
+        )
+        .await?
+        .then_some(())
+        .ok_or(ApiError::Unauthorized)?;
+    state
+        .cache_only_admin_proofs
+        .record_authenticated(proof_ticket, hash, &user);
 
     Ok(Json(LoginResponse {
         token,
@@ -64,10 +76,21 @@ pub async fn login(
 /// POST /api/v1/auth/logout — invalidate the presented token.
 pub async fn logout(
     State(state): State<AppState>,
+    _user: AuthUser,
     RawToken(token): RawToken,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let hash = auth::hash_token(&token);
-    state.store.delete_token(&hash).await?;
+    let proof_revocation = ClusterCacheRevocation::begin_digest(&state, &hash).await?;
+    if !state
+        .store
+        .delete_token_with_cache_admin_claim(&hash, proof_revocation.mutation_claim())
+        .await?
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "logout lost its cache-revocation exclusion; retry the request".into(),
+        ));
+    }
+    proof_revocation.finish(&state).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

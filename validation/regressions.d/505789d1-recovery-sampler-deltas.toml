@@ -1,0 +1,14 @@
+version = 1
+
+[[coverage]]
+commits = ["505789d1"]
+points = [
+  "cluster.auth",
+  "operations.packaging",
+  "validation.framework",
+]
+checks = [
+  "rust-gate-ci",
+  "operations-contract",
+]
+reason = "The campaign's expiry now says no node is leaking, which leaves one question — settling counts or persistent jitter — whose two answers want opposite fixes: a longer horizon, or a stability rule that stops demanding exact equality. The regression is that the report carries the evidence to choose: one test pins that each moved resource is named with its node and its before and after value, that a resource which did not move is left out, and that two identical samples say so rather than being reported as silence. No threshold, margin, horizon or sample count moved and the ceiling comparison is untouched, so every existing rejection test still pins the unchanged predicate. The lane's expected test count is a contract in two places, so the operations contract moves with the Makefile."

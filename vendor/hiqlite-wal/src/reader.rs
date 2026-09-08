@@ -80,9 +80,7 @@ fn run(
                     // Keep the shared layout guard through mmap creation and
                     // the complete read. Remove/truncate takes the exclusive
                     // guard before changing any path or record layout.
-                    read_requested_logs(
-                        &mut wal, from, until, &mut memo, &mut buf, &ack,
-                    )
+                    read_requested_logs(&mut wal, from, until, &mut memo, &mut buf, &ack)
                 };
                 complete_log_read(ack, result);
             }
@@ -113,10 +111,7 @@ fn run(
     debug!("Logs Reader exiting");
 }
 
-fn complete_log_read(
-    ack: flume::Sender<LogReadResponse>,
-    result: Result<bool, Error>,
-) {
+fn complete_log_read(ack: flume::Sender<LogReadResponse>, result: Result<bool, Error>) {
     match result {
         Ok(true) => {
             let _ = ack.send(LogReadResponse::Done(Ok(())));
@@ -190,9 +185,9 @@ fn read_requested_logs(
         // The next file owns the remainder. Drop completed-file mappings so a
         // snapshot catch-up does not pin every historical WAL in memory.
         log.mmap_drop();
-        from_next = file_until.checked_add(1).ok_or_else(|| {
-            Error::Integrity("requested WAL range continuation overflow".into())
-        })?;
+        from_next = file_until
+            .checked_add(1)
+            .ok_or_else(|| Error::Integrity("requested WAL range continuation overflow".into()))?;
     }
 
     Ok(true)
@@ -225,18 +220,23 @@ fn read_log_state(
 
     let last_log = if let Some(latest_log_id) = latest_log_id {
         buf.clear();
-        let active_has_data = wal.files.back().is_some_and(|file| file.data_start.is_some());
+        let active_has_data = wal
+            .files
+            .back()
+            .is_some_and(|file| file.data_start.is_some());
         let file = if active_has_data {
             wal.files
                 .back_mut()
                 .ok_or_else(|| Error::Integrity("WAL file set is empty".into()))?
         } else {
-            let previous = wal.files.len().checked_sub(2).ok_or_else(|| {
-                Error::Integrity("WAL rollover has no previous file".into())
-            })?;
-            wal.files.get_mut(previous).ok_or_else(|| {
-                Error::Integrity("WAL rollover previous file is absent".into())
-            })?
+            let previous = wal
+                .files
+                .len()
+                .checked_sub(2)
+                .ok_or_else(|| Error::Integrity("WAL rollover has no previous file".into()))?;
+            wal.files
+                .get_mut(previous)
+                .ok_or_else(|| Error::Integrity("WAL rollover previous file is absent".into()))?
         };
         file.mmap()?;
         file.read_logs(latest_log_id, latest_log_id, memo, buf)?;
@@ -354,8 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn range_spanning_the_retained_floor_streams_only_retained_records(
-    ) -> Result<(), Error> {
+    fn range_spanning_the_retained_floor_streams_only_retained_records() -> Result<(), Error> {
         let base_path = "test_data/reader_spanning_retained_floor".to_owned();
         let _ = fs::remove_dir_all(&base_path);
         fs::create_dir_all(&base_path)?;
@@ -368,9 +367,7 @@ mod tests {
         let mut memo = None;
         let mut buf = Vec::with_capacity(1);
         let (ack, responses) = flume::bounded(2);
-        let result = read_requested_logs(
-            &mut wal, 1, 10, &mut memo, &mut buf, &ack,
-        );
+        let result = read_requested_logs(&mut wal, 1, 10, &mut memo, &mut buf, &ack);
         complete_log_read(ack, result);
         assert!(matches!(
             responses.recv().unwrap(),
@@ -387,8 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn internal_retained_gap_is_a_terminal_error_after_any_prior_records(
-    ) -> Result<(), Error> {
+    fn internal_retained_gap_is_a_terminal_error_after_any_prior_records() -> Result<(), Error> {
         let base_path = "test_data/reader_internal_gap".to_owned();
         let _ = fs::remove_dir_all(&base_path);
         fs::create_dir_all(&base_path)?;
@@ -405,9 +401,7 @@ mod tests {
         let mut memo = None;
         let mut buf = Vec::with_capacity(2);
         let (ack, responses) = flume::bounded(2);
-        let result = read_requested_logs(
-            &mut wal, 1, 3, &mut memo, &mut buf, &ack,
-        );
+        let result = read_requested_logs(&mut wal, 1, 3, &mut memo, &mut buf, &ack);
         complete_log_read(ack, result);
         assert!(matches!(
             responses.recv().unwrap(),
@@ -424,8 +418,8 @@ mod tests {
     }
 
     #[test]
-    fn log_responses_apply_capacity_one_backpressure_before_the_terminal_result(
-    ) -> Result<(), Error> {
+    fn log_responses_apply_capacity_one_backpressure_before_the_terminal_result()
+    -> Result<(), Error> {
         let base_path = "test_data/reader_bounded_stream".to_owned();
         let _ = fs::remove_dir_all(&base_path);
         fs::create_dir_all(&base_path)?;
@@ -442,9 +436,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let mut memo = None;
             let mut buf = Vec::with_capacity(2);
-            let result = read_requested_logs(
-                &mut wal, 1, 2, &mut memo, &mut buf, &ack,
-            );
+            let result = read_requested_logs(&mut wal, 1, 2, &mut memo, &mut buf, &ack);
             complete_log_read(ack, result);
             finished.send(()).unwrap();
         });
@@ -453,7 +445,11 @@ mod tests {
         while responses.is_empty() && Instant::now() < deadline {
             thread::yield_now();
         }
-        assert_eq!(responses.len(), 1, "the first record must reach the bounded channel");
+        assert_eq!(
+            responses.len(),
+            1,
+            "the first record must reach the bounded channel"
+        );
         assert!(
             completion.try_recv().is_err(),
             "the producer must block before it can queue the second record and terminal result"

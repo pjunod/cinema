@@ -131,11 +131,7 @@ impl Client {
             Ok(state) => Ok(state),
             Err(err) => {
                 if self
-                    .was_leader_update_error(
-                        &err,
-                        &self.inner.leader_cache,
-                        &self.inner.tx_client_cache,
-                    )
+                    .was_leader_update_error(&err, &self.inner.leader_cache)
                     .await
                 {
                     self.lock_req(cache_req, is_remote_await).await

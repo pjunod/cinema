@@ -949,6 +949,7 @@ mod tests {
             .expect("assign relay owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
             recovery_epoch: String::new(),
+            expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
             user_id,
@@ -1012,6 +1013,7 @@ mod tests {
 
     fn relay_control_request(generation: String) -> crate::playback_control::ControlRequestV1 {
         crate::playback_control::ControlRequestV1 {
+            intent: None,
             protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
             generation,
             control_epoch: 1,
@@ -1185,6 +1187,7 @@ mod tests {
         state
             .store
             .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                expected_desired_revision: None,
                 incarnation_id: successor_incarnation.clone(),
                 session_id: successor_session.clone(),
                 user_id: user.id,
@@ -1214,6 +1217,8 @@ mod tests {
             action_id: uuid::Uuid::new_v4().to_string(),
             state: crate::playback_control::AcknowledgementState::Committed,
             buffered_through_ms: None,
+            // The successor was staged at origin 0; a commit echoes it.
+            committed_media_origin_ms: Some(0),
             first_frame_unix_ms: Some(4),
         });
         let response_time = crate::media_sessions::unix_ms();
@@ -1277,6 +1282,7 @@ mod tests {
                 user.id,
                 "relay-player",
                 &plurx_core::domain::MediaSessionPreparationCommitRequest {
+                    expected_desired_revision: None,
                     staged_incarnation_id: successor_incarnation,
                     expected_predecessor_owner_node_id: state.node_id.clone(),
                     expected_predecessor_owner_epoch: 1,

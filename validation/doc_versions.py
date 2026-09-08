@@ -138,14 +138,14 @@ def validate_documented_builds(read: Callable[[str], str]) -> tuple[str, ...]:
             r"^> Status:.*?build `([1-9]\d*)`",
             "Android README current build claim",
         ),
-        "docs/APPLE-CLIENT-PARITY.md": _one(
-            read("docs/APPLE-CLIENT-PARITY.md"),
+        "docs/clients/APPLE-CLIENT-PARITY.md": _one(
+            read("docs/clients/APPLE-CLIENT-PARITY.md"),
             r"^> Status .*?Apple build ([1-9]\d*)\.",
             "Apple parity current build claim",
         ),
     }
     errors: list[str] = []
-    for path in ("clients/apple/README.md", "docs/APPLE-CLIENT-PARITY.md"):
+    for path in ("clients/apple/README.md", "docs/clients/APPLE-CLIENT-PARITY.md"):
         if claims[path] != versions.apple_build:
             errors.append(
                 f"{path} claims Apple build {claims[path]}; "
