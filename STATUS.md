@@ -6,7 +6,8 @@ first.
 
 ## A prepared commit hands the viewer a session that is refused from its first request
 
-**Open on [its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/137).
+**Merged into `main` as `4c93ef29`, 2026-09-08, from
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/137).
 Documentation and one test comment; no runtime change.** Found while writing
 the plan for M6's missing server phase, and it is about code that has been
 merged for days rather than anything new.
@@ -23,8 +24,8 @@ very first request**, because `classify_durable_route` answers
 control on the same predicate. The pointer moves and the viewer gets nothing.
 
 **The obvious fix is a regression, and that was established by building it.**
-The publication was written as a caller on the commit path; all 1905 daemon
-tests passed, clippy and rustfmt were clean, and an adversarial pass found what
+The publication was written as a caller on the commit path; the whole daemon
+suite passed, clippy and rustfmt were clean, and an adversarial pass found what
 the suite could not. A committed successor has no local worker, because nothing
 primes one. Moving the row off the sentinel puts it into
 `owned_media_sessions`, and the lease loop renews only sessions that are
@@ -50,6 +51,35 @@ produces a `Transcode` recipe, and the VOD engine refuses every non-`Copy` kind
 until the D6 device measurement lands. Priming cannot be built against the
 transition the fleet actually produces. Hold it for D6, or narrow the axis set
 to copy-only and prove the transaction on those — that choice is Paul's.
+
+## The third client speaks the protocol, on a platform the server will not use it for
+
+**Merged into `main` as `b266341e`, 2026-09-08, from
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/136). With it,
+all three client halves of M6 are on `main`.** The work was built on
+`effort/decoder-selection-recovery`, where it merged as four pull requests,
+and reconciled here against `main`'s restructured seek path, control session
+and reporter. It was reviewed adversarially as a *change* rather than as a
+move, which is the reason it is worth a line: none of the three defects the
+review found is in the feature — all three are in the seam, in pairings that
+existed on neither branch. `./gradlew testDebugUnitTest :app:assembleDebug
+:app:lintDebug` — the non-Docker equivalent of `make android-test` and `make
+android` — green, 519 tests, 0 failures, 0 errors.
+
+**What it deliberately did not do, and this matters more than the port.**
+Android's `dual_player_preparation` is `false` and stays `false`. M5.5
+measured the tunneled Google TV at 0/3 on the same-codec case, both
+`PREPARED_AXIS_SETS` rows *are* same-codec, and Gate A is a hardware claim
+frozen per platform in protocol v1 — so the server will not stage a successor
+for an Android viewer, and this code does not run. It is written, tested and
+dark, against the day a measured device class earns the literal. The lab
+re-run on the tunneled Google TV was not taken; no lab access from that
+session. See
+[M6-ANDROID-CLIENT-STATUS.md](docs/playback-control/M6-ANDROID-CLIENT-STATUS.md).
+
+**If `effort/decoder-selection-recovery` is promoted later, its four Android
+commits are now duplicates** — rebase them away rather than merging them
+twice.
 
 ## Apple viewers were paying for encoders nobody told them about
 
@@ -130,9 +160,33 @@ prompt for them is in the pull request. `make apple-build` and
 `make apple-test` are green on Xcode 26.6 — 900 cases across the iOS and
 tvOS destinations.
 
+**One thing this branch got wrong, recorded with the evidence because the
+reasoning is the tempting kind.** `web layout and accessibility` was red on
+`main`, and this PR's log carried a Playwright `TargetClosedError` that
+matched the one in main's. That match was taken as proof the redness was not
+this branch's. The same log also carried `DRIFT 54 structural facts differ
+from tests/ui-structure.golden` — the Developer card's advisory rows are DOM
+facts and the golden had to move with them — so the merge here happened
+without the golden it needed, and `main` stayed red on that lane until the
+web half carried both cards' facts in `37ce1e87`.
+
+The lesson is sharper than "a job can fail twice", and the job logs are what
+sharpen it. Counted across the runs of that lane retained when this was
+written (tasks 3351 to 3723), `TargetClosedError` appears **six** times in the
+runs that **succeeded** (3404, 3497, 3531) and **four** times in the ones that
+failed (3351, 3368, 3451, 3478, 3723) — it is asyncio teardown noise, printed
+by passing runs, and nothing has ever failed on it. Every failure of that lane
+was a golden `DRIFT`, including the redness on `main` that was being matched
+against: `37ce1e87`'s own message says so.
+So the signature was never a failure signature. **Before treating a red lane
+as somebody else's, find the line that actually failed the job** — the
+`Error`/`FAILED`/`DRIFT` the runner exits on — and check whether it names a
+surface this branch touched. Matching an error string that also appears in
+green runs proves nothing at all.
+
 ## The CI fleet filled up because the bound was behind a flag nobody set
 
-**Branch `fix/ci-runner-disk` — open against `main`.** Runners kept running
+**Merged into `main`; the last of it is `5b30eb92`.** Runners kept running
 out of disk. The failure never says so: a runner that fills mid-link reports
 `ld terminated with signal 7 [Bus error]`, which is what a miscompile looks
 like, and the real `No space left on device` is hundreds of lines further down.
@@ -178,7 +232,19 @@ was holding 24G of its own and gave all of it back on the first pass.
 `gha-mba-apple-01`, the one runner with no systemd, and it is installed and
 verified there: it read the runner's label and config out of the launchd plist,
 unloaded the daemon, reset a 4 G cache and loaded it again, and the runner was
-back `idle` in Forgejo twenty seconds later. **The whole fleet is bounded.** The `pjunod/ansible`
+back `idle` in Forgejo twenty seconds later. **The cache is bounded fleet-wide.**
+
+**What is still unbounded, found 2026-09-08 and not fixed here.** The janitor
+bounds `cache.dir`. It does not bound `_work`, and that is what refused a job
+this morning: task 3753 on `gha-nuc4-general-01` ended
+`::error::gha-nuc4-general-01 is out of disk: 18G available at
+/opt/forgejo-runner/_work/1e3b94b21c43de67/hostexecutor, need 25G`, with the
+preflight refusing before anything compiled. The preflight is doing its job —
+it says the real cause instead of letting a link die on `signal 7` — but a
+checkout tree that nothing evicts fills the same disk the cache used to. The
+janitor's own comment already names this host, so the gap is the directory,
+not the coverage. A `_work` reaper wants the same shape: graceful stop, a
+budget, mutation-proven refusals. The `pjunod/ansible`
 repository still describes the retired GitHub `actions-runner` fleet and knows
 nothing about `forgejo-runner`, so the janitor ships from this repository until
 that catches up.
@@ -234,8 +300,8 @@ that dies mid-tick must still end it.
 
 ## A deploy that refused itself over an unmaintainable pair
 
-**PR [#37](http://192.168.4.7:3000/noirr/plurx/pulls/37) — open against
-`main`.** `make
+**PR [#37](http://192.168.4.7:3000/noirr/plurx/pulls/37) merged as
+`c661d387`.** `make
 docker-up` on nynuc refused to change a container: the health start period was
 the tracked five minutes, and `/srv/plurx/plurx.toml` sets
 `install_snapshot_timeout_secs = 1200`, which with the three named startup
