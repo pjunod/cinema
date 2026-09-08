@@ -190,6 +190,32 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **Live TV says what is on, and the picture follows you.** The Live TV page is
+  a real channel list and a real half-hour grid behind one switch, on the web,
+  iOS, tvOS, Android and Android TV. A channel row carries the network chip,
+  the number and callsign, the programme on now with a bar running to its end,
+  and what is next; the grid draws a red now line and says where the data ends.
+  Programme data comes from the HDHomeRun's own guide service by default, or
+  from an XMLTV document an administrator configures, and it is read-only —
+  there is no DVR behind it, so a future cell has details and nothing else.
+  Every guide state is *rendered*: off, empty, stale and erroring all leave a
+  working page and a tunable channel, because the channel list and the session
+  start never consult guide state and never wait on a guide fetch.
+
+  Leaving the page with a channel playing now docks the picture rather than
+  tearing it down, fullscreen is a surface with a neighbour strip and a
+  four-second auto-hide rather than a bare video element, and native
+  picture-in-picture works on all three platforms. The rules that own a
+  physical tuner were narrowed rather than removed: the keepalive, the status
+  poll and the thirty-second no-progress release run for as long as a lease is
+  held — docked and in picture-in-picture included — and every release path
+  asks whether picture-in-picture is running before it drops the tuner.
+
+  The credential policy changed by exactly one clause: the owner node reads the
+  device's `DeviceAuth` fresh at each refresh, sends it to the guide host over
+  TLS, and forgets it. It is never stored, logged, relayed or returned, and
+  only the owner ever holds it — the guide *result* is what other nodes relay.
+
 - **One routing table now says what every player does with a press.**
   `docs/clients/UI-NAVIGATION-AUDIT.md` records why the tvOS, Android, and web players
   diverged — a hidden-chrome directional press that seeks before it reveals, a

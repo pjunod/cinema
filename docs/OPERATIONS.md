@@ -2894,7 +2894,11 @@ untested, and turn it back off if the device does not visibly improve.
 | 32414 | UDP | GDM discovery so Plex/Kodi clients find the server on the LAN |
 | 5353 | UDP multicast | Bonjour `_plurx._tcp` discovery for native clients |
 
-Live TV adds no listener. It makes **outbound** connections from the owner node
+Live TV adds no listener. With a programme guide configured it makes one
+outbound *internet* connection from the owner node — `https` to
+`api.hdhomerun.com`, or to the XMLTV URL you supplied — every twenty minutes;
+with `live_tv.guide_source = off`, which is the default, it makes none. Its
+other **outbound** connections are from the owner node
 to the configured tuner on TCP 80 (`discover.json`, and `lineup.json` unless the
 device advertises it on 5004 — those two ports are the only ones accepted from
 an advertised `LineupURL`) and TCP 5004 (the stream). Those are the device's
@@ -4085,7 +4089,10 @@ curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/j
 # 3. Probe it. This is the step that tells you the truth.
 curl -s -X POST -H "Authorization: Bearer $TOKEN" $HOST/api/v1/live-tv/readiness/refresh
 
-# 4. Only then enable, carrying the generation the PUT above returned.
+# 4. Then enable, carrying the generation the PUT above returned. A red check
+#    does not stop you: readiness is advice, and enabling with one unmet tells
+#    you what actually breaks instead of leaving you with a switch that will
+#    not move and no way to find out why. Structural problems still refuse.
 curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"live_tv_config_generation":1,"live_tv_enabled":true}' $HOST/api/v1/settings
 ```
@@ -4113,6 +4120,60 @@ probing; `POST .../readiness/refresh` probes.
 | `lineup` | the device answered but its lineup is empty — run a channel scan **on the HDHomeRun**, not here |
 | `session_limit` | `live_tv_max_sessions` is above the tuner count the device reports |
 | `ffmpeg_graph` | the configured output cannot be built with this FFmpeg |
+
+**Readiness does not gate the enable (2026-09-07).** Every check above still
+runs, and the answer is recorded in the log line that accompanies the enable
+and shown on the Developer card — but an unmet check is a sentence, not a
+refusal. The things that still refuse are structural: an address that is not
+private or link-local, an unresolved previous-owner barrier, a session limit
+or output height outside their ranges, and a stale generation. Those make the
+*system* wrong. "The tuner did not answer just now" makes the feature not
+work, and an operator who cannot turn a feature on cannot find out why it does
+not work.
+
+### The programme guide
+
+Read-only, off until you turn it on, and it never touches the tuner contract:
+`GET /live-tv/channels` and session start do not consult guide state and never
+wait on a guide fetch. Three settings, all editable **while Live TV is
+enabled** because turning a feed on must not drain viewers:
+
+| Setting | Values | Meaning |
+|---|---|---|
+| `live_tv_guide_source` | `off` · `hdhomerun` · `xmltv` | `hdhomerun` needs no further setup; `xmltv` is the override for an existing grabber |
+| `live_tv_xmltv_url` | `http`/`https`, ≤ 1 KiB, no userinfo | Required when the source is `xmltv`. Plain or gzipped |
+| `live_tv_guide_hours` | `4`–`72` | How far ahead the cache tries to fill |
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"live_tv_config_generation":2,"live_tv_guide_source":"hdhomerun","live_tv_guide_hours":24}' \
+  $HOST/api/v1/settings
+
+curl -s -H "Authorization: Bearer $TOKEN" $HOST/api/v1/live-tv/guide/readiness   # advisory
+curl -s -X POST -H "Authorization: Bearer $TOKEN" $HOST/api/v1/live-tv/guide/refresh
+curl -s -H "Authorization: Bearer $TOKEN" $HOST/api/v1/live-tv/guide \
+  | python3 -c 'import json,sys; g=json.load(sys.stdin); print(g["freshness"], g["matched_channels"], "of", g["lineup_channels"])'
+```
+
+What the states mean, and what to do:
+
+| Report | What it means | What to do |
+|---|---|---|
+| `freshness: unavailable`, `source: off` | Nobody turned it on. Channel rows show number and callsign only | Set a source. Nothing is broken |
+| `freshness: unavailable`, a source set | The owner has no cache: it has not refreshed yet, or every refresh in the last six hours failed | Read `refresh_error`. For `hdhomerun` the usual cause is no outbound HTTPS from the owner, or a device that publishes no `DeviceAuth` — an older or unsubscribed tuner. Use XMLTV in that case |
+| `freshness: stale` | The last refresh is older than twenty minutes but younger than six hours. Still served, deliberately | If it persists, the refresh loop is failing: check `plurx_live_tv_guide_refresh_total{outcome="error"}` and the owner's log |
+| `matched N of M` with N well under M | XMLTV channel names do not line up with the tuner's | Matching is display-name, then `<lcn>`, then callsign. Fix the grabber's `<display-name>` to the channel number. There is no mapping UI |
+| Rows blank on one channel only | The source has no data for it | Nothing to do; the lineup channel keeps its row |
+
+Metrics: `plurx_live_tv_guide_refresh_total{source,outcome}`,
+`plurx_live_tv_guide_age_seconds` (the one to alert on — a stalled loop shows
+here long before anyone notices an empty grid), and
+`plurx_live_tv_guide_programmes`.
+
+The guide cache lives in the owner's memory only. A restart refetches; nothing
+is written to the settings table, which is replicated on every write and copied
+whole into every snapshot and is therefore the wrong place for a blob that
+changes every twenty minutes.
 | `drm_boundary` | informational; never blocks. Protected channels are listed and refused |
 
 Before it is enabled, expect exactly the enablement check to fail and every

@@ -849,6 +849,116 @@ async fn an_ingress_relays_a_capability_it_does_not_own_and_never_takes_the_tune
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ingress_serves_the_owners_guide_and_a_guide_outage_never_reaches_a_session() {
+    let (device, _serial) = exclusive_device().await;
+    let mut cluster = Cluster::start().await;
+    cluster
+        .configure(&device.address, &cluster.node_a_id.clone())
+        .await;
+    cluster.enable().await;
+
+    let b_base = cluster.b_base.clone();
+
+    // The guide source is deliberately left `off`, which is the state a fresh
+    // install is in. `off` is a *rendered* state, not an error: the ingress
+    // must answer 200 with `unavailable` rather than refusing, because a
+    // client that gets a 503 here has no way to draw the page at all.
+    let guide = cluster
+        .client
+        .get(format!("{b_base}/api/v1/live-tv/guide"))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .expect("guide request");
+    assert_eq!(
+        guide.status(),
+        StatusCode::OK,
+        "the ingress refused a guide read; node B: {} node A: {}",
+        cluster.node_b.diagnostics(),
+        cluster.node_a.diagnostics()
+    );
+    let body = guide.json::<Value>().await.expect("guide JSON");
+    assert_eq!(body["freshness"], "unavailable");
+    assert_eq!(
+        body["channels"].as_array().map(Vec::len),
+        Some(0),
+        "an unconfigured guide is an empty answer, not a missing one"
+    );
+    // And no credential or upstream host is anywhere in what crossed the wire.
+    let encoded = serde_json::to_string(&body).expect("guide json");
+    assert!(!encoded.contains("DeviceAuth"));
+    assert!(!encoded.contains("hdhomerun.com"));
+
+    // Point the guide at an XMLTV URL nothing is serving. Every refresh now
+    // fails, on the owner, for as long as this test runs.
+    let (status, response) = put_settings(
+        &cluster.client,
+        &cluster.a_base.clone(),
+        &cluster.token,
+        json!({
+            "live_tv_config_generation": settings(&cluster.client, &cluster.a_base, &cluster.token)
+                .await["live_tv_config_generation"],
+            "live_tv_guide_source": "xmltv",
+            "live_tv_xmltv_url": "http://192.0.2.1/guide.xml",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the guide source is a runtime setting and must be writable while Live TV is enabled: \
+         {response}"
+    );
+
+    // The whole point: a broken guide is not a broken tuner. Starting a
+    // session through the ingress must be untouched by any of it.
+    let channel = cluster.channel_id(&b_base).await;
+    let started = cluster.start_session(&b_base, &channel).await;
+    assert_eq!(
+        started.status(),
+        StatusCode::OK,
+        "a failing guide refused a session start; the tuner contract must never consult guide \
+         state. node B: {} node A: {}",
+        cluster.node_b.diagnostics(),
+        cluster.node_a.diagnostics()
+    );
+    let capability = started.json::<Value>().await.expect("start JSON")["session_id"]
+        .as_str()
+        .expect("capability")
+        .to_owned();
+    let read = cluster.read_until_rolled(&b_base, &capability).await;
+    assert!(
+        read >= 3,
+        "a relayed session served {read} segments while the guide was failing"
+    );
+    assert_eq!(
+        device.opens.load(Ordering::Acquire),
+        1,
+        "a guide refresh opened the physical tuner; a guide must never be a reason to talk to \
+         the device"
+    );
+
+    // And the guide read still answers, still without leaking the URL it could
+    // not reach.
+    let after = cluster
+        .client
+        .get(format!("{b_base}/api/v1/live-tv/guide"))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .expect("guide request")
+        .json::<Value>()
+        .await
+        .expect("guide JSON");
+    assert_eq!(after["freshness"], "unavailable");
+    let encoded = serde_json::to_string(&after).expect("guide json");
+    assert!(
+        !encoded.contains("192.0.2.1"),
+        "a sanitized refresh error must not carry the URL it tried: {encoded}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn disabling_live_tv_drains_the_session_and_refuses_the_next_one() {
     let (device, _serial) = exclusive_device().await;
     let mut cluster = Cluster::start().await;

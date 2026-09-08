@@ -91,6 +91,14 @@ class LiveTvUiTest {
                             path == "/api/v1/live-tv/channels" -> """{"freshness":"fresh","channels":[
                                 {"id":"one","guide_number":"7.1","guide_name":"Fixture News","favorite":true,"drm":false,"support":"ready"},
                                 {"id":"protected","guide_number":"107.1","guide_name":"Protected News","favorite":false,"drm":true,"support":"drm_unsupported"}]}"""
+                            // The guide is a second, independent read. It must
+                            // never gate the lineup or a start, so the fixture
+                            // answers the honest degraded shape — a configured
+                            // source with nothing cached — and the assertions
+                            // below prove the screen is fully usable anyway.
+                            path == "/api/v1/live-tv/guide" -> """{"source":"hdhomerun","freshness":"unavailable",
+                                "age_seconds":0,"window":{"start":0,"end":0},
+                                "matched_channels":0,"lineup_channels":2,"channels":[]}"""
                             path == "/api/v1/live-tv/readiness/refresh" ->
                                 """{"ready":true,"generation":$generation,"checks":[{"id":"tuner","ready":true,"message":"Fixture tuner reachable"}]}"""
                             path == "/api/v1/settings" -> {
@@ -168,7 +176,10 @@ class LiveTvUiTest {
         // does not owe a touch screen.
         if (television) compose.onNodeWithText("Back").assertIsFocused()
         else compose.onNodeWithText("Back").assertHasClickAction()
-        compose.onNodeWithText("Find a channel").performTextInput("Fixture")
+        // The field's label says what search now matches. It used to read
+        // "Find a channel"; since the guide landed it also matches the
+        // programme on now, and the label says so.
+        compose.onNodeWithText("Number, name, or what is on").performTextInput("Fixture")
         compose.onNodeWithText("7.1 · Fixture News").assertIsDisplayed()
         compose.onNodeWithText("Watch live").assertIsDisplayed()
         assertTrue(requests.none { it.startsWith("POST ") })

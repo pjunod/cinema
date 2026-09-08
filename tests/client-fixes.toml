@@ -806,6 +806,64 @@ test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
 
 [[fixes]]
+# `LiveTvInputPolicy.route` had exactly one call site in the repository and it
+# was its own test, so the transcribed routing table governed nothing: no key
+# handling, no four-second auto-hide, no channel up/down, and a television
+# showing the phone layout behind a Fullscreen button. A D-pad press reached
+# whichever of two overlapping channel lists the focus engine happened to pick.
+id = "android.live-tv-television-routes-every-press-through-the-table"
+commits = ["c0347847"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "applyOutcome(LiveTvInputPolicy.route(surface, inputState(), input))"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyTest.kt"
+test_anchor = "every press goes through the shared table"
+
+[[fixes]]
+# The screen set the retention flag before calling `enterPictureInPictureMode`
+# and discarded the Boolean it returns. The system refuses PiP whenever the
+# user has turned it off for the app, and on that path no mode-changed callback
+# ever fires — so the flag latched true for the life of the process and every
+# lifecycle release path was disabled. The client then kept renewing the lease
+# on the household's only tuner against a screen nobody was on, with no way
+# back to the Stop button.
+id = "android.live-tv-refused-pip-must-not-latch-retention"
+commits = ["01413da4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
+source_anchor = "controller.setRetained(entered)"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyTest.kt"
+test_anchor = "a refused picture-in-picture never latches the retention flag"
+
+[[fixes]]
+# Nothing in the tvOS live surface was focusable while the overlay was hidden.
+# tvOS delivers move/exit/playPause only to the focused view and its ancestors,
+# and PlayerSurfaceView refuses focus — so the overlay's own four-second
+# auto-hide removed the last focusable view from the presented cover and the
+# surface went permanently deaf. Every `hidden -> reveal` row of the contract
+# was unreachable, with no way back to any chrome.
+id = "apple.live-tv-ten-foot-surface-keeps-something-focusable"
+commits = ["9268f5f6"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".focused($focusedControl, equals: FocusTarget.reveal)"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden"
+
+[[fixes]]
+# Entering picture-in-picture backgrounds the app, and the release rule read
+# only the scene phase — so the one case picture-in-picture exists for would
+# have released the tuner underneath its own window. Every release path now
+# asks whether PiP is running, or about to be: automatic PiP starts on
+# background and iOS publishes `.inactive` first, so `isActive` alone still
+# released the tuner in the window before the window appeared. And the reverse
+# gap was worse — nothing observed PiP *ending* off-screen, so a closed PiP
+# window left the lease renewed forever.
+id = "apple.live-tv-picture-in-picture-keeps-its-tuner"
+commits = ["08e610d0"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private var mayRelease: Bool { !pictureInPicture.isActive && !pictureInPicture.isStarting }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheLiveSurfaceAllowsPictureInPictureAndReleasesOnlyWhenItIsNotActive"
+
+[[fixes]]
 id = "apple.prepared-successor-that-cannot-be-primed"
 commits = ["a9b4933f"]
 source = "clients/apple/Sources/PreparedReplacement.swift"

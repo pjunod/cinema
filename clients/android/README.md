@@ -20,12 +20,16 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `74` — native viewer parity across phone, foldable,
-> and TV. Build 74 speaks the M6 prepared-replacement protocol: it declares the
-> vocabulary, accepts a `prepare`, primes a second pipeline against the
-> playhead, reports readiness and commits — off by default, behind an enable in
-> Settings' Developer section. Build 73 carries the streaming-reliability
-> effort's client half; it adds no viewer-visible behaviour of its own. Build 70 gives
+> Status: **v0.3.0**, build `75` — native viewer parity across phone, foldable,
+> and TV. Build 75 gives Live TV a programme guide: channel rows say what is on
+> now with a bar to its end and what is next, a phone or tablet can switch to a
+> half-hour grid, and picture-in-picture keeps playing when the app goes to the
+> background rather than releasing the tuner. Build 74 speaks the M6
+> prepared-replacement protocol: it declares the vocabulary, accepts a
+> `prepare`, primes a second pipeline against the playhead, reports readiness
+> and commits — off by default, behind an enable in Settings' Developer section.
+> Build 73 carries the streaming-reliability effort's client half; it adds no
+> viewer-visible behaviour of its own. Build 70 gives
 > the library, search and settings screens a starting
 > focus and puts every layout's cards and episode rows in the D-pad's reach.
 > Build 66 retries the selected native subtitle once when its demanded

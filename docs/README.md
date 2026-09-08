@@ -294,7 +294,8 @@ them describe current behavior.
 [#91](reviews/PR91-APPLE-HLS-AHEAD-WINDOW-REVIEW.md) ·
 [#92](reviews/PR92-SKIP-CREDITS-LAYOUT-REVIEW.md) ·
 [#94](reviews/PR94-ARTWORK-CACHE-REVIEW.md) ·
-[#98](reviews/PR98-CLUSTERING-IMPORT-BACKUP-REVIEW.md)
+[#98](reviews/PR98-CLUSTERING-IMPORT-BACKUP-REVIEW.md) ·
+[effort/live-tv-guide](reviews/EFFORT-LIVE-TV-GUIDE-REVIEW.md)
 
 ---
 

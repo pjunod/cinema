@@ -28,6 +28,13 @@ data class LiveTvPlayerState(
     val playing: Boolean = false,
     val paused: Boolean = false,
     val muted: Boolean = false,
+    /**
+     * A second, independent read. It never gates the lineup and never gates a
+     * start: a screen that waited on it would be a screen that cannot tune
+     * while a guide host is slow.
+     */
+    val guide: LiveTvGuide? = null,
+    val watching: LiveTvChannel? = null,
 )
 
 /** Dedicated live player: no VOD controller, watch progress, queue or timeline. */
@@ -40,6 +47,18 @@ class LiveTvPlayer private constructor(context: Context) {
     private var profile: Pair<String, String>? = null
     private var serial = 0L
     private var heartbeat: Job? = null
+    private var guideRefresh: Job? = null
+    private var channelChange: Job? = null
+    /**
+     * Set by the screen while, and only while, the activity is genuinely in
+     * picture-in-picture — the one case where the video is still on screen and
+     * its tuner is still in use, so the ordinary "the screen went away, drop
+     * the tuner" rules must consult this first.
+     *
+     * There is no in-app dock on Android in this effort. Saying there was
+     * would tell a reader that a path nobody wrote is covered here.
+     */
+    @Volatile private var retain = false
     private val mutableState = MutableStateFlow(LiveTvPlayerState())
     val state = mutableState.asStateFlow()
     var player: ExoPlayer? = null
@@ -65,6 +84,7 @@ class LiveTvPlayer private constructor(context: Context) {
                 mutableState.value = LiveTvPlayerState(channels = lineup.channels,
                     message = if (lineup.channels.isEmpty()) "No channels. Check the saved tuner and channel scan in Settings → Developer."
                     else "Select a channel · lineup ${lineup.freshness}")
+                startGuideRefresh(origin, token)
             } catch (error: Exception) { if (mine == serial) fail(error) }
         }
     }
@@ -75,7 +95,8 @@ class LiveTvPlayer private constructor(context: Context) {
         val lease = lease ?: return
         val mine = ++serial
         detach()
-        mutableState.value = mutableState.value.copy(busy = true, playing = false, title = channel.title, message = "Starting ${channel.title}…")
+        mutableState.value = mutableState.value.copy(busy = true, playing = false, title = channel.title,
+            watching = channel, message = "Starting ${channel.title}…")
         scope.launch {
             try {
                 val started = lease.start(channel.id).await() ?: return@launch
@@ -159,20 +180,52 @@ class LiveTvPlayer private constructor(context: Context) {
     private fun stopWithMessage(message: String, clearProfile: Boolean = false) {
         val mine = ++serial
         detach()
-        mutableState.value = mutableState.value.copy(busy = false, playing = false, message = message,
-            channels = if (clearProfile) emptyList() else mutableState.value.channels)
+        mutableState.value = mutableState.value.copy(
+            busy = false, playing = false, message = message,
+            // A released tuner is not "Watching". Carrying `watching` forward
+            // left the list row labelled and the grid cell highlighted for a
+            // session that no longer exists.
+            watching = null,
+            channels = if (clearProfile) emptyList() else mutableState.value.channels,
+            // And a guide belongs to the profile whose lineup it was matched
+            // against: keeping it across a sign-out rendered one account's
+            // programme text over the next account's screen.
+            guide = if (clearProfile) null else mutableState.value.guide,
+        )
         scope.launch {
             try {
                 lease?.stop()?.await()
-                if (mine == serial && clearProfile) { api = null; profile = null; lease = null }
+                if (mine == serial && clearProfile) {
+                    // The loop captured `api` in a local, so nulling the field
+                    // did not stop it: after a sign-out it kept issuing
+                    // authenticated guide reads with the previous profile's
+                    // bearer token every twenty minutes, for the life of the
+                    // process.
+                    endGuideRefresh()
+                    api = null; profile = null; lease = null
+                }
             } catch (_: Exception) {
                 if (mine == serial) mutableState.value = mutableState.value.copy(message = "Owner cleanup is unconfirmed. Retry Stop before opening another channel.")
                 // Preserve the old immutable profile and capability for retry.
             }
         }
     }
+    /** A message for the viewer that is not a failure of the stream. */
+    fun report(message: String) {
+        mutableState.value = mutableState.value.copy(message = message)
+    }
+
+    /**
+     * Ends the guide refresh loop. Separate from [detach] because stopping a
+     * session does not end the guide — only losing the profile does.
+     */
+    private fun endGuideRefresh() {
+        guideRefresh?.cancel(); guideRefresh = null
+    }
+
     private fun detach() {
         heartbeat?.cancel(); heartbeat = null
+        channelChange?.cancel(); channelChange = null
         val output = player
         player = null
         output?.release()
@@ -180,7 +233,73 @@ class LiveTvPlayer private constructor(context: Context) {
     private fun fail(error: Exception) { mutableState.value = mutableState.value.copy(busy = false, playing = false, message = message(error)) }
     private fun message(error: Exception): String = if (error is LiveTvFailure) error.message.orEmpty() else liveTvMessage("stream_failed")
 
+    /**
+     * The one predicate every teardown path asks. It is here rather than in
+     * the screen because the screen is exactly the thing that is going away
+     * when it matters.
+     */
+    fun setRetained(retained: Boolean) {
+        // Set only by the picture-in-picture listener and by a confirmed
+        // `enterPictureInPictureMode`. There is no in-app dock on Android in
+        // this effort — the KDoc on `retain` used to claim one, which would
+        // have led a reader to believe an untested path was covered here.
+
+        retain = retained
+    }
+
+    /** True when a lifecycle event may release the tuner. */
+    fun mayRelease(): Boolean = !retain
+
+    /** Stop, unless something is still showing the picture. */
+    fun stopUnlessRetained() {
+        if (mayRelease()) stop()
+    }
+
+    /**
+     * A held channel key is one tuner start, not ten. Superseding requests
+     * cancel rather than queue, so a channel-surf ends in exactly one start.
+     */
+    fun requestChannel(channel: LiveTvChannel) {
+        channelChange?.cancel()
+        channelChange = scope.launch {
+            delay(LiveTvInputPolicy.CHANNEL_COALESCE_MS)
+            watch(channel)
+        }
+    }
+
+    /**
+     * Twenty minutes, matching the owner's own refresh cadence. It lives on the
+     * controller's scope beside the heartbeat rather than in a `LaunchedEffect`
+     * on the screen, so leaving the screen — or entering picture-in-picture —
+     * cannot forget the guide.
+     */
+    private fun startGuideRefresh(origin: String, token: String) {
+        guideRefresh?.cancel()
+        val api = this.api ?: return
+        guideRefresh = scope.launch {
+            while (true) {
+                // A guide that will not load leaves a working screen: rows fall
+                // back to number and callsign and nothing else changes.
+                // Check before the request, not only before the state write:
+                // suppressing the write still left the request itself going out
+                // under credentials the viewer has signed out of.
+                if (profile != origin to token) return@launch
+                runCatching { api.guide() }.getOrNull()?.let { fetched ->
+                    if (profile == origin to token) {
+                        mutableState.value = mutableState.value.copy(guide = fetched)
+                    }
+                }
+                delay(GUIDE_REFRESH_MS)
+            }
+        }
+    }
+
+    fun airing(channel: LiveTvChannel, now: Long = System.currentTimeMillis() / 1000): LiveTvAiring =
+        LiveTvGuideReducer.airing(mutableState.value.guide, channel.id, now)
+
     companion object {
+        const val GUIDE_REFRESH_MS: Long = 20 * 60 * 1_000
+
         @Volatile private var instance: LiveTvPlayer? = null
         fun get(context: Context): LiveTvPlayer = instance ?: synchronized(this) {
             instance ?: LiveTvPlayer(context).also { instance = it }

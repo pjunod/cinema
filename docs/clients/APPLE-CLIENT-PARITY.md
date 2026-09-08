@@ -9,7 +9,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-09-06): source is v0.3.0, Apple build 119. Native text
+> Status (2026-09-06): source is v0.3.0, Apple build 120. Native text
 > subtitles, the cinematic detail surface, stable seek/recovery, truthful
 > delivered-range badges, and app-managed offline viewing on iPhone/iPad have
 > landed.
@@ -480,12 +480,17 @@ that matter:
   Live TV from a shipped app, and every mutation requires server-enforced
   administrator access plus an exact settings generation.
 
-**Proved:** iOS and tvOS compile and 14 focused tests pass on each simulator
-(effort gate 95, merged `fc9c8f45`). The server side of Live TV is now proved
+**Proved:** iOS and tvOS compile and their focused Live TV tests pass on each
+simulator — 14 for the tuner contract, plus the guide reducers and the live
+input table against their shared fixtures. The server side of Live TV is now proved
 against a real HDHomeRun FLEX 4K over an antenna — see
 [HDHOMERUN-LIVE-TV-STATUS.md](../features/HDHOMERUN-LIVE-TV-STATUS.md). **Not proved:**
 playback on a physical iPhone or Apple TV against that tuner. The simulators do
-not settle whether AVPlayer keeps a 4 s-segment live window on real hardware.
+not settle whether AVPlayer keeps a 4 s-segment live window on real hardware,
+and nothing here settles whether the system picture-in-picture window survives
+two minutes of backgrounding on a physical iPhone — that is
+[LIVE-TV-GUIDE-AND-UI-PLAN.md](../features/LIVE-TV-GUIDE-AND-UI-PLAN.md) §8's
+first physical check.
 
 ## Release gate
 
