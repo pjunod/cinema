@@ -197,7 +197,10 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
     // Apple clients do. The one ruling this has to preserve: a direction on a
     // hidden overlay only reveals it — it never changes channel behind a
     // picture nobody can see.
-    fun apply(outcome: LiveTvInputOutcome): Boolean {
+    // Named `applyOutcome`, not `apply`: a local function called `apply`
+    // shadows kotlin.apply inside this scope, and this file uses `.apply {}`
+    // on the PlayerView a few lines below.
+    fun applyOutcome(outcome: LiveTvInputOutcome): Boolean {
         when (outcome) {
             LiveTvInputOutcome.Reveal -> { overlayVisible = true; lastInteraction += 1 }
             LiveTvInputOutcome.Hide -> overlayVisible = false
@@ -209,7 +212,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
             }
             LiveTvInputOutcome.ChannelUp, LiveTvInputOutcome.ChannelDown -> {
                 val delta = if (outcome == LiveTvInputOutcome.ChannelUp) -1 else 1
-                val next = LiveTvGuideReducer.adjacent(visible, state.watching?.id, delta)
+                val next = LiveTvGuideReducer.adjacent(visible.map { it.id }, state.watching?.id, delta)
                     ?.let { id -> visible.firstOrNull { it.id == id } }
                 if (next != null) controller.requestChannel(next)
                 lastInteraction += 1
@@ -239,7 +242,7 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
             // decides, so the focus engine cannot move focus behind a picture
             // that is showing no chrome.
             .liveTvInputAdapter(enabled = state.playing && !isInPip) { input ->
-                apply(LiveTvInputPolicy.route(surface, inputState(), input))
+                applyOutcome(LiveTvInputPolicy.route(surface, inputState(), input))
             },
     ) {
         if (!fullscreen && !isInPip) {
@@ -251,18 +254,20 @@ fun LiveTvScreen(origin: String, onBack: () -> Unit) {
             Text(state.message)
         }
         if (state.playing) {
+            val tap = remember { MutableInteractionSource() }
+            val picture = if (fullscreen || isInPip) {
+                Modifier.weight(1f).fillMaxWidth().background(Color.Black)
+            } else {
+                Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 260.dp).background(Color.Black)
+            }
             Box(
-                if (fullscreen || isInPip) {
-                    Modifier.weight(1f).fillMaxWidth().background(Color.Black)
-                } else {
-                    Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 260.dp).background(Color.Black)
-                },
-                    .let { base ->
-                        if (television) base else base.clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                        ) { apply(LiveTvInputPolicy.route(surface, inputState(), LiveTvContractInput.TapSurface)) }
-                    },
+                // A tap toggles the chrome, which is the touch table's whole
+                // contract for this surface. Never on a television, where the
+                // D-pad owns it and a tap would be a phantom press.
+                if (television) picture else picture.clickable(
+                    interactionSource = tap,
+                    indication = null,
+                ) { applyOutcome(LiveTvInputPolicy.route(surface, inputState(), LiveTvContractInput.TapSurface)) },
             ) {
                 AndroidView(
                     factory = { ctx ->

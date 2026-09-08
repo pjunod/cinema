@@ -814,7 +814,7 @@ test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinat
 id = "android.live-tv-television-routes-every-press-through-the-table"
 commits = ["c0347847"]
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
-source_anchor = "LiveTvInputPolicy.route(surface, inputState(), input)"
+source_anchor = "applyOutcome(LiveTvInputPolicy.route(surface, inputState(), input))"
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyTest.kt"
 test_anchor = "every press goes through the shared table"
 

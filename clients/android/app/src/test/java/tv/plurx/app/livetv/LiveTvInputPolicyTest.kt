@@ -110,7 +110,7 @@ class LiveTvScreenWiringTest {
         // Key spellings and the handler both live in LiveTvKeyAdapter, which is
         // the only file `scripts/player-input-fence` lets hold them.
         assertTrue(screen.contains(".liveTvInputAdapter(enabled = state.playing && !isInPip)"))
-        assertTrue(screen.contains("LiveTvInputPolicy.route(surface, inputState(), input)"))
+        assertTrue(screen.contains("applyOutcome(LiveTvInputPolicy.route(surface, inputState(), input))"))
         val adapter = java.io.File(
             "src/main/java/tv/plurx/app/livetv/LiveTvKeyAdapter.kt",
         ).readText()
