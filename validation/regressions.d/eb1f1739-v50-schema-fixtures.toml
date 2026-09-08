@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["eb1f1739"]
+points = ["core.media", "cluster.store"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-store-check"]
+reason = "the_downgrade_fixture_undoes_every_migration_after_the_guard is both the evidence and the reason this commit exists: it asserts the distance between SQLITE_SCHEMA_VERSION and the Dolby Vision guard against the number of objects the two hand-wound fixtures undo, so it names the gap on the commit that opens it rather than letting it surface as a duplicate-column error inside an unrelated guard test. Dropping either new statement from sqlite_v43_guard_migration_refuses_an_unrecoverable_committed_claim puts it back: the reopen replays v50 against a database that already has the column. The trigger is dropped ahead of the column because SQLite declines to drop a column a trigger reads, so the two statements are ordered rather than merely present. populated_v14_import_fixture carries the same pair for the v14 boundary and is exercised by cluster-store-check, which is why that lane is listed here even though the fast gate is what names the omission. media_session_import_reads_real_legacy_schema_boundaries pins the projected parameter list by value and not only by count: it reads a v33, v34 and v35 source through the real import SQL and requires the drain deadline to arrive as null, because a legacy row has no such column and a zero there would be a deadline in 1970 that every reader would then have to spell out as not really a deadline."
