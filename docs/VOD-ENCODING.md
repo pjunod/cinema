@@ -203,7 +203,18 @@ manager, dependency/font, process-isolation, disk-bound, and production
 oversized-attachment regressions. The default Homebrew FFmpeg 9.0.1 formula
 lacks libass and zscale; full burn/HDR checks used the supported
 `ffmpeg-full` 9.0.1 binary instead of weakening those tests. The PR remains
-draft, and its one post-correction full-suite run remains unspent. The prior
+draft.
+
+A complete workspace suite was mistakenly spent on this task branch before
+the effort-only qualification boundary was clarified. Its nonzero result was
+still used rather than discarded: focused corrections close its bounded-test
+grandchild leak, FFmpeg 9 diagnostic spelling, five obsolete HTTP refusal
+expectations, missing typed source/engine error mappings, stale scanner
+identity in real-media fixtures, and the hard-coded copy label that hid encoded
+VOD from both local and cluster activity. Every reported failure and the new
+wire/activity regressions pass focused reruns at correction `88abf00e`. The
+task PR will not spend a second complete suite; the one authoritative complete
+run belongs to the final reviewed effort-to-main candidate. The prior
 7.561–12.273-second warm two-hour measurements remain a performance nonclaim:
 correctness inside the 30-second materialization budget is not transparent
 seek latency.
