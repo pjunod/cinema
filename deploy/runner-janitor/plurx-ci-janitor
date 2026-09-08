@@ -79,6 +79,13 @@ done
 [[ "$BUDGET_GB" =~ ^[1-9][0-9]*$ ]] || {
   echo "plurx-ci-janitor: budget must be whole gigabytes" >&2; exit 2
 }
+# Same guard, and it matters more: an empty or negative REQUIRED_GB does not
+# fail, it quietly degrades the reserve back to the 20 % rule that let
+# `gha-nuc4-general-01` sit refused at 18 G free while this reported healthy.
+# A bound that silently cannot be met is the failure this whole change is about.
+[[ "$REQUIRED_GB" =~ ^[1-9][0-9]*$ ]] || {
+  echo "plurx-ci-janitor: required space must be whole gigabytes" >&2; exit 2
+}
 
 # The reserve, which is the whole point of the janitor and was the whole bug.
 #
@@ -100,6 +107,8 @@ done
 # by deleting caches, and chasing it would delete everything and fail anyway --
 # it is said out loud instead, because a bound that silently cannot be met is
 # how this went wrong the first time.
+capped_reported=false
+
 floor_kb_for() {
   local path filesystem_kb percent minimum quarter required half
   path=$1
@@ -110,11 +119,21 @@ floor_kb_for() {
   [ "$minimum" -le "$quarter" ] || minimum=$quarter
   [ "$percent" -ge "$minimum" ] || percent=$minimum
 
+  # A demand the filesystem cannot meet is REPORTED, and then ignored -- it
+  # does not become the reserve. Capping it to half the disk instead was worse
+  # than doing nothing: on any volume under 50 GiB, `min(25G, half)` IS half,
+  # so the smallest hosts in the fleet would carry the most aggressive reserve
+  # this script has ever kept, and would prune hourly, forever, chasing a
+  # figure the message in the same breath calls unreachable. A host that cannot
+  # free enough for a lane is a placement problem, not a pruning one.
   required=$((REQUIRED_GB * 1024 * 1024))
   half=$((filesystem_kb / 2))
-  if [ "$required" -gt "$half" ]; then
-    say "a job needs ${REQUIRED_GB}G and $path holds $((filesystem_kb / 1024 / 1024))G; no amount of pruning reaches that, reserving $((half / 1024 / 1024))G" >&2
-    required=$half
+  if [ "$required" -ge "$half" ]; then
+    if [ "$capped_reported" = false ]; then
+      say "a job needs ${REQUIRED_GB}G and $path holds $((filesystem_kb / 1024 / 1024))G; no amount of pruning reaches that, so this host keeps its $((percent / 1024 / 1024))G reserve and cannot run that lane" >&2
+      capped_reported=true
+    fi
+    required=0
   fi
   [ "$percent" -ge "$required" ] && { echo "$percent"; return; }
   echo "$required"

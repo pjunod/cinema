@@ -244,16 +244,50 @@ about it.
 `gha-nuc4-general-01` sat in that band on 2026-09-08: two jobs refused with
 `18G available … need 25G`, identical to the gigabyte across both, because the
 job's labels pin it to that guest and a re-push lands on the same disk. So the
-reserve is now `max(20 % of the filesystem, disk-gb)`, and a demand above half
-the filesystem is capped **and said out loud** rather than chased — the
-original bug here was a fixed 100 GiB reserve on a 78 GB guest, a rule that
-could never be satisfied, so the pruner deleted everything it was allowed to
-and failed anyway.
+reserve is now `max(20 % of the filesystem, REQUIRED_GB)`.
+
+A demand the filesystem cannot meet is **reported and then ignored** — it does
+not become the reserve. Capping it to half the disk was tried and is worse than
+doing nothing: `min(25 G, half)` *is* half for every volume under 50 GiB, so
+the smallest hosts in the fleet would carry the most aggressive reserve this
+script has ever kept, and prune hourly forever chasing a figure the same
+message calls unreachable. **A host that cannot free enough for a lane is a
+placement problem, not a pruning one.** The underlying lesson is the original
+bug here: a fixed 100 GiB reserve on a 78 GB guest could never be satisfied, so
+the pruner deleted everything it was allowed to and failed anyway.
 
 The janitor is installed standalone on each host and cannot read the workflow
-at run time, so the two figures are held level by a contract test rather than
-by an import: `test_the_janitor_reserve_and_the_preflight_bar_are_one_number`
-fails if `disk-gb` is raised without `REQUIRED_GB`. Raise them together.
+at run time, so the figures are held level by contract tests rather than by an
+import. `test_the_janitor_reserve_and_the_preflight_default_are_one_number`
+reads `inputs.disk-gb`'s **default**, not the `"${DISK_GB:-25}"` fallback in
+the step body — `action.yml` sets `DISK_GB` unconditionally, so that literal
+can never fire, and a test reading it stays green while the governing number
+moves.
+
+### The band is closed for the default bar, not for every lane
+
+`disk-gb` is a per-lane input and the janitor has one number for the host, so
+a lane asking for more than the janitor reserves keeps a band of its own.
+**`vod_web` asks for 45 G** — Playwright browsers plus an ffmpeg build on top
+of the workspace — and nothing reclaims the 25–45 G gap on its behalf. Raising
+`REQUIRED_GB` to 45 would not fix it either: that is over half a 78 GB guest,
+so it would be reported and ignored by the rule above. That lane needs a runner
+with the room. `test_no_lane_asks_for_more_disk_than_the_janitor_reserves`
+names it as a known exception and fails on any new one, so a second such lane
+is a decision rather than an accident.
+
+### Two side effects of raising the reserve, stated rather than discovered
+
+- **Docker prunes sooner.** The Docker block calls the same `floor_kb_for`, so
+  on a 78 GB host `docker image prune -af --filter until=336h` and the builder
+  prune now fire below 25 G free instead of below 15.6 G. Nothing new is
+  deleted; an existing deleter fires across a wider range.
+- **Cache resets are less rare.** This page records ~13 G/day of accumulation
+  on a 78 G disk, so with 25 G reserved rather than 15.6 G, expect the timer to
+  reset caches regularly instead of almost never. That is the intent — a cold
+  cache costs a few slow jobs, and the band it replaces cost the fleet the
+  whole lane — but the timer's own "in steady state it deletes nothing" note is
+  now less true than it was.
 
 ```bash
 systemctl list-timers plurx-ci-janitor.timer     # when it next runs

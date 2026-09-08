@@ -247,14 +247,26 @@ janitor reclaims nothing, and 18 G is inside it. Two bounds, both satisfied,
 nobody minding the gap.
 
 The reserve is now `max(20 % of the filesystem, the preflight's own number)`.
-A demand above half the filesystem is capped **and said out loud** rather than
-chased, because the original bug in this same function was a fixed 100 GiB
-reserve on a 78 GB guest — a rule that could never be satisfied, so the pruner
-deleted everything it was permitted to and failed anyway. The janitor is
-installed standalone per host and cannot read the workflow at run time, so a
-contract test holds the two figures level instead of an import: raise
-`disk-gb` without raising `REQUIRED_GB` and the test fails rather than the
-band reopening in silence.
+A demand the filesystem cannot meet is **reported and then ignored** rather
+than chased: capping it to half the disk was tried first and is worse than
+doing nothing, because `min(25 G, half)` *is* half on every volume under
+50 GiB — the smallest hosts would carry the most aggressive reserve this
+script has ever kept and prune hourly forever after a figure the same message
+calls unreachable. A host that cannot free enough for a lane is a placement
+problem. That keeps the lesson of the original bug in this same function: a
+fixed 100 GiB reserve on a 78 GB guest could never be satisfied, so the pruner
+deleted everything it was permitted to and failed anyway.
+
+The janitor is installed standalone per host and cannot read the workflow at
+run time, so contract tests hold the figures level instead of an import — and
+the first version of that test was itself a decoration, reading the
+`"${DISK_GB:-25}"` fallback in the step body when `action.yml` sets `DISK_GB`
+unconditionally and that literal can never fire. It reads `inputs.disk-gb`'s
+default now, proven by mutating the default and watching it fail. **The band
+is closed for the default bar and not for every lane:** `disk-gb` is per-lane
+and `vod_web` asks for 45 G, which raising `REQUIRED_GB` cannot cover because
+45 G is over half a 78 GB guest. That lane is named as a known exception and a
+second one fails the test rather than passing unnoticed.
 
 **A wrong fix was built first, and the way it was wrong is the lesson.** The
 error message names a path under `_work`, so `_work` was taken to be the full

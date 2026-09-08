@@ -270,27 +270,84 @@ class JanitorContractCase(unittest.TestCase):
         self.assertFalse(self.cache.exists())
         self.assertEqual(self.last_run()["reset"], 1)
 
-    def test_the_janitor_reserve_and_the_preflight_bar_are_one_number(self):
+    def test_the_janitor_reserve_and_the_preflight_default_are_one_number(self):
         """Two files, one figure, and nothing but this test holding them level.
 
         The janitor is installed standalone on each host -- it cannot read the
-        workflow at runtime -- so the shared constant has to be a contract
-        rather than an import. If `disk-gb` is ever raised without raising
-        `REQUIRED_GB`, the band that refused `gha-nuc4-general-01` reopens
-        silently and every runner reports healthy while jobs are turned away.
+        workflow at run time -- so the shared constant has to be a contract
+        rather than an import. If `disk-gb`'s default is ever raised without
+        raising `REQUIRED_GB`, the band that refused `gha-nuc4-general-01`
+        reopens silently and every runner reports healthy while jobs are turned
+        away.
+
+        The number read here is the INPUT DEFAULT, not the shell fallback.
+        `action.yml` sets `DISK_GB: ${{ inputs.disk-gb }}` unconditionally, so
+        `"${DISK_GB:-25}"` in the step body can never fire -- an earlier
+        version of this test read that dead literal and stayed green while the
+        governing default moved.
         """
-        script = SCRIPT.read_text(encoding="utf-8")
+        janitor_gb = self.janitor_required_gb()
+        self.assertEqual(janitor_gb, self.preflight_default_gb())
+
+    def test_no_lane_asks_for_more_disk_than_the_janitor_reserves(self):
+        """`disk-gb` is per lane, and the janitor has one number for the host.
+
+        A lane that asks for more than the janitor reserves has its own band:
+        the fleet refuses that lane while the janitor calls the runner healthy,
+        which is the whole defect, narrowed to one workflow. Such a lane is
+        allowed, because raising `REQUIRED_GB` to meet it would put the reserve
+        over half the disk on a 78 GB guest -- but it has to be named here, so
+        that adding another one is a decision rather than an accident.
+
+        `vod_web` asks for 45 G because it carries Playwright browsers and an
+        ffmpeg build on top of the workspace. Nothing reclaims the gap between
+        25 G and 45 G on its behalf; that lane needs a runner with the room,
+        which is placement rather than pruning.
+        """
+        known_larger = {"45": "vod_web: Playwright browsers plus an ffmpeg build"}
+
+        reserved = int(self.janitor_required_gb())
+        asked = set(
+            re.findall(r"^\s*disk-gb:\s*[\"']?(\d+)[\"']?\s*$",
+                       self.every_workflow_source(), re.M)
+        )
+        unexplained = sorted(
+            value for value in asked
+            if int(value) > reserved and value not in known_larger
+        )
+        self.assertEqual(
+            unexplained,
+            [],
+            "a lane asks for more free space than the janitor reserves, and is "
+            "not named as a known exception: " + ", ".join(unexplained),
+        )
+
+    def janitor_required_gb(self):
+        found = re.search(
+            r"^REQUIRED_GB=\$\{PLURX_JANITOR_REQUIRED_GB:-(\d+)\}",
+            SCRIPT.read_text(encoding="utf-8"),
+            re.M,
+        )
+        self.assertIsNotNone(found, "the janitor must name its required GB")
+        return found.group(1)
+
+    def preflight_default_gb(self):
         action = (
             ROOT / ".github/actions/cargo-cache/action.yml"
         ).read_text(encoding="utf-8")
-
-        janitor_gb = re.search(
-            r"^REQUIRED_GB=\$\{PLURX_JANITOR_REQUIRED_GB:-(\d+)\}", script, re.M
+        block = re.search(
+            r"^  disk-gb:\n(?:.*\n)*?^    default:\s*[\"']?(\d+)[\"']?\s*$",
+            action,
+            re.M,
         )
-        self.assertIsNotNone(janitor_gb, "the janitor must name its required GB")
-        preflight_gb = re.search(r'"\$\{DISK_GB:-(\d+)\}"', action)
-        self.assertIsNotNone(preflight_gb, "the action must name its disk-gb default")
-        self.assertEqual(janitor_gb.group(1), preflight_gb.group(1))
+        self.assertIsNotNone(block, "the action must declare a disk-gb default")
+        return block.group(1)
+
+    def every_workflow_source(self):
+        return "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((ROOT / ".github").rglob("*.yml"))
+        )
 
     def test_a_requirement_larger_than_the_disk_is_said_out_loud_not_chased(self):
         """The original bug was a fixed reserve that could never be satisfied.
@@ -302,15 +359,63 @@ class JanitorContractCase(unittest.TestCase):
         is exactly how this went wrong the first time.
         """
         self.environment["PLURX_JANITOR_REQUIRED_GB"] = "60"
-        self.environment["FIXTURE_AVAIL_KB"] = str(45 * 1024 * 1024)
+        # 25 G free on a 78 GB guest. Capping the demand to half the disk would
+        # make the reserve 39 G and reset this cache; ignoring it leaves the
+        # 20 % rule, 15.6 G, and 25 G is comfortably inside that. The
+        # difference between "capped" and "ignored" is exactly this assertion.
+        self.environment["FIXTURE_AVAIL_KB"] = str(25 * 1024 * 1024)
 
         result = self.run_janitor()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("no amount of pruning reaches that", result.stderr)
-        # 45 G free is above the 39 G half-filesystem cap, so nothing is taken.
+        self.assertIn("cannot run that lane", result.stderr)
         self.assertEqual(self.systemctl_calls(), [])
         self.assertTrue((self.cache / "bolt.db").is_file())
+        # Said once per pass, not once per call: the Docker block asks for the
+        # same floor, and a small host would otherwise log it every hour twice.
+        self.assertEqual(result.stderr.count("no amount of pruning"), 1)
+
+    def test_a_small_host_does_not_get_the_most_aggressive_reserve(self):
+        """The pathology a half-the-disk cap would have created.
+
+        `min(REQUIRED_GB, half)` IS `half` for every filesystem under 50 GiB,
+        so the smallest hosts in the fleet would have carried a 50 % reserve --
+        the most aggressive this script has ever kept -- and pruned hourly,
+        forever, chasing a figure the same message calls unreachable. A host
+        that cannot free enough for a lane is a placement problem.
+        """
+        # A 40 GiB guest with 19 G free and a 4 G cache. Half is 20 G, so a cap
+        # would reset here; the 20 % rule is 8 G, floored at 10 G, so nothing
+        # should happen.
+        self.environment["FIXTURE_FS_KB"] = str(40 * 1024 * 1024)
+        self.environment["FIXTURE_AVAIL_KB"] = str(19 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no amount of pruning reaches that", result.stderr)
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+
+    def test_a_required_size_that_is_not_whole_gigabytes_is_refused(self):
+        """An empty or negative value must not degrade the reserve in silence.
+
+        `BUDGET_GB` has always been validated; `REQUIRED_GB` was not, and an
+        unusable value there does not fail -- it drops the floor back to the
+        20 % rule that let `gha-nuc4-general-01` sit refused at 18 G while this
+        reported healthy.
+        """
+        # An empty value is NOT in this list and must not be: `${VAR:-25}`
+        # treats empty as unset, so it falls back to the default rather than
+        # degrading anything. The dangerous shapes are the ones bash accepts as
+        # arithmetic or as a word.
+        for value in ("-5", "0", "25G", "abc"):
+            with self.subTest(value=value):
+                self.environment["PLURX_JANITOR_REQUIRED_GB"] = value
+                result = self.run_janitor()
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn("whole gigabytes", result.stderr)
 
     def test_a_delete_that_fails_still_brings_the_runner_back(self):
         """The one invariant this script promises unconditionally.
