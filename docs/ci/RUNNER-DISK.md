@@ -309,7 +309,14 @@ about it.
 
 `gha-nuc4-general-01` sat in that band on 2026-09-08: two jobs refused with
 `18G available … need 25G`, identical to the gigabyte across both, because the
-job's labels pin it to that guest and a re-push lands on the same disk. So the
+job kept landing there. **Not because anything pinned it** — eight runners
+carry the `general` label, and `gha-m6-general-02` ran the same lane green with
+42 G free the same afternoon. A runner that refuses in fifteen seconds returns
+to idle immediately and is therefore first in line for the next job, so a full
+runner takes a disproportionate share of the queue and fails all of it —
+**it starves the pool precisely because it fails fast.** Worth its own fix: the
+preflight could hold the slot on refusal so healthy runners win the race.
+So the
 reserve is now `max(20 % of the filesystem, REQUIRED_GB)`.
 
 A demand **larger than half the filesystem** is reported and then ignored — it

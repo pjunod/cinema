@@ -314,7 +314,10 @@ class JanitorContractCase(unittest.TestCase):
         A 78 GB guest with 18 G free and a 4 G cache. The preflight refused two
         jobs in a row for wanting 25 G; 20 % of 78 GB is 15.6 G, so the janitor
         called the same runner healthy and reclaimed nothing, and every re-push
-        landed on the same guest because the job's labels pin it there. Both
+        landed on the same guest -- not because anything pinned it there
+        (eight runners carry the `general` label), but because a runner that
+        refuses in fifteen seconds is idle again immediately and takes the next
+        job. Both
         rules were satisfied at once and the fleet was stuck between them.
         """
         self.environment["FIXTURE_AVAIL_KB"] = str(18 * 1024 * 1024)
