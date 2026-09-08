@@ -202,13 +202,11 @@ class ControlRequestWireCase(unittest.TestCase):
         # the Swift and Kotlin requests, and the test starts comparing it
         # again.
         rust.discard("intent")
-        # `acknowledgement` is now per-port rather than discarded for both.
-        # Apple consumes `prepare` and therefore has something to acknowledge;
-        # Android still consumes no action, so it has nothing. The day Android
-        # gains the type, its discard comes out with the same change — and
-        # `test_the_acknowledgement` below already compares whichever ports
-        # model it, so there is no window where the struct is outside every
-        # comparison.
+        # `acknowledgement` was discarded per-port while only Apple consumed
+        # `prepare` and Android had nothing to acknowledge. Android consumes it
+        # now, so the last discard comes out here — as the comment that stood
+        # in this place said it would — and both ports are compared against the
+        # same server struct with nothing set aside but `intent`.
         self.assertEqual(
             swift_coding_keys(self.apple, "ControlRequest"),
             rust,
@@ -216,14 +214,12 @@ class ControlRequestWireCase(unittest.TestCase):
             f"(apple-only {sorted(swift_coding_keys(self.apple, 'ControlRequest') - rust)}, "
             f"server-only {sorted(rust - swift_coding_keys(self.apple, 'ControlRequest'))})",
         )
-        android_rust = set(rust)
-        android_rust.discard("acknowledgement")
         self.assertEqual(
             kotlin_fields(self.android, "ControlRequest"),
-            android_rust,
+            rust,
             "ControlRequestV1: Android and the server disagree "
-            f"(android-only {sorted(kotlin_fields(self.android, 'ControlRequest') - android_rust)}, "
-            f"server-only {sorted(android_rust - kotlin_fields(self.android, 'ControlRequest'))})",
+            f"(android-only {sorted(kotlin_fields(self.android, 'ControlRequest') - rust)}, "
+            f"server-only {sorted(rust - kotlin_fields(self.android, 'ControlRequest'))})",
         )
 
     def test_the_acknowledgement(self) -> None:
