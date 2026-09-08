@@ -809,7 +809,10 @@ marker.write_text("survived", encoding="utf-8")
                 time.sleep(wait_after_ready)
             self.assertFalse(marker.exists())
 
-    @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
+    @unittest.skipUnless(
+        sys.platform.startswith("linux"),
+        "Linux pidfd lifecycle proof",
+    )
     def test_timeout_cleanup_failure_kills_root_group_and_aborts(self):
         catalog = self.load()
         for cleanup_snapshots_before_failure in (0, 1):
@@ -821,10 +824,40 @@ marker.write_text("survived", encoding="utf-8")
             ):
                 root = Path(directory)
                 marker = root / "survived"
+                child_identity_path = root / "child.identity"
+                child_script = root / "child.py"
+                child_script.write_text(
+                    """\
+from pathlib import Path
+import os
+import sys
+import time
+
+
+def start_ticks(pid):
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    return stat[stat.rfind(")") + 2 :].split()[19]
+
+
+pid = os.getpid()
+parent = os.getppid()
+Path(sys.argv[1]).write_text(
+    f"{pid} {parent} {start_ticks(pid)} {start_ticks(parent)}",
+    encoding="utf-8",
+)
+time.sleep(1.5)
+Path(sys.argv[2]).write_text("survived", encoding="utf-8")
+""",
+                    encoding="utf-8",
+                )
                 timed_tree = dataclasses.replace(
                     catalog.check_map["baseline"],
                     command=(
-                        f"sleep 1.5; printf survived > {shlex.quote(str(marker))}"
+                        f"{shlex.quote(sys.executable)} "
+                        f"{shlex.quote(str(child_script))} "
+                        f"{shlex.quote(str(child_identity_path))} "
+                        f"{shlex.quote(str(marker))}"
+                        + "; :"
                     ),
                     timeout_seconds=1,
                 )
@@ -833,35 +866,101 @@ marker.write_text("survived", encoding="utf-8")
 
                 def fail_discovery(
                     deadline: float,
+                    *,
+                    root_pid: int | None = None,
+                    required_identities: set[
+                        validation_runner._ProcessIdentity
+                    ]
+                    | None = None,
                 ) -> dict[int, validation_runner._ProcessRecord]:
                     nonlocal calls
                     calls += 1
                     if calls <= 1 + cleanup_snapshots_before_failure:
-                        return original_snapshot(deadline)
+                        return original_snapshot(
+                            deadline,
+                            root_pid=root_pid,
+                            required_identities=required_identities,
+                        )
                     raise PermissionError("injected process discovery denial")
 
-                with (
-                    mock.patch.object(
-                        validation_runner,
-                        "_process_snapshot",
-                        side_effect=fail_discovery,
-                    ),
-                    contextlib.redirect_stdout(io.StringIO()),
-                    self.assertRaisesRegex(
-                        RuntimeError,
-                        "could not prove the attached validation process tree",
-                    ),
-                ):
-                    execute_checks(
-                        (timed_tree,),
-                        root,
-                        root / "artifacts",
-                        strict=True,
-                        fail_fast=True,
-                    )
+                execution_error: Exception | None = None
+                observed_child: validation_runner._ProcessRecord | None = None
+                child_identity: validation_runner._ProcessIdentity | None = None
+                leader_identity: validation_runner._ProcessIdentity | None = None
+                cleanup_errors: list[str] = []
+                try:
+                    with (
+                        mock.patch.object(
+                            validation_runner,
+                            "_process_snapshot",
+                            side_effect=fail_discovery,
+                        ),
+                        contextlib.redirect_stdout(io.StringIO()),
+                    ):
+                        execute_checks(
+                            (timed_tree,),
+                            root,
+                            root / "artifacts",
+                            strict=True,
+                            fail_fast=True,
+                        )
+                except Exception as error:
+                    execution_error = error
+                finally:
+                    if child_identity_path.exists():
+                        pid, leader_pid, started, leader_started = (
+                            child_identity_path.read_text(encoding="utf-8").split()
+                        )
+                        child_identity = validation_runner._ProcessIdentity(
+                            int(pid), f"linux-start-ticks:{started}"
+                        )
+                        leader_identity = validation_runner._ProcessIdentity(
+                            int(leader_pid), f"linux-start-ticks:{leader_started}"
+                        )
+                        observed_child = validation_runner._read_linux_process_record(
+                            child_identity.pid
+                        )
+                        for identity in (child_identity, leader_identity):
+                            record = validation_runner._read_linux_process_record(
+                                identity.pid
+                            )
+                            if record is None or record.identity != identity:
+                                continue
+                            cleanup_errors.extend(
+                                validation_runner._signal_linux_identities(
+                                    (record,), signal.SIGKILL, time.monotonic() + 2
+                                )
+                            )
 
-                time.sleep(0.75)
+                self.assertIsInstance(execution_error, RuntimeError)
+                assert execution_error is not None
+                self.assertRegex(
+                    str(execution_error),
+                    "could not prove the attached validation process tree",
+                )
+                causes: list[BaseException] = []
+                cause = execution_error.__cause__
+                while cause is not None:
+                    causes.append(cause)
+                    cause = cause.__cause__
+                self.assertTrue(
+                    any(isinstance(cause, PermissionError) for cause in causes),
+                    f"injected discovery denial missing from causes: {causes!r}",
+                )
+                self.assertIsNotNone(child_identity)
+                self.assertIsNotNone(leader_identity)
+                assert child_identity is not None
+                assert leader_identity is not None
+                self.assertNotEqual(child_identity.pid, leader_identity.pid)
                 self.assertFalse(marker.exists())
+                self.assertTrue(
+                    observed_child is None
+                    or observed_child.identity != child_identity
+                    or observed_child.state.startswith("Z"),
+                    f"cleanup abandoned pid {child_identity.pid} in state "
+                    f"{getattr(observed_child, 'state', 'gone')}",
+                )
+                self.assertEqual(cleanup_errors, [])
 
     @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
     def test_timeout_never_resumes_a_term_handler(self):
@@ -1312,7 +1411,7 @@ time.sleep(30)
             identities.add(identity)
 
         with (
-            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
             mock.patch.object(validation_runner, "_freeze_process_tree", side_effect=freeze),
             mock.patch.object(validation_runner, "_kill_frozen_groups", return_value=[]),
             mock.patch.object(validation_runner, "_reap_owned_process", return_value=None),
@@ -1330,7 +1429,7 @@ time.sleep(30)
         process.wait.return_value = 0
 
         with (
-            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
             mock.patch.object(validation_runner, "_freeze_process_tree"),
             mock.patch.object(
                 validation_runner,
@@ -1344,7 +1443,8 @@ time.sleep(30)
                 process, time.monotonic() + 1
             )
 
-        process.kill.assert_called_once_with()
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
         process.wait.assert_called_once()
         verify.assert_not_called()
 
@@ -1376,7 +1476,7 @@ time.sleep(30)
 
         with (
             mock.patch.object(validation_runner.sys, "platform", "linux"),
-            mock.patch.object(validation_runner.os, "killpg"),
+            mock.patch.object(validation_runner.os, "killpg") as killpg,
             mock.patch.object(
                 validation_runner, "_freeze_process_tree", side_effect=freeze
             ),
@@ -1404,7 +1504,8 @@ time.sleep(30)
 
         pidfd_signal.assert_not_called()
         close.assert_called_once_with(9)
-        process.kill.assert_called_once_with()
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
         process.wait.assert_called_once()
 
     @unittest.skipIf(os.name == "nt", "POSIX process cleanup contract")
@@ -1444,7 +1545,8 @@ time.sleep(30)
             )
 
         self.assertIn(mock.call(200, signal.SIGKILL), killpg.call_args_list)
-        process.kill.assert_called_once_with()
+        self.assertIn(mock.call(100, signal.SIGKILL), killpg.call_args_list)
+        process.kill.assert_not_called()
         process.wait.assert_called_once()
 
     def test_reused_process_group_is_not_killed(self):
