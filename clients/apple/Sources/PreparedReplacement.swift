@@ -2,13 +2,13 @@ import Foundation
 
 /// The client half of a prepared quality handoff.
 ///
-/// The server stages a whole second session — a real encoder, a durable row,
-/// an actor slot — and then waits to be told what happened to it. Everything
-/// in this file except `PreparedSuccessorHost` is deliberately free of
-/// AVFoundation, because the rules that decide a viewer's picture are the ones
-/// that must be provable in a unit test: which acknowledgement is owed, in
-/// what order, whether a repeated action is a second preparation, and whether
-/// a settlement can be lost.
+/// The server stages a whole second session — an incarnation, a durable row,
+/// the actor's one preparation slot — and then waits to be told what happened
+/// to it. Everything in this file except `PreparedSuccessorHost` is
+/// deliberately free of AVFoundation, because the rules that decide a viewer's
+/// picture are the ones that must be provable in a unit test: which
+/// acknowledgement is owed, in what order, whether a repeated action is a
+/// second preparation, and whether a settlement can be lost.
 ///
 /// `docs/playback-control/M6-CLIENT-REPLACEMENT-CONTRACT.md` is the contract
 /// these rules implement; the §C-numbers in the comments point into it.
@@ -31,8 +31,7 @@ import Foundation
 struct PreparedAcknowledgementLedger: Equatable {
     /// A ceiling that can only be reached by a server staging faster than this
     /// client can settle, which is not a thing that happens; it exists so a
-    /// pathological peer cannot grow this without bound. The oldest
-    /// *non-terminal* entry is what goes, never a settlement.
+    /// pathological peer cannot grow this without bound.
     static let capacity = 8
 
     private(set) var entries: [ActionAcknowledgement] = []
@@ -50,11 +49,16 @@ struct PreparedAcknowledgementLedger: Equatable {
             entries[index] = value
             return
         }
-        if entries.count >= Self.capacity,
-           let stale = entries.firstIndex(where: { !$0.state.isTerminal }) {
-            entries.remove(at: stale)
+        // At the ceiling, the *incoming* value is the one worth keeping: it is
+        // the newest thing this client knows, and if it is a settlement it is
+        // the one holding a server slot open right now. So a progress report
+        // goes first, and only if there is none does the oldest settlement go
+        // — never the value being recorded, which is what an early `return`
+        // here would have discarded.
+        if entries.count >= Self.capacity {
+            let victim = entries.firstIndex { !$0.state.isTerminal } ?? entries.startIndex
+            entries.remove(at: victim)
         }
-        guard entries.count < Self.capacity else { return }
         entries.append(value)
     }
 
@@ -82,8 +86,9 @@ enum PreparedReplacementPhase: Equatable {
     case metadataReady
     /// The successor is buffered past the switch point.
     case bufferReady
-    /// The switch has happened and the first qualifying frame is being waited
-    /// for. The commit is not sent until it arrives (§5.4).
+    /// The switch is in flight. A critical section: nothing may build,
+    /// supersede or abandon a staging while its own commit is running, because
+    /// the commit's outcome is about *this* staging and arrives after an await.
     case switching
 }
 
@@ -97,11 +102,29 @@ enum PreparedReplacementOffer: Equatable {
     /// device for one staging.
     case alreadyOpen
     /// A staging this client has already settled. Its replay is in flight or
-    /// was ignored; either way there is nothing left to build.
+    /// was ignored; either way there is nothing left to build, and **nothing
+    /// is going to change the stream**, so the caller still owes the viewer
+    /// the in-place change they asked for.
     case alreadySettled
     /// A different staging arrived while one was live. The old one is owed
     /// `aborted` and its pipeline freed before the new one is built.
     case supersede(previous: PreparedReplacementAction, next: PreparedReplacementAction)
+    /// A switch is in flight. Nothing may be built on top of one.
+    case busy
+    /// This playback has already proved it cannot prime a successor. The
+    /// staging is settled immediately rather than left to the server's
+    /// 330-second deadline, and nothing is built.
+    case declined
+
+    /// Whether the prepared path has taken ownership of the change that
+    /// produced this offer. When false the caller must make the change itself,
+    /// or the viewer's tap does nothing at all.
+    var ownsTheChange: Bool {
+        switch self {
+        case .build, .alreadyOpen, .supersede: return true
+        case .alreadySettled, .busy, .declined: return false
+        }
+    }
 }
 
 /// Why a preparation was given up on. The distinction is the server's: a
@@ -116,6 +139,22 @@ enum PreparedReplacementAbandonment: Equatable {
     case aborted
 
     var state: AcknowledgementState { self == .failed ? .failed : .aborted }
+}
+
+/// How a switch ended.
+enum PreparedCommitOutcome: Equatable {
+    /// The switch happened and the successor's own first qualifying frame
+    /// rendered at this wall clock.
+    case committed(firstFrameUnixMs: Int)
+    /// **Nothing was switched.** The incumbent's item, session and pointer are
+    /// exactly as they were, so the ordinary in-place change still applies and
+    /// this says nothing about whether a successor could have been primed.
+    case refused
+    /// The switch happened and no qualifying frame arrived inside the bound.
+    /// There is no incumbent to put back — its item is gone and its session
+    /// released — so this is both a settlement and a reopen, and the picture
+    /// the viewer is looking at is frozen until that reopen lands.
+    case switchedWithoutAFrame
 }
 
 /// One preparation at a time, and everything owed about it.
@@ -137,17 +176,21 @@ struct PreparedReplacementLedger: Equatable {
 
     var pendingAcknowledgement: ActionAcknowledgement? { acknowledgements.head }
     var hasActivePreparation: Bool { active != nil }
+    /// A switch is in flight, and nothing may disturb it.
+    var isSwitching: Bool { active != nil && phase == .switching }
 
     init() {}
 
     /// What an offered `prepare` means here. Pure: it decides nothing about
     /// pipelines, so a caller can consult it before spending anything.
-    func offer(_ action: PreparedReplacementAction) -> PreparedReplacementOffer {
+    func offer(_ action: PreparedReplacementAction, canPrepare: Bool = true) -> PreparedReplacementOffer {
+        if isSwitching { return .busy }
         if let active {
             if active.actionId == action.actionId { return .alreadyOpen }
             return .supersede(previous: active, next: action)
         }
         if settled.contains(action.actionId) { return .alreadySettled }
+        guard canPrepare else { return .declined }
         return .build(action)
     }
 
@@ -186,45 +229,51 @@ struct PreparedReplacementLedger: Equatable {
     /// The switch is under way. Nothing is sent yet: a commit is a claim that
     /// the viewer is already watching the successor, and the server's CAS
     /// moves the playback pointer on it.
-    mutating func noteSwitching() {
-        guard active != nil else { return }
+    @discardableResult
+    mutating func noteSwitching(_ action: PreparedReplacementAction) -> Bool {
+        guard active?.actionId == action.actionId,
+              phase == .metadataReady || phase == .bufferReady
+        else { return false }
         phase = .switching
+        return true
     }
 
     /// The successor's own first qualifying frame rendered. This is the only
     /// thing that may produce a `committed`.
-    mutating func noteCommitted(firstFrameUnixMs: Int) {
-        guard let active, firstFrameUnixMs > 0 else { return }
+    ///
+    /// Named rather than implied: a commit takes minutes of wall clock in the
+    /// worst case and the ledger's `active` can have moved on, so settling
+    /// "whatever is current" would stamp one staging's frame with another
+    /// staging's identity — and the server's `bound_preparation_acknowledgement`
+    /// would accept it and move the pointer to a session nothing displayed.
+    mutating func noteCommitted(_ action: PreparedReplacementAction, firstFrameUnixMs: Int) {
+        guard firstFrameUnixMs > 0 else { return }
         acknowledgements.record(
             ActionAcknowledgement(
-                actionId: active.actionId,
+                actionId: action.actionId,
                 state: .committed,
                 // Echoed from the offer, never recomputed from the player: the
                 // server compares it against the staged successor's own origin
                 // and refuses a mismatch, so a value derived here would turn a
                 // rounding difference into a refused commit.
-                committedMediaOriginMs: active.mediaOriginMs,
+                committedMediaOriginMs: action.mediaOriginMs,
                 firstFrameUnixMs: firstFrameUnixMs
             )
         )
-        retire(active.actionId)
+        retire(action.actionId)
     }
 
-    /// This client is giving the staging up. Always owed; leaving it to the
-    /// 330-second deadline holds the session's only preparation slot for the
-    /// rest of its life (§C7).
+    /// This client is giving the live staging up. Always owed; leaving it to
+    /// the 330-second deadline holds the session's only preparation slot for
+    /// the rest of its life (§C7).
     mutating func noteAbandoned(_ reason: PreparedReplacementAbandonment) {
         guard let active else { return }
-        abandon(active, reason)
+        noteAbandoned(active, reason)
     }
 
-    /// The same, for a staging that has just been superseded by a newer one.
-    /// Ordered ahead of the newer staging's progress in the queue.
-    mutating func noteSuperseded(_ action: PreparedReplacementAction) {
-        abandon(action, .aborted)
-    }
-
-    private mutating func abandon(
+    /// The same, for a named staging — one that has been superseded, declined,
+    /// or whose commit resolved after the ledger moved on.
+    mutating func noteAbandoned(
         _ action: PreparedReplacementAction,
         _ reason: PreparedReplacementAbandonment
     ) {
@@ -271,8 +320,9 @@ enum PreparedReplacementBounds {
     /// couple of seconds the switch trades a quality change for a stall.
     static let switchRunwayMs = 2_000
     /// From the switch to the successor's own first qualifying frame. Past it
-    /// the handoff is `failed` and the incumbent is put back.
-    static let firstFrameMs = 4_000
+    /// the picture is frozen and the only way out is a reopen, so this is
+    /// generous where the readiness bounds are mean.
+    static let firstFrameMs = 6_000
     /// How often the readiness and first-frame monitors look.
     static let pollMs = 100
 }
@@ -300,10 +350,10 @@ protocol PreparedSuccessorHost: AnyObject {
     func discardPreparedSuccessor()
 
     /// Put the primed successor in front of the viewer and retire the
-    /// incumbent. Returns the wall clock of the successor's own first
-    /// qualifying frame, or `nil` when the switch did not produce one — in
-    /// which case the incumbent is still the authoritative stream.
-    func commitPreparedSuccessor(_ action: PreparedReplacementAction) async -> Int?
+    /// incumbent. See `PreparedCommitOutcome` — the three answers differ in
+    /// whether anything was switched, which is what decides both the
+    /// settlement and whether there is an incumbent left to fall back to.
+    func commitPreparedSuccessor(_ action: PreparedReplacementAction) async -> PreparedCommitOutcome
 
     /// The in-place quality change this platform has always done. The
     /// fallback, and an ordinary outcome rather than an error branch.
@@ -354,6 +404,11 @@ final class PreparedReplacementCoordinator {
     /// a switch and nothing configures it: it is learned, it is forgotten when
     /// the player ends, and the day a successor becomes primeable this client
     /// starts using it with no change at all.
+    ///
+    /// It is consulted inside `offer` rather than at one call site, so the
+    /// server-pushed path cannot walk around it — and a staging offered while
+    /// it is false is still settled, because an unanswered one holds the
+    /// server's slot for 330 seconds either way.
     private(set) var canOfferPreparation = true
 
     init(host: PreparedSuccessorHost?, now: @escaping () -> Int = {
@@ -368,24 +423,38 @@ final class PreparedReplacementCoordinator {
     var activeAction: PreparedReplacementAction? { ledger.active }
     var phase: PreparedReplacementPhase { ledger.phase }
 
+    /// Whether a viewer-initiated change should wait for an offer at all.
+    var shouldAskForPreparation: Bool {
+        canOfferPreparation && !ledger.hasActivePreparation
+    }
+
     /// A `prepare` arrived. The whole of §5.2's "one successor at a time" rule
-    /// lives here: a replay builds nothing, a settled staging builds nothing,
-    /// and a genuinely new staging first settles and frees the old one.
+    /// lives here: a replay builds nothing, a settled staging builds nothing, a
+    /// switch in flight is never disturbed, and a genuinely new staging first
+    /// settles and frees the old one.
     ///
-    /// `filmPositionMs` is read lazily because the two branches that do not
+    /// `filmPositionMs` is read lazily because the four branches that do not
     /// build must not ask the player anything.
     @discardableResult
     func offer(
         _ action: PreparedReplacementAction,
         filmPositionMs: @autoclosure () -> Int
     ) -> PreparedReplacementOffer {
-        let offer = ledger.offer(action)
+        let offer = ledger.offer(action, canPrepare: canOfferPreparation)
         switch offer {
-        case .alreadyOpen, .alreadySettled:
+        case .alreadyOpen, .alreadySettled, .busy:
+            return offer
+        case .declined:
+            // Nothing is built, and the staging is settled at once rather than
+            // left to the deadline: a server slot held for 330 seconds costs
+            // this session every later preparation, including the one that
+            // would work if the priming phase landed mid-film.
+            ledger.noteAbandoned(action, .aborted)
+            host?.preparedSuccessorOwesAnExchange()
             return offer
         case .supersede(let previous, let next):
             host?.discardPreparedSuccessor()
-            ledger.noteSuperseded(previous)
+            ledger.noteAbandoned(previous, .aborted)
             start(next, filmPositionMs: filmPositionMs())
         case .build(let next):
             start(next, filmPositionMs: filmPositionMs())
@@ -393,29 +462,26 @@ final class PreparedReplacementCoordinator {
         return offer
     }
 
-    /// Whether a viewer-initiated change should wait for an offer at all.
-    var shouldAskForPreparation: Bool { canOfferPreparation && !ledger.hasActivePreparation }
-
     private func start(_ action: PreparedReplacementAction, filmPositionMs: Int) {
         ledger.open(action)
         openedAtMs = now()
         guard host?.startPreparedSuccessor(action, filmPositionMs: filmPositionMs) == true else {
             // Not being able to start one is the ordinary one-slot outcome, so
             // it takes the ordinary path: settle, free, and change in place.
-            abandon(.failed, fallingBackFor: action)
+            abandon(.failed, settling: action)
             return
         }
         host?.preparedSuccessorOwesAnExchange()
     }
 
     func successorIsMetadataReady() {
-        guard ledger.hasActivePreparation else { return }
+        guard ledger.hasActivePreparation, !ledger.isSwitching else { return }
         ledger.noteMetadataReady()
         host?.preparedSuccessorOwesAnExchange()
     }
 
     func successorIsBuffered(throughMs: Int) {
-        guard ledger.hasActivePreparation else { return }
+        guard ledger.hasActivePreparation, !ledger.isSwitching else { return }
         ledger.noteBufferReady(bufferedThroughMs: throughMs)
         host?.preparedSuccessorOwesAnExchange()
     }
@@ -436,31 +502,38 @@ final class PreparedReplacementCoordinator {
 
     /// Give the staging up and take the in-place path instead.
     func abandon(_ reason: PreparedReplacementAbandonment) {
-        guard let action = ledger.active else { return }
-        abandon(reason, fallingBackFor: action)
+        guard let action = ledger.active, !ledger.isSwitching else { return }
+        abandon(reason, settling: action)
     }
 
     /// Give the staging up without falling back — the viewer already moved on,
     /// so there is nothing left to change to.
+    ///
+    /// Never during a switch: the commit's own outcome is what settles that
+    /// staging, and a viewer command landing mid-switch is applied by the
+    /// ordinary path once the switch has resolved.
     func abandonWithoutFallback(_ reason: PreparedReplacementAbandonment) {
-        guard ledger.hasActivePreparation else { return }
+        guard let action = ledger.active, !ledger.isSwitching else { return }
         host?.discardPreparedSuccessor()
-        ledger.noteAbandoned(reason)
+        ledger.noteAbandoned(action, reason)
         openedAtMs = nil
         host?.preparedSuccessorOwesAnExchange()
     }
 
     private func abandon(
         _ reason: PreparedReplacementAbandonment,
-        fallingBackFor action: PreparedReplacementAction
+        settling action: PreparedReplacementAction
     ) {
         // A successor that never became playable is evidence about this
         // playback, not about this attempt. One that failed after reaching
         // metadata is not: something produced media, so the next change is
         // worth trying.
-        if reason == .failed && ledger.phase == .building { canOfferPreparation = false }
+        if reason == .failed && ledger.active?.actionId == action.actionId
+            && ledger.phase == .building {
+            canOfferPreparation = false
+        }
         host?.discardPreparedSuccessor()
-        ledger.noteAbandoned(reason)
+        ledger.noteAbandoned(action, reason)
         openedAtMs = nil
         host?.preparedSuccessorOwesAnExchange()
         host?.fallBackToInPlaceReplacement(action)
@@ -471,22 +544,41 @@ final class PreparedReplacementCoordinator {
     /// The commit is sent only after the successor's own first qualifying
     /// frame, because the server's CAS moves the playback pointer on it: a
     /// premature commit points the pointer at a session the viewer is not
-    /// watching. A switch that produces no frame inside the bound is a
-    /// `failed` and the incumbent stays authoritative.
+    /// watching. Three outcomes, and they are genuinely different:
+    ///
+    /// - **committed** — the switch happened and a frame proved it.
+    /// - **refused** — nothing was switched, so the incumbent is untouched and
+    ///   this is an `aborted` plus the ordinary in-place change. It says
+    ///   nothing about whether a successor could have been primed, so it does
+    ///   not stop this playback asking again.
+    /// - **switchedWithoutAFrame** — the item is already gone and the
+    ///   predecessor released. There is no incumbent to keep, so this is a
+    ///   `failed` *and* a reopen, and the interruption is measured.
+    ///
+    /// The staging is named through every branch. `ledger.active` cannot be
+    /// trusted across the await — `.switching` stops anything else opening
+    /// one, but the ledger is settled by id either way.
     func commit() async {
-        guard let action = ledger.active,
-              ledger.phase == .metadataReady || ledger.phase == .bufferReady
-        else { return }
-        ledger.noteSwitching()
+        guard let action = ledger.active, ledger.noteSwitching(action) else { return }
         let startedAt = now()
-        guard let firstFrameUnixMs = await host?.commitPreparedSuccessor(action) else {
-            host?.recordPreparedFallbackInterruption(ms: max(0, now() - startedAt))
-            abandon(.failed, fallingBackFor: action)
-            return
-        }
-        ledger.noteCommitted(firstFrameUnixMs: firstFrameUnixMs)
+        let outcome = await host?.commitPreparedSuccessor(action) ?? .refused
         openedAtMs = nil
-        host?.preparedSuccessorOwesAnExchange()
+        switch outcome {
+        case .committed(let firstFrameUnixMs):
+            ledger.noteCommitted(action, firstFrameUnixMs: firstFrameUnixMs)
+            host?.preparedSuccessorOwesAnExchange()
+        case .refused:
+            host?.discardPreparedSuccessor()
+            ledger.noteAbandoned(action, .aborted)
+            host?.preparedSuccessorOwesAnExchange()
+            host?.fallBackToInPlaceReplacement(action)
+        case .switchedWithoutAFrame:
+            host?.recordPreparedFallbackInterruption(ms: max(0, now() - startedAt))
+            host?.discardPreparedSuccessor()
+            ledger.noteAbandoned(action, .failed)
+            host?.preparedSuccessorOwesAnExchange()
+            host?.fallBackToInPlaceReplacement(action)
+        }
     }
 
     func acknowledgementDelivered(_ value: ActionAcknowledgement) {

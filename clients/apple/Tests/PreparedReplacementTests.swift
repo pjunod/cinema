@@ -52,18 +52,43 @@ private func preparedAction(
 
 /// A host that records what it was asked to do, so every rule the coordinator
 /// applies is provable without AVFoundation, a device, or a server.
+/// Holds a commit open so a test can observe the switching window — the one
+/// window every re-entrancy bug in this file lives in.
+@MainActor
+private final class CommitGate {
+    private var resume: CheckedContinuation<Void, Never>?
+    private var opened = false
+
+    func wait() async {
+        guard !opened else { return }
+        await withCheckedContinuation { continuation in
+            if opened { continuation.resume() } else { resume = continuation }
+        }
+    }
+
+    func open() {
+        opened = true
+        resume?.resume()
+        resume = nil
+    }
+}
+
 @MainActor
 private final class RecordingHost: PreparedSuccessorHost {
+    var commitGate: CommitGate?
     var started: [PreparedReplacementAction] = []
     var discards = 0
     var fallbacks: [PreparedReplacementAction] = []
     var exchanges = 0
     var interruptions: [Int] = []
-    /// Pipelines alive right now, by the crudest possible count: one up per
-    /// successful start, one down per discard.
+    /// Pipelines alive right now. One up per successful start, one *down* per
+    /// discard rather than a reset to zero: a discard that frees nothing, or
+    /// two starts against one discard, is exactly the leak this counts, and a
+    /// counter that clamps to zero could not see either.
     var alive = 0
     var startSucceeds = true
-    var firstFrameUnixMs: Int? = 1_788_000_000_000
+    var outcome: PreparedCommitOutcome = .committed(firstFrameUnixMs: 1_788_000_000_000)
+    var commits: [PreparedReplacementAction] = []
 
     func startPreparedSuccessor(
         _ action: PreparedReplacementAction,
@@ -77,12 +102,18 @@ private final class RecordingHost: PreparedSuccessorHost {
 
     func discardPreparedSuccessor() {
         discards += 1
-        alive = 0
+        if alive > 0 { alive -= 1 }
     }
 
-    func commitPreparedSuccessor(_ action: PreparedReplacementAction) async -> Int? {
-        alive = 0
-        return firstFrameUnixMs
+    func commitPreparedSuccessor(
+        _ action: PreparedReplacementAction
+    ) async -> PreparedCommitOutcome {
+        commits.append(action)
+        await commitGate?.wait()
+        if case .refused = outcome { return outcome }
+        // A switch consumes the pipeline whether or not a frame proves it.
+        if alive > 0 { alive -= 1 }
+        return outcome
     }
 
     func fallBackToInPlaceReplacement(_ action: PreparedReplacementAction) {
@@ -354,21 +385,23 @@ final class PreparedReplacementLedgerTests: XCTestCase {
         XCTAssertEqual(ledger.pendingAcknowledgement?.bufferedThroughMs, 55_000)
     }
 
-    /// The same value rides every snapshot until the exchange that carried it
-    /// comes back. Coalescing cannot drop a settlement.
     /// The commit echoes the offer's own origin, whatever the player thinks.
     func testACommitEchoesTheOffersOriginRatherThanRecomputingIt() {
         var ledger = PreparedReplacementLedger()
-        ledger.open(preparedAction(mediaOriginMs: 600_000))
-        ledger.noteCommitted(firstFrameUnixMs: 1_788_000_000_000)
+        let action = preparedAction(mediaOriginMs: 600_000)
+        ledger.open(action)
+        ledger.noteCommitted(action, firstFrameUnixMs: 1_788_000_000_000)
         XCTAssertEqual(ledger.pendingAcknowledgement?.committedMediaOriginMs, 600_000)
         XCTAssertTrue(ledger.pendingAcknowledgement?.isValid == true)
     }
 
+    /// The same value rides every snapshot until the exchange that carried it
+    /// comes back. Coalescing cannot drop a settlement.
     func testASettlementStaysPendingUntilItsExchangeReturns() {
         var ledger = PreparedReplacementLedger()
-        ledger.open(preparedAction())
-        ledger.noteCommitted(firstFrameUnixMs: 1_788_000_000_000)
+        let action = preparedAction()
+        ledger.open(action)
+        ledger.noteCommitted(action, firstFrameUnixMs: 1_788_000_000_000)
         guard let owed = ledger.pendingAcknowledgement else {
             return XCTFail("a commit is owed the moment the first frame lands")
         }
@@ -389,7 +422,7 @@ final class PreparedReplacementLedgerTests: XCTestCase {
         let second = preparedAction(actionId: "7c2e3b55-3c8f-4b2d-8a4f-3d6b8c9e0f12")
         var ledger = PreparedReplacementLedger()
         ledger.open(first)
-        ledger.noteSuperseded(first)
+        ledger.noteAbandoned(first, .aborted)
         ledger.open(second)
         ledger.noteMetadataReady()
         XCTAssertEqual(ledger.acknowledgements.entries.map(\.state), [.aborted, .metadataReady])
@@ -407,14 +440,50 @@ final class PreparedReplacementLedgerTests: XCTestCase {
         XCTAssertFalse(ledger.hasActivePreparation)
     }
 
+    /// A settled staging never reopens through the only door there is.
     func testATerminalStateIsNeverOverwrittenByProgress() {
         var ledger = PreparedReplacementLedger()
         let action = preparedAction()
         ledger.open(action)
         ledger.noteAbandoned(.aborted)
-        ledger.open(action)
+        // Through `offer`, which is how a replay actually arrives — a direct
+        // `open` of a settled staging is a state the production path cannot
+        // reach, and testing through it would prove nothing about the code
+        // that runs.
+        XCTAssertEqual(ledger.offer(action), .alreadySettled)
         ledger.noteMetadataReady()
         XCTAssertEqual(ledger.acknowledgements.entries.map(\.state), [.aborted])
+    }
+
+    /// At the ceiling the value being recorded is the one worth keeping: if it
+    /// is a settlement, it is the one holding a server slot open right now.
+    func testTheQueueCeilingDropsAProgressReportRatherThanASettlement() {
+        var ledger = PreparedAcknowledgementLedger()
+        let ids = (0..<PreparedAcknowledgementLedger.capacity).map {
+            "6f1d2a44-2b7e-4a1c-9f3e-2c5a7b8d9e\(String(format: "%02d", $0))"
+        }
+        ledger.record(ActionAcknowledgement(actionId: ids[0], state: .metadataReady))
+        for id in ids.dropFirst() {
+            ledger.record(ActionAcknowledgement(actionId: id, state: .aborted))
+        }
+        XCTAssertEqual(ledger.entries.count, PreparedAcknowledgementLedger.capacity)
+        let late = ActionAcknowledgement(
+            actionId: "7c2e3b55-3c8f-4b2d-8a4f-3d6b8c9e0f12", state: .failed
+        )
+        ledger.record(late)
+        XCTAssertEqual(ledger.entries.count, PreparedAcknowledgementLedger.capacity)
+        XCTAssertTrue(ledger.entries.contains(late), "the incoming settlement is never the victim")
+        XCTAssertFalse(
+            ledger.entries.contains { $0.state == .metadataReady },
+            "progress is what goes: it reports nothing the server is waiting on"
+        )
+        // And with nothing but settlements queued, the oldest goes rather than
+        // the newest being thrown away.
+        var terminalOnly = PreparedAcknowledgementLedger()
+        for id in ids { terminalOnly.record(ActionAcknowledgement(actionId: id, state: .aborted)) }
+        terminalOnly.record(late)
+        XCTAssertTrue(terminalOnly.entries.contains(late))
+        XCTAssertEqual(terminalOnly.entries.first?.actionId, ids[1])
     }
 }
 
@@ -465,9 +534,12 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.hasActivePreparation)
     }
 
+    /// The switch happened and no frame proved it. There is no incumbent left
+    /// to keep, so this is a settlement *and* a reopen — and the interruption
+    /// is the number Apple has never had.
     func testASwitchThatProducesNoFrameIsFailedRatherThanCommitted() async {
         let host = RecordingHost()
-        host.firstFrameUnixMs = nil
+        host.outcome = .switchedWithoutAFrame
         let coordinator = PreparedReplacementCoordinator(host: host)
         let action = preparedAction()
         coordinator.offer(action, filmPositionMs: 1_000)
@@ -475,11 +547,145 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         coordinator.successorIsBuffered(throughMs: 40_000)
         await coordinator.commit()
         XCTAssertEqual(coordinator.pendingAcknowledgement?.state, .failed)
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.actionId, action.actionId)
         XCTAssertEqual(host.fallbacks, [action])
+        XCTAssertEqual(host.alive, 0)
         XCTAssertEqual(
             host.interruptions.count, 1,
             "the fallback interruption is unmeasured on Apple; this is the instrument"
         )
+    }
+
+    /// A commit the host would not even attempt is not evidence about
+    /// anything: the incumbent is untouched, so it is an abort plus the
+    /// ordinary in-place change, and this playback keeps asking.
+    func testARefusedSwitchAbortsRatherThanFailsAndLeavesTheAskingAlone() async {
+        let host = RecordingHost()
+        host.outcome = .refused
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        let action = preparedAction()
+        coordinator.offer(action, filmPositionMs: 1_000)
+        coordinator.successorIsMetadataReady()
+        coordinator.successorIsBuffered(throughMs: 40_000)
+        await coordinator.commit()
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.state, .aborted)
+        XCTAssertEqual(host.fallbacks, [action])
+        XCTAssertTrue(host.interruptions.isEmpty, "nothing was interrupted")
+        XCTAssertTrue(coordinator.shouldAskForPreparation)
+        XCTAssertEqual(host.alive, 0)
+    }
+
+    /// A staging offered while a switch is in flight builds nothing, disturbs
+    /// nothing, and — crucially — does not claim the viewer's change.
+    func testAStagingOfferedDuringASwitchIsRefusedWithoutTouchingTheSwitch() async {
+        let host = RecordingHost()
+        let gate = CommitGate()
+        host.commitGate = gate
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        let first = preparedAction()
+        let second = preparedAction(actionId: "7c2e3b55-3c8f-4b2d-8a4f-3d6b8c9e0f12")
+        coordinator.offer(first, filmPositionMs: 1_000)
+        coordinator.successorIsMetadataReady()
+        // Held inside the host, which is where a real commit spends its time:
+        // up to six seconds of waiting for the successor's first frame, with
+        // MainActor free the whole way.
+        let switching = Task { await coordinator.commit() }
+        while host.commits.isEmpty { await Task.yield() }
+        XCTAssertEqual(coordinator.phase, .switching)
+        XCTAssertEqual(coordinator.offer(second, filmPositionMs: 1_000), .busy)
+        XCTAssertFalse(PreparedReplacementOffer.busy.ownsTheChange)
+        XCTAssertEqual(host.started, [first], "nothing is built on top of a switch")
+        // Nor may a viewer command settle the staging the switch is committing.
+        coordinator.abandonWithoutFallback(.aborted)
+        coordinator.abandon(.failed)
+        XCTAssertEqual(
+            coordinator.pendingAcknowledgement?.state, .metadataReady,
+            "the progress already reported is all that is owed mid-switch"
+        )
+        XCTAssertEqual(coordinator.phase, .switching)
+        gate.open()
+        await switching.value
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.state, .committed)
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.actionId, first.actionId)
+    }
+
+    /// The commit settles the staging it was called for, by name.
+    ///
+    /// The coordinator's switching critical section is what makes this state
+    /// unreachable in production, and this is the ledger's own half of that
+    /// guarantee: even handed a stale staging while a different one is live,
+    /// it stamps the one it was given. A commit carrying another staging's
+    /// identity would pass the server's `bound_preparation_acknowledgement`
+    /// and move the playback pointer to a session nothing ever displayed.
+    func testACommitSettlesTheStagingItWasCalledForRatherThanWhateverIsCurrent() {
+        var ledger = PreparedReplacementLedger()
+        let first = preparedAction(mediaOriginMs: 600_000)
+        let second = preparedAction(
+            actionId: "7c2e3b55-3c8f-4b2d-8a4f-3d6b8c9e0f12", mediaOriginMs: 900_000
+        )
+        ledger.open(first)
+        ledger.noteMetadataReady()
+        XCTAssertTrue(ledger.noteSwitching(first))
+        ledger.open(second)
+        ledger.noteCommitted(first, firstFrameUnixMs: 1_788_000_000_000)
+        let committed = ledger.acknowledgements.entries.first { $0.state == .committed }
+        XCTAssertEqual(committed?.actionId, first.actionId)
+        XCTAssertEqual(
+            committed?.committedMediaOriginMs, 600_000,
+            "not 900000 — the origin the server compares is the offer's own"
+        )
+        XCTAssertEqual(ledger.active?.actionId, second.actionId, "the newer staging is untouched")
+    }
+
+    /// Nothing may switch from a staging that has not been made ready.
+    func testNoteSwitchingRefusesAnUnreadyOrForeignStaging() {
+        var ledger = PreparedReplacementLedger()
+        let action = preparedAction()
+        ledger.open(action)
+        XCTAssertFalse(ledger.noteSwitching(action), "building is not ready")
+        ledger.noteMetadataReady()
+        XCTAssertFalse(
+            ledger.noteSwitching(
+                preparedAction(actionId: "7c2e3b55-3c8f-4b2d-8a4f-3d6b8c9e0f12")
+            ),
+            "a staging that is not the live one cannot start a switch"
+        )
+        XCTAssertTrue(ledger.noteSwitching(action))
+    }
+
+    /// A playback that has stopped asking still settles what it is offered:
+    /// a staging left to the 330-second deadline costs that session every
+    /// later preparation.
+    func testADeclinedStagingIsSettledAtOnceAndBuildsNothing() {
+        let host = RecordingHost()
+        host.startSucceeds = false
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        coordinator.offer(preparedAction(), filmPositionMs: 1_000)
+        XCTAssertFalse(coordinator.canOfferPreparation)
+        host.startSucceeds = true
+        let pushed = preparedAction(actionId: "7c2e3b55-3c8f-4b2d-8a4f-3d6b8c9e0f12")
+        XCTAssertEqual(coordinator.offer(pushed, filmPositionMs: 1_000), .declined)
+        XCTAssertFalse(PreparedReplacementOffer.declined.ownsTheChange)
+        XCTAssertEqual(host.started.count, 0, "the server-pushed path obeys the same rule")
+        XCTAssertEqual(
+            coordinator.ledger.acknowledgements.entries.last?.actionId, pushed.actionId
+        )
+        XCTAssertEqual(coordinator.ledger.acknowledgements.entries.last?.state, .aborted)
+    }
+
+    /// A staging this client already settled changes nothing, so the caller
+    /// still owes the viewer the change they asked for.
+    func testASettledReplayDoesNotClaimTheViewersChange() {
+        let host = RecordingHost()
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        let action = preparedAction()
+        coordinator.offer(action, filmPositionMs: 1_000)
+        coordinator.abandonWithoutFallback(.aborted)
+        XCTAssertEqual(coordinator.offer(action, filmPositionMs: 1_000), .alreadySettled)
+        XCTAssertFalse(PreparedReplacementOffer.alreadySettled.ownsTheChange)
+        XCTAssertTrue(PreparedReplacementOffer.build(action).ownsTheChange)
+        XCTAssertTrue(PreparedReplacementOffer.alreadyOpen.ownsTheChange)
+        XCTAssertEqual(host.started.count, 1)
     }
 
     func testACommitCarriesTheFirstFrameAndSettlesTheStaging() async {
@@ -564,7 +770,7 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
     /// the next one, so the asking continues.
     func testAFailureAfterReadinessDoesNotStopTheAsking() async {
         let host = RecordingHost()
-        host.firstFrameUnixMs = nil
+        host.outcome = .switchedWithoutAFrame
         let coordinator = PreparedReplacementCoordinator(host: host)
         coordinator.offer(preparedAction(), filmPositionMs: 1_000)
         coordinator.successorIsMetadataReady()

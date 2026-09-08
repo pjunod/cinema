@@ -1752,6 +1752,12 @@ final class PlayerController: ObservableObject {
     /// The film position the successor was primed to, and the boundary the
     /// commit's first qualifying frame has to reach or pass.
     private var preparedFilmPositionMs = 0
+    /// The item-local seek the successor still owes. An `AVPlayerItem` one
+    /// statement old has status `.unknown` and silently drops a seek, which
+    /// would leave the successor primed to its own zero and commit a stream
+    /// that replays film the viewer has already watched. Nil once it has been
+    /// issued, which is also what lets the readiness monitor move on.
+    private var preparedSeekMs: Int?
     /// How long the viewer's picture was interrupted the last time a prepared
     /// handoff fell back, in milliseconds. Nil until one does. Published so
     /// the developer surfaces can show the number that is currently missing
@@ -2919,14 +2925,19 @@ final class PlayerController: ObservableObject {
     /// Returns true when the prepared path has taken ownership of this change,
     /// in which case the caller must not also reopen in place.
     ///
-    /// **Only live sessions ask.** `DeliveryView::from_status` leaves
-    /// `delivered_bps` `None` on every VOD session, and the server's
-    /// throughput floor needs both that number and this client's
-    /// `observed_download_bps`, so a prepared handoff cannot fire on a VOD
-    /// session today on any platform, however capable the client is. Asking
-    /// there would add this wait to every VOD quality change and could never
-    /// buy anything, so VOD keeps exactly the behaviour it has today. Closing
-    /// the VOD half is server work.
+    /// **VOD is not excluded, and an earlier draft of this excluded it.** The
+    /// contract says `DeliveryView::from_status` leaves `delivered_bps` `None`
+    /// on every VOD session, so the throughput floor can never be met there.
+    /// That was true when it was written and `f2fecc98` — "measure what a VOD
+    /// session actually delivers", an ancestor of `main` — fixed it, saying in
+    /// as many words that a `None` there "is what made preparation unreachable
+    /// on the primary presentation". Excluding VOD would have disabled this on
+    /// the presentation the server had just enabled it for. The code is the
+    /// authority; the contract is stale, and is corrected beside its claim.
+    ///
+    /// What bounds the cost instead is `canOfferPreparation`, which is about
+    /// evidence rather than presentation: a playback that proves it cannot
+    /// prime a successor stops asking, whatever it is playing.
     ///
     /// The bound is the one this platform already uses for "publish evidence
     /// and wait briefly for the verdict", and the contract records how long a
@@ -2936,33 +2947,42 @@ final class PlayerController: ObservableObject {
     /// viewer seconds of black and a rebuffer. It is spent only on a live
     /// session whose client declares the capability.
     private func offerPreparedQualityChange() async -> Bool {
-        guard !isVOD,
-              Caps.controlCapabilities().dualPlayerPreparation,
+        guard Caps.controlCapabilities().dualPlayerPreparation,
               // A successor that never became playable once will not become
               // playable on the next tap either, and the viewer already paid
               // for finding that out. See `canOfferPreparation`.
               preparedReplacement.shouldAskForPreparation,
+              // A paused viewer's change cannot be committed — no rate means
+              // no new frame to prove the switch — so it is not worth a wait.
+              wantsPlayback,
               await playbackControl.isActivelyReporting
         else {
             retainControlSequence(await playbackControl.reportIntent())
             return false
         }
+        // The floor `reportIntent` would have returned, read before the ask
+        // publishes anything — `notifyUrgently` returns `sequence + 1`, and
+        // `controlSequence` is nil until the first exchange, which is the same
+        // floor of 1. Reading it after the ask instead would retain a *lower*
+        // number whenever the ask bails without building a request, and order
+        // the reopen's create as more superseded than it is.
+        let floor = ((await playbackControl.controlSequence) ?? 0) + 1
         let answer = await playbackControl.askForAction(
             bound: Self.controlAskSeconds,
             cap: Self.controlAskCapSeconds,
             publish: { [weak self] in self?.playbackControl.reportEvidence() }
         )
-        // The reporter has moved past the exchange that carried this intent,
-        // so its own counter is at least the sequence `reportIntent` would
-        // have returned. Higher can only look less superseded, which is the
-        // safe direction the ordering floor is documented to take.
-        retainControlSequence(await playbackControl.controlSequence)
+        retainControlSequence(max(floor, (await playbackControl.controlSequence) ?? 0))
         guard let answer, let prepared = PreparedReplacementAction(answer) else { return false }
         // Idempotent against the reporter's own return path, which offers the
         // same staging from `onPreparedReplacement`: whichever arrives second
-        // is a replay and builds nothing.
-        preparedReplacement.offer(prepared, filmPositionMs: positionForPlaybackIntent())
-        return true
+        // is a replay and builds nothing. The answer decides whether the
+        // prepared path actually took the change — a staging this client has
+        // already settled, or one offered while a switch is in flight, changes
+        // nothing, and returning true for those would drop the viewer's tap.
+        return preparedReplacement.offer(
+            prepared, filmPositionMs: positionForPlaybackIntent()
+        ).ownsTheChange
     }
 
     /// The link rate AVFoundation itself measured, in bits per second.
@@ -6991,6 +7011,13 @@ extension PlayerController {
             onSubtitleReady: { [weak self] in
                 self?.retryNativeSubtitleAfterReadiness()
             },
+            // Deliberately ungated at this call site. Everything that could
+            // refuse a staging — one already live, one already settled, a
+            // switch in flight, a playback that has proved it cannot prime one
+            // — is decided inside `offer`, so the server-pushed path and the
+            // viewer-initiated path cannot disagree. A refusal here still
+            // settles the staging: an unanswered one holds the server's only
+            // preparation slot for 330 seconds.
             onPreparedReplacement: { [weak self] action in
                 guard let self else { return }
                 self.preparedReplacement.offer(
@@ -7208,18 +7235,16 @@ extension PlayerController: PreparedSuccessorHost {
         preparedItem = item
         preparedFilmPositionMs = max(0, filmPositionMs)
         // The successor's session-relative zero is not the film's. This is the
-        // same arithmetic a created session gets, over a raw origin.
-        if let itemPositionMs = Self.sessionAttachSeekMs(
+        // same arithmetic a created session gets, over a raw origin — and it
+        // is *recorded* here rather than performed, because the item is one
+        // statement old, its status is `.unknown`, and AVFoundation drops a
+        // seek on an item that cannot yet honour it. The created-session path
+        // has the same problem and solves it the same way, by waiting for
+        // readiness first (`seekWhenReady`).
+        preparedSeekMs = Self.sessionAttachSeekMs(
             requestedStartMs: preparedFilmPositionMs,
             mediaOriginMs: action.mediaOriginMs
-        ) {
-            item.seek(
-                to: CMTime(value: CMTimeValue(itemPositionMs), timescale: 1_000),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero,
-                completionHandler: nil
-            )
-        }
+        )
         observePreparedLifecycle()
         beginPreparedReadinessMonitor()
         return true
@@ -7248,6 +7273,7 @@ extension PlayerController: PreparedSuccessorHost {
         preparedPlayer = nil
         preparedItem = nil
         preparedFilmPositionMs = 0
+        preparedSeekMs = nil
     }
 
     /// Watch the second pipeline until it is worth switching to, gives up, or
@@ -7270,9 +7296,28 @@ extension PlayerController: PreparedSuccessorHost {
                 // `metadata_ready` claims.
                 if item.status == .readyToPlay {
                     self.preparedReplacement.successorIsMetadataReady()
-                    if let throughMs = self.preparedBufferedThroughMs(item),
-                       throughMs >= self.preparedFilmPositionMs
-                           + PreparedReplacementBounds.switchRunwayMs {
+                    // The seek the successor owes, issued exactly once and
+                    // only now that the item can honour it. Runway measured
+                    // before it lands is runway from the successor's own zero,
+                    // which is a different point in the film.
+                    if let seekMs = self.preparedSeekMs {
+                        // Cleared before the await, not after: this loop runs
+                        // every 100 ms and a flag set on the far side of a
+                        // suspension would issue the same seek repeatedly.
+                        // Awaited rather than given a completion handler
+                        // because AVFoundation calls those on a queue of its
+                        // choosing, and asserting main-actor isolation inside
+                        // one is what killed every play on build 90.
+                        self.preparedSeekMs = nil
+                        _ = await item.seek(
+                            to: CMTime(value: CMTimeValue(seekMs), timescale: 1_000),
+                            toleranceBefore: .zero,
+                            toleranceAfter: .zero
+                        )
+                        continue
+                    } else if let throughMs = self.preparedBufferedThroughMs(item),
+                              throughMs >= self.preparedFilmPositionMs
+                                  + PreparedReplacementBounds.switchRunwayMs {
                         self.preparedReplacement.successorIsBuffered(throughMs: throughMs)
                         await self.preparedReplacement.commit()
                         return
@@ -7316,12 +7361,22 @@ extension PlayerController: PreparedSuccessorHost {
     /// watching. Reassociating an item is the narrower change — and it is
     /// guarded, because AVFoundation raises rather than returns when an item
     /// is handed to a second player while the first still holds it.
-    func commitPreparedSuccessor(_ action: PreparedReplacementAction) async -> Int? {
+    func commitPreparedSuccessor(
+        _ action: PreparedReplacementAction
+    ) async -> PreparedCommitOutcome {
         guard started,
               let successor = preparedPlayer,
               let item = preparedItem,
-              player.currentItem != nil
-        else { return nil }
+              player.currentItem != nil,
+              // A paused viewer produces no new frame, ever: the item's output
+              // clock does not advance at rate zero, so a switch made while
+              // paused could only ever time out — and timing out after the
+              // swap means telling the server to abort a session the viewer is
+              // looking at. A quality change made while paused takes the
+              // in-place path, which costs a paused viewer nothing.
+              wantsPlayback,
+              !isChangingStream
+        else { return .refused }
         // Dropped rather than cancelled: this runs *inside* the readiness
         // monitor's own task, and cancelling it here would make every
         // `Task.isCancelled` check below — including the first-frame wait —
@@ -7335,10 +7390,18 @@ extension PlayerController: PreparedSuccessorHost {
         successor.replaceCurrentItem(with: nil)
         guard successor.currentItem == nil else {
             discardPreparedSuccessor()
-            return nil
+            return .refused
         }
         preparedPlayer = nil
         preparedItem = nil
+        // From here the incumbent's item is being replaced, so every monitor
+        // that would otherwise read a not-yet-ready item as a stall has to
+        // know a change is in flight — the same flag, for the same window,
+        // that `open()` holds across its own attach. Without it the end-of-
+        // item handler, the stall recovery and `positionForPlaybackIntent`
+        // all act on a stream that is mid-switch.
+        isChangingStream = true
+        defer { isChangingStream = false }
 
         // The film position the switch happens at. A first frame whose own
         // display time falls before this boundary is a pixel buffer that
@@ -7387,7 +7450,8 @@ extension PlayerController: PreparedSuccessorHost {
         if superseded != action.sessionId {
             await release(session: superseded)
         }
-        return firstFrameUnixMs
+        guard let firstFrameUnixMs else { return .switchedWithoutAFrame }
+        return .committed(firstFrameUnixMs: firstFrameUnixMs)
     }
 
     /// Wall clock at the successor's first frame that is actually at or past

@@ -453,11 +453,11 @@ struct EffectiveSelection: Codable, Equatable {
     /// `crates/plurxd/src/playback_control.rs`. Height starts at zero because
     /// zero is what a source delivery reports.
     var isValid: Bool {
-        (0...PlaybackControl.maximumHeight).contains(height)
+        let offset = PlaybackControl.maximumAudioOffsetMs
+        return (0...PlaybackControl.maximumHeight).contains(height)
             && (audioTrack.map { (0...1_024).contains($0) } ?? true)
             && (subtitleBurn.map { (0...1_024).contains($0) } ?? true)
-            && (-PlaybackControl.maximumAudioOffsetMs
-                ...PlaybackControl.maximumAudioOffsetMs).contains(audioOffsetMs)
+            && (-offset...offset).contains(audioOffsetMs)
             && Self.deliveryMethods.contains(codec)
             && (dynamicRange.map { Self.dynamicRanges.contains($0) } ?? true)
     }

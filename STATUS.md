@@ -55,11 +55,32 @@ send `observed_download_bps` as null is corrected, because both fill it now;
 and Settings → Developer's prepared-handoff card says, per requirement,
 whether it is currently met — advisory, gating nothing.
 
-**Not proven here:** a directed replacement on real hardware, on a live
-session (VOD cannot reach the preparation path at all, because
-`delivered_bps` is absent there), and the fallback interruption Apple has
-never measured. Both are operator steps; the prompt for them is in the pull
-request.
+An adversarial review of the branch found nine defects and all nine are
+fixed. Three were the kind only a reviewer finds: a commit that reported
+`failed` for a successor already on screen — which would have told the
+server to abort the session the viewer was watching, and fired on every
+quality change made while paused; a commit that settled *whatever staging
+was current* rather than the one it was called for, which the server would
+have accepted and used to move the pointer to a session nothing displayed;
+and a `.alreadySettled` replay that silently swallowed the viewer's tap and
+changed nothing at all. The switch is now a critical section nothing may
+build on top of, every settlement is named, and the successor's alignment
+seek waits for an item that can honour it instead of being dropped on an
+item one statement old.
+
+The review also caught the branch excluding VOD on the strength of a
+contract paragraph that `main` had already contradicted: `f2fecc98`
+populates `delivered_bps` for VOD and says in as many words that its absence
+"is what made preparation unreachable on the primary presentation". The
+exclusion would have disabled this on the presentation the server had just
+enabled it for. Both documents and the Rust doc comment that caused it are
+corrected.
+
+**Not proven here:** a directed replacement on real hardware and the
+fallback interruption Apple has never measured. Both are operator steps; the
+prompt for them is in the pull request. `make apple-build` and
+`make apple-test` are green on Xcode 26.6 — 900 cases across the iOS and
+tvOS destinations.
 
 ## Settings put the operator on the login page, and the cause was a tombstone
 

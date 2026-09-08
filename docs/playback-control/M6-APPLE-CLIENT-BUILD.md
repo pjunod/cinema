@@ -95,6 +95,27 @@ throughput can never be offered a preparation, whatever its capability says, so
 Apple's whole Gate A result is moot if this is null on the wire. Capture a real
 request body from a device, settle it, and fix whichever is wrong.
 
+
+> **Correction, 2026-09-07 — VOD's half is fixed, and this paragraph is
+> stale.** `f2fecc98`, "measure what a VOD session actually delivers", is an
+> ancestor of `main`. It populates `delivered_bps` in the VOD arm of
+> `DeliveryView::from_status` (`playback_control.rs`) from the VOD serving
+> boundary's own measurement, and its comment says exactly what this
+> paragraph says: *"This is what made preparation unreachable on the primary
+> presentation: `headroom_refusal` needs a delivered rate, and a `None` here
+> refused every VOD exchange with `throughput_unreported` — which is most of
+> them."* It is `None` only until a measurement window has closed.
+>
+> **So a client must not exclude VOD.** An earlier draft of the Apple client
+> did, on the strength of the paragraph below, which would have disabled the
+> capability on the presentation the server had just enabled it for. The
+> `FallbackReason::ThroughputUnreported` doc comment in the Rust is stale for
+> the same reason, and on a second count: it says both native clients hardcode
+> `observed_download_bps` null, and both now fill it.
+>
+> What bounds a client's cost is evidence, not presentation: a playback that
+> proves it cannot prime a successor stops asking, whatever it is playing.
+
 **And the half you cannot fix:** `delivered_bps` is `None` on every VOD session
 (§C9.2), so **a prepared handoff cannot fire on VOD, on any platform.**
 This changes how §8's hardware acceptance must be run: change quality on a
@@ -931,6 +952,27 @@ demand, and M5.5 never tested a contended link
 (`M6-IMPLEMENTATION-HANDOFF.md` §8) — the floor is the only thing standing in
 for that measurement. If your platform currently sends null, fixing that is
 part of your brief, not an optimisation.
+
+
+> **Correction, 2026-09-07 — VOD's half is fixed, and this paragraph is
+> stale.** `f2fecc98`, "measure what a VOD session actually delivers", is an
+> ancestor of `main`. It populates `delivered_bps` in the VOD arm of
+> `DeliveryView::from_status` (`playback_control.rs`) from the VOD serving
+> boundary's own measurement, and its comment says exactly what this
+> paragraph says: *"This is what made preparation unreachable on the primary
+> presentation: `headroom_refusal` needs a delivered rate, and a `None` here
+> refused every VOD exchange with `throughput_unreported` — which is most of
+> them."* It is `None` only until a measurement window has closed.
+>
+> **So a client must not exclude VOD.** An earlier draft of the Apple client
+> did, on the strength of the paragraph below, which would have disabled the
+> capability on the presentation the server had just enabled it for. The
+> `FallbackReason::ThroughputUnreported` doc comment in the Rust is stale for
+> the same reason, and on a second count: it says both native clients hardcode
+> `observed_download_bps` null, and both now fill it.
+>
+> What bounds a client's cost is evidence, not presentation: a playback that
+> proves it cannot prime a successor stops asking, whatever it is playing.
 
 **And the half you cannot fix from a client: `delivered_bps` is `None` on every
 VOD session.** The `FallbackReason::ThroughputUnreported` doc says it in as
