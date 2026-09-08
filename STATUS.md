@@ -4,6 +4,53 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## A prepared commit hands the viewer a session that is refused from its first request
+
+**Open on [its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/137).
+Documentation and one test comment; no runtime change.** Found while writing
+the plan for M6's missing server phase, and it is about code that has been
+merged for days rather than anything new.
+
+`commit_media_session_preparation` advances the playback pointer to the
+successor and deliberately does not publish it — the same split an activation
+makes, and the store contract is right to make it. What an activation also has
+is the caller that finishes the job: `settle_activation_predecessor` completes
+its successor's handoff once the exact predecessor accepts terminal control. A
+commit has no equivalent, so a committed successor stays at
+`MEDIA_SESSION_PUBLICATION_BLOCKED` — and **is refused on both planes from its
+very first request**, because `classify_durable_route` answers
+`OwnerTransition` for any non-zero fence and `control_owner_refusal` refuses
+control on the same predicate. The pointer moves and the viewer gets nothing.
+
+**The obvious fix is a regression, and that was established by building it.**
+The publication was written as a caller on the commit path; all 1905 daemon
+tests passed, clippy and rustfmt were clean, and an adversarial pass found what
+the suite could not. A committed successor has no local worker, because nothing
+primes one. Moving the row off the sentinel puts it into
+`owned_media_sessions`, and the lease loop renews only sessions that are
+*live*: `take_stale_settlement_candidates` selects exactly the inventory rows
+that are not, and `end_media_session_if_owner` ends them `replaced` **and
+deletes the playback pointer in the same transaction**. Publishing a workerless
+successor would have traded a stalled pointer for a deleted one, seconds after
+the commit instead of minutes. The sentinel was the only thing keeping the row
+out of that sweep.
+
+So the code change was withdrawn and the finding kept where it will be read:
+`preparation_executor_commits_a_staged_successor` keeps its sentinel assertion
+and now carries the whole mechanism, including the instruction not to "fix" it
+by publishing. Two further requirements the same review established are in the
+plan: `PredecessorAcknowledged` may not be asserted on a retired row while the
+predecessor's worker is still serving admitted bodies, and a publication that
+retries against the Store has to fit inside the client's four-second exchange
+budget.
+
+`docs/playback-control/M6-SERVER-PRIME-HANDOFF.md` carries the phase this was
+found under, and **the decision it waits on**: the only transition M6 admits
+produces a `Transcode` recipe, and the VOD engine refuses every non-`Copy` kind
+until the D6 device measurement lands. Priming cannot be built against the
+transition the fleet actually produces. Hold it for D6, or narrow the axis set
+to copy-only and prove the transaction on those — that choice is Paul's.
+
 ## Apple viewers were paying for encoders nobody told them about
 
 **Merged into `main` as `9c5e1f9b`, 2026-09-08, from
