@@ -6809,7 +6809,7 @@ function playbackControlCapabilities(){
   const decoderPx=Number(PLAY_CAPS&&PLAY_CAPS.maxheight)||displayPx;
   const px=Math.min(displayPx||decoderPx,decoderPx||displayPx);
   return {platform:"web",max_height:Math.max(144,Math.min(2160,Math.round(px)||1080)),
-    codecs,dynamic_ranges:ranges,dual_player_preparation:preparedHandoffEnabled()};
+    codecs,dynamic_ranges:ranges,dual_player_preparation:preparedHandoffOffered(PLAYER)};
 }
 function playbackControlSelection(p){
   const requested=playQuality();
@@ -6974,6 +6974,18 @@ const PREPARED_SETTLED_MEMORY=8;
 // four seconds, so anything longer is waiting on a server that is not going to
 // answer.
 const CONTROL_SETTLE_FLUSH_MS=5000;
+// Whether this browser will OFFER to prepare, right now.
+//
+// The switch is the operator's answer; this is the player's. A successor that
+// died before it was ever playable is evidence about this playback rather than
+// about that attempt — and while staging starts no worker, that is every
+// attempt — so the offer is withdrawn for the rest of the playback instead of
+// building a doomed second pipeline on every quality change. Learned, and
+// forgotten when the player ends: no flag, nothing persisted, and nothing an
+// operator has to reset.
+function preparedHandoffOffered(p){
+  return preparedHandoffEnabled() && !(p&&p.preparedRefused);
+}
 function preparedHandoffEnabled(){
   // Any scope without storage — a private window that refuses it, and the test
   // harnesses that build these functions out of source — reads as off.
@@ -7447,6 +7459,11 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
 function failPreparedReplacement(p,state,detail){
   if(preparedState(p)!==state) return;
   state.state="failed";
+  // Never playable, so stop asking for the next one. `buffered` is the line: a
+  // successor that reached its buffer target and then failed says something
+  // about that successor; one that never got there says the server cannot hand
+  // this playback a usable second pipeline at all.
+  if(!state.buffered) p.preparedRefused=true;
   queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
   clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
     message:`preparation of ${state.sessionId} failed: ${detail}`},playbackContext()));
@@ -14454,11 +14471,13 @@ function preparedHandoffReadiness(settings){
       note:`Two live decode pipelines need Media Source Extensions, or a native HLS engine `+
         `that will take a second element. A browser without either can still play; it just `+
         `cannot prepare.`},
-    {met:null,label:"The stream reports throughput, and is not VOD",
+    {met:true,label:"The stream reports throughput",
       note:`The server refuses a preparation unless this client's measured download rate is `+
-        `at least twice the delivered rate — and <code>delivered_bps</code> is absent on `+
-        `every VOD session, so a prepared handoff cannot fire on VOD on any platform today. `+
-        `Test on a live or recovery session; a quality change on a film shows nothing.`},
+        `at least twice what the session is delivering. This browser reports its rate from `+
+        `hls.js's own estimate, and the server has measured the delivered rate on VOD `+
+        `sessions since <code>f2fecc98</code> — before that it did not, and preparation was `+
+        `unreachable on the presentation nearly every session uses. Neither native client `+
+        `reports a rate yet.`},
     {met:null,label:"The fleet receipt is complete",
       note:`Require twenty consecutive commits on the corrected realistic-runway instrument `+
         `with stable memory. Apple is the measured candidate; Android and web remain `+

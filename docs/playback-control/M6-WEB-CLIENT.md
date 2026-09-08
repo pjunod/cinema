@@ -111,10 +111,19 @@ from the live-worker lease loop, which a worker-less row never enters.
 **So a client that builds a second pipeline today reaches `failed`, not
 `buffer_ready` — on every platform, Apple included.** That is the first row of
 the readiness list, and it is why the card still says *do not enable this for
-viewers yet*. The web client's behaviour on that path is correct and tested: a
-fatal manifest error settles the staging with `failed` and frees the slot,
-rather than leaving the session's only preparation slot held until the
-deadline.
+viewers yet*.
+
+The web client's behaviour on that path is correct, tested, and deliberately
+does not repeat itself. A fatal manifest error settles the staging with
+`failed` and frees the slot rather than holding the session's only preparation
+slot until the deadline — and a successor that was **never playable** also
+withdraws the offer: `preparedHandoffOffered` reports
+`dual_player_preparation` false for the rest of that playback, so the server
+stops staging. Without it, an operator who turned the switch on would get a
+doomed second pipeline built on every quality change, which is a regression and
+not a feature. It is learned, forgotten when the player ends, and needs no
+flag; Apple's `PreparedReplacementCoordinator.canOfferPreparation` is the same
+rule in the same place.
 
 ## 4. The gates that keep this honest
 
@@ -218,7 +227,16 @@ Three corrections to the shared wire contract, found while building this half:
    preparation half-understood is worse than one refused, because the server is
    holding a slot for it either way.
 
+**And one thing the contract's own §C9.2 got right yesterday and wrong today:
+VOD is no longer excluded.** `f2fecc98` ("measure what a VOD session actually
+delivers") populates `delivered_bps` for VOD sessions, which is what made the
+throughput floor unreachable on the presentation nearly every session uses. A
+client that gates preparation on "not VOD" now disables the feature on the
+presentation the server just enabled it for. The doc comment on
+`FallbackReason::ThroughputUnreported` still says otherwise; it is stale.
+
 Everything else in the contract matched the tree at `main` when this was
 written: the five acknowledgement states, the `committed`-may-not-ride-`end`
-rule, the 330-second deadline, and the throughput floor that keeps a prepared
-handoff off every VOD session on every platform.
+rule, the 330-second deadline, and the throughput floor itself — this client's
+measured rate must be at least twice the delivered one, and web is the only
+port that reports a rate at all.

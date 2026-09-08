@@ -646,7 +646,7 @@ async function main() {
     [
       // `preparedHandoffEnabled` reads storage this scope does not have, and
       // answers "off" when it cannot — which is what a private window does too.
-      shippedSource("preparedHandoffEnabled"),
+      shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffOffered"),
       shippedSource("pendingPlaybackControlAcknowledgement"),
       shippedSource("playbackControlCapabilities"),
       shippedSource("playbackControlSelection"),
@@ -3398,6 +3398,8 @@ async function main() {
     h.instances[0].events.error(null, { fatal: true, details: "manifestLoadError" });
     assert.equal(latest(h).state, "failed");
     assert.equal(p.prepared, null, "a failed preparation frees its slot too");
+    assert.equal(p.preparedRefused, true,
+      "…and one that was never playable withdraws the offer for this playback");
     h.instances[0].events.error(null, { fatal: false, details: "bufferStalledError" });
     assert.equal(latest(h).state, "failed", "a non-fatal error settles nothing");
   }
@@ -3477,11 +3479,12 @@ async function main() {
   {
     const capabilities = new Function("localStorage", "PLAY_CAPS", "screen", "window", [
       shippedConst("PREPARED_HANDOFF_KEY"),
-      shippedSource("preparedHandoffEnabled"),
+      shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffOffered"),
       shippedSource("setPreparedHandoffEnabled"),
       shippedSource("playbackControlCapabilities"),
+      "let PLAYER=null;",
       "return {capabilities:playbackControlCapabilities,enable:setPreparedHandoffEnabled,"
-        + "enabled:preparedHandoffEnabled};",
+        + "enabled:preparedHandoffEnabled,player(p){PLAYER=p;}};",
     ].join("\n"))(
       (() => {
         const store = new Map();
@@ -3497,6 +3500,16 @@ async function main() {
     assert.equal(capabilities.enabled(), true);
     assert.equal(capabilities.capabilities().dual_player_preparation, true,
       "and the switch is what reaches the wire — there is no separate code gate");
+    // …and the player can withdraw the offer without the operator touching the
+    // switch. A successor that died before it was ever playable is a statement
+    // about this playback, and while staging starts no worker that is every
+    // attempt — so the alternative is a doomed second pipeline on every quality
+    // change, which is a regression, not a feature.
+    capabilities.player({ preparedRefused: true });
+    assert.equal(capabilities.capabilities().dual_player_preparation, false,
+      "a playback that could not be handed a usable successor stops offering");
+    capabilities.player(null);
+    assert.equal(capabilities.capabilities().dual_player_preparation, true);
     capabilities.enable(false);
     assert.equal(capabilities.capabilities().dual_player_preparation, false);
   }

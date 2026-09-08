@@ -288,7 +288,7 @@ test("Developer is where the switches that cost something live", () => {
   assert.match(html, /advisory and does not block this switch/);
   assert.match(html, /503 media_owner_transition/,
     "the card says what a staged playlist actually answers today");
-  assert.match(html, /cannot fire on VOD/);
+  assert.match(html, /at least twice what the session is delivering/);
   // The switch has to be wired to something. A control that renders and does
   // nothing is worse than no control: it reports a capability to the operator
   // that the server never hears about.
