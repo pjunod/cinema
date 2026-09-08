@@ -391,7 +391,7 @@ and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
   H.264 copy session, plurx does the segmenting itself and places a boundary
   only in front of a keyframe with no leading picture to discard — every
   ordinary boundary on an open-GOP disc remux costs exactly one frame
-  ([STUTTER-4K.md](STUTTER-4K.md) §5.6). Where no such keyframe appears
+  ([STUTTER-4K.md](streaming/STUTTER-4K.md) §5.6). Where no such keyframe appears
   within 48 MB or 15 s the cut is taken anyway and counted; the decoded
   frames are bit-identical either way, and a stream the reader cannot follow
   falls back to ffmpeg's own muxer automatically.
@@ -523,7 +523,7 @@ behave exactly like the flagged ones: the device accepts the connection and
 returns nothing after a flat ten seconds, while reporting 98% signal quality —
 so that is the device declining to hand over protected content, not a weak
 signal, and not something plurx can fix. See
-[HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md).
+[HDHOMERUN-LIVE-TV-STATUS.md](features/HDHOMERUN-LIVE-TV-STATUS.md).
 
 **What else is limited, honestly.** Losing the owner node ends the live session
 in flight;
@@ -677,7 +677,7 @@ backend (hiqlite, raft-replicated SQLite) and the transcode-failover mechanic
 (session restart-at-boundary, any node serves segment N) are **decided and
 validated**, not yet wired into a running cluster. Today plurx runs as a single
 node; the cluster is the next phase. Detail: [ARCHITECTURE.md](ARCHITECTURE.md)
-§2, [PHASE3-SPIKE.md](PHASE3-SPIKE.md).
+§2, [PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md).
 
 ---
 

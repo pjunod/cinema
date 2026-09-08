@@ -18,15 +18,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use hiqlite::macros::params;
-use hiqlite::{Client, Row};
+use hiqlite::{Client, Params, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::replicated::ReplicatedSql;
 use super::telemetry::NodeLocalTelemetry;
 use super::{
-    keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence, MetricsStore,
-    NetworkPriorStore, PlaybackTelemetryStore, PrometheusStoreSnapshot, SettingsStore, UserStore,
+    keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence, CacheAdminMutationClaim,
+    MetricsStore, NetworkPriorStore, PlaybackTelemetryStore, PrometheusStoreSnapshot,
+    SettingsStore, UserStore,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -73,8 +74,10 @@ const DV_CONVERSIONS_SCHEMA_VERSION: i64 = 24;
 const DV_RECOVERY_GUARDS_SCHEMA_VERSION: i64 = 25;
 const ATTEMPT_ERRORS_SCHEMA_VERSION: i64 = 26;
 const REQUEST_IDENTITY_SCHEMA_VERSION: i64 = 27;
-const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 28;
-const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 29;
+const DESIRED_SELECTION_SCHEMA_VERSION: i64 = 28;
+const POINTER_DESIRED_FENCE_SCHEMA_VERSION: i64 = 29;
+const PRODUCER_RECOVERY_SCHEMA_VERSION: i64 = 30;
+const RECOVERY_EPOCH_SCHEMA_VERSION: i64 = 31;
 pub const AUTH_SCHEMA_VERSION: i64 = RECOVERY_EPOCH_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
@@ -100,7 +103,13 @@ const DV_CONVERSIONS_SCHEMA_MIGRATION_SOURCE: i64 = STAGED_GENERATION_SCHEMA_VER
 const DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE: i64 = DV_CONVERSIONS_SCHEMA_VERSION;
 const ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE: i64 = DV_RECOVERY_GUARDS_SCHEMA_VERSION;
 const REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ATTEMPT_ERRORS_SCHEMA_VERSION;
-const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
+const DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE: i64 = REQUEST_IDENTITY_SCHEMA_VERSION;
+const POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = DESIRED_SELECTION_SCHEMA_VERSION;
+// The decoder-recovery pair moved behind the desired-selection pair in the
+// merge: both efforts appended a v28 and a v29 to this chain independently,
+// and the one already on main is the one that cannot move. The chain is
+// positional, so a source is whichever version now precedes the step.
+const PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = POINTER_DESIRED_FENCE_SCHEMA_VERSION;
 const RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE: i64 = PRODUCER_RECOVERY_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
@@ -142,6 +151,10 @@ const AUTHORITY_QUORUM_RECOVERY_BUDGET: Duration = Duration::from_secs(5);
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
 const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
+const CREDENTIAL_MUTATION_INTENT_BEGIN_SQL: &str =
+    "INSERT INTO cluster_credential_mutation_intents (singleton) VALUES (1)";
+const CREDENTIAL_MUTATION_INTENT_END_SQL: &str =
+    "DELETE FROM cluster_credential_mutation_intents WHERE singleton = 1";
 
 const AUTH_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS cluster_meta (
@@ -172,6 +185,19 @@ CREATE TABLE IF NOT EXISTS tokens (
     device       TEXT,
     created_at   INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL
+) STRICT;
+
+-- Present in the authentication schema as well as the membership schema so
+-- current Store transactions can carry their proof before the first cluster
+-- heartbeat. The row exists only inside one replicated transaction.
+CREATE TABLE IF NOT EXISTS cluster_credential_mutation_intents (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
+) STRICT;
+
+-- Permanent only after the exact committed roster concurrently proves the
+-- credential-revocation protocol. Membership owns publication of this row.
+CREATE TABLE IF NOT EXISTS cluster_credential_guard_activation (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -1198,6 +1224,37 @@ impl HiqliteAuthStore {
         &self.client
     }
 
+    /// Carry a transaction-local proof around credential mutations. Replicated
+    /// triggers start enforcing this after a guarded full-roster activation,
+    /// so a rolled-back binary cannot race another node's readiness refresh
+    /// and mutate authority with legacy SQL.
+    async fn credential_mutation(
+        &self,
+        statements: Vec<(&'static str, Params)>,
+    ) -> Result<Vec<usize>, StoreError> {
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        let statement_count = statements.len();
+        let mut transaction = Vec::with_capacity(statement_count + 2);
+        transaction.push((CREDENTIAL_MUTATION_INTENT_BEGIN_SQL, params!()));
+        transaction.extend(statements);
+        transaction.push((CREDENTIAL_MUTATION_INTENT_END_SQL, params!()));
+        let results = self
+            .client()
+            .txn(transaction)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if results.len() != statement_count + 2 {
+            return Err(StoreError::Database(
+                "credential mutation transaction returned the wrong result count".into(),
+            ));
+        }
+        Ok(results[1..=statement_count].to_vec())
+    }
+
     /// Reset attempted client-call accounting before a validation workload.
     #[cfg(feature = "cluster-read-cost-validation")]
     #[doc(hidden)]
@@ -2041,6 +2098,90 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // A new table rather than a column, so this step *is*
+                    // idempotent on its own — but it still settles through the
+                    // same helper as every other, because the schema-version
+                    // update is not: two voters observing the same predecessor
+                    // both try to advance it and exactly one may win.
+                    let statements = vec![
+                        (super::MEDIA_PLAYBACK_DESIRED_SCHEMA.to_owned(), params!()),
+                        (
+                            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                             WHERE singleton = 1 AND schema_version = $3"
+                                .to_owned(),
+                            params!(
+                                DESIRED_SELECTION_SCHEMA_VERSION,
+                                now,
+                                DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
+                            ),
+                        ),
+                    ];
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    // A column plus two triggers, settled through the same
+                    // helper as every other step. The three statements are one
+                    // step on purpose: a column nothing enforces is not a
+                    // fence, and a trigger cannot be created on a column that
+                    // does not exist. `ALTER TABLE ... ADD COLUMN` is not
+                    // idempotent, which is exactly why the schema-version CAS
+                    // below has to be the thing that decides who applied it.
+                    let mut statements = vec![
+                        (
+                            super::MEDIA_PLAYBACK_POINTER_DESIRED_REVISION_COLUMN.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            super::MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER.to_owned(),
+                            params!(),
+                        ),
+                        (
+                            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                             WHERE singleton = 1 AND schema_version = $3"
+                                .to_owned(),
+                            params!(
+                                POINTER_DESIRED_FENCE_SCHEMA_VERSION,
+                                now,
+                                POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE
+                            ),
+                        ),
+                    ];
+                    // The `ALTER` is dropped when the column is already there,
+                    // and that is not belt-and-braces. A cluster bootstrapped
+                    // from the current install schema has the column from its
+                    // first moment, because the fresh table declares it — so a
+                    // database whose marker still names an older version has
+                    // the column but not the step, and replaying the chain
+                    // across it meets `duplicate column name` rather than an
+                    // upgrade. `settle_migration_attempt` cannot rescue that:
+                    // it forgives a failure only when *another voter* has
+                    // advanced the marker, and here nobody has. Asking the
+                    // schema what it already holds is the shape the analysis
+                    // component migration uses, for this exact reason.
+                    if self.pointer_desired_revision_column_present().await? {
+                        statements.remove(0);
+                    }
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     // `CREATE TABLE IF NOT EXISTS` is idempotent, so unlike the
@@ -2119,6 +2260,23 @@ impl HiqliteAuthStore {
     /// now current. Treat an error as commit/concurrency-unknown, reread the
     /// replicated marker consistently, and suppress it only when another
     /// transaction durably advanced beyond the exact predecessor we tried.
+    /// Whether `media_playback_pointers` already carries `desired_revision`.
+    ///
+    /// A fresh install declares the column in the table; an upgrade adds it.
+    /// Both are correct and both are reachable from the same marker, so the
+    /// migration asks rather than assumes.
+    async fn pointer_desired_revision_column_present(&self) -> Result<bool, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM pragma_table_info('media_playback_pointers') \
+                 WHERE name = 'desired_revision'",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
     async fn settle_migration_attempt(
         &self,
         predecessor: i64,
@@ -2289,10 +2447,6 @@ impl HiqliteAuthStore {
                 "DELETE FROM media_session_terminal_acks".to_owned(),
                 params!(),
             ),
-            (
-                "DELETE FROM media_session_producer_recovery".to_owned(),
-                params!(),
-            ),
             ("DELETE FROM media_sessions".to_owned(), params!()),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
@@ -2318,9 +2472,11 @@ impl HiqliteAuthStore {
             ("DELETE FROM files".to_owned(), params!()),
             ("DELETE FROM items".to_owned(), params!()),
             ("DELETE FROM libraries".to_owned(), params!()),
+            (CREDENTIAL_MUTATION_INTENT_BEGIN_SQL.to_owned(), params!()),
             ("DELETE FROM tokens".to_owned(), params!()),
             ("DELETE FROM api_keys".to_owned(), params!()),
             ("DELETE FROM users".to_owned(), params!()),
+            (CREDENTIAL_MUTATION_INTENT_END_SQL.to_owned(), params!()),
             (
                 "DELETE FROM settings WHERE key <> $1 \
                    AND key NOT GLOB 'internal.cluster_job_owner_removed.*'"
@@ -3228,9 +3384,42 @@ impl UserStore for HiqliteAuthStore {
 
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError> {
         Ok(self
-            .execute("DELETE FROM users WHERE id = $1", params!(id))
-            .await?
+            .credential_mutation(vec![("DELETE FROM users WHERE id = $1", params!(id))])
+            .await?[0]
             > 0)
+    }
+
+    async fn delete_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let statement = match claim {
+            Some(claim) => (
+                "DELETE FROM users
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))
+                       AND EXISTS (
+                         SELECT 1 FROM cluster_cache_admin_revocation_leases
+                         WHERE claim_id = $2
+                       )",
+                params!(id, claim.as_str()),
+            ),
+            None => (
+                "DELETE FROM users
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))",
+                params!(id),
+            ),
+        };
+        let changed = self.credential_mutation(vec![statement]).await?[0];
+        Ok(changed > 0)
     }
 
     async fn count_admins(&self) -> Result<i64, StoreError> {
@@ -3248,28 +3437,160 @@ impl UserStore for HiqliteAuthStore {
         // parameter whose index follows first appearance. Keep `$1` first in
         // the SQL even when the SET clause precedes the predicate.
         Ok(self
-            .execute(
+            .credential_mutation(vec![(
                 "UPDATE users SET password_hash = $1 WHERE id = $2",
                 params!(password_hash, id),
-            )
-            .await?
+            )])
+            .await?[0]
             > 0)
+    }
+
+    async fn reset_password_and_revoke_tokens(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let results = match claim {
+            Some(claim) => {
+                self.credential_mutation(vec![
+                    (
+                        "UPDATE users SET password_hash = $1
+                             WHERE id = $2 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $3
+                             )",
+                        params!(password_hash, id, claim.as_str()),
+                    ),
+                    (
+                        "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $2
+                             )",
+                        params!(id, claim.as_str()),
+                    ),
+                ])
+                .await?
+            }
+            None => {
+                self.credential_mutation(vec![
+                    (
+                        "UPDATE users SET password_hash = $1 WHERE id = $2",
+                        params!(password_hash, id),
+                    ),
+                    ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
+                ])
+                .await?
+            }
+        };
+        let mut results = results.into_iter();
+        let changed = results.next().ok_or_else(|| {
+            StoreError::Database("password transaction returned no result".into())
+        })?;
+        results
+            .next()
+            .ok_or_else(|| StoreError::Database("token transaction returned no result".into()))?;
+        Ok(changed > 0)
+    }
+
+    async fn promote_user_and_reset_password(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let results = match claim {
+            Some(claim) => {
+                self.credential_mutation(vec![
+                    (
+                        "UPDATE users SET password_hash = $1, is_admin = 1
+                             WHERE id = $2 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $3
+                             )",
+                        params!(password_hash, id, claim.as_str()),
+                    ),
+                    (
+                        "DELETE FROM tokens WHERE user_id = $1 AND EXISTS (
+                               SELECT 1 FROM cluster_cache_admin_revocation_leases
+                               WHERE claim_id = $2
+                             )",
+                        params!(id, claim.as_str()),
+                    ),
+                ])
+                .await?
+            }
+            None => {
+                self.credential_mutation(vec![
+                    (
+                        "UPDATE users SET password_hash = $1, is_admin = 1 WHERE id = $2",
+                        params!(password_hash, id),
+                    ),
+                    ("DELETE FROM tokens WHERE user_id = $1", params!(id)),
+                ])
+                .await?
+            }
+        };
+        let mut results = results.into_iter();
+        let changed = results.next().ok_or_else(|| {
+            StoreError::Database("promotion transaction returned no result".into())
+        })?;
+        results
+            .next()
+            .ok_or_else(|| StoreError::Database("token transaction returned no result".into()))?;
+        Ok(changed > 0)
     }
 
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError> {
         Ok(self
-            .execute(
+            .credential_mutation(vec![(
                 "UPDATE users SET is_admin = $1 WHERE id = $2",
                 params!(is_admin, id),
-            )
-            .await?
+            )])
+            .await?[0]
             > 0)
+    }
+
+    async fn demote_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let statement = match claim {
+            Some(claim) => (
+                "UPDATE users SET is_admin = 0
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))
+                       AND EXISTS (
+                         SELECT 1 FROM cluster_cache_admin_revocation_leases
+                         WHERE claim_id = $2
+                       )",
+                params!(id, claim.as_str()),
+            ),
+            None => (
+                "UPDATE users SET is_admin = 0
+                     WHERE id = $1
+                       AND (is_admin = 0 OR EXISTS (
+                         SELECT 1 FROM users AS other
+                         WHERE other.is_admin = 1 AND other.id != $1
+                       ))",
+                params!(id),
+            ),
+        };
+        let changed = self.credential_mutation(vec![statement]).await?[0];
+        Ok(changed > 0)
     }
 
     async fn delete_tokens_for_user(&self, user_id: i64) -> Result<u64, StoreError> {
         Ok(self
-            .execute("DELETE FROM tokens WHERE user_id = $1", params!(user_id))
-            .await? as u64)
+            .credential_mutation(vec![(
+                "DELETE FROM tokens WHERE user_id = $1",
+                params!(user_id),
+            )])
+            .await?[0] as u64)
     }
 
     async fn create_token(
@@ -3279,14 +3600,34 @@ impl UserStore for HiqliteAuthStore {
         device: Option<&str>,
     ) -> Result<(), StoreError> {
         let now = self.now()?;
-        self.execute(
+        self.credential_mutation(vec![(
             "INSERT INTO tokens \
              (token_hash, user_id, device, created_at, last_seen_at) \
              VALUES ($1, $2, $3, $4, $4)",
             params!(token_hash, user_id, device, now),
-        )
+        )])
         .await?;
         Ok(())
+    }
+
+    async fn create_token_if_password_matches(
+        &self,
+        token_hash: &str,
+        user_id: i64,
+        device: Option<&str>,
+        expected_password_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let now = self.now()?;
+        Ok(self
+            .credential_mutation(vec![(
+                "INSERT INTO tokens \
+                 (token_hash, user_id, device, created_at, last_seen_at) \
+                 SELECT $1, id, $2, $3, $3 FROM users \
+                 WHERE id = $4 AND password_hash = $5",
+                params!(token_hash, device, now, user_id, expected_password_hash),
+            )])
+            .await?[0]
+            > 0)
     }
 
     async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError> {
@@ -3310,12 +3651,34 @@ impl UserStore for HiqliteAuthStore {
 
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError> {
         Ok(self
-            .execute(
+            .credential_mutation(vec![(
                 "DELETE FROM tokens WHERE token_hash = $1",
                 params!(token_hash),
-            )
-            .await?
+            )])
+            .await?[0]
             > 0)
+    }
+
+    async fn delete_token_with_cache_admin_claim(
+        &self,
+        token_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        let statement = match claim {
+            Some(claim) => (
+                "DELETE FROM tokens WHERE token_hash = $1 AND EXISTS (
+                       SELECT 1 FROM cluster_cache_admin_revocation_leases
+                       WHERE claim_id = $2
+                     )",
+                params!(token_hash, claim.as_str()),
+            ),
+            None => (
+                "DELETE FROM tokens WHERE token_hash = $1",
+                params!(token_hash),
+            ),
+        };
+        let changed = self.credential_mutation(vec![statement]).await?[0];
+        Ok(changed > 0)
     }
 }
 
@@ -3596,6 +3959,8 @@ fn schema_migration_action(
         | DV_RECOVERY_GUARDS_SCHEMA_MIGRATION_SOURCE
         | ATTEMPT_ERRORS_SCHEMA_MIGRATION_SOURCE
         | REQUEST_IDENTITY_SCHEMA_MIGRATION_SOURCE
+        | DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE
+        | POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE
         | PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE
         | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
@@ -5382,17 +5747,35 @@ mod tests {
             "v26 must advance exactly one step to the request-identity schema"
         );
         assert_eq!(
-            PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, REQUEST_IDENTITY_SCHEMA_VERSION,
-            "the producer-recovery migration must start from the exact v27 shape"
+            DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE, REQUEST_IDENTITY_SCHEMA_VERSION,
+            "the desired-selection migration must start from the exact v27 shape"
+        );
+        assert_eq!(
+            DESIRED_SELECTION_SCHEMA_MIGRATION_SOURCE + 1,
+            DESIRED_SELECTION_SCHEMA_VERSION,
+            "v27 must advance exactly one step to the desired-selection schema"
+        );
+        assert_eq!(
+            POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE, DESIRED_SELECTION_SCHEMA_VERSION,
+            "the pointer fence migration must start from the exact v28 shape"
+        );
+        assert_eq!(
+            POINTER_DESIRED_FENCE_SCHEMA_MIGRATION_SOURCE + 1,
+            POINTER_DESIRED_FENCE_SCHEMA_VERSION,
+            "v28 must advance exactly one step to the pointer fence schema"
+        );
+        assert_eq!(
+            PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, POINTER_DESIRED_FENCE_SCHEMA_VERSION,
+            "the producer-recovery migration must start from the exact v29 shape"
         );
         assert_eq!(
             PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE + 1,
             PRODUCER_RECOVERY_SCHEMA_VERSION,
-            "v27 must advance exactly one step to the producer-recovery schema"
+            "v29 must advance exactly one step to the producer-recovery schema"
         );
         assert_eq!(
-            RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 28,
-            "the recovery-epoch migration must start from the exact v28 shape. \
+            RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 30,
+            "the recovery-epoch migration must start from the exact v30 shape. \
              The literal is the point: every other step in this chain asserts \
              its source against the constant it is defined as, which cannot \
              fail, so it guards the version bump and not the source"
@@ -5400,12 +5783,12 @@ mod tests {
         assert_eq!(
             RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE + 1,
             RECOVERY_EPOCH_SCHEMA_VERSION,
-            "v28 must advance exactly one step to the recovery-epoch schema"
+            "v30 must advance exactly one step to the recovery-epoch schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 24,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 26,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v29 step"
+            "this implementation contains every additive v5→v31 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

@@ -68,9 +68,10 @@ services:
     # operator's job, and it does not work: the deadline commonly lives in a
     # bind-mounted plurx.toml that `.env` never mentions, so the two halves are
     # in different files on different machines and the first report of a
-    # mismatch is a refused deploy. `make docker-up` now derives this value
-    # from the same deadline its preflight reads, so leaving it unset is always
-    # the right number rather than a number somebody has to maintain.
+    # mismatch is a refused deploy. The supported `docker-up` and
+    # `docker-image-up` targets now derive this value from the same deadline
+    # their preflight reads, so leaving it unset is always the right number
+    # rather than a number somebody has to maintain.
     #
     # Set it in `.env` only to *choose* a grace — a longer one, or a
     # deliberately short one that surfaces a broken build fast. Anything that
@@ -78,21 +79,21 @@ services:
     # somebody, wherever they wrote it, and is used exactly as Compose resolved
     # it: nothing here re-reads `.env` and second-guesses that. It is never
     # raised past you; if it cannot cover the deadline the preflight refuses it
-    # by name. Five minutes is the unset default for a deployment
-    # that never resolves anything longer: it covers the 120s default without
-    # hiding a broken build for the one-hour maximum, and `.env.example` shows
-    # the maximum pair. Invoking `docker compose up` directly derives nothing
-    # and proves nothing.
+    # by name. Twenty-five minutes is the unset default for a deployment that
+    # never resolves anything longer: it covers the 1,200s transfer stage,
+    # 120s final install, and 135s of named startup phases. `.env.example`
+    # shows the fleet rollout pair. Invoking `docker compose up` directly
+    # derives nothing and proves nothing.
     healthcheck:
       test: ["CMD", "plurxd", "healthcheck"]
       interval: 30s
       timeout: 5s
-      start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"
-    # At the supported 3,600s snapshot-transfer maximum, a recovering voter can
-    # spend 45s becoming healthy, 45s confirming admission, 3,645s catching up,
-    # and 30s draining Hiqlite's writer/Raft tasks. Docker's 10-second default
-    # kills that bounded path midway and leaves crash sentinels behind. The
-    # default covers the full maximum plus margin; ordinary stops exit sooner.
+      start_period: "${PLURX_HEALTH_START_PERIOD:-25m}"
+    # At the supported 3,600s final-install maximum, a recovering voter can
+    # spend that full allowance in node-owned storage work plus shutdown
+    # cleanup. Docker's 10-second default kills that bounded path midway and
+    # leaves crash sentinels behind. The default covers the install maximum
+    # plus margin; ordinary stops exit sooner.
     stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}
     # Keep the base service on ordinary Docker networking. Host-specific
     # overrides commonly attach plurxd to an external media network, and
@@ -119,16 +120,21 @@ services:
       PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"
       PLURX_BIND: "0.0.0.0:32400"
       PLURX_DATA_DIR: "/var/lib/plurx"
-      # Empty leaves a TOML value (or the built-in 120s default) authoritative.
-      # `make docker-up` checks readable bind-mounted TOML too; when set in
-      # .env, pair this with PLURX_HEALTH_START_PERIOD above.
+      # Empty leaves TOML (or built-in defaults) authoritative. The 30s chunk
+      # watchdog is independent of startup grace; the preflight derives grace
+      # from the 1,200s transfer and 120s final-install stages. It also checks
+      # readable bind-mounted TOML. When either stage is set in .env, pair it
+      # with PLURX_HEALTH_START_PERIOD above or leave that grace unset so
+      # either supported rollout target derives it.
+      PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS: "${PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS:-}"
+      PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS: "${PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS:-}"
       PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: "${PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS:-}"
       # Multicast cannot escape a Docker bridge. The host-network discovery
       # companion below owns Bonjour so this container does not publish a
       # duplicate service on the private `media` bridge.
       PLURX_MDNS_ADVERTISE: "false"
       # HLS master experiments for the copied-Dolby-Vision investigation
-      # (docs/APPLE-NATIVE-SUBTITLES-PLAN.md §5.4). Enable ONE per deploy and
+      # (docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md §5.4). Enable ONE per deploy and
       # watch a real Apple TV: every master regression in that arc passed the
       # unit tests and failed on the device.
       # PLURX_HLS_CLOSED_CAPTIONS_NONE: "1"
@@ -146,7 +152,9 @@ services:
   # Splitting these roles avoids Compose's forbidden `network_mode` +
   # `networks` combination while making Bonjour visible to phones and TVs.
   plurx-discovery:
-    image: plurx/plurxd:latest
+    # The companion must run the same qualified fleet artifact as the server.
+    # Reusing PLURX_IMAGE also lets one pull satisfy both image-only services.
+    image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurx-discovery
     restart: unless-stopped
     network_mode: host

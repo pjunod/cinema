@@ -127,16 +127,14 @@ enum Command {
         )]
         server: String,
     },
-    /// Reset a user's password in the activated store — the recovery path
-    /// when an admin password is forgotten (admins reset *other* users in
-    /// the web UI). Requires the server running, because it shares that
-    /// daemon's voter; revokes the user's sessions. In Docker:
-    /// docker exec -it plurxd plurxd reset-password NAME
+    /// Refuse the legacy direct-store password reset. An authenticated
+    /// daemon-owned recovery control path is required before this can safely
+    /// mutate credentials beside cache-only cluster recovery reads.
     ResetPassword {
         /// Username whose password to reset.
         username: String,
-        /// New password (min 8 chars). Omit to be prompted on stdin, which
-        /// keeps it out of your shell history.
+        /// Retained for CLI compatibility; the disabled command refuses
+        /// before reading, validating, or applying this value.
         #[arg(long)]
         password: Option<String>,
     },
@@ -1237,60 +1235,21 @@ async fn refresh_metadata_with_store(
     result
 }
 
-/// Console recovery path: rewrite one user's password hash and revoke their
-/// sessions through the activated replicated store.
+const RESET_PASSWORD_REQUIRES_DAEMON_CONTROL: &str =
+    "password reset is unavailable: a direct replicated Store write cannot invalidate the \
+     running daemons' cache-only admin proofs; use an authenticated admin session to reset \
+     another user, and do not bypass this refusal with a direct database write";
+
+/// The former console path connected directly to the replicated Store beside
+/// the daemon. That write could commit without invalidating any process-local
+/// recovery proof, so fail before opening the Store until a daemon-owned,
+/// authenticated local control endpoint exists.
 async fn reset_password(
-    config: &Config,
-    username: &str,
-    password: Option<String>,
+    _config: &Config,
+    _username: &str,
+    _password: Option<String>,
 ) -> anyhow::Result<()> {
-    let password = match password {
-        Some(p) => p,
-        None => {
-            eprint!("New password for `{username}` (min 8 chars): ");
-            read_password(&mut std::io::stdin().lock())?
-        }
-    };
-    anyhow::ensure!(
-        password.len() >= 8,
-        "password must be at least 8 characters"
-    );
-
-    let store = connect_activated_store(config).await.context(
-        "connecting to the activated store: an unmigrated data directory needs \
-             `plurxd run` to import it once, and an activated one needs that daemon \
-             running because maintenance commands share its voter rather than \
-             opening a second store",
-    )?;
-    reset_password_in_store(store.as_ref(), username, &password).await
-}
-
-async fn reset_password_in_store(
-    store: &dyn Store,
-    username: &str,
-    password: &str,
-) -> anyhow::Result<()> {
-    let user = store
-        .get_user_by_username(username)
-        .await?
-        .with_context(|| format!("no user named `{username}`"))?;
-    let hash =
-        plurx_core::auth::hash_password(password).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    store.set_password(user.id, &hash).await?;
-    let revoked = store.delete_tokens_for_user(user.id).await?;
-    println!("password reset for `{username}`; {revoked} session(s) revoked");
-    Ok(())
-}
-
-/// One line of typed password, with the line ending removed.
-///
-/// Only the trailing CR/LF goes: a password may legitimately start or end with
-/// a space, and trimming it would leave the operator with an account whose
-/// password is not the one they typed and no way to find out why.
-fn read_password(input: &mut impl std::io::BufRead) -> std::io::Result<String> {
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_owned())
+    anyhow::bail!(RESET_PASSWORD_REQUIRES_DAEMON_CONTROL)
 }
 
 async fn run(config: Config) -> anyhow::Result<()> {
@@ -2152,6 +2111,22 @@ fn spawn_background_loops(
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
     tokio::spawn(state.clone().store_metrics_loop());
+    tokio::spawn(
+        crate::http::cluster_operations::membership_status_cache_loop(
+            state.clone(),
+            background_shutdown.clone(),
+        ),
+    );
+    tokio::spawn(
+        crate::http::internal_auth_revocation::cache_admin_revocation_activation_loop(
+            state.clone(),
+            background_shutdown.clone(),
+        ),
+    );
+    tokio::spawn(crate::http::cluster_operations::peer_status_cache_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     let replication = state.replication.clone();
     tokio::spawn(replication.passive_metrics_loop(background_shutdown.clone().cancelled_owned()));
     tokio::spawn(
@@ -3150,22 +3125,6 @@ mod startup_tests {
 
     fn store_in(dir: &std::path::Path) -> Arc<dyn Store> {
         Arc::new(SqliteStore::open(&dir.join("plurx.db")).expect("store"))
-    }
-
-    /// A password may legitimately begin or end with a space. Trimming it would
-    /// leave the operator locked out of the account they just repaired, with
-    /// nothing in any log to explain it.
-    #[test]
-    fn only_the_line_ending_is_stripped_from_a_typed_password() {
-        let read = |s: &str| {
-            read_password(&mut std::io::Cursor::new(s.as_bytes().to_vec())).expect("read")
-        };
-        assert_eq!(read("hunter2hunter2\n"), "hunter2hunter2");
-        assert_eq!(read("hunter2hunter2\r\n"), "hunter2hunter2");
-        assert_eq!(read("  spaced pass  \n"), "  spaced pass  ");
-        // A closed stdin is an empty password, which the length check then
-        // rejects — it must not read as success.
-        assert_eq!(read(""), "");
     }
 
     /// The scratch directory is cleared at boot because a half-written segment
@@ -4515,12 +4474,13 @@ mod startup_tests {
         server.join().expect("server thread");
     }
 
-    /// The recovery path when an admin password is forgotten. Resetting must
-    /// also revoke the sessions, or a stolen token outlives the password it
-    /// was issued against.
+    /// A console process is not a daemon-local revocation authority. The
+    /// refusal must happen before either the password or existing sessions can
+    /// change, even when the target store is otherwise writable.
     #[tokio::test]
-    async fn resetting_a_password_revokes_the_sessions_it_replaces() {
+    async fn console_password_reset_fails_closed_before_any_store_mutation() {
         let tmp = crate::test_tempdir().expect("tempdir");
+        let config = config_in(tmp.path());
         let store = store_in(tmp.path());
         let hash = plurx_core::auth::hash_password("original-password").expect("hash");
         let user = store
@@ -4531,9 +4491,10 @@ mod startup_tests {
             .create_token("session-token", user.id, None)
             .await
             .expect("token");
-        reset_password_in_store(store.as_ref(), "owner", "a-new-password")
+        let error = reset_password(&config, "owner", Some("a-new-password".to_owned()))
             .await
-            .expect("reset");
+            .expect_err("direct Store reset must be refused");
+        assert_eq!(error.to_string(), RESET_PASSWORD_REQUIRES_DAEMON_CONTROL);
 
         let after = store
             .get_user_by_username("owner")
@@ -4541,25 +4502,21 @@ mod startup_tests {
             .expect("lookup")
             .expect("user");
         assert!(
-            plurx_core::auth::verify_password("a-new-password", &after.password_hash),
-            "the new password must work"
-        );
-        assert!(
-            !plurx_core::auth::verify_password("original-password", &after.password_hash),
-            "the old password must not"
+            plurx_core::auth::verify_password("original-password", &after.password_hash),
+            "the refusal must leave the password unchanged"
         );
         assert!(
             store
                 .user_for_token("session-token")
                 .await
                 .expect("token lookup")
-                .is_none(),
-            "an existing session must not outlive the password it was issued against"
+                .is_some(),
+            "the refusal must not partially revoke sessions"
         );
     }
 
     #[tokio::test]
-    async fn a_password_reset_refuses_a_short_password_and_an_unknown_user() {
+    async fn a_password_reset_does_not_process_an_unusable_secret() {
         let tmp = crate::test_tempdir().expect("tempdir");
         let config = config_in(tmp.path());
         let store = store_in(tmp.path());
@@ -4570,24 +4527,13 @@ mod startup_tests {
             .expect("create user");
         drop(store);
 
-        let error = format!(
-            "{:#}",
-            reset_password(&config, "owner", Some("short".to_owned()))
-                .await
-                .expect_err("too short")
-        );
-        assert!(error.contains("at least 8 characters"), "{error}");
+        let error = reset_password(&config, "owner", Some("short".to_owned()))
+            .await
+            .expect_err("direct reset must be refused");
+        assert_eq!(error.to_string(), RESET_PASSWORD_REQUIRES_DAEMON_CONTROL);
 
         let store = store_in(tmp.path());
-        let error = format!(
-            "{:#}",
-            reset_password_in_store(store.as_ref(), "ghost", "a-new-password")
-                .await
-                .expect_err("no such user")
-        );
-        assert!(error.contains("no user named `ghost`"), "{error}");
-
-        // And the real account's password is untouched by either failure.
+        // The real account's password is untouched by either refusal.
         let user = store
             .get_user_by_username("owner")
             .await
@@ -4600,8 +4546,8 @@ mod startup_tests {
     }
 
     /// Maintenance commands must not become a second migration coordinator.
-    /// Until `run` has activated Hiqlite they fail without creating an
-    /// incoming or active target and leave the legacy database untouched.
+    /// Reset refuses even earlier at its daemon-control boundary; metadata
+    /// reaches store selection but still cannot create an activated target.
     #[tokio::test]
     async fn maintenance_commands_refuse_an_unmigrated_data_directory() {
         let tmp = crate::test_tempdir().expect("tempdir");
@@ -4614,20 +4560,18 @@ mod startup_tests {
             .expect("create user");
         drop(store);
 
-        for error in [
-            reset_password(&config, "owner", Some("a-new-password".to_owned()))
-                .await
-                .expect_err("reset must refuse legacy SQLite"),
-            refresh_metadata(&mut config, None)
-                .await
-                .expect_err("refresh must refuse legacy SQLite"),
-        ] {
-            let message = format!("{error:#}");
-            assert!(
-                message.contains("only `plurxd run` may import"),
-                "{message}"
-            );
-        }
+        let reset = reset_password(&config, "owner", Some("a-new-password".to_owned()))
+            .await
+            .expect_err("reset must refuse a direct Store write");
+        assert_eq!(reset.to_string(), RESET_PASSWORD_REQUIRES_DAEMON_CONTROL);
+        let refresh = refresh_metadata(&mut config, None)
+            .await
+            .expect_err("refresh must refuse legacy SQLite");
+        let message = format!("{refresh:#}");
+        assert!(
+            message.contains("only `plurxd run` may import"),
+            "{message}"
+        );
         assert!(!tmp.path().join("hiqlite.incoming").exists());
         assert!(!tmp.path().join("hiqlite").exists());
 

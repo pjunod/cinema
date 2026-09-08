@@ -7,7 +7,7 @@
 //! chosen. It computes boundaries that are provably clean, floor- and
 //! ceiling-respecting, and stable for the life of the file.
 //!
-//! [plan]: ../../../docs/VOD-PRESENTATION-PLAN.md
+//! [plan]: ../../../docs/streaming/VOD-PRESENTATION-PLAN.md
 //!
 //! Three things live here, all pure:
 //!

@@ -12,7 +12,7 @@ content evidence, but no command or review performed on that tree is presented
 as exact-tree evidence for the current Forgejo base.
 
 This is the live execution ledger for
-[DECODER_SELECTION_AND_RECOVERY_PLAN.md](DECODER_SELECTION_AND_RECOVERY_PLAN.md).
+[DECODER_SELECTION_AND_RECOVERY_PLAN.md](streaming/DECODER_SELECTION_AND_RECOVERY_PLAN.md).
 It records what is merged, what was actually tested, and what remains unsafe.
 An unchecked item is not implied by a nearby passing check.
 

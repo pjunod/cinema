@@ -2,11 +2,11 @@ use crate::app_state::{AppState, RaftType};
 use crate::{Error, Node};
 use bincode::error::{DecodeError, EncodeError};
 use openraft::{ChangeMembers, RaftMetrics};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::info;
 
 #[inline(always)]
@@ -130,10 +130,7 @@ pub async fn change_membership(
 /// OpenRaft 0.9 has no dedicated leader-transfer API. A successful call means
 /// only that this voter accepted the command; the campaign can still lose to
 /// an active leader lease, so callers must independently observe its outcome.
-pub async fn trigger_election(
-    state: &Arc<AppState>,
-    raft_type: &RaftType,
-) -> Result<(), Error> {
+pub async fn trigger_election(state: &Arc<AppState>, raft_type: &RaftType) -> Result<(), Error> {
     match raft_type {
         #[cfg(feature = "sqlite")]
         RaftType::Sqlite => state.raft_db.raft.trigger().elect().await?,

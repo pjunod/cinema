@@ -93,14 +93,14 @@ class StallBudgetTest {
     }
 
     @Test
-    fun vodSeekResetsBudgetAndCannotReuseAStallRequestToken() {
+    fun viewerSeekResetsBudgetAndCannotReuseAStallRequestToken() {
         val budget = StallReopenBudget()
         val guard = ControllerStallGuard(budget)
         guard.beginRequest() // initial session
         val staleStall = guard.beginRequest()
         var sought = false
 
-        guard.vodSeek { sought = true }
+        guard.viewerSeek { sought = true }
         val newerRequest = guard.beginRequest()
 
         assertTrue(sought)
@@ -110,7 +110,7 @@ class StallBudgetTest {
     }
 
     @Test
-    fun liveSessionSeekResetsExhaustedBudgetBeforeReopen() {
+    fun viewerSeekResetsExhaustedBudgetBeforeReplacement() {
         val budget = StallReopenBudget()
         budget.seed(240)
         repeat(3) { budget.record(240) }
@@ -118,10 +118,10 @@ class StallBudgetTest {
         val staleStall = guard.beginRequest()
         var reopened = false
 
-        // Controller.seekTo's non-VOD HLS branch routes through this helper
-        // before openSession. The reset and invalidation therefore happen
-        // exactly once before the replacement request starts.
-        guard.liveSessionSeek { reopened = true }
+        // Controller.seekTo routes every transport through this helper before
+        // native execution or replacement. The reset and invalidation happen
+        // exactly once before the destination starts.
+        guard.viewerSeek { reopened = true }
         val replacement = guard.beginRequest()
 
         assertTrue(reopened)
@@ -134,20 +134,38 @@ class StallBudgetTest {
     }
 
     @Test
-    fun inPlaceSubtitleChangeResetsBudgetAndCannotReuseAStallRequestToken() {
+    fun explicitViewerActionResetsBudgetAndCannotReuseAStallRequestToken() {
         val budget = StallReopenBudget()
         val guard = ControllerStallGuard(budget)
         guard.beginRequest() // initial session
         val staleStall = guard.beginRequest()
         var selectionApplied = false
 
-        guard.inPlaceSubtitleChange { selectionApplied = true }
+        guard.invalidateForUserAction()
+        selectionApplied = true
         val newerRequest = guard.beginRequest()
 
         assertTrue(selectionApplied)
         assertEquals(1, budget.resetCount)
         assertFalse(guard.isCurrent(staleStall))
         assertTrue(guard.isCurrent(newerRequest))
+    }
+
+    @Test
+    fun transportFailoverInvalidatesAWaitingStallWithoutResettingItsBudget() {
+        val budget = StallReopenBudget()
+        budget.seed(720)
+        budget.record(720)
+        val guard = ControllerStallGuard(budget)
+        val waitingStall = guard.beginRequest()
+
+        // This is the exact ownership transition used by
+        // Controller.retryMediaOnNextNode before it starts the successor.
+        guard.invalidateForPlaybackAttempt()
+
+        assertFalse(guard.isCurrent(waitingStall))
+        assertEquals(1, budget.nonDowngradeCount)
+        assertEquals(0, budget.resetCount)
     }
 
     @Test
@@ -162,6 +180,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "fresh-request" },
+            releaseSession = {},
         )
 
         val result = coordinator.reopenAfterStall(stallBody())
@@ -186,6 +205,7 @@ class StallBudgetTest {
             },
             isBadRequest = { false },
             freshRequestId = { "unused" },
+            releaseSession = {},
         )
 
         try {
@@ -210,6 +230,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "unused" },
+            releaseSession = {},
         )
 
         // Use budget.userActionSequence as the isCurrent source — same
@@ -237,6 +258,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "unused" },
+            releaseSession = {},
         )
 
         // Stall captures current sequence. A user action advances the
@@ -279,6 +301,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "fallback-request" },
+            releaseSession = {},
         )
 
         // Stall starts: 400 triggers fallback which holds the mutex
@@ -376,6 +399,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "fresh-request-id" },
+            releaseSession = {},
         )
 
         val freshBody = CreateSessionReq(
@@ -424,6 +448,7 @@ class StallBudgetTest {
             },
             isBadRequest = { it === badRequest },
             freshRequestId = { "fallback-req" },
+            releaseSession = {},
         )
 
         // Phase 1: budget exhausted, then user action resets

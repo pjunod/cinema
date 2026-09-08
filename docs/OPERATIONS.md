@@ -218,22 +218,46 @@ PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main
 ```
 
 Pulling does not stop the running voter, so it may happen ahead of the rolling
-restart. Replacement remains serial: pull · `up -d` · `/readyz` 200, then the
-next voter.
+restart. Replacement remains serial: pull · startup-budget proof · no-build
+`up -d` · `/readyz` 200, then the next voter.
 
 ```bash
-cd /opt/noirr/plurx/deploy
-docker compose pull plurxd
-docker compose up -d
+cd /opt/noirr/plurx
+git fetch origin
+git switch --detach origin/main # must match the revision in the fleet image
+make docker-image-up
 curl -fsS http://127.0.0.1:32400/readyz
 curl -fsS http://127.0.0.1:32400/api/v1/server
 ```
 
+`make docker-image-up` pulls `plurxd`, freezes its immutable local image ID,
+and reads `org.opencontainers.image.revision` from that ID rather than from the
+moving tag. The label must be nonempty and exactly match a tracked-clean
+checkout's `HEAD`; the server and discovery companion must both resolve to the
+same frozen ID. Only then does the target derive one startup period from the
+resolved Compose/TOML/environment configuration, prove that exact value, and
+apply it with `docker compose up -d --no-build --pull never`. An identity,
+configuration, or budget failure leaves the running voter untouched. If
+`origin/main` moved ahead of the published fleet tag, use the image revision
+printed by the refusal or wait for publication rather than bypassing the
+check.
+
 **Rollback by digest-bearing tag, not by rebuilding an old tree on every
 node.** Replace `main` in `deploy/.env` with the known-good
-`sha-<12hex>` tag, then run the same serial `up -d` and readiness gate. The
-Forgejo cleanup rule keeps the ten newest `sha-` tags, which bounds disk use
-and rollback depth together.
+`sha-<12hex>` tag and check out that same full 40-character commit. Then run the
+same serial `make docker-image-up` and readiness gate. The Forgejo cleanup rule
+keeps the ten newest `sha-` tags, which bounds disk use and rollback depth
+together.
+
+```bash
+git fetch origin
+git switch --detach <old-40-character-sha>
+sed -i.bak \
+  's|^PLURX_IMAGE=.*|PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<first-12-characters>|' \
+  deploy/.env
+make docker-image-up
+curl -fsS http://127.0.0.1:32400/readyz
+```
 
 If nuc3 or Forgejo is down, do not weaken the cluster sequence. Leave one
 voter down at most and use the retained local-build path on that voter:
@@ -246,8 +270,10 @@ curl -fsS http://127.0.0.1:32400/readyz
 ```
 
 This fallback is slower, but it keeps a registry outage from becoming a
-deployment dead end. Restore `deploy/.env` to `latest` only after Forgejo is
-healthy and that voter can pull the intended immutable tag.
+deployment dead end. After Forgejo recovers, keep the known-good immutable tag
+while the rollback remains active. To resume normal fleet updates, restore
+`deploy/.env` to `main`, fetch the repository, and check out the revision named
+by the pulled image before running `make docker-image-up`.
 
 ### Rolling back a deploy
 
@@ -287,10 +313,12 @@ the replicated write but before the local marker rewrite replays only the
 marker write on the next boot. Do not restart a v5, v6, v7, or v8 binary after v9
 commits: its strict compatibility check correctly refuses the newer schema. If
 a node fails during the maintenance window, leave the v9 quorum authoritative
-and roll that node forward with the same v9-or-newer binary. `reset-password`,
-`refresh-metadata`, and other maintenance clients do not own migration and
-will refuse until the running daemon has completed it. Replicated v4 has no
-supported direct path to v9 and remains refused.
+and roll that node forward with the same v9-or-newer binary. `refresh-metadata`
+and other Store-backed maintenance clients do not own migration and will refuse
+until the running daemon has completed it. `reset-password` is stricter: it
+currently refuses before connecting to any activated Store because a sidecar
+writer cannot invalidate process-local admin recovery proofs. Replicated v4 has
+no supported direct path to v9 and remains refused.
 
 Every Ansible redeploy stops the Plurx Compose stack long enough to copy the
 closed SQLite database. The three newest copies stay on each node under
@@ -1243,7 +1271,7 @@ Give a learner the same trust you give a voter: admit only machines you
 administer, and treat a leaked join token as a full cluster compromise, exactly
 as for a voter join. Splitting membership mutation onto its own credential is a
 separate milestone, designed in
-[MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
+[MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](cluster/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
 
 Refusals specific to learner admission and lifecycle:
 
@@ -1689,28 +1717,306 @@ inconclusive, keep 4. Preserve all raw pair files with the three campaign
 summaries; a summary without its hash-bound raw evidence is not a selection
 artifact.
 
-`cluster.install_snapshot_timeout_secs` is bounded from 10 through 3,600 and
-defaults to 120 seconds. It is the deadline OpenRaft applies while sending and
-installing snapshot segments because Hiqlite leaves its separate non-final
-segment timeout disabled. The previous fixed 10-second deadline repeatedly
-restarted a 72 MiB snapshot after about 50 MiB on the production LAN; 120
-seconds completed the same transfer. Keep the value identical on every voter
-so leadership changes do not change catch-up behavior. Snapshot frequency,
-WAL size/sync, disaster-recovery log retention, heartbeat, and election timers
-remain unchanged. During a rolling upgrade, an old-binary leader keeps its
-fixed 10-second deadline until that voter is upgraded; do not treat the new
-deadline as effective cluster-wide until every possible leader is current.
+Every Hiqlite Raft, internal cluster-API, proxy, and authentication WebSocket
+frame is complete only after its writer flushes the TLS stream. One 30-second
+transport budget covers the write and flush together. A write or flush error,
+including deadline expiry, ends that socket and wakes its connection owner even
+when the peer sends no more traffic; it does not authorize replay of an
+ambiguous API mutation. Graceful Close frames are best effort within 250
+milliseconds, and an incomplete server authentication exchange still loses the
+existing five-second connection allowance. These are transport bounds, not
+database execution or snapshot-installation timeouts.
 
-Compose forwards `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` explicitly and
-pairs it with `PLURX_HEALTH_START_PERIOD`. The default five-minute health grace
-covers the 120-second snapshot deadline plus the three sequential 45-second
-startup phases. Raising the snapshot deadline raises what the grace must be,
-but does not make that your bookkeeping: leave `PLURX_HEALTH_START_PERIOD`
-unset and `make docker-up` derives the grace as the resolved deadline plus 135
-seconds, from the same reading its preflight refuses on. That matters most for
-the case that used to bite — a deadline set in a bind-mounted production TOML,
-where `.env` has no reason to mention readiness at all, and the first report of
-the mismatch was a refused deploy on the box.
+Snapshot recovery has three independent budgets. Keep all three identical on
+every voter so a leadership change does not change catch-up behavior:
+
+- `cluster.snapshot_chunk_timeout_secs` is bounded from 5 through 300 and
+  defaults to 30 seconds. It bounds one non-final chunk RPC, including queue
+  admission, frame delivery, and its reply. It does not bound a complete
+  advancing transfer or final database restore.
+- `cluster.snapshot_transfer_timeout_secs` is bounded from 60 through 14,400
+  and defaults to 1,200 seconds. It is one absolute transfer-stage deadline;
+  progress, reconnects, retries, and typed mismatch recovery do not renew it.
+- `cluster.install_snapshot_timeout_secs` remains bounded from 10 through
+  3,600 and defaults to 120 seconds. It caps the final chunk and installation
+  RPC. The final stage may exceed the chunk watchdog, but cannot renew this
+  install allowance or extend the overall attempt beyond transfer plus install.
+
+The chunk budget must not exceed the transfer budget. Values are converted to
+milliseconds with checked arithmetic before reaching Hiqlite. Snapshot
+frequency, WAL size/sync, disaster-recovery log retention, heartbeat, and
+election timers remain unchanged. During a rolling upgrade, an old-binary
+leader still uses its old per-RPC snapshot behavior. The wire format is
+unchanged, but do not call the bounded recovery contract fleet-wide until every
+possible leader is current.
+
+Compose forwards all three snapshot settings. The startup/readiness pair uses
+only the two sequential stages: `snapshot transfer + final install + 135s` for
+the three named startup allowances. The independent non-final chunk watchdog
+does not add another stage. The default 1,200-second transfer and 120-second
+install require 1,455 seconds, covered by the tracked 25-minute health grace.
+Raising either stage raises what the grace must be, but does not make that your
+bookkeeping: leave `PLURX_HEALTH_START_PERIOD` unset and `make docker-up`
+derives the grace from both resolved stage settings plus 135 seconds. That
+matters most when one or both deadlines live in a bind-mounted production TOML,
+where `.env` has no reason to mention readiness.
+
+Snapshot transport progress is process-local diagnostic evidence, never
+serving authority. Each embedded Hiqlite node retains a bounded record per
+Raft group and configured peer, plus a small expiring allowance for retired
+peers. Recording a frame or chunk performs no SQL transaction, roster update,
+WAL append, or quorum read. Sender acknowledgement offsets and receiver-local
+bytes are separate fields because a receiver may have accepted bytes whose
+reply has not reached the sender.
+
+For inbound work, a different snapshot identity becomes visible only when the
+node-owned FIFO executor actually admits that exact request. A queued request
+or later admission waiter cannot displace the running install's identity. This
+keeps `operation_owns_work` tied to the future that currently owns the durable
+state-machine operation, including while an older socket is disappearing.
+If the Raft server's reader or writer ends while socket-owned submission work
+is pending, a synchronous cleanup owner records `snapshot_connection_closed`;
+that cleanup cannot overwrite a worker-owned or completed result, and dropping
+the socket future cannot cancel work the node executor already accepted.
+Admission tickets are reserved synchronously when a socket task calls the
+executor and released or skipped on cancellation, so reverse future polling
+cannot reorder callers that have reached that boundary. Receipt and submit
+remain separate task steps, so the public status attempt ID is assigned under
+the status lock at actual worker start; the order of real durable installs is
+therefore authoritative even if an earlier receiver task was descheduled before
+submission. At most two socket tasks may wait behind the executor's one running
+and one queued request; additional callers receive the explicit retryable
+`snapshot_admission_busy` outcome, and cancelled ticket retention stays bounded.
+The bounded `snapshot_id` remains display text only;
+cross-observer correlation uses a separate 64-hex SHA-256 fingerprint of the
+original ID. Older peers that omit it stay attempt-local instead of acquiring
+unsafe identity from a potentially colliding display label.
+Cross-observer completion can supersede a predecessor only inside the same
+fingerprint's five-second freshness cohort. A retained acknowledgement or
+receiver completion outside that cohort cannot hide a newer retry, install, or
+failure after a receiver restart or leadership change.
+
+The existing private Hiqlite cluster listener serves
+`GET /cluster/transport/sqlite` with the same `X-API-SECRET` authentication as
+the adjacent cluster metrics route. The response is JSON and reads only the
+node-owned in-memory snapshot, so it remains usable while startup is waiting
+and before port 32400 opens. Query only a peer address from the committed
+Hiqlite roster; never send the cluster API secret to an operator-supplied URL.
+During a rolling update, HTTP 404 means that peer does not expose transport
+progress yet and must be rendered as unavailable.
+
+The Cluster panel joins each node's authenticated operations status with the
+roster using at most eight concurrent peer refreshes, a one-second deadline
+per peer, and five-second process-local peer and membership caches. Separate
+background refreshes run every three seconds; the page, support bundle, and
+metrics request paths read those node-owned projections and perform no Store
+call or peer network request. An absent or expired membership projection fails
+closed instead of rendering a guessed roster. Standalone SQLite installs do
+not start the replicated-membership refresh loop, so an unavailable membership
+backend cannot fill the bounded diagnostics log with periodic warnings.
+
+The public status and support routes also avoid a hidden Store call in their
+admin extractor. Successful ordinary authentication publishes a process-local
+proof containing only the SHA-256 token digest, user ID, and fixed five-minute
+expiry. Recovery reads do not renew it, at most 64 proofs are retained, and a
+miss, expiry, non-admin result, or cache failure returns `401` without falling
+back to Store. Store-backed authentication captures the cache revocation
+generation before its read and publishes proof only if that generation is
+unchanged. On replicated nodes, publication and cache-only authentication start
+disabled. A separate node-owned background activation pass enables them only
+after every member in the exact committed Raft configuration carries a
+`cache_admin_revocation_v3`
+row whose timestamp equals that node's current heartbeat. The pass takes the
+replicated membership exclusion, waits for its exact claim to apply locally,
+and globally clears cached proofs with the same bounded Begin/End fanout used
+for credential mutations before publishing readiness. It cannot block the
+independent membership-status publisher while an exclusion cleanup waits for
+quorum. Version 3 means the node
+supports the replicated credential-mutation exclusion, exact Store-write
+predicate, and local-applied claim acknowledgement described below. Version 1
+and version 2 capability heartbeats are retired by the replicated schema so a
+rolled-back process cannot silently restore the weaker contract. A joining
+member, missing
+row, refresh failure, or heartbeat from a rolled-back binary closes the gate and
+clears every proof; reopening requires a new ordinary authentication. Logout,
+demotion, password reset, and user deletion invalidate proof and advance the
+generation both before and after their Store mutation; an in-flight stale read
+therefore cannot republish a revoked credential. These mutations first acquire
+a separate replicated singleton lease that blocks join, promotion, removal,
+and planned-outage acquisition. They then bracket the Store write with signed
+begin/end messages to every member of a stable exact committed roster under one
+two-second aggregate bound. The Store mutation names the exact lease claim, so
+a delayed write cannot commit after cancellation has released it. The lease
+remains owned until the terminal peer invalidation; heartbeat expiry creates a
+permanent receipt before cleanup after a crash.
+The peer wire contains only the random lease-claim UUID and phase, never a token
+digest or user ID. A peer installs its process-local fence before polling its
+local-applied SQLite view and acknowledges begin only after that exact claim is
+visible. Cache readiness independently remains false while any such lease is
+present; the ordered local application of its release is the only event that
+can reopen readiness after a restart or local fence expiry. A peer clears its
+bounded proof cache and refuses all cache-only recovery authorization while any
+fence is active; at most 128
+remote fences are retained, and an end that is lost or whose commit outcome is
+unknown expires no later than the existing non-sliding five-minute proof TTL.
+The origin retains the same global five-minute fence when a Store mutation or
+peer end returns ambiguously; dropping a request future cannot reopen recovery
+authorization while a delayed Raft write may still commit.
+An unreachable peer, missing HTTP claim, oversized roster, non-204 response,
+or invalid signature fails the caller closed with a typed `503`; success is
+reported only after all begin and end acknowledgements. A cold process
+therefore needs one successful ordinary authentication
+before these public recovery reads; the private authenticated cluster-listener
+transport route remains the pre-listener/startup path.
+
+There is currently no safe forgotten-last-admin console recovery command.
+`plurxd reset-password` refuses before Store connection or mutation because a
+separate process cannot participate in the daemon-owned begin/end proof
+invalidation protocol. Do not work around that refusal with direct Hiqlite or
+SQLite writes: use a still-authenticated admin session to create or reset
+another admin. A daemon-owned authenticated local control path is required
+before unattended last-admin recovery can be re-enabled.
+
+Directory and membership SQL
+receive the exact committed Raft IDs as a bounded parameter, so abandoned join
+rows are never materialized; a committed roster above the explicit 64-member
+diagnostics bound is unavailable rather than truncated. The directory lookup
+is bounded to 500 milliseconds, leaving a strict 500-millisecond completion
+margin even when a public probe consumes its full deadline. Cache availability
+begins when that refresh completes; embedded status and transport ages still
+advance from their node-owned source timestamps. If a browser retains the last
+aggregate across failed refreshes, it advances those server-projected durations
+from a browser-local monotonic receipt baseline; browser and daemon wall-clock
+skew therefore cannot renew or prematurely expire the evidence. The projection
+crosses to `stalled` at zero and expires after the same five-minute diagnostic
+window. Automatic and manual refresh failures pay a preserving repaint so
+those projected transport fields change on screen while the unavailable
+verdict remains visible. If a Cluster decision dialog is open, the page keeps
+that dialog intact, patches only the independent reading-age cell, and pays the
+transport repaint after the dialog closes. Each peer refresh probes the
+public and private listeners concurrently, so up to sixteen bounded HTTP
+requests may be in flight. Roster members beyond the eight-probe bound remain
+visible as `peer_limit` instead of disappearing. A healthy sender can therefore
+report outbound evidence for a learner whose public listener is still closed.
+Safety-changing maintenance-entry and restart-preparation requests do not use
+those five-second peer projections: they first claim the replicated
+planned-outage lifecycle lease, then reread committed membership and the peer
+directory and perform current authenticated probes under one absolute
+two-second preflight deadline. Collection failure or an unsafe/candidate-mismatch
+verdict releases that exact claim. A cancellation-safe owner retains it across
+preflight, admission drain, and the final restart-preparation or maintenance
+commit; every error or aborted request releases the exact claim, and only a
+successful commit disarms cleanup. While present it prevents a concurrent
+join, promotion, maintenance, or removal from invalidating the safety proof. A roster or directory read that does not finish
+inside its own 500-millisecond share fails closed before mutation.
+Inactive status older than five minutes expires instead of continuing to claim
+work. An observation with an active monotonic deadline remains visible past
+five minutes through that deadline and for the producer's five-minute stalled
+diagnostic window. That window is anchored to the actual deadline (or the
+producer's last update plus the stall threshold when no deadline exists), so a
+late first read cannot resurrect expired work. A cached pre-stall sample projects that one transition
+without resetting an already-stalled sample's age; the five-second cache
+decreases its reported deadline remainder rather than granting more time. The
+panel reports observer and sample age and keeps
+`bounded_read_ready` separate: receiving, waiting for acknowledgement,
+installing, retrying, or stalled transport never grants reads. While port
+32400 is still closed, the daemon also emits one bounded startup-wait record
+every ten seconds with target/applied indexes when known.
+
+### Qualify transport recovery before fleet enablement
+
+Run the recovery campaign on a Linux validation host before declaring the
+bounded transport safe for a fleet. It is a qualification workload, not a
+production toggle:
+
+```bash
+PLURX_BUILD_SHA=<40-character-candidate-sha> make cluster-transport-recovery-check
+```
+
+Set `PLURX_BUILD_SHA` to the exact commit used to create the source archive.
+The campaign validates this identity before it creates a cluster or starts the
+first recovery cycle; an archive without `.git` fails immediately when the
+identity is missing or malformed.
+
+The command creates fresh separate-process clusters and uses the production
+TLS Raft snapshot path. A second process keeps committing acknowledged writes
+through the production TLS API WebSocket while node 4 is rebuilt from an empty
+data directory. It runs 20 recoveries with node 4 admitted as a learner using
+the current membership token protocol, then 20 with node 4 as a voter. The
+learner image carries at least 88,559,616 bytes and the voter image at least
+177,119,232 bytes. Any failed cycle fails the command; there is no partial-pass
+result. Each cycle requires a readiness acknowledgement followed by at least
+two uniquely keyed acknowledgements during recovery, separated by the fixed
+writer cadence. If an API execute result is ambiguous, the writer performs one
+or more bounded consistent reads of that identifier and accepts only the exact
+value; it never replays the write blindly.
+
+The controller owns the writer process throughout the recovery window. An
+unexpected exit fails the cycle immediately, and a 35-second interval without
+a new acknowledgement is a stalled workload, not evidence of continuing
+load. The artifact requires every adjacent acknowledgement gap and the tail
+from the last acknowledgement to recovery completion to stay within that same
+35-second bound. Node readiness, target installation, and source completion
+share one absolute 1,500-second recovery deadline; moving between phases never
+renews it.
+
+The campaign's 256-log snapshot trigger exists only in the cluster validation
+launch payload. It is absent from `plurxd`, TOML, environment variables, and
+the Settings UI, so it cannot change production snapshot frequency. The
+transport correction itself remains compiled and active without a feature
+gate.
+
+Successful runs write
+`target/validation/cluster-transport-recovery.json`. The closed-schema artifact
+binds the exact Git SHA and records, per cycle, the source and installed
+snapshot ID/size/SHA-256, snapshot/purge/applied indexes, transferred bytes,
+source-leader outbound attempt/reconnect/retry counts, and target-local inbound
+byte and installation evidence. Attempt, final acknowledgement, local receive,
+and install times are explicit. The source attempt clock begins with the first
+full-snapshot attempt in one recovery series and survives failed replacement
+attempts, so the role's worst transfer duration includes their reconnect and
+retry time rather than measuring only the final successful transfer. Missing
+or zero large-image durations fail the artifact instead of becoming zero-valued
+evidence. The artifact also records
+the readiness acknowledgement, every in-recovery acknowledgement, their
+target-local digest, the recovered SQLite content digest, and baseline plus
+post-quiescence OS-thread, socket, and Hiqlite-owned async-task counts for
+persistent voters 1–3 and restarted node 4. Before taking the fixed baseline,
+the target must apply and hash the seeded image exactly, then complete one
+unmeasured recovery warmup cycle so lazy transport and database resources are
+already present. Baseline and post-cycle counts are each accepted only after
+two identical idle samples separated by a three-second sample interval; active
+snapshot work resets that proof. Every post-cycle sample must return to the
+fixed warmed baseline within one absolute 60-second cleanup horizon.
+The summary records the worst recovery, transfer, and install duration for each
+role. Do not accept an artifact if its build SHA differs from the candidate,
+either role has fewer than 20 cycles, recovery exceeds 1,500 seconds, the
+source and installed snapshot hashes differ, an acknowledged-write digest
+differs, any required timestamp is absent, or any node retains even one
+additional OS thread, socket, or owned async task after quiescence. Stable
+samples above the established baseline are a leak, not cleanup evidence.
+
+Main-bound cluster changes run this command in the dedicated
+`cluster_transport_recovery` CI job and retain the evidence, log, and exact
+lane receipt. A successful receipt verifies that the artifact's `build_sha`
+equals the tested commit and binds the artifact's SHA-256 and byte count, so a
+different or replaced JSON file is not qualification evidence. Both that
+successful lane receipt and the final qualification receipt require workflow
+run attempt `1`. A failed cycle therefore remains disqualifying inside that
+workflow execution: do not use **Re-run jobs** to make it produce a green
+artifact. Preserve its failure receipt, fix the cause, and qualify a new commit
+instead. Forgejo assigns a fresh attempt `1` to a different workflow run,
+including one created by closing and reopening the pull request; this receipt
+does not provide a repository-wide failed-SHA ledger, so inspect earlier
+receipts before accepting a repeated candidate SHA.
+Other CI lanes may still retain successful rerun receipts because they do not
+replace this campaign's failure evidence. The campaign removes any prior output
+before starting, then syncs a temporary complete JSON file and atomically
+publishes it. A failed lane always records a log-only receipt, including on a
+later workflow attempt, and does not parse a stale or interrupted evidence
+file. An effort is not qualified when that selected job is skipped or fails.
+Ordinary effort task PRs retain their compile-only development gate; the
+40-cycle campaign belongs to the final effort-to-main qualification.
 
 Set the variable only to choose a grace deliberately. Whether anybody chose is
 answered by Compose, not by a second reading of `deploy/.env`: a resolved grace
@@ -1720,35 +2026,41 @@ literal pinned in an override, at Compose's own precedence, and is used exactly
 as resolved. It is never silently raised, because a short grace is a legitimate
 choice: it surfaces a build that can never become ready instead of waiting out
 the deadline. If it cannot cover the resolved deadline the preflight refuses it
-by name. Writing the tracked default itself — five minutes — is indistinguishable
+by name. Writing the tracked default itself — 25 minutes — is indistinguishable
 from writing nothing, and is derived from like anything else. The supported
-maximum pair is
-3,600 seconds and 65 minutes; do not adopt the 65-minute maximum as an ordinary
-default.
+maximum transfer/install pair requires 18,135 seconds; choose at least `5h3m`
+when setting a rounded Docker duration. Do not adopt that maximum as an
+ordinary default.
 
-Use `make docker-up`, not bare `docker compose up`, for a Compose rollout. It
-derives the period, proves it, and applies that same period — a preflight that
-proves one number while `compose up` applies another proves nothing. The proof
-is a read-only, fail-closed preflight that runs `docker compose config` in
-`deploy/`, so shell variables, `deploy/.env`, interpolation defaults, and
-override files have the same precedence they will have during the rollout.
-It then reads the effective snapshot timeout from the resolved container
-environment or, when the environment is empty, a readable bind-mounted
+Use `make docker-up` for a source build or `make docker-image-up` for a prebuilt
+fleet image, not bare `docker compose up`. Both derive the period, prove it, and
+apply that same period — a preflight that proves one number while `compose up`
+applies another proves nothing. The image target pulls before deriving and
+proving, then applies the qualified image with `--no-build`. The proof is a
+read-only, fail-closed preflight that runs `docker compose config` in `deploy/`,
+so shell variables, `deploy/.env`, interpolation defaults, and override files
+have the same precedence they will have during the rollout. It then reads the
+effective chunk, transfer, and install timeouts from the resolved container
+environment or, when an environment value is empty, a readable bind-mounted
 production TOML. A resolved command-line `--config` path takes precedence over
-`PLURX_CONFIG`, as it does in the server. The command exits before any Compose
-mutation unless the health start period it is about to apply covers that
-timeout plus all three named startup phases.
+`PLURX_CONFIG`, as it does in the server. The command reports all three values
+and their sources, validates that the chunk budget does not exceed the transfer
+budget, and exits before any Compose replacement unless the health start period
+it is about to apply covers the two sequential stages plus all three named
+startup phases.
 
 If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
-`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` in the resolved environment. With
-no explicit value, the preflight assumes the source maximum rather than
-guessing that the hidden TOML uses the default.
+`PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS`,
+`PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS`, and
+`PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` in the resolved environment.
+With any value missing, the preflight assumes that budget's source maximum
+rather than guessing that the hidden TOML uses the default.
 
 Two diagnostics, and they answer different questions. `make
-docker-startup-budget-check` answers "would `make docker-up` succeed here" — it
-derives the same period the rollout would and proves that. To ask instead what
-a bare `docker compose up` would apply, which derives nothing, run the script
-without the deriving step:
+docker-startup-budget-check` answers "would either supported rollout target
+succeed here" — it derives the same period the rollout would and proves that.
+To ask instead what a bare `docker compose up` would apply, which derives
+nothing, run the script without the deriving step:
 
 ```bash
 cd deploy && python3 ../scripts/validate-docker-startup-budget
@@ -1945,7 +2257,7 @@ maximum connection drain. Retry `GET` and `HEAD` only; never automatically
 replay `POST`, `PUT`, `PATCH`, or `DELETE`, because a lost response does not
 prove the authority mutation was uncommitted. The exact contract and
 ready-to-adapt examples live in
-[`deploy/cluster-routing/`](../deploy/cluster-routing/).
+[`deploy/cluster-routing/`](../deploy/cluster-routing).
 
 Before rollout, run the product-neutral fixture and inspect its evidence:
 
@@ -1968,7 +2280,7 @@ deployed; do not infer a tighter absolute SLO from local stopwatch output.
 ### Cluster ingress, drain, and recovery
 
 Ready-to-adapt HAProxy, keepalived, and Kubernetes Service/Ingress examples
-live in [`deploy/cluster-routing/`](../deploy/cluster-routing/). All three use
+live in [`deploy/cluster-routing/`](../deploy/cluster-routing). All three use
 `/readyz`, not `/healthz`, for new traffic. Configure each voter's
 `cluster.artwork_url` as its node-specific public base even when
 `cluster.join_url` names the shared VIP or proxy; `GET /api/v1/cluster/ingress`
@@ -2113,7 +2425,8 @@ symlink. There is no raw-token argument. Use `--json` when another tool needs
 the exact API document.
 
 Restart preparation acquires one replicated, expiring planned-outage lease
-before the target fences local admissions. Maintenance uses the same lease, so
+before it collects the fresh safety preflight and before the target fences local
+admissions. Maintenance uses the same lease, so
 two safe observations on different nodes cannot turn into two simultaneous
 reboots. Cancellation releases the restart claim; a failed maintenance request
 releases its exact claim; normal heartbeats remove expired claims after a
@@ -2514,8 +2827,10 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `false` | Cluster-wide opt-in and Authority-read kill switch for the named lag-gated catalogue slice. Enable only after every voter advertises the current bounded-read protocol |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
-| `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Snapshot transfer/install deadline in seconds, bounded 10–3,600; keep identical on every voter |
-| `PLURX_HEALTH_START_PERIOD` | — | derived | Compose-only Docker readiness grace. Unset, `make docker-up` derives the resolved snapshot deadline plus 135 seconds (`5m` when nothing longer resolves). Set it only to choose a grace deliberately: the value is used as written, and refused rather than raised if it cannot cover the deadline |
+| `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS` | `cluster.snapshot_chunk_timeout_secs` | `30` | One non-final snapshot chunk RPC in seconds, bounded 5–300; must not exceed the transfer timeout and must match on every voter |
+| `PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS` | `cluster.snapshot_transfer_timeout_secs` | `1200` | Absolute snapshot transfer stage in seconds, bounded 60–14,400; retries, reconnects, and mismatches cannot renew it |
+| `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Final chunk/install RPC cap in seconds, bounded 10–3,600; keep identical on every voter |
+| `PLURX_HEALTH_START_PERIOD` | — | derived | Compose-only Docker readiness grace. Unset, `make docker-up` derives transfer plus install plus 135 seconds (`25m` when defaults resolve). Set it only to choose a grace deliberately: the value is used as written, and refused rather than raised if it cannot cover both stages |
 | — | `cluster.raft_bind` | `0.0.0.0:32401` | Raft listener for this voter. A never-joined node still binds loopback until `advertise_host` opts into membership. Remote traffic uses automatic TLS; every node needs a unique reachable address |
 | — | `cluster.api_bind` | `0.0.0.0:32402` | Authenticated Hiqlite cluster API with automatic TLS. It follows the same loopback-until-opt-in rule |
 | — | `cluster.advertise_host` | empty | Host or IP placed in committed peer records and the explicit membership-listener opt-in. Leave empty for an ordinary one-voter install; set it on every joining node. A sole voter whose committed address differs from this value performs one crash-recoverable local metadata readdress on restart, then settles. Once any peer or remote membership exists, changing the advertised host or either listener port is refused until an online membership-reconfiguration path exists |
@@ -2548,7 +2863,7 @@ can be tried, watched, and kept or dropped without another build. Both are
 Apple authoring-rules items and both are candidates for the one open failure
 in the Apple native-subtitle work: a physical Apple TV rejecting a copied
 Dolby Vision master with CoreMedia `-12927`
-([docs/APPLE-NATIVE-SUBTITLES-PLAN.md](APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4).
+([docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4).
 
 | Var | What it adds | Why it might matter |
 |---|---|---|
@@ -3513,7 +3828,7 @@ plan's acceptance names. Nothing contests a session until its lease expires,
 and the media-session lease is twelve seconds with a three-second renewal
 (`LEASE_TTL_MS`, `LEASE_INTERVAL`); the contest tick and the takeover deadline
 sit on top of that. Recovery is bounded and correct at these values, just not
-fast — closing the gap is tracked in `docs/CLUSTER-MEDIA-POOL-PLAN.md` §8.8.
+fast — closing the gap is tracked in `docs/cluster/CLUSTER-MEDIA-POOL-PLAN.md` §8.8.
 
 #### Optional verified shared cache
 

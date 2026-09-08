@@ -182,7 +182,7 @@ internal fun nativeSubtitleOrdinal(index: Long, tracks: List<SubTrack>): Int? =
  * viewer never asked to have re-encoded. A *forced* track is the carve-out —
  * a handful of signage cues the film is unwatchable without — and when that
  * burn alone replaces copyable video, it preserves source height
- * (docs/CLIENTS-REMEDIATION-PLAN.md §3.1, owner policy).
+ * (docs/clients/CLIENTS-REMEDIATION-PLAN.md §3.1, owner policy).
  */
 internal fun autoSubtitleSelection(tracks: List<SubTrack>): Long? {
     val pick = tracks.firstOrNull { it.default } ?: return null
@@ -254,16 +254,16 @@ internal fun sessionHeight(
 }
 
 /**
- * Whether the session's height is a promise from an Auto viewer rather than a
- * manual quality pick. An Auto viewer that sends a promise-height — a burn, or
- * Quality = Original — must carry this flag, or the server reads the posted
- * height as a sticky manual pick and can never step that session down.
- * See docs/ADAPTIVE-QUALITY.md §"Native stall-reopen server boundary".
+ * Whether the viewer selected Auto. New clients always send this Boolean:
+ * omission belongs only to legacy clients, whose server-side fallback treats
+ * a heightless copy session as automatic. Explicit false is therefore what
+ * keeps Original distinct from Auto on that exact body shape.
+ * See docs/streaming/ADAPTIVE-QUALITY.md §"Native stall-reopen server boundary".
  */
 internal fun qualityAuto(
     quality: PlaybackQuality,
-    delivery: SubtitleDelivery,
-): Boolean = quality == PlaybackQuality.Auto && delivery == SubtitleDelivery.Burn
+    @Suppress("UNUSED_PARAMETER") delivery: SubtitleDelivery,
+): Boolean = quality == PlaybackQuality.Auto
 
 /**
  * The exact body each routing arm posts to `/files/{id}/hls/sessions`.
@@ -319,7 +319,7 @@ internal fun subtitleSessionBody(
         preserve_dolby_vision = true.takeIf { copy && preserveDolbyVision },
         previous_session_id = previousSessionId,
         reopen_reason = reopenReason,
-        quality_auto = true.takeIf { qualityAuto(quality, delivery) },
+        quality_auto = qualityAuto(quality, delivery),
     )
 }
 

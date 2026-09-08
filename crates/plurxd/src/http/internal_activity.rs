@@ -492,8 +492,8 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     title: bounded_text(session.item_title, MAX_TITLE_BYTES),
                     started_unix: session.started_unix,
                     idle_seconds: session.idle_seconds,
-                    delivered_bytes: Some(0),
-                    delivered_bps: None,
+                    delivered_bytes: Some(session.delivered_bytes),
+                    delivered_bps: session.delivered_bps,
                 });
             }
             ActivityCandidate::Remux(stream) => {
@@ -775,6 +775,7 @@ mod tests {
             client,
             ActivityPeer {
                 node_id: "legacy-node".to_owned(),
+                raft_id: 2,
                 http_base: None,
                 reachable: true,
             },
@@ -945,6 +946,11 @@ mod tests {
     #[test]
     fn vod_session_participates_in_the_bounded_peer_inventory() {
         let session = crate::vodserve::VodDeliveryInfo {
+            // Non-zero on purpose: the peer snapshot hard-coded zero here, so
+            // a fixture that also says zero cannot see the difference.
+            delivered_bytes: 4_096,
+            delivered_bps: Some(12_000_000),
+            delivered_idle_ms: 250,
             id: "vod-session".to_owned(),
             file_id: 7,
             item_id: 9,
@@ -1268,6 +1274,7 @@ mod tests {
         let peers = (0..9)
             .map(|index| ActivityPeer {
                 node_id: format!("node-{index}"),
+                raft_id: index as u64,
                 http_base: Some(format!("http://node-{index}:32400")),
                 reachable: true,
             })

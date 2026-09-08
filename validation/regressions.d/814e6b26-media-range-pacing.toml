@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["814e6b26"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The Rust gate exercises http::stream::tests, including actual file responses for complete, partial, malformed, unsatisfiable, empty, HEAD, and If-Range requests; arbitrary-size decimal bounds and complete bounded range lists; and finite nonnegative remux pacing. The focused development loop ran all 45 stream tests."

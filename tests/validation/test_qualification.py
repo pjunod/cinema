@@ -18,7 +18,7 @@ class QualificationReceiptCase(unittest.TestCase):
             "GITHUB_SHA": "a" * 40,
             "GITHUB_WORKFLOW_REF": "pjunod/plurx/.github/workflows/ci.yml@refs/pull/1/merge",
             "GITHUB_RUN_ID": "123",
-            "GITHUB_RUN_ATTEMPT": "2",
+            "GITHUB_RUN_ATTEMPT": "1",
             "PLURX_PULL_REQUEST": "42",
             "PLURX_HEAD_SHA": "b" * 40,
             "PLURX_BASE_SHA": "c" * 40,
@@ -36,11 +36,35 @@ class QualificationReceiptCase(unittest.TestCase):
         self.assertEqual(receipt["pull_request"], 42)
         self.assertEqual(receipt["tested_sha"], "a" * 40)
         self.assertEqual(receipt["tested_tree"], "d" * 40)
+        self.assertEqual(receipt["run_attempt"], "1")
         self.assertEqual(receipt["jobs"], dict(sorted(self.results().items())))
 
-    def test_receipt_refuses_non_effort_or_non_main_refs(self):
+    def test_receipt_refuses_a_successful_workflow_rerun(self):
+        environment = self.environment()
+        environment["GITHUB_RUN_ATTEMPT"] = "2"
+
+        with self.assertRaisesRegex(
+            QualificationError, "must come from workflow run attempt 1"
+        ):
+            build_receipt(environment, self.results(), "a" * 40, "d" * 40)
+
+    def test_receipt_accepts_conflict_resolution_integration_head(self):
+        environment = self.environment()
+        environment["GITHUB_HEAD_REF"] = "integration/playback-control-into-main"
+
+        receipt = build_receipt(
+            environment, self.results(), "a" * 40, "d" * 40
+        )
+
+        self.assertEqual(
+            receipt["head_ref"], "integration/playback-control-into-main"
+        )
+
+    def test_receipt_refuses_non_qualification_or_non_main_refs(self):
         for field, value in (
             ("GITHUB_HEAD_REF", "codex/task"),
+            ("GITHUB_HEAD_REF", "integration/-into-main"),
+            ("GITHUB_HEAD_REF", "integration/playback-control"),
             ("GITHUB_BASE_REF", "effort/playback-control"),
         ):
             with self.subTest(field=field):

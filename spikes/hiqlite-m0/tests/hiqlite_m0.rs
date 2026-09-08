@@ -344,8 +344,9 @@ async fn three_voters_prove_the_sql_and_transport_contracts() {
 /// benchmark on every ordinary test run.
 ///
 /// This is a gate, not a microbenchmark score: it asserts only the budgets in
-/// `docs/CLUSTERING-PLAN.md` section 1 and prints the values recorded in
-/// `docs/PHASE3-SPIKE.md`. Run it with `make hiqlite-baseline` on a quiet host.
+/// `docs/cluster/CLUSTERING-PLAN.md` section 1 and prints the values recorded
+/// in `docs/cluster/PHASE3-SPIKE.md`. Run it with `make hiqlite-baseline` on a
+/// quiet host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual M0 latency, RSS, and 10,000-write baseline"]
 async fn single_voter_cost_stays_inside_the_m0_budget() {

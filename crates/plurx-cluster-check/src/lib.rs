@@ -14,7 +14,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -96,6 +96,7 @@ mod named_runner;
 #[cfg(test)]
 mod storage_evidence;
 mod topology;
+mod transport_recovery;
 pub use failure_drills::{
     validate_failure_drill_artifact, ClusterFailureDrillArtifact,
     FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION,
@@ -111,6 +112,17 @@ pub use topology::{
     percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
     NodeAppliedIndex, NodeCorpusObservation, ResourceSample, TopologyRun, TopologyWorkload,
     TOPOLOGY_ARTIFACT_SCHEMA_VERSION, TOPOLOGY_WRITE_OPERATIONS,
+};
+pub use transport_recovery::{
+    validate_transport_recovery_artifact, validate_transport_recovery_bytes,
+    AcknowledgedRecoveryWrite, ClusterTransportRecoveryArtifact, ProcessResourceCount,
+    RecoveryCycleEvidence, RecoveryImageEvidence, RecoveryNodeResourceEvidence,
+    RecoveryResourceNodeKind, RecoveryRole, RecoveryRoleCampaign, RecoveryRuntimeStatus,
+    RecoveryWriteDigest, SnapshotFileEvidence, SourceOutboundTransportEvidence,
+    TargetInboundTransportEvidence, TransportRecoveryWorstDurations,
+    TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION, TRANSPORT_RECOVERY_CYCLES_PER_ROLE,
+    TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES, TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES,
+    TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,
 };
 
 const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
@@ -316,6 +328,39 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
+        Some("transport-recovery") => {
+            if args.get(3).is_some() {
+                bail!("transport-recovery accepts at most one output path");
+            }
+            let output = args.get(2).map(PathBuf::from).unwrap_or_else(|| {
+                PathBuf::from("target/validation/cluster-transport-recovery.json")
+            });
+            transport_recovery::run_transport_recovery_campaign(&output).await
+        }
+        Some("validate-transport-recovery-stdin") => {
+            if args.get(2).is_some() {
+                bail!("validate-transport-recovery-stdin accepts no arguments");
+            }
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut bytes)
+                .context("read transport-recovery evidence from stdin")?;
+            transport_recovery::validate_transport_recovery_bytes(&bytes)
+        }
+        Some("transport-recovery-voter-smoke") => {
+            let plan = transport_recovery::voter_smoke_plan(&args[2..])?;
+            transport_recovery::run_transport_recovery_voter_smoke(plan).await
+        }
+        Some("transport-recovery-writer") => {
+            let config = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("transport-recovery-writer requires one config JSON path")?;
+            if args.get(3).is_some() {
+                bail!("transport-recovery-writer accepts exactly one config JSON path");
+            }
+            transport_recovery::run_transport_recovery_writer(&config).await
+        }
         Some("watermark-experiment") => run_watermark_double_read_experiment(args.get(2)).await,
         Some("inspect-wal") => run_inspect_wal(&args[2..]),
         Some("topology") => {
@@ -7236,6 +7281,14 @@ pub struct NodeLaunch {
     /// report happened to claim.
     #[serde(default = "default_read_pool_size")]
     pub read_pool_size: usize,
+    /// Validation-harness-only override for the number of Raft log entries
+    /// between snapshots. The separate-process controller serializes this
+    /// value into the child launch payload; production plurxd configuration
+    /// has no corresponding setting or environment variable.
+    ///
+    /// `None` deliberately retains the daemon-derived production policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_logs_since_last: Option<u64>,
     /// P2f control-arm switch. This field reaches a validation-only hook in
     /// plurx-core; production plurxd builds have no corresponding switch.
     #[serde(default = "instrument_store_operations_by_default")]
@@ -7268,6 +7321,7 @@ impl NodeLaunch {
             nodes,
             listen_addr: default_listen_addr(),
             read_pool_size: default_read_pool_size(),
+            snapshot_logs_since_last: None,
             instrument_store_operations: true,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
@@ -7280,6 +7334,17 @@ impl NodeLaunch {
     #[must_use]
     pub fn as_learner(mut self) -> Self {
         self.role = ClusterRole::Learner;
+        self
+    }
+
+    /// Override the snapshot trigger for a validation-harness child process.
+    ///
+    /// [`node_config`] validates the value before applying it. Production
+    /// daemon launches never construct a [`NodeLaunch`] and therefore cannot
+    /// enable this override.
+    #[must_use]
+    pub fn with_snapshot_logs_since_last(mut self, logs_since_last: u64) -> Self {
+        self.snapshot_logs_since_last = Some(logs_since_last);
         self
     }
 
@@ -7523,6 +7588,23 @@ pub enum Request {
     ReadLocalSetting {
         key: String,
     },
+    /// Populate the fixed M5 SQLite recovery image through replicated SQL.
+    SeedRecoveryImage {
+        minimum_bytes: u64,
+        marker: String,
+    },
+    /// Hash every byte of the target-local recovery image after installation.
+    RecoveryImageDigest {
+        minimum_bytes: u64,
+    },
+    /// Hash the acknowledged writer rows applied on this target.
+    RecoveryWriteDigest {
+        prefix: String,
+    },
+    /// Snapshot, purge, apply, install, and transport evidence from this node.
+    RecoveryStatus,
+    /// Linux process-local thread and socket counts after quiescence.
+    ProcessResources,
     ForceCompaction {
         phase: String,
         /// The `BACKGROUND_SQL_CLASSES` entries whose background writers are
@@ -7653,6 +7735,7 @@ pub enum Request {
 impl Request {
     fn response_timeout(&self) -> Duration {
         match self {
+            Self::SeedRecoveryImage { .. } => Duration::from_secs(900),
             Self::ForceCompaction { .. } => COMPACTION_RESPONSE_TIMEOUT,
             Self::WriteWithoutQuorum => WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT,
             Self::RemoveVoter { .. }
@@ -7844,6 +7927,18 @@ pub enum Response {
     },
     Setting {
         value: Option<String>,
+    },
+    RecoveryImage {
+        evidence: RecoveryImageEvidence,
+    },
+    RecoveryWriteDigest {
+        digest: RecoveryWriteDigest,
+    },
+    RecoveryStatus {
+        status: RecoveryRuntimeStatus,
+    },
+    ProcessResources {
+        resources: ProcessResourceCount,
     },
     ArtworkFenceApply {
         setting: bool,
@@ -10280,6 +10375,25 @@ async fn handle_request(
         Request::ReadLocalSetting { ref key } => Ok(Response::Setting {
             value: read_local_setting(client, key).await?,
         }),
+        Request::SeedRecoveryImage {
+            minimum_bytes,
+            ref marker,
+        } => Ok(Response::RecoveryImage {
+            evidence: transport_recovery::seed_recovery_image(client, minimum_bytes, marker)
+                .await?,
+        }),
+        Request::RecoveryImageDigest { minimum_bytes } => Ok(Response::RecoveryImage {
+            evidence: transport_recovery::recovery_image_digest(client, minimum_bytes).await?,
+        }),
+        Request::RecoveryWriteDigest { ref prefix } => Ok(Response::RecoveryWriteDigest {
+            digest: transport_recovery::recovery_write_digest(client, prefix).await?,
+        }),
+        Request::RecoveryStatus => Ok(Response::RecoveryStatus {
+            status: transport_recovery::recovery_runtime_status(client).await?,
+        }),
+        Request::ProcessResources => Ok(Response::ProcessResources {
+            resources: transport_recovery::process_resources(client)?,
+        }),
         Request::ForceCompaction {
             ref phase,
             ref background,
@@ -12460,6 +12574,19 @@ async fn run_preflight(
 
 /// Build the hiqlite configuration for one voter and create its data dir.
 pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
+    let mut defaults = production_hiqlite_defaults_with_read_pool(launch.read_pool_size);
+    if let Some(logs_since_last) = launch.snapshot_logs_since_last {
+        if logs_since_last == 0 || logs_since_last > u64::MAX / 2 {
+            bail!(
+                "validation snapshot threshold must be in 1..={}, got {logs_since_last}",
+                u64::MAX / 2
+            );
+        }
+        let validation_raft_config = NodeConfig::default_raft_config(logs_since_last);
+        defaults.raft_config.snapshot_policy = validation_raft_config.snapshot_policy;
+        defaults.raft_config.replication_lag_threshold =
+            validation_raft_config.replication_lag_threshold;
+    }
     let data_dir = launch.root.join(format!("node-{}", launch.node_id));
     std::fs::create_dir_all(&data_dir)?;
     Ok(NodeConfig {
@@ -12490,7 +12617,7 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         // Raft, WAL, and read-pool settings come from the daemon's own builder
         // rather than a second copy here, so a harness run cannot measure a
         // configuration production never runs.
-        ..production_hiqlite_defaults_with_read_pool(launch.read_pool_size)
+        ..defaults
     })
 }
 
@@ -12980,6 +13107,7 @@ mod tests {
             }],
             listen_addr: default_listen_addr(),
             read_pool_size,
+            snapshot_logs_since_last: None,
             instrument_store_operations: true,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
@@ -13025,5 +13153,76 @@ mod tests {
         assert_eq!(launch.read_pool_size, default_read_pool_size());
         assert_eq!(launch.read_pool_size, 4);
         assert!(launch.instrument_store_operations);
+    }
+
+    #[test]
+    fn a_legacy_launch_retains_the_production_snapshot_policy() {
+        let root = tempfile::tempdir().expect("config test root");
+        let launch: NodeLaunch = serde_json::from_value(serde_json::json!({
+            "node_id": 1,
+            "root": root.path(),
+            "nodes": [{
+                "id": 1,
+                "raft": "127.0.0.1:19001",
+                "api": "127.0.0.1:19002"
+            }]
+        }))
+        .expect("decode a legacy launch");
+        assert_eq!(launch.snapshot_logs_since_last, None);
+        assert!(
+            serde_json::to_value(&launch)
+                .expect("encode the legacy launch")
+                .get("snapshot_logs_since_last")
+                .is_none(),
+            "an absent override must preserve the legacy launch payload"
+        );
+
+        let config = node_config(&launch).expect("build the voter config");
+        let production = production_hiqlite_defaults_with_read_pool(default_read_pool_size());
+        assert_eq!(
+            config.raft_config.snapshot_policy,
+            production.raft_config.snapshot_policy
+        );
+        assert_eq!(
+            config.raft_config.replication_lag_threshold,
+            production.raft_config.replication_lag_threshold
+        );
+    }
+
+    #[test]
+    fn a_snapshot_threshold_round_trips_and_reaches_the_launched_voter_config() {
+        let root = tempfile::tempdir().expect("config test root");
+        let launch =
+            test_launch(root.path(), default_read_pool_size()).with_snapshot_logs_since_last(37);
+        let encoded = serde_json::to_string(&launch).expect("encode the launch");
+        let decoded: NodeLaunch = serde_json::from_str(&encoded).expect("decode the launch");
+        assert_eq!(decoded.snapshot_logs_since_last, Some(37));
+
+        let config = node_config(&decoded).expect("build the voter config");
+        let expected = NodeConfig::default_raft_config(37);
+        assert_eq!(config.raft_config.snapshot_policy, expected.snapshot_policy);
+        assert_eq!(config.raft_config.replication_lag_threshold, 74);
+        assert_eq!(config.raft_config.install_snapshot_timeout, 120_000);
+        assert_eq!(config.wal_size, HIQLITE_WAL_SIZE_BYTES);
+    }
+
+    #[test]
+    fn an_invalid_snapshot_threshold_is_rejected_without_changing_production() {
+        let root = tempfile::tempdir().expect("config test root");
+        for threshold in [0, u64::MAX] {
+            let mut launch = test_launch(root.path(), default_read_pool_size());
+            launch.snapshot_logs_since_last = Some(threshold);
+            let error = node_config(&launch).expect_err("reject an unsafe snapshot threshold");
+            assert!(
+                error
+                    .to_string()
+                    .contains("validation snapshot threshold must be in"),
+                "unexpected error: {error:#}"
+            );
+            assert!(
+                !root.path().join("node-1").exists(),
+                "an invalid launch must fail before creating voter state"
+            );
+        }
     }
 }

@@ -1,0 +1,12 @@
+[Unit]
+Description=Bound the Forgejo runner cache servers and Docker store on this host
+Documentation=https://192.168.4.7:3000/noirr/plurx/src/branch/main/docs/ci/RUNNER-DISK.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/plurx-ci-janitor
+# A janitor that fails must not mask a runner failure: it reports and exits.
+SuccessExitStatus=0
+Nice=10
+IOSchedulingClass=idle

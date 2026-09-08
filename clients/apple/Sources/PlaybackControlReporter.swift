@@ -23,7 +23,34 @@ enum PlaybackControl {
     /// The actions this client will accept, and therefore the only ones the
     /// server will send it. An action that is never declared is never sent, so
     /// a client cannot be silenced by one it does not understand.
-    static let supportedActions = ["hold", "retry_resource", "terminal"]
+    static let supportedActions = [
+        "hold", "retry_resource", "terminal", prepareReplacementAction,
+    ]
+    /// The name a client **declares**, and the name the action **arrives**
+    /// under, are not the same string, and this is the only action in the
+    /// protocol where that is true.
+    ///
+    /// `accepts()` on the server is a literal comparison against the declared
+    /// name (`playback_control.rs`, `PREPARE_REPLACEMENT_ACTION`), while the
+    /// tag comes from `#[serde(tag = "type", rename_all = "snake_case")]` on
+    /// the `ControlAction` enum, whose variant is `Prepare`. The transaction
+    /// is named for the whole exchange; the tag is named for the moment.
+    ///
+    /// Both failures from getting this wrong are silent. Declaring `"prepare"`
+    /// is never matched, so the server simply never offers a preparation.
+    /// Switching on `"prepare_replacement"` never fires, so a staged successor
+    /// is paid for and thrown away. These two constants exist so neither
+    /// spelling is ever typed by hand again.
+    static let prepareReplacementAction = "prepare_replacement"
+    static let prepareActionType = "prepare"
+    /// Mirrors of the server's own bounds, so a payload this client would have
+    /// refused is refused before it reaches AVFoundation rather than after.
+    /// `playback_control.rs`: `MAX_MEDIA_MILLIS`, `MAX_PLAYLIST_URL_LEN`,
+    /// `MAX_ACTION_ID_LEN`, and `EffectiveSelection::is_valid`.
+    static let maximumMediaMs = 366 * 24 * 60 * 60 * 1_000
+    static let maximumPlaylistUrlBytes = 512
+    static let maximumActionIdBytes = 64
+    static let maximumAudioOffsetMs = 15_000
     static let minimumExchangeMs = 250
     static let maximumExchangeMs = 60_000
     static let exchangeDeadlineMs = 6_000
@@ -38,6 +65,27 @@ enum PlaybackControl {
     /// a redirected or spoofed bootstrap rebind the session.
     static func isUUID(_ value: String) -> Bool {
         UUID(uuidString: value) != nil
+    }
+
+    /// The acknowledgement a request may actually carry.
+    ///
+    /// Two refusals, and both of them cost the acknowledgement rather than the
+    /// exchange. An acknowledgement this client could not form is dropped
+    /// because the server answers a malformed one with `400 invalid_control`,
+    /// which fails the whole request and takes the position report with it.
+    ///
+    /// And `committed` may not share an exchange with `demand: "end"` — the
+    /// server rejects that pairing outright. A viewer who switches players and
+    /// then immediately closes owes two exchanges, in that order, and the
+    /// caller is what sequences them; this is the guard that makes the
+    /// forbidden body impossible to construct rather than merely unlikely.
+    static func acknowledgement(
+        _ value: ActionAcknowledgement?,
+        demand: PlaybackDemand
+    ) -> ActionAcknowledgement? {
+        guard let value, value.isValid else { return nil }
+        guard !(demand == .end && value.state == .committed) else { return nil }
+        return value
     }
 
     /// The control types spell their keys in camelCase and let the key
@@ -136,10 +184,12 @@ enum ClientErrorCode: String, Codable, Equatable {
     case network, manifest, media, decoder, drm, unknown
 }
 
-/// `{"mode": "auto"}` or `{"mode": "manual", "height": 1080}` — the server's
+/// `{"mode": "auto"}`, `{"mode": "original"}`, or
+/// `{"mode": "manual", "height": 1080}` — the server's
 /// internally tagged `QualitySelection`.
 enum QualitySelection: Codable, Equatable {
     case auto
+    case original
     case manual(height: Int)
 
     private enum CodingKeys: String, CodingKey { case mode, height }
@@ -148,6 +198,7 @@ enum QualitySelection: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         switch try container.decode(String.self, forKey: .mode) {
         case "auto": self = .auto
+        case "original": self = .original
         case "manual": self = .manual(height: try container.decode(Int.self, forKey: .height))
         default:
             throw DecodingError.dataCorruptedError(
@@ -161,6 +212,8 @@ enum QualitySelection: Codable, Equatable {
         switch self {
         case .auto:
             try container.encode("auto", forKey: .mode)
+        case .original:
+            try container.encode("original", forKey: .mode)
         case .manual(let height):
             try container.encode("manual", forKey: .mode)
             try container.encode(height, forKey: .height)
@@ -269,6 +322,20 @@ struct PlaybackControlSnapshot: Equatable {
     var selection: ClientSelection
     var capabilities: DynamicCapabilities
     var observation: ClientObservation?
+    /// The settlement this player owes a staged successor, if it owes one.
+    ///
+    /// It rides the snapshot rather than a queue of its own because the
+    /// reporter coalesces: the newest capture replaces any waiting one, so an
+    /// acknowledgement parked anywhere else would be the one thing a position
+    /// update could silently drop. The player keeps the same value on every
+    /// snapshot until it sees the exchange that carried it come back, which
+    /// makes a repeat — which the server tolerates on every state — the price
+    /// of never losing a terminal settlement.
+    ///
+    /// Deliberately outside `isValid`: an acknowledgement this client could
+    /// not form must cost the acknowledgement, never the whole exchange. The
+    /// request builder drops it instead.
+    var acknowledgement: ActionAcknowledgement? = nil
 
     var isValid: Bool {
         positionMs >= 0
@@ -302,6 +369,11 @@ struct ControlRequest: Codable, Equatable {
     var selection: ClientSelection
     var capabilities: DynamicCapabilities?
     var observation: ClientObservation?
+    /// Encoded only when present. The server has `deny_unknown_fields` and a
+    /// `null` here is legal, but an omitted key is what every other optional
+    /// on this request does, and Swift's synthesized encoding omits it for
+    /// free.
+    var acknowledgement: ActionAcknowledgement? = nil
     var supportedActions: [String] = PlaybackControl.supportedActions
 
     enum CodingKeys: String, CodingKey {
@@ -309,7 +381,8 @@ struct ControlRequest: Codable, Equatable {
         case generation, controlEpoch, clientInstanceId, sequence, demand
         case positionMs, bufferedFromMs, bufferedThroughMs, playbackRate
         case renderState, seekTargetMs, observedDownloadBps
-        case selection, capabilities, observation, supportedActions
+        case selection, capabilities, observation, acknowledgement
+        case supportedActions
     }
 }
 
@@ -321,10 +394,208 @@ struct ControlAction: Codable, Equatable {
     var reason: String? = nil
     /// `retry_resource` only: when the server wants to be asked again.
     var afterMs: Int? = nil
+    /// `hold` only: when the server expects to be worth asking again.
+    ///
+    /// A revisit contract, not an expiry — nothing fails when it passes. It
+    /// exists because `no_room` is cleared by something outside this session,
+    /// so a client told to hold for that reason has no way of its own to know
+    /// when asking again is worth the exchange.
+    var revisitAfterMs: Int? = nil
     /// `terminal` only: which producer decision ended this session, and a
     /// bounded sentence explaining it.
     var code: String? = nil
     var message: String? = nil
+    /// `prepare` only, all five. Optionals on a flat struct rather than an
+    /// enum with associated values: web and Android both keep a flat shape,
+    /// and the three implementations are meant to stay observably identical.
+    /// `PreparedReplacementAction` is where the flat shape is turned into
+    /// something that cannot be half-present.
+    ///
+    /// The UUID that names this staging, replayed byte-identically on every
+    /// exchange until it settles. Echo it in `acknowledgement.action_id`.
+    var actionId: String? = nil
+    /// The successor's own session UUID.
+    var sessionId: String? = nil
+    /// Node-relative, and only ever this session's own index or master
+    /// playlist. Never followed as an absolute URL.
+    var playlistUrl: String? = nil
+    /// The source position the successor's session-relative zero maps to.
+    /// Without it the second timeline cannot be aligned with the first.
+    var mediaOriginMs: Int? = nil
+    /// What the successor will deliver — the server's answer, not the ask.
+    var effectiveSelection: EffectiveSelection? = nil
+}
+
+/// What a session delivers, in the server's own vocabulary.
+///
+/// It appears twice on the wire: on the response, describing the session that
+/// is playing now, and inside a `prepare`, describing the one that would
+/// replace it. Comparing the two is how a client knows what is about to
+/// change.
+struct EffectiveSelection: Codable, Equatable {
+    var qualityAuto: Bool
+    var height: Int
+    var audioTrack: Int?
+    var subtitleBurn: Int?
+    var audioOffsetMs: Int
+    /// **Not a codec name.** Exactly `source` or `server_selected`, which is
+    /// the direct-play/remux versus transcode distinction — the server's
+    /// `PreparationAxis::DeliveryMethod`. Rendering this string to a viewer as
+    /// a codec is wrong.
+    var codec: String
+    /// `dolby_vision`, `hdr10`, `hlg`, `sdr`, or absent.
+    var dynamicRange: String?
+
+    static let deliveryMethods = ["source", "server_selected"]
+    static let dynamicRanges = ["dolby_vision", "hdr10", "hlg", "sdr"]
+
+    /// The mirror of `EffectiveSelection::is_valid` in
+    /// `crates/plurxd/src/playback_control.rs`. Height starts at zero because
+    /// zero is what a source delivery reports.
+    var isValid: Bool {
+        let offset = PlaybackControl.maximumAudioOffsetMs
+        return (0...PlaybackControl.maximumHeight).contains(height)
+            && (audioTrack.map { (0...1_024).contains($0) } ?? true)
+            && (subtitleBurn.map { (0...1_024).contains($0) } ?? true)
+            && (-offset...offset).contains(audioOffsetMs)
+            && Self.deliveryMethods.contains(codec)
+            && (dynamicRange.map { Self.dynamicRanges.contains($0) } ?? true)
+    }
+
+    /// Whether the successor is a transcode rather than the source itself.
+    var isServerSelected: Bool { codec == "server_selected" }
+}
+
+/// How far a prepared successor got, in the five words the server accepts.
+///
+/// There is no sixth. A value outside this set is a serde error on the server,
+/// which answers `400 invalid_control` with no `invalid_field` at all — the
+/// body never reaches the semantic validator, so nothing says which key was
+/// wrong.
+enum AcknowledgementState: String, Codable, Equatable {
+    case metadataReady = "metadata_ready"
+    case bufferReady = "buffer_ready"
+    case committed
+    case failed
+    case aborted
+
+    /// Progress states are optional and the server behaves correctly without
+    /// them; a terminal one is owed. A preparation left to the 330-second
+    /// deadline holds the session's only preparation slot for the rest of its
+    /// life, so that session gets exactly one preparation, ever.
+    var isTerminal: Bool {
+        switch self {
+        case .committed, .failed, .aborted: return true
+        case .metadataReady, .bufferReady: return false
+        }
+    }
+}
+
+/// The client's half of the preparation transaction.
+struct ActionAcknowledgement: Codable, Equatable {
+    /// The `action_id` of the staging being settled, verbatim. An
+    /// acknowledgement whose id does not match the currently bound `prepare`
+    /// is silently ignored by the server — no error comes back — so a `200`
+    /// is never proof a commit was accepted.
+    var actionId: String
+    var state: AcknowledgementState
+    /// Required by `buffer_ready`, and meaningless elsewhere.
+    var bufferedThroughMs: Int? = nil
+    /// Required by `committed`: the source position the successor's timeline
+    /// actually starts at, echoed from the offer being committed to.
+    ///
+    /// This is what a commit is proof *of*. `action_id` says which offer is
+    /// being answered; this says the client built the thing that offer
+    /// described. Between the `prepare` and the commit the server's own intent
+    /// can move — a seek, a quality change, a new recipe — and an
+    /// acknowledgement carrying only an id cannot distinguish a client that
+    /// committed to the current offer from one that committed to a stale one
+    /// and is about to present media nobody asked for. The server compares it
+    /// against the staged successor's own `media_origin_ms` and refuses a
+    /// mismatch, which is the only reason it is worth carrying.
+    var committedMediaOriginMs: Int? = nil
+    /// Required by `committed`: the wall clock at the successor's first
+    /// qualifying frame, in milliseconds, and greater than zero.
+    var firstFrameUnixMs: Int? = nil
+
+    /// Every rule in the server's acknowledgement validator, applied before
+    /// the request is built. Each of these is a `400 invalid_control` that
+    /// would cost the whole exchange, not just the acknowledgement.
+    var isValid: Bool {
+        guard PlaybackControl.isUUID(actionId),
+              actionId.utf8.count <= PlaybackControl.maximumActionIdBytes
+        else { return false }
+        if let bufferedThroughMs,
+           !(0...PlaybackControl.maximumMediaMs).contains(bufferedThroughMs) {
+            return false
+        }
+        if let firstFrameUnixMs, firstFrameUnixMs <= 0 { return false }
+        if let committedMediaOriginMs,
+           !(0...PlaybackControl.maximumMediaMs).contains(committedMediaOriginMs) {
+            return false
+        }
+        if state == .bufferReady && bufferedThroughMs == nil { return false }
+        if state == .committed && firstFrameUnixMs == nil { return false }
+        if state == .committed && committedMediaOriginMs == nil { return false }
+        return true
+    }
+}
+
+/// A `prepare` action that has already been proven whole.
+///
+/// The reporter refuses a malformed one as a protocol violation, so nothing
+/// downstream has to ask whether a field is present: reaching this type at all
+/// means every rule below held.
+struct PreparedReplacementAction: Equatable {
+    let actionId: String
+    let sessionId: String
+    let playlistUrl: String
+    let mediaOriginMs: Int
+    let effectiveSelection: EffectiveSelection
+
+    /// `/api/v1/hls/{sessionId}/index.m3u8` or `.../master.m3u8`, and nothing
+    /// else — the exact rule `is_node_relative_playlist` applies, including
+    /// that a query or fragment is allowed and ignored.
+    ///
+    /// Node-relative is the whole security property: resolved against this
+    /// session's own origin, a prepared handoff cannot point a client
+    /// anywhere. An absolute URL is refused here rather than followed, even
+    /// if some later server sends one.
+    static func isNodeRelativePlaylist(_ value: String, sessionId: String) -> Bool {
+        guard value.utf8.count <= PlaybackControl.maximumPlaylistUrlBytes else { return false }
+        let path = String(
+            value.split(
+                separator: "?", maxSplits: 1, omittingEmptySubsequences: false
+            )[0].split(
+                separator: "#", maxSplits: 1, omittingEmptySubsequences: false
+            )[0]
+        )
+        return path == "/api/v1/hls/\(sessionId)/index.m3u8"
+            || path == "/api/v1/hls/\(sessionId)/master.m3u8"
+    }
+
+    /// The mirror of `prepared_payload_is_valid`. Nil means the reporter must
+    /// treat this action as a protocol violation.
+    init?(_ action: ControlAction) {
+        guard action.type == PlaybackControl.prepareActionType,
+              let actionId = action.actionId,
+              let sessionId = action.sessionId,
+              let playlistUrl = action.playlistUrl,
+              let mediaOriginMs = action.mediaOriginMs,
+              let effectiveSelection = action.effectiveSelection,
+              PlaybackControl.isUUID(actionId),
+              actionId.utf8.count <= PlaybackControl.maximumActionIdBytes,
+              PlaybackControl.isUUID(sessionId),
+              Self.isNodeRelativePlaylist(playlistUrl, sessionId: sessionId),
+              (0...PlaybackControl.maximumMediaMs).contains(mediaOriginMs),
+              effectiveSelection.isValid
+        else { return nil }
+        self.actionId = actionId
+        self.sessionId = sessionId
+        self.playlistUrl = playlistUrl
+        self.mediaOriginMs = mediaOriginMs
+        self.effectiveSelection = effectiveSelection
+    }
 }
 
 struct ControlDelivery: Codable, Equatable {
@@ -343,11 +614,11 @@ final class SubtitleReadinessRetryState: @unchecked Sendable {
     private let lock = NSLock()
     private var lastReady: Bool?
 
-    func record(_ value: String?) -> Bool {
+    func record(_ value: String?, commitReady: Bool = true) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         let ready = SubtitleReadinessDecision.meansReady(value)
-        defer { lastReady = ready }
+        defer { if !ready || commitReady { lastReady = ready } }
         return lastReady == false && ready
     }
 }
@@ -358,11 +629,17 @@ struct ControlResponse: Codable, Equatable {
     var controlEpoch: Int
     var acceptedSequence: Int
     var delivery: ControlDelivery? = nil
+    /// What the session being reported on is actually delivering. The server
+    /// has always sent this; until now Swift's decoder dropped it on the
+    /// floor, so a client had no way to compare what it has against what a
+    /// prepared successor would give it.
+    var effectiveSelection: EffectiveSelection? = nil
     var action: ControlAction
 
     enum CodingKeys: String, CodingKey {
         case proto = "protocol"
-        case generation, controlEpoch, acceptedSequence, delivery, action
+        case generation, controlEpoch, acceptedSequence, delivery
+        case effectiveSelection, action
     }
 }
 
@@ -389,13 +666,29 @@ struct ControlProtocolError: Error, Equatable {
 
 // MARK: - Reporter
 
-/// One in-flight exchange, newest-snapshot-wins coalescing, monotonic
-/// sequences, and a bounded exchange deadline.
-///
-/// An actor rather than a lock because every rule here is about ordering:
-/// exactly one exchange may be outstanding, a snapshot that arrives during an
-/// exchange replaces any other waiting snapshot instead of queueing behind
-/// it, and the sequence a request carries must never be reused or skipped.
+/// Local ownership is deliberately separate from the server's 409 generation.
+struct PlaybackControlCaptureOwner: Equatable, Sendable {
+    let lifecycleId: String
+    let attachmentGeneration: Int
+}
+
+/// A source-actor value, never a snapshot labelled after an actor hop. Swift
+/// value semantics keep nested capabilities and selections immutable too.
+struct PlaybackControlCapture: Equatable, Sendable {
+    let snapshot: PlaybackControlSnapshot
+    let intentGeneration: Int
+    let owner: PlaybackControlCaptureOwner
+    let sourceRevision: Int
+
+    func hasSameIntent(as other: Self?) -> Bool {
+        guard let other else { return false }
+        return owner == other.owner && intentGeneration == other.intentGeneration
+    }
+}
+
+/// One in-flight exchange, newest-capture-wins coalescing, monotonic
+/// sequences, and a bounded exchange deadline. The actor owns ordering, not
+/// source observation: all player reads happen before the capture reaches it.
 actor PlaybackControlReporter {
     typealias Send = @Sendable (String, ControlRequest) async throws -> ControlResponse
     typealias Sleep = @Sendable (Int, SleepKind) async throws -> Void
@@ -414,11 +707,20 @@ actor PlaybackControlReporter {
         var request: ControlRequest
         var response: ControlResponse?
         var failure: String?
+        /// Local-only viewer intent that produced this request.
+        let capture: PlaybackControlCapture
+        var intentGeneration: Int { capture.intentGeneration }
+    }
+
+    private struct PendingRequest {
+        var request: ControlRequest
+        let capture: PlaybackControlCapture
     }
 
     private(set) var bootstrap: ControlBootstrap
     private let clientInstanceId: String
-    private let snapshot: @Sendable () -> PlaybackControlSnapshot?
+    private let owner: PlaybackControlCaptureOwner
+    private let capture: @Sendable () -> PlaybackControlCapture?
     private let send: Send
     private let sleep: Sleep
     private let now: @Sendable () -> Int
@@ -427,9 +729,10 @@ actor PlaybackControlReporter {
     private(set) var sequence = 0
     private(set) var acceptedSequence = 0
     private(set) var stopped = false
+    private var terminalStop: PlaybackControlCapture?
     private var inFlight = false
-    private var pending: PlaybackControlSnapshot?
-    private var retryRequest: ControlRequest?
+    private var pending: PlaybackControlCapture?
+    private var retryRequest: PendingRequest?
     private var acceptedCapabilities: DynamicCapabilities?
     private var lastStartedAt: Int?
     private var nextAllowedAt = 0
@@ -438,7 +741,8 @@ actor PlaybackControlReporter {
     init?(
         bootstrap: ControlBootstrap,
         clientInstanceId: String,
-        snapshot: @escaping @Sendable () -> PlaybackControlSnapshot?,
+        owner: PlaybackControlCaptureOwner,
+        capture: @escaping @Sendable () -> PlaybackControlCapture?,
         send: @escaping Send,
         sleep: @escaping Sleep,
         now: @escaping @Sendable () -> Int,
@@ -447,7 +751,8 @@ actor PlaybackControlReporter {
         guard bootstrap.isValid, PlaybackControl.isUUID(clientInstanceId) else { return nil }
         self.bootstrap = bootstrap
         self.clientInstanceId = clientInstanceId
-        self.snapshot = snapshot
+        self.owner = owner
+        self.capture = capture
         self.send = send
         self.sleep = sleep
         self.now = now
@@ -459,17 +764,19 @@ actor PlaybackControlReporter {
     /// alive is a no-op rather than a second exchange loop.
     func start() {
         guard !stopped, pump == nil else { return }
-        pending = pending ?? snapshot()
+        if pending == nil { pending = newestCapture(nil) }
         pump = Task { [weak self] in await self?.run() }
     }
 
     /// The player changed. The newest snapshot replaces any waiting one — an
     /// intermediate position between two exchanges is not worth a round trip,
     /// and reporting it late would be worse than not reporting it.
-    func notify(_ value: PlaybackControlSnapshot? = nil) {
-        guard !stopped else { return }
-        guard let newest = value ?? snapshot(), newest.isValid else { return }
+    func notify(_ value: PlaybackControlCapture? = nil) {
+        guard let newest = newestCapture(value), newest.snapshot.isValid else { return }
+        let resume = stopped
+        guard admitAfterTerminal(newest) else { return }
         pending = newest
+        if resume { pump = Task { [weak self] in await self?.run() } }
     }
 
     /// Report now rather than at the next cadence.
@@ -485,20 +792,51 @@ actor PlaybackControlReporter {
     /// the old pump exits at its next iteration instead of racing this one.
     /// An exchange already in flight is left alone — `run()` picks up
     /// `pending` immediately after it, without sleeping.
-    func notifyUrgently(_ value: PlaybackControlSnapshot? = nil) {
-        notify(value)
-        guard !stopped, !inFlight, pending != nil else { return }
-        pump?.cancel()
-        pump = Task { [weak self] in await self?.run() }
+    @discardableResult
+    func notifyUrgently(_ value: PlaybackControlCapture? = nil) -> Int? {
+        guard let newest = newestCapture(value), newest.snapshot.isValid,
+              admitAfterTerminal(newest) else { return nil }
+        pending = newest
+        // A retry can replay the current sequence, but it cannot consume the
+        // next new request. A replacement retains this floor even if ending
+        // this reporter cancels the pump before it reaches the server.
+        let floor = sequence + 1
+        if !inFlight {
+            pump?.cancel()
+            pump = Task { [weak self] in await self?.run() }
+        }
+        return floor
     }
 
     func stop() {
+        terminalStop = nil
         guard !stopped else { return }
         stopped = true
         pending = nil
         retryRequest = nil
         pump?.cancel()
         pump = nil
+    }
+
+    /// A terminal stops only the captured intent. MainActor may publish B
+    /// immediately after this check, so B's notification can resume this
+    /// latch. Explicit End/stop and protocol failure remain permanent.
+    private func stopForTerminal(_ captured: PlaybackControlCapture) {
+        guard !stopped, captured.hasSameIntent(as: newestCapture(pending)) else { return }
+        stopped = true
+        terminalStop = captured
+        pending = nil
+        retryRequest = nil
+        pump?.cancel()
+        pump = nil
+    }
+
+    private func admitAfterTerminal(_ newest: PlaybackControlCapture) -> Bool {
+        guard stopped else { return true }
+        guard let terminalStop, !terminalStop.hasSameIntent(as: newest) else { return false }
+        self.terminalStop = nil
+        stopped = false
+        return true
     }
 
     func status() -> [String: Int] {
@@ -517,7 +855,7 @@ actor PlaybackControlReporter {
     private func run() async {
         while !stopped && !Task.isCancelled {
             if pending == nil && retryRequest == nil {
-                pending = snapshot()
+                pending = newestCapture(nil)
             }
             guard pending != nil || retryRequest != nil else {
                 try? await sleep(bootstrap.nextExchangeMs, .pacing)
@@ -548,14 +886,15 @@ actor PlaybackControlReporter {
     /// A retry replays the exact request that failed — the same sequence, the
     /// same body — because a control exchange the server never accepted must
     /// not consume a sequence number, and the server dedupes on it.
-    private func nextRequest() -> ControlRequest? {
+    private func nextRequest() -> PendingRequest? {
         if let retryRequest { return retryRequest }
-        guard let snapshot = pending, snapshot.isValid else {
+        guard let pending = newestCapture(pending), pending.snapshot.isValid else {
             pending = nil
             return nil
         }
-        pending = nil
+        self.pending = nil
         sequence += 1
+        let snapshot = pending.snapshot
         var request = ControlRequest(
             proto: PlaybackControl.protocolName,
             generation: bootstrap.generation,
@@ -573,6 +912,9 @@ actor PlaybackControlReporter {
             selection: snapshot.selection,
             capabilities: snapshot.capabilities,
             observation: snapshot.observation?.bounded,
+            acknowledgement: PlaybackControl.acknowledgement(
+                snapshot.acknowledgement, demand: snapshot.demand
+            ),
             supportedActions: PlaybackControl.supportedActions
         )
         // Capabilities are static for the life of a player. Repeating them on
@@ -581,10 +923,11 @@ actor PlaybackControlReporter {
         if request.sequence != 1 && snapshot.capabilities == acceptedCapabilities {
             request.capabilities = nil
         }
-        return request
+        return PendingRequest(request: request, capture: pending)
     }
 
-    private func exchange(_ request: ControlRequest) async {
+    private func exchange(_ pendingRequest: PendingRequest) async {
+        let request = pendingRequest.request
         nextAllowedAt = 0
         lastStartedAt = now()
         inFlight = true
@@ -606,15 +949,21 @@ actor PlaybackControlReporter {
             if response.action.type == "retry_resource", let afterMs = response.action.afterMs {
                 nextAllowedAt = now() + max(PlaybackControl.minimumExchangeMs, afterMs)
             }
-            onExchange(Exchange(request: request, response: response, failure: nil))
+            onExchange(Exchange(
+                request: request,
+                response: response,
+                failure: nil,
+                capture: pendingRequest.capture
+            ))
             // A terminal verdict ends reporting. It does not tear the player
             // down: this reporter still owns no recovery, and buffer already
             // fetched is still worth playing. The milestone that moves that
             // authority is the one that acts on this.
-            if request.demand == .end || response.action.type == "terminal" { stop() }
+            if request.demand == .end { stop() }
+            else if response.action.type == "terminal" { stopForTerminal(pendingRequest.capture) }
         } catch {
             if stopped { return }
-            handle(failure: error, for: request)
+            handle(failure: error, for: pendingRequest)
         }
     }
 
@@ -651,6 +1000,16 @@ actor PlaybackControlReporter {
             guard response.action.code != nil, response.action.message != nil else {
                 throw ControlProtocolError(reason: "action")
             }
+        case PlaybackControl.prepareActionType:
+            // Strict, and fatal when it fails, for the same reason the
+            // `default:` arm is fatal: an action inside the declared
+            // vocabulary whose payload this client cannot trust is worse than
+            // one it has never heard of, because it would be acted on. A
+            // prepared handoff that half-parses would build a second decode
+            // pipeline against an address nobody validated.
+            guard PreparedReplacementAction(response.action) != nil else {
+                throw ControlProtocolError(reason: "action")
+            }
         case "retry_resource":
             guard response.action.reason != nil,
                 let afterMs = response.action.afterMs,
@@ -664,10 +1023,16 @@ actor PlaybackControlReporter {
         }
     }
 
-    private func handle(failure: Error, for request: ControlRequest) {
+    private func handle(failure: Error, for pendingRequest: PendingRequest) {
+        let request = pendingRequest.request
         if let transport = failure as? ControlTransportError, transport.canceled { return }
         onExchange(
-            Exchange(request: request, response: nil, failure: describe(failure))
+            Exchange(
+                request: request,
+                response: nil,
+                failure: describe(failure),
+                capture: pendingRequest.capture
+            )
         )
         if failure is ControlProtocolError {
             stop()
@@ -688,7 +1053,7 @@ actor PlaybackControlReporter {
             stop()
             return
         }
-        retryRequest = request
+        retryRequest = pendingRequest
         let fallback = retryableControl ? 500 : bootstrap.nextExchangeMs
         nextAllowedAt = now() + retryDelay(transport, fallback)
     }
@@ -708,7 +1073,10 @@ actor PlaybackControlReporter {
         let generationChanged = generation != bootstrap.generation
         let epochChanged = epoch > bootstrap.controlEpoch
         guard generationChanged || epochChanged else { return false }
-        guard let newest = snapshot(), newest.isValid else { return false }
+        // Source may be intentionally empty between intent invalidation and
+        // publication. Adopt the validated wire owner without inventing data;
+        // fresh admission will wait for this local attachment's next capture.
+        let newest = currentCapture().flatMap { $0.snapshot.isValid ? $0 : nil }
         bootstrap.generation = generation
         bootstrap.controlEpoch = epoch
         sequence = 0
@@ -718,6 +1086,20 @@ actor PlaybackControlReporter {
         lastStartedAt = nil
         pending = newest
         return true
+    }
+
+    private func currentCapture() -> PlaybackControlCapture? {
+        guard let current = capture(), current.owner == owner else { return nil }
+        return current
+    }
+
+    /// Actor delivery order is not source observation order. Adopt the newer
+    /// source envelope whole; never relabel an older queued payload.
+    private func newestCapture(_ value: PlaybackControlCapture?) -> PlaybackControlCapture? {
+        guard let current = currentCapture() else { return nil }
+        if let value, value.owner != owner { return nil }
+        guard let value, value.sourceRevision >= current.sourceRevision else { return current }
+        return value
     }
 
     private func retryDelay(_ error: ControlTransportError?, _ fallback: Int) -> Int {

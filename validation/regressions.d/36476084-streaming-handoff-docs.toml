@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["36476084"]
+points = []
+checks = []
+reason = "Documentation only: adds the remaining streaming-reliability handoff and updates its status page with already-merged capture evidence. This commit changes no executable application or validation behavior; the implementation commits and their focused regression mappings remain independently governed."
+ignore = true

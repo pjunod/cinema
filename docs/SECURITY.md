@@ -528,6 +528,12 @@ the protections above believable. plurx does **not**:
   cost one leader lookup. If either surface is reachable from an untrusted
   network, put rate limiting at the proxy — the layer that can see the client
   IP.
+- **Recover a forgotten last-admin password from the console.** The legacy
+  `plurxd reset-password` sidecar Store writer is refused because it cannot
+  invalidate cache-only admin proofs inside every running daemon. A
+  still-authenticated admin can reset other accounts; last-admin recovery needs
+  a future authenticated daemon-owned local control path. Direct database edits
+  are not a supported substitute.
 - **Authenticate `/metrics` or the APK download.** Both are public by design
   (a scrape endpoint and a client binary). `/metrics` leaks deployment shape,
   not user data; firewall it if that matters to you.

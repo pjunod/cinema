@@ -16,9 +16,11 @@ mod dto;
 mod dv_disk;
 mod error;
 mod extract;
+pub(crate) use extract::CacheOnlyAdminProofCache;
 mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
+pub(crate) mod internal_auth_revocation;
 pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
@@ -438,6 +440,12 @@ pub fn router(state: AppState) -> Router {
             get(cluster_operations::local),
         )
         .route(
+            internal_auth_revocation::PATH,
+            post(internal_auth_revocation::receive).layer(DefaultBodyLimit::max(
+                internal_auth_revocation::MAX_REQUEST_BYTES,
+            )),
+        )
+        .route(
             crate::media_pool::SNAPSHOT_PATH,
             get(internal_media::snapshot),
         )
@@ -588,6 +596,9 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
     if method == Method::POST && matches!(path, "/api/v1/auth/login" | "/api/v1/auth/logout") {
         return true;
     }
+    if method == Method::POST && path == internal_auth_revocation::PATH {
+        return true;
+    }
     if method == Method::POST && path == "/api/v1/cluster/election" {
         return true;
     }
@@ -679,6 +690,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     if method == Method::POST && path == "/api/v1/cluster/leave" {
         // The body is bound to this backend's node id; this is the only
         // membership mutation a learner may originate locally.
+        return true;
+    }
+    if method == Method::POST && path == internal_auth_revocation::PATH {
         return true;
     }
     // The content-addressed fragment-index read. `fragment_index_cluster`
@@ -1095,6 +1109,7 @@ mod tests {
             // segment of media owned by another node goes through it.
             (Method::POST, crate::media_sessions::RELAY_PATH),
             (Method::POST, crate::shared_cache::CANARY_PATH),
+            (Method::POST, internal_auth_revocation::PATH),
             // Peer hydration of a fragment index. `media_peers()` names
             // learners, so refusing this at the route matrix made the
             // directory point at a closed door.
@@ -1128,6 +1143,7 @@ mod tests {
             (Method::GET, "/api/v1/cluster/status"),
             (Method::GET, "/api/v1/cluster/support-bundle"),
             (Method::GET, cluster_operations::INTERNAL_PATH),
+            (Method::POST, internal_auth_revocation::PATH),
             (Method::POST, "/api/v1/auth/login"),
             (Method::POST, "/api/v1/auth/logout"),
             (Method::POST, "/api/v1/cluster/election"),
@@ -4118,6 +4134,90 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The Settings→login-page bounce, as a request pair.
+    ///
+    /// `/cluster/status` is guarded by the Store-free proof cache. When the
+    /// cluster has not finished activating the credential-revocation protocol
+    /// that cache is fenced closed on every node and holds nothing at all, and
+    /// the guard used to read that emptiness as a verdict on the caller: it
+    /// answered 401, the web client answered a 401 by ending the session, and
+    /// an administrator whose Settings page remembered the Cluster section was
+    /// thrown at the login screen on every attempt — with a valid credential,
+    /// over a fault in the cluster they were opening the page to look at.
+    ///
+    /// Three callers, three different answers, and only one of them is 401.
+    #[tokio::test]
+    async fn a_closed_recovery_proof_refuses_by_condition_never_by_credential() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token").to_owned();
+
+        // Close the cache the way the fleet closed it: the protocol readiness
+        // projection answered false, which clears every proof and refuses to
+        // publish another.
+        state
+            .cache_only_admin_proofs
+            .set_cluster_revocation_capability_ready(false);
+
+        let (status, body) = call(&app, get("/api/v1/cluster/status", Some(&admin))).await;
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a closed proof cache is this node's condition, not a bad credential — \
+             answering 401 is what ended the operator's session: {body}"
+        );
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "the Store still knows this admin: {body}"
+        );
+        // Past the guard and inside the handler: this standalone test state has
+        // no committed roster to report, and that refusal — the handler's own,
+        // named — is the proof the request was authorized.
+        assert_eq!(
+            body["code"], "cluster_roster_unavailable",
+            "the recovery read reached its handler: {body}"
+        );
+
+        let (status, _) = call(&app, get("/api/v1/cluster/status", Some(&viewer))).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a viewer is refused for who they are, and that is not a session-ending answer"
+        );
+
+        let (status, _) = call(&app, get("/api/v1/cluster/status", Some("not-a-token"))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "only a credential the Store has no row for is unauthorized"
+        );
+
+        // The support bundle carries the same guard and must answer the same
+        // way; it is the other half of what an operator reaches for here.
+        let (status, body) = call(&app, get("/api/v1/cluster/support-bundle", Some(&admin))).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
     }
 
     #[tokio::test]

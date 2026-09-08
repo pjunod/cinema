@@ -1091,7 +1091,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             ),
         )
         self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 2)
-        self.assertIn("assert_eq!(methods.len(), 68);", replicated)
+        # 71 after main merged in: the count is read off the merged trait, and
+        # the comment beside it in `replicated.rs` says why neither parent's
+        # total describes it.
+        self.assertIn("assert_eq!(methods.len(), 71);", replicated)
 
         # The shape records a real difference between the backends rather than
         # a promise about future work: the replicated twin cannot hold it, and
@@ -1114,7 +1117,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertRegex(hiqlite, r"AUTH_SCHEMA_MIGRATION_SOURCE \+ \d+,")
         self.assertRegex(hiqlite, r"every additive v5→v\d+ step")
         self.assertIn(
-            "PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, REQUEST_IDENTITY_SCHEMA_VERSION",
+            # The recovery pair sits behind main's desired-selection pair after the
+            # merge, so its source is the pointer fence rather than the request
+            # identity. What is pinned is that the chain is contiguous.
+            "PRODUCER_RECOVERY_SCHEMA_MIGRATION_SOURCE, POINTER_DESIRED_FENCE_SCHEMA_VERSION",
             hiqlite,
         )
 
@@ -1316,10 +1322,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # handing the client a raw status token.
         self.assertIn("SourceDecodeFailed,", control)
         self.assertIn('Self::SourceDecodeFailed => "source_decode_failed",', control)
-        self.assertIn(
-            "Self::Unsupported | Self::InvalidConfiguration | Self::SourceDecodeFailed",
-            control,
-        )
+        # Four permanent reasons after main merged in, so the match is no
+        # longer one line. What this pins is that the decode verdict is one
+        # of them, which is the fact M5c1 exists to establish.
+        self.assertIn("pub(crate) fn is_permanent(self) -> bool {", control)
+        self.assertIn("| Self::SourceDecodeFailed", control)
         self.assertIn(
             "this source did not decode, and trying again will not change that",
             control,
@@ -1389,7 +1396,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             SQLITE_STORE.read_text(encoding="utf-8"),
         )
         self.assertIn(
-            "RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 28,",
+            # v30 after main merged in: both efforts appended a v28 and a v29
+            # to this chain independently, and the pair already on main is the
+            # one that could not move.
+            "RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE, 30,",
             HIQLITE.read_text(encoding="utf-8"),
         )
 

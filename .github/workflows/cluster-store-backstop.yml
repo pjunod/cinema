@@ -22,11 +22,6 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: cluster-store-backstop
-          # This lane is the independent safety net for accelerated execution,
-          # so an eligible physical runner should keep its cache warm even
-          # while the required graph remains in legacy or shadow mode.
-          execution-mode: accelerated
-          persistent-eligible: "true"
       - name: Run the complete Store inventory without sharding
         id: store_backstop
         continue-on-error: true

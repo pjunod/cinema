@@ -27,7 +27,7 @@ audit_paths = [
   "vendor/**",
 ]
 audit_exclude = []
-allow_unmatched_globs = ["docs/METADATA*.md"]
+allow_unmatched_globs = ["docs/features/METADATA*.md"]
 
 [[checks]]
 id = "catalog-contract"
@@ -107,6 +107,15 @@ missing = "fail"
 timeout_seconds = 1800
 
 [[checks]]
+id = "hiqlite-vendor-clippy"
+title = "Vendored Hiqlite production snapshot transport denied-warning Clippy"
+command = "make hiqlite-vendor-clippy"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 1800
+
+[[checks]]
 id = "web-static"
 title = "Embedded JavaScript and theme contrast"
 command = "make web-check"
@@ -134,7 +143,7 @@ command = "make playback-smoke"
 profiles = ["full", "nightly"]
 platforms = ["darwin", "linux"]
 requires = ["cargo", "ffmpeg", "node"]
-missing = "skip"
+missing = "fail"
 timeout_seconds = 3600
 
 # The browser matrix above needs ffmpeg, a server build, and Chrome, so it only
@@ -253,6 +262,16 @@ missing = "fail"
 timeout_seconds = 3600
 
 [[checks]]
+id = "cluster-transport-recovery"
+title = "Supervised twenty-cycle learner and voter TLS snapshot recovery campaign"
+command = "make cluster-transport-recovery-check"
+profiles = ["full", "nightly"]
+platforms = ["linux"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 7200
+
+[[checks]]
 id = "offline-contract"
 title = "Offline package persistence, ownership, lease, and media boundary"
 command = "cargo test -p plurx-core store::sqlite::offline -- --nocapture && cargo test -p plurx-core v14_offline -- --nocapture && cargo test -p plurxd offline -- --nocapture"
@@ -348,6 +367,16 @@ requires = ["cargo", "ffmpeg", "node"]
 missing = "fail"
 timeout_seconds = 7200
 
+[[checks]]
+id = "playback-auto-cliff"
+title = "Auto quality changes seamlessly through the accepted bandwidth cliff"
+command = "make playback-stall-recovery"
+profiles = ["nightly"]
+platforms = ["darwin", "linux"]
+requires = ["cargo", "ffmpeg", "node"]
+missing = "fail"
+timeout_seconds = 1800
+
 [[points]]
 id = "core.media"
 title = "Media facts, persistence, and domain rules"
@@ -412,6 +441,7 @@ paths = [
   "benchmarks/cluster-instrumentation-campaign.schema.json",
   "benchmarks/cluster-topology-campaign.schema.json",
   "benchmarks/cluster-topology.schema.json",
+  "benchmarks/cluster-transport-recovery.schema.json",
   "crates/plurx-cluster-check/**",
   "crates/plurx-core/src/cluster/coordination.rs",
   "crates/plurx-core/src/metadata/**",
@@ -442,13 +472,14 @@ paths = [
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
   "scripts/cluster-named-runner",
+  "scripts/require-test-count",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "vendor/hiqlite/**",
   "vendor/hiqlite-wal/**",
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+checks = ["rust-gate", "rust-gate-ci", "hiqlite-vendor-clippy", "cluster-auth", "cluster-transport-recovery"]
 depends_on = ["core.media", "identity.access"]
 
 [[points]]
@@ -466,7 +497,7 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/transcode.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
 
 [[points]]
@@ -477,7 +508,7 @@ paths = [
   "crates/plurxd/src/http/cluster_operations.rs",
   "crates/plurxd/src/wal_cli.rs",
 ]
-checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "web-membership", "operations-contract"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries", "web-membership", "operations-contract"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 
 [[points]]
@@ -581,7 +612,7 @@ paths = [
   "crates/plurx-core/src/metadata/**",
   "crates/plurx-core/tests/audiobook_artwork.rs",
   "crates/plurxd/src/http/items.rs",
-  "docs/METADATA*.md",
+  "docs/features/METADATA*.md",
 ]
 checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["core.media", "server.api", "library.catalog"]
@@ -589,13 +620,14 @@ depends_on = ["core.media", "server.api", "library.catalog"]
 [[points]]
 id = "identity.access"
 title = "Accounts, tokens, and authorization boundaries"
-contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate."
+contract = "Only authenticated users can cross protected API and media boundaries, with admin operations kept separate; cache-only recovery authorization is published only from a current Store-backed admin read, is invalidated around credential mutations, and fails closed on every committed peer until its signed begin/end revocation fence is acknowledged or expires at the proof TTL. A closed or empty proof cache is that node's condition and never a verdict on the caller: the recovery guard answers its cached proof first and without touching the Store, and on a miss falls back to one bounded Store read, so a Store-known administrator is admitted, a Store-known non-admin is refused as forbidden, only a credential the Store has no row for is unauthorized, and a node that cannot find out answers a named service-unavailable refusal rather than a 401 that ends a working session. The one-time revocation-protocol activation names the precondition blocking it and retries on a bounded backoff."
 paths = [
   "crates/plurx-core/src/auth.rs",
   "crates/plurx-core/src/secrets.rs",
   "crates/plurx-core/src/store/sqlite/{apikeys,users}.rs",
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurxd/src/http/{auth,keys,users}.rs",
+  "crates/plurxd/src/http/internal_auth_revocation.rs",
   "docs/SECURITY.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "credential-encryption"]
@@ -622,8 +654,11 @@ paths = [
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
   "crates/plurxd/src/web/playback-policy.js",
   "crates/plurxd/src/web/playback-control.js",
-  "docs/PLAYBACK*.md",
-  "docs/STUTTER-4K.md",
+  "docs/PLAYBACK.md",
+  "docs/PLAYBACK-TESTING.md",
+  "docs/playback-control/**",
+  "docs/streaming/PLAYBACK-CAPS-V2-*.md",
+  "docs/streaming/STUTTER-4K.md",
   "scripts/dv-evidence",
   "scripts/decoder-media-baseline",
   "scripts/verify-dv-timeline",
@@ -636,7 +671,7 @@ paths = [
   "scripts/vod-probe-stub",
   "tests/playback/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive", "playback-auto-cliff"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -667,7 +702,7 @@ paths = [
   "scripts/live-tv-endless",
   "crates/plurxd/tests/live_tv_two_node.rs",
   "scripts/live-tv-hardware",
-  "docs/HDHOMERUN-LIVE-TV-*.md",
+  "docs/features/HDHOMERUN-LIVE-TV-*.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "resource-bounds", "operations-contract", "web-static", "web-layout", "live-tv-two-node", "live-tv-hardware"]
 depends_on = ["server.api", "identity.access", "playback.pipeline"]
@@ -694,7 +729,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/offline.rs",
   "crates/plurxd/src/offline.rs",
   "crates/plurxd/src/http/offline.rs",
-  "docs/OFFLINE-VIEWING-PLAN.md",
+  "docs/clients/OFFLINE-VIEWING-PLAN.md",
 ]
 checks = [
   "offline-contract",
@@ -733,13 +768,13 @@ depends_on = ["server.api", "api.contract", "playback.pipeline"]
 [[points]]
 id = "web.experience"
 title = "Embedded web player and administration UI"
-contract = "The shipped one-file web app remains syntactically valid, readable in every theme, and structurally stable across layouts. Its Activity warning names incomplete nodes and renders a missing Activity origin, authentication refusal, HTTP failure, transport unreachability, timeout, and invalid response as distinct plain-language outcomes. Its admin cluster panel separates health, node cards, direct all-voter evidence, an operations rail whose membership controls are expansions of the rows that state their preconditions, and diagnostics; keeps the direct all-voter status current on a gate of its own while the tab is open, repainting only on a change it renders and never under an open modal; presents two voters as a reconfiguration waypoint rather than redundancy; renders the server's conservative restart verdict plus process, serving, Raft, WAL, snapshot, media, build, and protocol evidence; keeps unreachable voters explicit blockers; binds restart prepare/cancel controls to the current backend; renders maintenance acknowledgement, handoff, catch-up, and session drain as explicit preflights; permits a bounded election only with quorum; turns lost quorum into an original-voter restoration and preservation workspace without unsafe force reconfiguration; renders every typed refusal as an actionable sentence; uses the authenticated redacted support-bundle route; stays absent for a non-admin; holds a minted join token in memory only — never in browser storage, a URL, or a log; and its playback-control reporter completes real exchanges in a real browser rather than only satisfying source-level assertions in Node."
+contract = "The shipped one-file web app remains syntactically valid, readable in every theme, and structurally stable across layouts. Its Activity warning names incomplete nodes and renders a missing Activity origin, authentication refusal, HTTP failure, transport unreachability, timeout, and invalid response as distinct plain-language outcomes. Its admin cluster panel separates health, node cards, direct all-voter evidence, an operations rail whose membership controls are expansions of the rows that state their preconditions, and diagnostics; keeps the direct all-voter status current on a gate of its own while the tab is open, repainting only on a change it renders and never under an open modal; presents two voters as a reconfiguration waypoint rather than redundancy; renders the server's conservative restart verdict plus process, serving, Raft, WAL, snapshot, media, build, and protocol evidence; keeps unreachable voters explicit blockers; binds restart prepare/cancel controls to the current backend; renders maintenance acknowledgement, handoff, catch-up, and session drain as explicit preflights; permits a bounded election only with quorum; turns lost quorum into an original-voter restoration and preservation workspace without unsafe force reconfiguration; renders every typed refusal as an actionable sentence; uses the authenticated redacted support-bundle route; stays absent for a non-admin; holds a minted join token in memory only — never in browser storage, a URL, or a log; and its playback-control reporter completes real exchanges in a real browser rather than only satisfying source-level assertions in Node. A refusal of either Store-free cluster recovery read — the direct all-voter status and the support bundle — is reported in the panel that reports the cluster and never ends the operator's session, including a 401, because that guard answers from a process-local proof cache whose closure describes the cluster; every other route's 401 still ends it."
 paths = [
   "brand/tokens.css",
   "crates/plurxd/src/http/web.rs",
   "crates/plurxd/src/web/**",
-  "docs/UI-*.md",
-  "docs/PLAYER-INPUT-CONTRACT*.md",
+  "docs/clients/UI-*.md",
+  "docs/clients/PLAYER-INPUT-CONTRACT*.md",
   "scripts/contrast-*",
   "scripts/player-contract-table",
   "scripts/player-input-fence",
@@ -764,7 +799,7 @@ paths = [
   "clients/apple/Sources/**",
   "clients/apple/Resources/**",
   "clients/apple/project.yml",
-  "docs/APPLE-CLIENT-PARITY.md",
+  "docs/clients/APPLE-CLIENT-PARITY.md",
   "docs/STATUS.html",
   "docs/apple-builds/**",
   "clients/android/app/src/main/**",
@@ -811,6 +846,8 @@ paths = [
   "scripts/ci-cargo-cache-refresh",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
+  "scripts/ci-require-disk",
+  "scripts/ci-runner-cache-audit",
   "scripts/release-package-candidate",
   "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/container-smoke",
@@ -832,13 +869,14 @@ paths = [
   ".gitignore",
   "Makefile",
   "docs/VALIDATION.md",
-  "docs/CI_EXECUTION_ACCELERATION_PLAN.md",
+  "docs/ci/CI_EXECUTION_ACCELERATION_PLAN.md",
   "docs/DECODER_SELECTION_RECOVERY_STATUS.md",
   "scripts/pre-commit",
   "scripts/ci-flake-report",
   "scripts/history-audit",
   "scripts/prove-fix",
   "scripts/prove-tombstone-offline-fence",
+  "scripts/require-test-count",
   "scripts/validate",
   "tests/client-fixes.toml",
   "tests/validation/**",

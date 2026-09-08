@@ -71,6 +71,24 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("cargo-mutants", mutation)
         self.assertNotIn("needs:", mutation)
 
+    def test_nightly_runs_and_retains_the_auto_cliff_acceptance(self) -> None:
+        makefile = self.read("Makefile")
+        points = self.read("validation/points.toml")
+        workflow = self.read(".github/workflows/validation-nightly.yml")
+        action = self.read(".github/actions/playwright/action.yml")
+
+        self.assertIn("playback-stall-recovery:", makefile)
+        self.assertIn("--suite stall-recovery", makefile)
+        self.assertIn("--network-profile 8mbps-to-1.5mbps", makefile)
+        self.assertIn("target/playback-lab/acceptance/auto-cliff.json", makefile)
+        self.assertIn('id = "playback-auto-cliff"', points)
+        auto = points.split('id = "playback-auto-cliff"', 1)[1].split("[[checks]]", 1)[0]
+        self.assertIn('profiles = ["nightly"]', auto)
+        self.assertIn('missing = "fail"', auto)
+        self.assertIn("make playback-stall-recovery", auto)
+        self.assertIn("target/playback-lab", workflow)
+        self.assertIn("PLURX_PLAYBACK_CHROME=$chromium", action)
+
     def test_pgs_periodic_refresh_and_completion_prune_remain_wired(self) -> None:
         apple = self.read("clients/apple/Sources/PlayerController.swift")
         server = self.read("crates/plurxd/src/pgs_overlay.rs")

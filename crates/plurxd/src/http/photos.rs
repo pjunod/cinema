@@ -1,7 +1,7 @@
 //! Serving stills from `home` libraries.
 //!
 //! Photos are static bytes: no decision engine, no transcode, no session.
-//! They must never touch the playback pipeline (docs/HOMEVIDEO-PLAN.md §8.3).
+//! They must never touch the playback pipeline (docs/features/HOMEVIDEO-PLAN.md §8.3).
 //!
 //! Browsers honor EXIF orientation on `<img>` natively
 //! (`image-orientation: from-image` is the default), so the original is served
@@ -30,6 +30,7 @@ pub async fn serve(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Query(q): Query<PhotoQuery>,
+    method: axum::http::Method,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     let item = state
@@ -56,5 +57,5 @@ pub async fn serve(
         .into_iter()
         .next()
         .ok_or(ApiError::NotFound("photo file"))?;
-    super::stream::serve_file_range(&file.path, &headers).await
+    super::stream::serve_file_range(&file.path, &headers, &method).await
 }

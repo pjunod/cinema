@@ -296,6 +296,51 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("page.add_init_script(ACTIVITY_CAPTURE_JS)", script)
         self.assertIn("ACTIVITY_DETAIL_BUSY === 0", script)
 
+    def test_global_activity_capture_stops_before_runner_delay_adds_a_second_tick(self):
+        script = read("scripts/ui-baseline")
+        capture = runpy.run_path(str(ROOT / "scripts/ui-baseline"))["ACTIVITY_CAPTURE_JS"]
+        contract = r"""
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const capture = process.argv[1];
+let now = 0, next = 0;
+const timers = new Map(), calls = [];
+const context = vm.createContext({
+  location: {hash: '#/item/7'}, ACT_TIMER: null,
+  setInterval(callback, delay, ...args) {
+    const id = ++next;
+    timers.set(id, {callback, delay, args, due: now + delay});
+    return id;
+  },
+  clearInterval(id) { timers.delete(id); },
+  record: value => calls.push(value),
+});
+context.window = context;
+vm.runInContext(capture, context);
+vm.runInContext(`
+  ACT_TIMER = setInterval(() => record('activity'), 4000);
+  setInterval(() => record('unrelated'), 4000);
+`, context);
+const target = 8500; // Model a badly delayed 4.5s Playwright sleep callback.
+while (true) {
+  const ready = [...timers].filter(([, timer]) => timer.due <= target)
+    .sort((a, b) => a[1].due - b[1].due)[0];
+  if (!ready) break;
+  const [id, timer] = ready;
+  now = timer.due;
+  timer.due += timer.delay;
+  timer.callback(...timer.args);
+  if (timers.has(id)) timers.set(id, timer);
+}
+assert.deepEqual(calls.filter(call => call === 'activity'), ['activity']);
+assert.deepEqual(calls.filter(call => call === 'unrelated'), ['unrelated', 'unrelated']);
+assert.equal(context.__plurxGlobalActivityCaptureTick, true);
+assert.equal(context.ACT_TIMER, null);
+"""
+        subprocess.run(["node", "-e", contract, capture], check=True)
+        self.assertIn("window.__plurxGlobalActivityCaptureTick = false;", script)
+        self.assertIn("window.__plurxGlobalActivityCaptureTick === true && !ACT_POLLING", script)
+
     def test_store_verdict_handles_unused_forgejo_workflow_without_weakening_required_lane(self):
         verdict = workflow_job_blocks(".github/workflows/ci.yml")["cluster_store"]
         step = workflow_step_blocks(verdict)["Select the required Store graph"]
@@ -422,7 +467,17 @@ for (const startupDelay of [0, 1600, 7000]) {
             "stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}", compose
         )
         self.assertIn(
-            'start_period: "${PLURX_HEALTH_START_PERIOD:-5m}"', compose
+            'start_period: "${PLURX_HEALTH_START_PERIOD:-25m}"', compose
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS:-}"',
+            compose,
+        )
+        self.assertIn(
+            'PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS: '
+            '"${PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS:-}"',
+            compose,
         )
         self.assertIn(
             'PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS: '
@@ -437,6 +492,10 @@ for (const startupDelay of [0, 1600, 7000]) {
     def test_discovery_uses_host_network_without_stealing_it_from_the_server(self):
         compose = read("deploy/docker-compose.yml")
         server, discovery = compose.split("  plurx-discovery:", 1)
+        self.assertEqual(
+            compose.count("image: ${PLURX_IMAGE:-plurx/plurxd:latest}"),
+            2,
+        )
         self.assertNotRegex(server, r"(?m)^    network_mode: host$")
         self.assertIn("network_mode: host", discovery)
         configured_origin = '"http://127.0.0.1:${PLURX_HTTP_PORT:-32400}"'
@@ -444,34 +503,78 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn(f"PLURX_DISCOVERY_SERVER_URL: {configured_origin}", discovery)
         self.assertIn(f"PLURX_BIND: {configured_bind}", discovery)
 
-    def _run_rollout_recipe(self, proof_exit: int) -> tuple[int, Path]:
-        """Run the real `docker-up` recipe with the checker and Docker stubbed."""
+    def _run_rollout_recipe(
+        self,
+        target: str,
+        up_command: str,
+        proof_exit: int,
+        *,
+        image_revision: str = "a" * 40,
+        checkout_revision: str = "a" * 40,
+        tracked_dirty: bool = False,
+        discovery_image: str | None = None,
+    ) -> tuple[int, Path, Path, Path, Path, Path]:
+        """Run a real rollout recipe with the checker and Docker stubbed."""
 
         rollout = [
             line
-            for line in make_dry_run_commands("docker-up")
-            if "docker compose up -d --build" in line
+            for line in make_dry_run_commands(target)
+            if up_command in line
         ][0]
         directory = Path(tempfile.mkdtemp())
-        marker = directory / "compose-up-ran"
+        pull_marker = directory / "compose-pull-ran"
+        derive_marker = directory / "budget-derive-ran"
+        proof_marker = directory / "budget-proof-ran"
+        up_marker = directory / "compose-up-ran"
+        image_marker = directory / "compose-up-image"
         stubs = directory / "bin"
         stubs.mkdir()
         (stubs / "python3").write_text(
             "#!/bin/sh\n"
             'case "$*" in\n'
-            "  *--emit-start-period*) echo 1335s ;;\n"
-            f"  *) exit {proof_exit} ;;\n"
+            f'  *--emit-start-period*) printf derived > "{derive_marker}"; echo 2535s ;;\n'
+            f'  *) printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{proof_marker}"; exit {proof_exit} ;;\n'
             "esac\n",
             encoding="utf-8",
         )
         (stubs / "docker").write_text(
             "#!/bin/sh\n"
-            f'printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{marker}"\n',
+            'case "$*" in\n'
+            '  *"compose config --images plurxd plurx-discovery"*) '
+            'printf "%s\\n%s\\n" "$PLURX_IMAGE" '
+            '"${STUB_DISCOVERY_IMAGE:-$PLURX_IMAGE}" ;;\n'
+            '  *"compose config --images plurxd"*) echo registry.example/plurxd:test ;;\n'
+            f'  *"compose pull plurxd"*) printf pulled > "{pull_marker}" ;;\n'
+            '  *"org.opencontainers.image.revision"*) '
+            'last=; for argument do last="$argument"; done; '
+            'test "$last" = sha256:1111111111111111111111111111111111111111111111111111111111111111 '
+            '|| exit 86; '
+            'printf "%s\\n" "$STUB_IMAGE_REVISION" ;;\n'
+            '  *"image inspect"*) '
+            'echo sha256:1111111111111111111111111111111111111111111111111111111111111111 ;;\n'
+            f'  *"compose up"*) printf "%s" "$PLURX_HEALTH_START_PERIOD" > "{up_marker}"; '
+            f'printf "%s" "$PLURX_IMAGE" > "{image_marker}" ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        (stubs / "git").write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  "status --porcelain --untracked-files=no") '
+            '[ "$STUB_TRACKED_DIRTY" = 1 ] && echo " M Makefile"; exit 0 ;;\n'
+            '  "rev-parse HEAD") printf "%s\\n" "$STUB_CHECKOUT_REVISION" ;;\n'
+            "  *) exit 99 ;;\n"
+            "esac\n",
             encoding="utf-8",
         )
         for stub in stubs.iterdir():
             stub.chmod(0o755)
         environment = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}")
+        environment["STUB_IMAGE_REVISION"] = image_revision
+        environment["STUB_CHECKOUT_REVISION"] = checkout_revision
+        environment["STUB_TRACKED_DIRTY"] = "1" if tracked_dirty else "0"
+        if discovery_image is not None:
+            environment["STUB_DISCOVERY_IMAGE"] = discovery_image
         result = subprocess.run(
             ["sh", "-c", rollout],
             cwd=ROOT,
@@ -481,7 +584,14 @@ for (const startupDelay of [0, 1600, 7000]) {
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        return result.returncode, marker
+        return (
+            result.returncode,
+            pull_marker,
+            derive_marker,
+            proof_marker,
+            up_marker,
+            image_marker,
+        )
 
     def test_a_failed_budget_proof_stops_the_rollout_before_it_touches_a_container(
         self,
@@ -491,17 +601,180 @@ for (const startupDelay of [0, 1600, 7000]) {
         # the guarantee is shell-level and has to be exercised: a `;` here
         # would let a refused budget deploy anyway, and no assertion about the
         # recipe's text catches that.
-        code, marker = self._run_rollout_recipe(proof_exit=2)
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-up", "docker compose up -d --build", proof_exit=2
+            )
+        )
         self.assertNotEqual(code, 0)
+        self.assertFalse(pull_marker.exists())
+        self.assertTrue(derive_marker.exists())
+        self.assertTrue(proof_marker.exists())
         self.assertFalse(
-            marker.exists(), "compose up ran after the budget proof failed"
+            up_marker.exists(), "compose up ran after the budget proof failed"
         )
 
-        code, marker = self._run_rollout_recipe(proof_exit=0)
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-up", "docker compose up -d --build", proof_exit=0
+            )
+        )
         self.assertEqual(code, 0)
-        self.assertTrue(marker.exists())
+        self.assertFalse(pull_marker.exists())
+        self.assertTrue(derive_marker.exists())
+        self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertTrue(up_marker.exists())
         # The period that was proved is the period that gets applied.
-        self.assertEqual(marker.read_text(encoding="utf-8"), "1335s")
+        self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+
+    def test_prebuilt_image_rollout_matching_revision_proves_then_replaces(self):
+        commands = make_dry_run_commands("docker-image-up")
+        rollouts = [
+            line
+            for line in commands
+            if "docker compose up -d --no-build --pull never" in line
+        ]
+        self.assertEqual(len(rollouts), 1)
+        rollout = rollouts[0]
+        self.assertTrue(rollout.startswith("cd deploy && "))
+        self.assertEqual(rollout.count("docker compose pull plurxd"), 1)
+        self.assertEqual(rollout.count("--emit-start-period"), 1)
+        proof = (
+            'PLURX_IMAGE="$image_id" PLURX_HEALTH_START_PERIOD="$period" python3 '
+            "../scripts/validate-docker-startup-budget"
+        )
+        up = "docker compose up -d --no-build --pull never"
+        self.assertIn(proof, rollout)
+        self.assertLess(
+            rollout.index("docker compose pull plurxd"),
+            rollout.index("--emit-start-period"),
+        )
+        self.assertLess(rollout.index("--emit-start-period"), rollout.index(proof))
+        self.assertLess(rollout.index(proof), rollout.index(up))
+        self.assertIn(
+            'PLURX_IMAGE="$image_id" PLURX_HEALTH_START_PERIOD="$period" PLURX_NODE_HOSTNAME=',
+            rollout,
+        )
+        self.assertIn("docker image inspect --format '{{.Id}}'", rollout)
+        self.assertIn('org.opencontainers.image.revision', rollout)
+        self.assertIn('git status --porcelain --untracked-files=no', rollout)
+        self.assertIn('git rev-parse HEAD', rollout)
+        self.assertIn(
+            'PLURX_IMAGE="$image_id" docker compose config --images plurxd plurx-discovery',
+            rollout,
+        )
+        frozen_images = (
+            'PLURX_IMAGE="$image_id" docker compose config --images '
+            "plurxd plurx-discovery"
+        )
+        self.assertLess(
+            rollout.index("org.opencontainers.image.revision"),
+            rollout.index(frozen_images),
+        )
+        self.assertLess(
+            rollout.index(frozen_images), rollout.index("--emit-start-period")
+        )
+        self.assertNotIn("PLURX_BUILD_REF", rollout)
+
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up", up, proof_exit=2
+            )
+        )
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists(), "image was not pulled before the proof")
+        self.assertTrue(derive_marker.exists())
+        self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertFalse(
+            up_marker.exists(), "compose up ran after the budget proof failed"
+        )
+
+        code, pull_marker, derive_marker, proof_marker, up_marker, image_marker = (
+            self._run_rollout_recipe(
+                "docker-image-up", up, proof_exit=0
+            )
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertTrue(derive_marker.exists())
+        self.assertEqual(proof_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertTrue(up_marker.exists())
+        self.assertEqual(up_marker.read_text(encoding="utf-8"), "2535s")
+        self.assertEqual(
+            image_marker.read_text(encoding="utf-8"),
+            "sha256:" + "1" * 64,
+        )
+
+        operations = read("docs/OPERATIONS.md")
+        deploy_readme = read("deploy/README.md")
+        for document in (operations, deploy_readme):
+            self.assertIn("org.opencontainers.image.revision", document)
+            self.assertIn("--no-build --pull never", document)
+        self.assertNotIn("Restore `deploy/.env` to `latest`", operations)
+        self.assertIn("restore\n`deploy/.env` to `main`", operations)
+
+    def test_prebuilt_image_rollout_refuses_a_missing_revision_before_proof(self):
+        up = "docker compose up -d --no-build --pull never"
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up", up, proof_exit=0, image_revision=""
+            )
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertFalse(derive_marker.exists())
+        self.assertFalse(proof_marker.exists())
+        self.assertFalse(up_marker.exists())
+
+    def test_prebuilt_image_rollout_refuses_revision_mismatch_before_proof(self):
+        up = "docker compose up -d --no-build --pull never"
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up",
+                up,
+                proof_exit=0,
+                image_revision="a" * 40,
+                checkout_revision="b" * 40,
+            )
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertFalse(derive_marker.exists())
+        self.assertFalse(proof_marker.exists())
+        self.assertFalse(up_marker.exists())
+
+    def test_prebuilt_image_rollout_refuses_dirty_source_before_proof(self):
+        up = "docker compose up -d --no-build --pull never"
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up", up, proof_exit=0, tracked_dirty=True
+            )
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertFalse(derive_marker.exists())
+        self.assertFalse(proof_marker.exists())
+        self.assertFalse(up_marker.exists())
+
+    def test_prebuilt_image_rollout_refuses_divergent_discovery_image(self):
+        up = "docker compose up -d --no-build --pull never"
+        code, pull_marker, derive_marker, proof_marker, up_marker, _ = (
+            self._run_rollout_recipe(
+                "docker-image-up",
+                up,
+                proof_exit=0,
+                discovery_image="registry.example/plurxd:other",
+            )
+        )
+
+        self.assertNotEqual(code, 0)
+        self.assertTrue(pull_marker.exists())
+        self.assertFalse(derive_marker.exists())
+        self.assertFalse(proof_marker.exists())
+        self.assertFalse(up_marker.exists())
 
     def test_docker_up_preserves_override_discovery_and_stamps_the_build(self):
         commands = make_dry_run_commands("docker-up")
@@ -551,6 +824,10 @@ for (const startupDelay of [0, 1600, 7000]) {
         assert runtime_stage is not None
         self.assertEqual(runtime_stage.start(), stages[-1].start())
         runtime = dockerfile[runtime_stage.end() :]
+        self.assertIn('ARG PLURX_BUILD_SHA=""', runtime)
+        self.assertIn(
+            'LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"', runtime
+        )
         healthcheck_instructions = list(
             re.finditer(r"(?im)^[ \t]*healthcheck\b", dockerfile)
         )
@@ -585,12 +862,22 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertEqual(compose_start_seconds, start_period_seconds)
 
         config_source = read("crates/plurx-core/src/config.rs")
-        default_snapshot = re.search(
+        default_transfer = re.search(
+            r"(?m)^pub const DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = "
+            r"([\d_]+);$",
+            config_source,
+        )
+        default_install = re.search(
             r"(?m)^pub const DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = "
             r"([\d_]+);$",
             config_source,
         )
-        source_max_snapshot = re.search(
+        source_max_transfer = re.search(
+            r"(?m)^pub const MAX_SNAPSHOT_TRANSFER_TIMEOUT_SECS: u64 = "
+            r"([\d_]+);$",
+            config_source,
+        )
+        source_max_install = re.search(
             r"(?m)^pub const MAX_INSTALL_SNAPSHOT_TIMEOUT_SECS: u64 = ([\d_]+);$",
             config_source,
         )
@@ -607,42 +894,66 @@ for (const startupDelay of [0, 1600, 7000]) {
             )
             for name in phase_names
         }
-        self.assertIsNotNone(default_snapshot)
-        self.assertIsNotNone(source_max_snapshot)
+        self.assertIsNotNone(default_transfer)
+        self.assertIsNotNone(default_install)
+        self.assertIsNotNone(source_max_transfer)
+        self.assertIsNotNone(source_max_install)
         self.assertTrue(all(value is not None for value in phases.values()))
-        assert default_snapshot is not None and source_max_snapshot is not None
+        assert default_transfer is not None and default_install is not None
+        assert source_max_transfer is not None and source_max_install is not None
 
-        # Dockerfile owns the image default. Compose exposes a paired override
-        # for operators who deliberately extend the snapshot deadline.
+        # Dockerfile owns the image default. Compose exposes independent
+        # transfer/install overrides while the startup grace covers both.
         supported_default_startup_seconds = int(
-            default_snapshot.group(1).replace("_", "")
+            default_transfer.group(1).replace("_", "")
+        ) + int(
+            default_install.group(1).replace("_", "")
         ) + sum(int(value.group(1)) for value in phases.values() if value)
         self.assertGreaterEqual(
             start_period_seconds, supported_default_startup_seconds
         )
 
         env_example = read("deploy/.env.example")
-        max_snapshot = re.search(
+        rollout_transfer = re.search(
+            r"# PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS=(\d+)", env_example
+        )
+        rollout_install = re.search(
             r"# PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS=(\d+)", env_example
         )
-        max_health = re.search(
+        rollout_health = re.search(
             r"# PLURX_HEALTH_START_PERIOD=(\d+)([smh])", env_example
         )
-        self.assertIsNotNone(max_snapshot)
-        self.assertIsNotNone(max_health)
-        assert max_snapshot is not None and max_health is not None
-        env_max_snapshot_seconds = int(max_snapshot.group(1))
-        source_max_snapshot_seconds = int(
-            source_max_snapshot.group(1).replace("_", "")
+        self.assertIsNotNone(rollout_transfer)
+        self.assertIsNotNone(rollout_install)
+        self.assertIsNotNone(rollout_health)
+        assert rollout_transfer is not None and rollout_install is not None
+        assert rollout_health is not None
+        rollout_transfer_seconds = int(rollout_transfer.group(1))
+        rollout_install_seconds = int(rollout_install.group(1))
+        self.assertEqual(
+            rollout_transfer_seconds,
+            int(default_transfer.group(1).replace("_", "")),
         )
-        self.assertEqual(env_max_snapshot_seconds, source_max_snapshot_seconds)
-        max_health_seconds = parse_duration(
-            "".join(max_health.groups()), ".env.example maximum health period"
+        self.assertEqual(rollout_install_seconds, 1200)
+        rollout_health_seconds = parse_duration(
+            "".join(rollout_health.groups()), ".env.example rollout health period"
         )
-        supported_max_startup_seconds = source_max_snapshot_seconds + sum(
+        supported_rollout_startup_seconds = (
+            rollout_transfer_seconds
+            + rollout_install_seconds
+            + sum(int(value.group(1)) for value in phases.values() if value)
+        )
+        self.assertGreaterEqual(
+            rollout_health_seconds, supported_rollout_startup_seconds
+        )
+
+        supported_max_startup_seconds = int(
+            source_max_transfer.group(1).replace("_", "")
+        ) + int(source_max_install.group(1).replace("_", "")) + sum(
             int(value.group(1)) for value in phases.values() if value
         )
-        self.assertGreaterEqual(max_health_seconds, supported_max_startup_seconds)
+        self.assertEqual(supported_max_startup_seconds, 18135)
+        self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
@@ -937,6 +1248,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn("name: Main promotion gate", workflow)
         self.assertIn("branches: [main]", workflow)
+        self.assertIn("effort/*|integration/*-into-main)", workflow)
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  check:", 1)[1].split(
@@ -967,8 +1279,11 @@ for (const startupDelay of [0, 1600, 7000]) {
         vod_web = workflow.split("\n  vod_web:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
+        self.assertIn("needs: [scope, preflight, web_layout]", vod_web)
+        self.assertNotIn("group: plurx-browser-heavy", web_layout)
+        self.assertNotIn("group: plurx-browser-heavy", vod_web)
         self.assertIn("--case suspend-resume", vod_web)
-        self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
+        self.assertIn("docs/streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
         self.assertIn(
             "if: needs.scope.outputs.release_build == 'true' || "
             "needs.scope.outputs.container == 'true'",
@@ -1140,9 +1455,13 @@ for (const startupDelay of [0, 1600, 7000]) {
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
         effort = read(".github/workflows/effort-ci.yml")
+        effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
+        effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
         precommit = read("scripts/pre-commit")
+        catalog = tomllib.loads(read("validation/points.toml"))
+        membership_web_tests = read("tests/web/cluster-membership.test.js")
 
         # Forgejo has no GitHub merge-queue event. The single required
         # aggregate workflow fires on main-bound pull requests, while the
@@ -1165,10 +1484,82 @@ for (const startupDelay of [0, 1600, 7000]) {
         # release suites; an effort/** -> main PR is expanded above instead.
         self.assertIn('      - "effort/**"', effort)
         self.assertIn("name: Effort development gate", effort)
-        self.assertIn("run: make effort-rust-check", effort)
+        self.assertEqual(
+            list(effort_rust_steps),
+            [
+                "Check out the candidate",
+                "Install the pinned Rust toolchain",
+                "Restore the effort Rust cache",
+                "Compile every Rust target without executing tests",
+                "Enforce persistent Cargo bounds",
+            ],
+        )
+        rust_toolchain = effort_rust_steps["Install the pinned Rust toolchain"]
+        self.assertEqual(
+            workflow_step_scalar(rust_toolchain, "uses"),
+            "https://github.com/dtolnay/rust-toolchain@1.97.1",
+        )
+        self.assertIn("          components: rustfmt, clippy", rust_toolchain)
+        self.assertEqual(
+            workflow_step_literal(
+                effort_rust_steps["Compile every Rust target without executing tests"],
+                "run",
+            ),
+            ["make effort-rust-check", "make hiqlite-vendor-clippy"],
+        )
+        self.assertEqual(
+            make_dry_run_commands("hiqlite-vendor-clippy"),
+            [
+                "cargo clippy --locked --manifest-path vendor/hiqlite/Cargo.toml "
+                "--lib --no-default-features "
+                "--features auto-heal,cache,macros,sqlite -- -D warnings"
+            ],
+        )
+        vendor_clippy = next(
+            check
+            for check in catalog["checks"]
+            if check["id"] == "hiqlite-vendor-clippy"
+        )
+        self.assertEqual(
+            vendor_clippy,
+            {
+                "id": "hiqlite-vendor-clippy",
+                "title": (
+                    "Vendored Hiqlite production snapshot transport "
+                    "denied-warning Clippy"
+                ),
+                "command": "make hiqlite-vendor-clippy",
+                "profiles": ["commit", "ci", "full", "nightly"],
+                "requires": ["cargo", "make"],
+                "missing": "fail",
+                "timeout_seconds": 1800,
+            },
+        )
+        cluster_point = next(
+            point for point in catalog["points"] if point["id"] == "cluster.auth"
+        )
+        self.assertIn("hiqlite-vendor-clippy", cluster_point["checks"])
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
         self.assertIn("run: make web-check", effort)
+        web_check = makefile.split(".PHONY: web-check", 1)[1].split(".PHONY:", 1)[0]
+        self.assertIn("node tests/web/cluster-membership.test.js", web_check)
+        self.assertIn(
+            'test("transport recovery is attributed only to the receiving node"',
+            membership_web_tests,
+        )
+        self.assertIn(
+            'test("active transport stays visible through its server-projected deadline"',
+            membership_web_tests,
+        )
+        self.assertIn(
+            'test("transport observer age advances the repaint projection"',
+            membership_web_tests,
+        )
+        self.assertIn(
+            'test("rejected public and wrong-observer transport evidence cannot reappear"',
+            membership_web_tests,
+        )
         self.assertNotIn("make ci-rust-gate", effort)
         self.assertNotIn("make cluster-", effort)
         self.assertNotIn("make apple-test", effort)
@@ -1208,16 +1599,143 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn("make cluster-harness-check", jobs["cluster_topology"])
         self.assertNotIn("make cluster-store-check", jobs["cluster_topology"])
+        harness_commands = make_dry_run_commands("cluster-harness-check")
+        snapshot_launch_tests = (
+            "a_legacy_launch_retains_the_production_snapshot_policy",
+            "a_snapshot_threshold_round_trips_and_reaches_the_launched_voter_config",
+            "an_invalid_snapshot_threshold_is_rejected_without_changing_production",
+        )
+        for test_name in snapshot_launch_tests:
+            command = next(
+                (command for command in harness_commands if test_name in command),
+                None,
+            )
+            self.assertIsNotNone(
+                command,
+                f"cluster-harness-check does not run {test_name}",
+            )
+            self.assertIn("scripts/require-test-count", command)
         self.assertIn("run: make cluster-wal-check", workflow)
         wal_commands = make_dry_run_commands("cluster-wal-check")
+        self.assertTrue(
+            all("scripts/require-test-count" in command for command in wal_commands),
+            "every cluster WAL command must retain the nonzero test-count guard",
+        )
         hiqlite_snapshot_tests = (
+            "raw_write_frame_stays_idle_after_transport_recovers_until_an_explicit_flush",
+            "deadline_less_retry_serializes_its_effective_fallback_stall_boundary",
+            "real_tls_tail_backpressure_completes_for_every_payload_direction",
+            "real_tls_no_backpressure_control_completes_without_an_extra_frame",
+            "frame_completion_flushes_the_underlying_transport",
+            "flush_failure_is_a_failed_frame_write",
+            "permanently_blocked_flush_expires_the_combined_budget",
+            "close_frame_uses_the_short_fixed_budget",
+            "production_raft_request_writer_flushes_a_snapshot_chunk_through_tls",
+            "production_raft_writer_reports_flush_failure_to_its_supervisor",
+            "production_raft_response_writer_flushes_serialized_response_through_tls",
+            "production_raft_response_writer_reports_flush_failure_and_closes",
+            "production_api_request_writer_flushes_serialized_request_through_tls",
+            "production_api_writer_reports_flush_failure_to_its_supervisor",
+            "queued_leader_change_wins_before_queued_api_request",
+            "queued_api_response_wins_before_queued_leader_change",
+            "queued_api_response_wins_before_leader_during_writer_backpressure",
+            "leader_handoff_settles_decoded_response_before_failing_unresolved_requests",
+            "dedicated_leader_control_bypasses_application_backlog_during_writer_backpressure",
+            "proxy_handoff_settles_decoded_response_before_failing_unresolved_requests",
+            "dropped_caller_still_allows_its_proxy_refusal_to_claim_handoff",
+            "concurrent_proxy_refusals_coalesce_into_one_endpoint_advance",
+            "teardown_drained_proxy_refusal_claims_the_socket_handoff",
+            "teardown_drained_non_proxy_refusal_preserves_terminal_ambiguity",
+            "production_api_response_writer_flushes_serialized_response_through_tls",
+            "production_api_response_writer_reports_flush_failure_and_closes",
+            "production_raft_reader_reports_malformed_frames",
+            "raft_transport_debug_logging_exposes_only_bounded_metadata",
+            "production_api_reader_reports_malformed_frames",
+            "silent_peer_cannot_hold_the_server_handshake_open",
+            "executor_runs_one_queues_one_and_drops_abandoned_queued_work",
+            "shutdown_reports_running_work_without_cancelling_it",
+            "cancelled_shutdown_wait_retains_the_executor_handle",
+            "shutdown_before_submission_is_latched_and_admits_no_work",
+            "admission_deadline_never_executes_the_timed_out_job",
+            "accepted_partial_write_finishes_before_same_offset_retry",
+            "production_snapshot_executor_worker_records_status_around_injected_installer",
+            "production_snapshot_executor_fifo_status_ignores_later_admission_waiter",
+            "production_snapshot_executor_ticket_order_survives_reverse_waiter_polling",
+            "production_snapshot_status_follows_worker_start_after_pre_ticket_deschedule",
+            "admission_waiter_budget_bounds_cancelled_ticket_retention_and_reports_busy",
+            "production_shared_executor_retains_abandoned_other_peer_terminal_status",
+            "inbound_result_disposition_distinguishes_mismatch_higher_vote_and_fatal",
             "handler_coordinator_consumes_retained_reset_when_request_queue_is_full",
             "replacement_socket_drops_cancelled_request_after_consuming_reset",
             "live_request_on_stale_socket_requires_reconnect",
             "reset_interrupts_write_enqueue_under_backpressure",
+            "latched_reset_prevents_write_queue_ownership_transfer",
+            "latched_reader_failure_prevents_write_queue_ownership_transfer",
+            "shutdown_interrupts_write_enqueue_under_backpressure",
+            "handler_coordinator_observes_writer_failure_while_reader_is_pending",
+            "handler_coordinator_treats_writer_panic_as_terminal",
+            "handler_coordinator_observes_reader_failure_while_writer_is_pending",
+            "handler_coordinator_treats_reader_panic_as_terminal",
             "forced_reset_cleanup_does_not_wait_for_full_writer_queue",
+            "dropping_connection_off_runtime_keeps_cleanup_owned",
+            "repeated_connection_failures_return_supervised_tasks_to_baseline",
+            "production_connection_supervisor_does_not_invent_snapshot_work",
+            "production_natural_reconnect_advances_physical_socket_epoch_without_reset",
+            "production_snapshot_catch_up_preserves_physical_socket_epoch_during_interleaving",
+            "two_client_churn_cannot_overwrite_the_snapshot_connection_owner",
             "sqlite_install_snapshot_preserves_mismatch_for_offset_reset",
             "cache_install_snapshot_preserves_mismatch_for_offset_reset",
+            "snapshot_chunk_deadlines_advance_without_renewing_the_transfer_window",
+            "non_final_snapshot_rpc_uses_hard_ttl_when_it_is_shorter_than_chunk_budget",
+            "final_install_deadline_latches_once_and_mismatch_restores_transfer_deadline",
+            "final_install_respects_the_first_rpc_hard_cap_and_transfer_expiry",
+            "mismatch_cannot_reenter_final_install_after_transfer_expiry",
+            "watchable_snapshot_deadline_switches_to_the_active_phase",
+            "simultaneous_final_phase_update_wins_over_stale_transfer_timer",
+            "production_final_mismatch_restores_transfer_deadline_before_reread",
+            "production_final_transport_error_retains_final_install_deadline_in_status",
+            "production_higher_vote_response_never_advances_snapshot_acknowledgement",
+            "sqlite_full_snapshot_enters_bounded_wrapper",
+            "cache_full_snapshot_enters_bounded_wrapper",
+            "advancing_transfer_may_exceed_one_chunk_window_and_finish_before_transfer_expiry",
+            "unanswered_non_final_rpc_expires_at_chunk_budget_and_resets_socket",
+            "repeated_mismatch_style_resets_expire_at_the_original_transfer_deadline",
+            "final_install_may_exceed_chunk_window_but_cannot_renew_install_window",
+            "stale_snapshot_guard_cannot_clear_a_newer_attempt",
+            "caller_cancellation_drops_the_active_snapshot_rpc_guard_immediately",
+            "aborting_snapshot_owner_publishes_attempt_guarded_terminal_status",
+            "outbound_snapshot_attempt_bounds_identity_before_supervisor_logging",
+            "snapshot_deadline_durations_are_bounded_before_instant_arithmetic",
+            "outbound_snapshot_identity_is_bounded_before_retention",
+            "inbound_snapshot_identity_is_bounded_before_retention",
+            "outbound_attempted_offset_never_rolls_back_within_one_snapshot_attempt",
+            "bounded_inbound_display_id_cannot_alias_semantic_snapshot_identity",
+            "snapshot_fingerprint_correlates_raw_identity_across_directions_without_display_aliasing",
+            "snapshot_fingerprint_is_optional_for_rolling_status_deserialization",
+            "local_status_distinguishes_receive_ack_install_retry_and_completion",
+            "receiver_bytes_are_not_reported_as_sender_acknowledgements",
+            "inbound_progress_is_monotonic_and_new_identity_clears_attempt_state",
+            "same_peer_inbound_install_and_outbound_transfer_do_not_collide",
+            "terminal_wrapper_preserves_the_actionable_failure_category",
+            "specific_terminal_failure_replaces_prior_transient_category",
+            "outbound_live_socket_counts_the_first_reconnect",
+            "production_supervisor_start_before_snapshot_attempt_counts_first_reconnect",
+            "stale_inbound_completion_cannot_mutate_newer_snapshot_identity",
+            "abandoned_inbound_admission_does_not_displace_worker_result",
+            "inbound_socket_epoch_and_reconnect_count_are_attempt_local",
+            "configured_inbound_inter_chunk_deadline_uses_minimum_and_maximum",
+            "configured_peer_capacity_covers_both_groups_and_directions",
+            "live_membership_add_remove_churn_rekeys_capacity_and_retired_allowance",
+            "active_observation_remains_visible_through_deadline_then_expires",
+            "live_install_longer_than_five_minutes_remains_visible_through_its_deadline",
+            "configured_chunk_deadline_controls_awaiting_ack_stall_projection",
+            "completed_observation_never_projects_as_stalled_and_eventually_expires",
+            "valid_install_does_not_stall_at_the_chunk_window",
+            "retired_peers_are_bounded",
+            "production_transport_route_enforces_auth_and_returns_memory_only_json",
+            "production_transport_client_uses_exact_authenticated_route_and_accepts_404",
+            "snapshot_transport_peer_tracks_current_raft_membership_for_new_learner",
+            "production_transport_client_rejects_oversized_unframed_response_body",
         )
         for test_name in hiqlite_snapshot_tests:
             matching = [command for command in wal_commands if test_name in command]
@@ -1232,6 +1750,137 @@ for (const startupDelay of [0, 1600, 7000]) {
                 command,
             )
             self.assertIn("--lib -- --exact", command)
+
+        daemon_transport_tests = (
+            "peer_fanout_applies_the_one_second_per_peer_deadline",
+            "peer_fanout_never_exceeds_the_eight_peer_bound",
+            "production_collector_labels_directory_overflow_without_probing_it",
+            "peer_status_cache_is_fresh_for_five_seconds_then_expires",
+            "full_refresh_cycle_keeps_cache_fresh_and_ages_transport_from_local_cache_time",
+            "remote_status_freshness_uses_local_monotonic_age_despite_clock_skew",
+            "stale_peer_sample_uses_local_elapsed_time_and_cannot_become_healthy",
+            "absent_and_expired_cache_are_unavailable_never_peer_limited",
+            "membership_status_cache_is_fresh_for_five_seconds_then_expires",
+            "membership_projection_refresh_is_bounded_and_preserves_last_good_sample",
+            "long_install_crosses_to_stalled_then_expires_after_the_post_deadline_window",
+            "cached_fresh_active_transport_stalls_exactly_when_deadline_reaches_zero",
+            "cached_deadline_less_active_transport_uses_the_producer_fallback_boundary",
+            "cached_terminal_transport_observation_expires_at_five_minutes",
+            "transport_projection_uses_local_monotonic_age_despite_remote_clock_skew",
+            "peer_status_refresh_keeps_strict_cycle_overhead_margin",
+            "aggregate_request_reads_only_node_owned_projections",
+            "production_collector_preserves_private_transport_when_public_listener_is_closed",
+            "slow_public_probe_cannot_discard_completed_private_transport",
+            "identity_mismatch_discards_peer_local_state",
+            "public_transport_fallback_requires_matching_observer_identity",
+            "unresolved_exact_release_keeps_admissions_fenced_past_the_lease_deadline",
+            "restart_cancellation_cannot_clear_a_maintenance_owned_fence",
+            "delayed_same_owner_cleanup_cannot_clear_a_successor_generation",
+            "overlapping_cleanup_tokens_are_resolved_independently",
+            "confirmed_release_resolves_latch_but_preserves_timed_fence",
+            "confirmed_current_restart_cancel_resolves_a_preexisting_exact_latch",
+            "confirmed_current_restart_cancel_resolves_an_expired_exact_latch",
+            "confirmed_maintenance_exit_resolves_an_expired_exact_latch",
+            "confirmed_maintenance_exit_preserves_a_restart_owned_latch",
+            "stuck_restart_admission_cannot_outlive_the_exact_fence",
+            "mutation_preflight_ages_local_transport_across_peer_collection",
+            "restart_preparation_claims_and_releases_the_replicated_outage_slot",
+            "cancelled_waiter_keeps_the_serialized_operation_gate_with_its_owner",
+            "cleanup_retry_backoff_is_capped_and_shutdown_interruptible",
+            "credential_revocation_uses_the_exact_committed_security_roster",
+            "credential_revocation_accepts_more_than_the_diagnostics_probe_limit",
+            "membership_added_between_begin_passes_is_fenced_before_store_admission",
+            "replicated_membership_exclusion_spans_final_roster_read_and_peer_end",
+            "replicated_exclusion_projection_outlives_remote_ttl_and_clock_skew",
+            "cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released",
+            "local_apply_ack_wire_version_rejects_pre_barrier_receivers",
+            "begin_ack_installs_memory_fence_before_waiting_for_exact_local_apply",
+            "cancelled_local_apply_wait_leaves_peer_memory_fence_closed",
+            "origin_waits_for_exact_claim_apply_before_observing_added_member",
+            "automatic_activation_runs_outside_the_membership_projection",
+            "full_roster_projection_activates_without_a_credential_mutation",
+            "permanent_activation_stops_the_one_time_worker",
+            "stuck_automatic_activation_does_not_block_membership_refresh_or_shutdown",
+            "automatic_activation_checks_the_permanent_marker_before_taking_the_gate",
+        )
+        for test_name in daemon_transport_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurxd --bin plurxd", command)
+            self.assertIn("-- --exact", command)
+
+        core_snapshot_tests = (
+            "snapshot_install_timeout_is_bounded_and_env_values_are_parsed",
+            "snapshot_chunk_and_transfer_timeouts_validate_bounds_and_relationship",
+            "snapshot_budget_env_overrides_are_parsed_and_empty_values_do_not_override",
+            "operations_peer_directory_preserves_identities_beyond_the_probe_limit",
+            "operations_peer_query_materializes_only_the_committed_roster",
+            "cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission",
+            "membership_cannot_commit_after_final_roster_read_before_credential_store_write",
+            "definitive_cache_admin_acquire_release_cycles_leave_no_receipts",
+            "definitive_cache_admin_singleton_losers_leave_no_receipts",
+            "zero_after_ambiguous_cache_admin_acquire_advances_watermark",
+            "ambiguous_cache_admin_acquire_advances_watermark_and_cannot_resurrect",
+            "repeated_ambiguous_cache_admin_cleanup_keeps_one_bounded_watermark",
+            "server_commit_response_loss_and_crash_expire_cache_admin_exclusion_conservatively",
+            "cache_admin_exclusion_is_separate_rolling_safe_and_capability_v3",
+            "active_cache_revocation_exclusion_blocks_readiness_without_wall_clock_expiry",
+            "cache_revocation_capability_keeps_a_joiner_closed_until_self_is_committed",
+            "rollback_heartbeat_cannot_republish_retired_cache_revocation_capabilities",
+            "rollback_credential_mutation_is_rejected_before_readiness_refresh",
+            "three_voter_rolling_upgrade_activates_credential_guard_only_after_full_roster",
+            "activated_guard_with_live_mutation_lease_is_not_an_activation_candidate",
+            "status_protocol_query_materializes_only_the_committed_roster",
+            "committed_roster_bound_fails_closed_instead_of_truncating",
+            "released_planned_outage_claim_cannot_be_resurrected_by_a_delayed_write",
+            "maintenance_and_exact_release_are_safe_in_both_commit_orders",
+            "ambiguous_operation_acquire_retries_only_while_its_owned_claim_is_live",
+            "previous_release_lifecycle_writes_cannot_cross_an_outage_lease",
+            "production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts",
+            "immediate_watermark_errors_cannot_starve_due_startup_log",
+        )
+        for test_name in core_snapshot_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurx-core", command)
+            self.assertIn("--lib -- --exact", command)
+
+        core_store_tests = (
+            "password_and_session_revocation_roll_back_together_on_delete_failure",
+            "failed_combined_promotion_never_authorizes_the_old_session",
+            "concurrent_admin_demote_and_delete_preserve_one_administrator",
+        )
+        for test_name in core_store_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn("cargo test --locked -p plurx-core --lib", command)
+            self.assertIn("-- --exact", command)
+
+        clustered_store_tests = (
+            "clustered_promotion_requires_the_exact_claim_and_rolls_back_on_token_failure",
+        )
+        for test_name in clustered_store_tests:
+            matching = [command for command in wal_commands if test_name in command]
+            self.assertEqual(len(matching), 1, test_name)
+            command = matching[0]
+            self.assertIn(
+                "--features cluster-read-cost-validation,hiqlite-contract-tests",
+                command,
+            )
+            self.assertIn("--test store_contract", command)
+            self.assertIn("-- --exact --test-threads=1", command)
+
+        proxy_writer_test = (
+            "server::proxy::stream::tests::"
+            "production_proxy_response_writer_flushes_serialized_response_through_tls"
+        )
+        matching = [command for command in wal_commands if proxy_writer_test in command]
+        self.assertEqual(len(matching), 1)
+        self.assertIn("--no-default-features --features server", matching[0])
+        self.assertIn("--lib -- --exact", matching[0])
 
         openraft_test = (
             "network::snapshot_transport::tests::"
@@ -1249,6 +1898,13 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn('--manifest-path "$OPENRAFT_MANIFEST"', openraft_command)
         self.assertIn("--features generic-snapshot-data", openraft_command)
         self.assertIn("--lib -- --exact", openraft_command)
+        snapshot_metrics = [
+            command
+            for command in wal_commands
+            if " snapshot_metrics --lib -- --test-threads=1" in command
+        ]
+        self.assertEqual(len(snapshot_metrics), 1)
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=10", snapshot_metrics[0])
         self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_split_cluster_lanes_execute_and_propagate_the_exact_inventory(self):
@@ -1305,6 +1961,7 @@ for (const startupDelay of [0, 1600, 7000]) {
                 "mkdir -p target/validation",
                 "{",
                 '  if [ "$RUN_CLUSTER_AUTH" = true ]; then',
+                "    make hiqlite-vendor-clippy",
                 "    make cluster-harness-check",
                 "  fi",
                 '  if [ "$RUN_HIQLITE_SPIKE" = true ]; then',
@@ -1325,6 +1982,7 @@ for (const startupDelay of [0, 1600, 7000]) {
         )
         self.assertIn('--result "$LANE_RESULT"', topology_receipt)
         for command in (
+            "make hiqlite-vendor-clippy",
             "make cluster-harness-check",
             "cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml "
             "--tests --no-deps -- -D warnings",
@@ -1520,7 +2178,10 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-store]", job)
         self.assertIn("uses: https://github.com/dtolnay/rust-toolchain@1.97.1", job)
         self.assertIn("lane: cluster-store-backstop", job)
-        self.assertIn('persistent-eligible: "true"', job)
+        # No eligibility input any more: a self-hosted runner always gets the
+        # bounded runner-local cache, and always enforces it on the way out.
+        self.assertNotIn("persistent-eligible", job)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", job)
         self.assertEqual(job.count("make cluster-store-check"), 2)
         self.assertNotIn("validation.store_shard run", job)
         self.assertNotIn("--exact", job)
@@ -1574,9 +2235,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIn("DOCKER_ARCH: ${{ matrix.docker_machine }}", package)
         self.assertIn("docker_machine: aarch64", package)
         self.assertIn("linux/$DOCKER_ARCH", proof)
+        self.assertNotIn("persistent-eligible", package)
         self.assertIn(
-            "persistent-eligible: ${{ matrix.arch == 'arm64' && 'true' || 'false' }}",
-            package,
+            'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', package
         )
         self.assertIn("package_smoke", workflow_job_needs(pr_gate))
         self.assertNotIn("native_arm_shadow", jobs)
@@ -1607,6 +2268,9 @@ for (const startupDelay of [0, 1600, 7000]) {
         self.assertIsNotNone(workflow_pin)
         self.assertIsNotNone(cache_pin)
         self.assertEqual(workflow_pin.group(1), cache_pin.group(1))
+        self.assertIn("PLURX_PLAYBACK_CHROME=$chromium", action)
+        self.assertIn('test -x "$chromium"', action)
+        self.assertNotIn("exit 0", action)
 
         # Both Android jobs reuse the Forgejo toolchain image keyed on the
         # Dockerfile hash, and the Makefile honors the pre-pull instead of
@@ -1742,10 +2406,12 @@ for (const startupDelay of [0, 1600, 7000]) {
         )[0]
         self.assertIn("uses: ./.github/actions/cargo-cache", store)
         self.assertIn("lane: cluster-store-legacy", store)
-        self.assertIn('persistent-eligible: "true"', store)
+        self.assertNotIn("persistent-eligible", store)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", store)
         self.assertIn("uses: ./.github/actions/cargo-cache", topology)
         self.assertIn("lane: cluster-topology", topology)
-        self.assertIn('persistent-eligible: "true"', topology)
+        self.assertNotIn("persistent-eligible", topology)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", topology)
         self.assertIn(
             "Resolve pinned Rust executables for the long contract run", topology
         )
@@ -1771,6 +2437,109 @@ for (const startupDelay of [0, 1600, 7000]) {
             "path: target/validation/cluster-topology-semantic.json", topology
         )
         self.assertIn("if-no-files-found: error", topology)
+
+    def test_transport_recovery_campaign_is_a_persistent_affected_linux_gate(self):
+        workflow = read(".github/workflows/ci.yml")
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        recovery = jobs["cluster_transport_recovery"]
+        make_commands = make_dry_run_commands("cluster-transport-recovery-check")
+
+        self.assertEqual(len(make_commands), 15)
+        self.assertEqual(make_commands[0], 'test "$(uname -s)" = Linux')
+        self.assertIn("PLURX_EXPECT_TEST_COUNT=31", make_commands[1])
+        self.assertIn("scripts/require-test-count", make_commands[1])
+        self.assertIn("transport_recovery::tests --lib", make_commands[1])
+        exact_regressions = (
+            "writer_exit_after_readiness_fails_the_recovery_promptly",
+            "two_early_acknowledgements_cannot_hide_a_long_recovery_gap",
+            "writer_must_cover_the_end_of_recovery",
+            "whole_recovery_duration_cannot_exceed_the_absolute_deadline",
+            "worst_transfer_duration_covers_the_complete_source_series",
+            "artifact_publication_replaces_stale_bytes_without_exposing_a_partial_result",
+            "owned_async_task_growth_has_no_resource_slack",
+            "owned_async_task_guard_tracks_abort_safe_lifetime",
+            "recovery_series_preserves_failed_retry_and_resets_after_completion",
+            "outbound_retry_counts_only_when_openraft_issues_the_next_chunk",
+            "recovery_series_counts_every_replacement_client_connection_attempt",
+            "production_snapshot_executor_worker_is_counted_until_joined",
+        )
+        for offset, regression in enumerate(exact_regressions, start=2):
+            self.assertIn(regression, make_commands[offset])
+            self.assertIn("scripts/require-test-count", make_commands[offset])
+            self.assertIn("--lib -- --exact", make_commands[offset])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[9])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[10])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[11])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[12])
+        self.assertIn("vendor/hiqlite/Cargo.toml", make_commands[13])
+        self.assertIn(
+            "transport-recovery target/validation/cluster-transport-recovery.json",
+            make_commands[14],
+        )
+
+        self.assertIn("needs.scope.outputs.cluster_auth == 'true'", recovery)
+        self.assertIn("runs-on: [self-hosted, Linux, X64, lab, ci-topology]", recovery)
+        self.assertIn("rust-toolchain@1.97.1", recovery)
+        self.assertIn("lane: cluster-transport-recovery", recovery)
+        self.assertNotIn("persistent-eligible", recovery)
+        self.assertIn("uses: ./.github/actions/cargo-cache-finalize", recovery)
+        self.assertIn("make cluster-transport-recovery-check", recovery)
+        self.assertIn("PLURX_BUILD_SHA: ${{ github.sha }}", recovery)
+        self.assertIn("cluster-transport-recovery-receipt.json", recovery)
+        self.assertIn("target/validation/cluster-transport-recovery.json", recovery)
+        self.assertIn(
+            "--evidence target/validation/cluster-transport-recovery.json", recovery
+        )
+        self.assertIn(
+            "EVIDENCE_VALIDATOR: ${{ steps.cargo-cache.outputs.target-dir }}/debug/plurx-cluster-check",
+            recovery,
+        )
+        self.assertIn('--evidence-validator "$EVIDENCE_VALIDATOR"', recovery)
+        self.assertIn("if-no-files-found: error", recovery)
+        self.assertIn(
+            "steps.transport_recovery.outcome != 'success'", recovery
+        )
+        receipt_contract = runpy.run_path(
+            str(ROOT / "validation/ci_lane_receipt.py")
+        )
+        self.assertIn(
+            "cluster-transport-recovery",
+            receipt_contract["LANES"],
+        )
+        self.assertEqual(
+            receipt_contract["FIRST_WORKFLOW_RUN_ATTEMPT"],
+            "1",
+        )
+
+        for aggregate_name in ("publish_main", "pr_gate"):
+            aggregate = jobs[aggregate_name]
+            self.assertIn(
+                "cluster_transport_recovery", workflow_job_needs(aggregate)
+            )
+            self.assertIn("CLUSTER_TRANSPORT_RECOVERY_RESULT", aggregate)
+        self.assertIn(
+            '"cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}"',
+            jobs["pr_gate"],
+        )
+        qualification_contract = runpy.run_path(
+            str(ROOT / "validation/qualification.py")
+        )
+        self.assertEqual(
+            qualification_contract["FIRST_WORKFLOW_RUN_ATTEMPT"],
+            "1",
+        )
+
+        with (ROOT / "validation/points.toml").open("rb") as handle:
+            catalog = tomllib.load(handle)
+        checks = {entry["id"]: entry for entry in catalog["checks"]}
+        campaign = checks["cluster-transport-recovery"]
+        self.assertEqual(campaign["command"], "make cluster-transport-recovery-check")
+        self.assertEqual(campaign["profiles"], ["full", "nightly"])
+        self.assertEqual(campaign["platforms"], ["linux"])
+        self.assertEqual(campaign["timeout_seconds"], 7200)
+        points = {entry["id"]: entry for entry in catalog["points"]}
+        for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
+            self.assertIn("cluster-transport-recovery", points[point]["checks"])
 
         # Hosted smoke keeps scoped GHA state; an eligible self-hosted smoke
         # uses the one named host builder and enforces its postcondition.
@@ -2047,7 +2816,10 @@ for (const startupDelay of [0, 1600, 7000]) {
                     and name == "cluster-store-backstop"
                 ):
                     expected = ci_store
-                elif path == ".github/workflows/ci.yml" and name == "cluster_topology":
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "cluster_topology",
+                    "cluster_transport_recovery",
+                }:
                     expected = ci_topology
                 elif path == ".github/workflows/ci.yml" and name == "check":
                     expected = high_cpu_ffmpeg6

@@ -1510,6 +1510,7 @@ mod tests {
         let now = tokio::time::Instant::now();
         let peers = vec![ActivityPeer {
             node_id: "peer-a".to_owned(),
+            raft_id: 2,
             http_base: Some("http://peer-a:8080".to_owned()),
             reachable: true,
         }];
@@ -1635,11 +1636,13 @@ mod tests {
         assert!(!has_reachable_media_peer(&[]));
         assert!(!has_reachable_media_peer(&[ActivityPeer {
             node_id: "offline".to_owned(),
+            raft_id: 2,
             http_base: Some("http://offline:32400".to_owned()),
             reachable: false,
         }]));
         assert!(has_reachable_media_peer(&[ActivityPeer {
             node_id: "peer".to_owned(),
+            raft_id: 2,
             http_base: Some("http://peer:32400".to_owned()),
             reachable: true,
         }]));

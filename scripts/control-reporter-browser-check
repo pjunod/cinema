@@ -66,6 +66,28 @@ window.__settled = undefined;
 const settle = (value) => { window.__settled = value; };
 (() => {
   const seen = [];
+  // The staged successor this gate answers with on the second exchange. The
+  // action's wire tag is `prepare`; the name declared in `supported_actions` is
+  // `prepare_replacement`, and a browser that refused either would be invisible
+  // to every Node test in this repo — which is the whole reason this file
+  // exists.
+  const PREPARED_SESSION = "44444444-4444-4444-8444-444444444444";
+  const PREPARE = {
+    type: "prepare",
+    action_id: "33333333-3333-4333-8333-333333333333",
+    session_id: PREPARED_SESSION,
+    playlist_url: "/api/v1/hls/" + PREPARED_SESSION + "/index.m3u8",
+    media_origin_ms: 600000,
+    effective_selection: {
+      quality_auto: true, height: 1080, audio_track: null, subtitle_burn: null,
+      audio_offset_ms: 0, codec: "server_selected", dynamic_range: "sdr",
+    },
+  };
+  let acknowledgement = null;
+  let declared = null;
+  let preparedAction = null;
+  let acknowledged = null;
+  let validated = null;
   const fail = (stage, error) => settle({
     ok: false, stage,
     error: String((error && (error.stack || error.message)) || error),
@@ -87,11 +109,18 @@ const settle = (value) => { window.__settled = value; };
         lease_timeout_ms: 300000,
       },
       clientInstanceId: "22222222-2222-4222-8222-222222222222",
-      // The shape `tests/playback/web-control.test.js` uses, verbatim. The
-      // reporter silently drops a snapshot it does not recognise — `notify`
+      // The shape `tests/playback/web-control.test.js` uses, verbatim, and
+      // through the module's own `capture` wrapper for the same reason: the
+      // reporter silently drops a capture it does not recognise — `notify`
       // returns null and nothing is queued — so a drifted shape here would
       // make this gate pass by never running the reporter at all.
-      snapshot: () => ({
+      //
+      // The option is `capture` and not `snapshot`. That rename is exactly the
+      // kind of thing this gate is for: every Node test passes its own capture
+      // and kept passing, the shipped page was updated, and this — the only
+      // caller that constructs the real reporter in a real browser — was left
+      // on the old name and threw at construction.
+      capture: () => PlurxPlaybackControl.capture({
         demand: "active",
         position_ms: 1000,
         buffered_from_ms: 1000,
@@ -116,21 +145,32 @@ const settle = (value) => { window.__settled = value; };
           dual_player_preparation: false,
         },
         observation: null,
-        acknowledgement: null,
-      }),
+        // Filled by the exchange that receives the preparation, exactly as the
+        // player's state machine fills it. A snapshot the module refuses is
+        // dropped in silence, so an acknowledgement that never reaches the wire
+        // reads here as a missing third exchange rather than as an error.
+        acknowledgement,
+      }, 0, { lifecycleId: "browser-check", attachmentGeneration: 0 }),
       // A real network round trip is not what broke; the reporter's own
       // runtime was. Resolving here keeps the gate hermetic — but the response
       // has to be *valid*, echoing the request's generation, epoch and
       // sequence, or the reporter rejects it and stops. That refusal is
       // correct protocol behaviour and it would masquerade here as the defect
       // this gate exists to catch.
-      send: async (url, request) => ({
-        protocol: PlurxPlaybackControl.PROTOCOL,
-        generation: request.generation,
-        control_epoch: request.control_epoch,
-        accepted_sequence: request.sequence,
-        action: { type: "none" },
-      }),
+      send: async (url, request) => {
+        declared = request.supported_actions;
+        if (request.acknowledgement) acknowledged = request.acknowledgement;
+        return {
+          protocol: PlurxPlaybackControl.PROTOCOL,
+          generation: request.generation,
+          control_epoch: request.control_epoch,
+          accepted_sequence: request.sequence,
+          // The second exchange stages a successor. A browser that parses the
+          // module but refuses this payload — a regex, a bounded integer, a
+          // path comparison — stops the reporter here with a protocol error.
+          action: request.sequence === 2 ? PREPARE : { type: "none" },
+        };
+      },
       onExchange: ({ request, response, error }) => {
         seen.push({
           sequence: request && request.sequence,
@@ -138,12 +178,40 @@ const settle = (value) => { window.__settled = value; };
           action: response && response.action && response.action.type,
           error: error ? String(error.message || error) : null,
         });
-        // Two, so this proves the reporter SCHEDULES the next exchange through
-        // the default timer as well as sending the first. The defect killed
-        // the first; a regression in `schedule` would kill only the second.
-        if (seen.length >= 2) {
+        if (response && response.action && response.action.type === "prepare") {
+          preparedAction = response.action;
+          // Standing in for the player's state machine — which lives in
+          // index.html and is covered by the node suite — so that what this
+          // gate proves is narrow and true: the module accepts the action in a
+          // real browser, and carries an acknowledgement built to the server's
+          // shape back out. A commit owes BOTH its timestamp and the origin it
+          // was offered; the second is the field a client omits by accident,
+          // and it is a 400 that stops the reporter for good.
+          const commit = {
+            action_id: response.action.action_id,
+            state: "committed",
+            first_frame_unix_ms: Date.now(),
+            committed_media_origin_ms: response.action.media_origin_ms,
+          };
+          validated = {
+            commit: PlurxPlaybackControl.validAcknowledgement(commit, "active"),
+            withoutOrigin: PlurxPlaybackControl.validAcknowledgement(
+              { action_id: commit.action_id, state: "committed",
+                first_frame_unix_ms: commit.first_frame_unix_ms }, "active"),
+            onEnd: PlurxPlaybackControl.validAcknowledgement(commit, "end"),
+          };
+          acknowledgement = { action_id: response.action.action_id, state: "metadata_ready" };
+          reporter.notify();
+        }
+        // Three, so this proves the reporter SCHEDULES the next exchange
+        // through the default timer as well as sending the first, accepts a
+        // staged successor, and carries the acknowledgement it earns. The M5
+        // defect killed the first; a regression in `schedule` would kill only
+        // the second; a browser that refuses the preparation kills the third.
+        if (seen.length >= 3) {
           reporter.stop();
-          settle({ ok: true, seen });
+          settle({ ok: true, seen, declared, prepared: preparedAction,
+            acknowledged, validated });
         }
       },
     });
@@ -215,7 +283,36 @@ def main(argv):
             browser.close()
 
     if result.get("ok"):
+        declared = result.get("declared") or []
+        prepared = result.get("prepared") or {}
+        acknowledged = result.get("acknowledged") or {}
+        problems = []
+        if "prepare_replacement" not in declared:
+            problems.append(f"the request declared {declared!r}, without prepare_replacement")
+        if prepared.get("session_id") is None:
+            problems.append("the browser refused the staged successor")
+        if acknowledged.get("state") != "metadata_ready":
+            problems.append(f"no acknowledgement reached the wire ({acknowledged!r})")
+        validated = result.get("validated") or {}
+        if validated.get("commit") is not True:
+            problems.append("the browser refused a correctly shaped commit")
+        if validated.get("withoutOrigin") is not False:
+            problems.append(
+                "a commit without committed_media_origin_ms was accepted — the server "
+                "answers 400 to it and the reporter never recovers"
+            )
+        if validated.get("onEnd") is not False:
+            problems.append("a commit was accepted on an exchange that ends the session")
+        if problems:
+            print("FAIL  the reporter runs, but the prepared-replacement path does not")
+            for problem in problems:
+                print(f"  {problem}")
+            return 1
         print(f"PASS  reporter completed {len(result['seen'])} exchanges in a real browser")
+        print(f"      declared {declared}")
+        print(f"      parsed a staged successor for session {prepared['session_id']}")
+        print(f"      carried a {acknowledged['state']} acknowledgement back on the next exchange")
+        print("      validated a commit, and refused one missing its origin and one on an end")
         return 0
 
     print("FAIL  the shipped playback-control reporter does not run in a browser")

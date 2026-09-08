@@ -1,0 +1,44 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "6faebf61",
+  "c48cfb02",
+  "3a8c6ba6",
+  "9b2ddfb3",
+  "c436de73",
+  "d4ffde98",
+  "b0a6203f",
+  "0253f11b",
+  "d313b206",
+  "5fe3fe43",
+  "9e5a6d56",
+  "fb035cea",
+  "a333ffe3",
+  "9e0fc194",
+  "bd7812df",
+  "df4021ba",
+  "28bb55d4",
+  "7d6cf0c5",
+  "e360ef03",
+  "f9d3169e",
+  "adf80abd",
+]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "The current cluster/WAL Rust lane exercises attempt-scoped transport state, snapshot ownership, local-apply acknowledgement, planned-outage ownership, and cache-revocation ordering; the operations, membership-web, security, and vendored-Clippy checks retain the private status wire, bounded UI projection, mixed-version fail-closed contracts, and lint-clean production paths added by these corrections."

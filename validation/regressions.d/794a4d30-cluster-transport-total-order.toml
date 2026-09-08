@@ -1,0 +1,24 @@
+version = 1
+
+[[coverage]]
+commits = ["794a4d30"]
+points = [
+  "cluster.auth",
+  "cluster.membership",
+  "cluster.operations",
+  "core.media",
+  "identity.access",
+  "server.api",
+  "web.experience",
+]
+checks = [
+  "rust-gate",
+  "rust-gate-ci",
+  "hiqlite-vendor-clippy",
+  "cluster-auth",
+  "security-boundaries",
+  "web-membership",
+  "operations-contract",
+  "web-static",
+]
+reason = "The shipped Cluster panel applies attempt chronology before fingerprint-local completion authority, uses one age basis for an entire mixed-version cohort, and preserves retry ordering across fingerprints. Browser membership regressions cover same- and different-fingerprint late predecessor failures plus all permutations of a current/current/legacy cohort."

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b88b1670"]
+points = ["playback.pipeline", "mobile.versioning"]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract", "mobile-version"]
+reason = "test_module_wide_task_timer_and_process_shapes_have_reviewed_counts is the finding: it counts every namespaced time constructor under crates/plurxd/src and refuses any change to that count without a written ownership review beside it, which is what caught the guard's new bound and turned main red on its own preflight. Restoring 644 fails it with the same 645 != 644 the CI run reported. The comment the count carries is the evidence the gate exists to demand and cannot itself be executed, so the assertion's value is entirely that it cannot be satisfied silently: bumping the number without the paragraph is possible and is the failure mode a reviewer has to catch, which is why the paragraph states what the bound owns (nothing), what it can cancel (an idempotent activity stamp the ordinary auth path writes unbounded), and why it exists at all. test_no_status_page_calls_a_merged_pull_request_open covers the other half: it reads the merged pull requests out of history and fails when a status page still calls one open, and both STATUS.md and docs/STATUS.html described #101 as an open branch after it merged."

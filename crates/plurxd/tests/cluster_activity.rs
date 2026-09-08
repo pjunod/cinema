@@ -32,6 +32,11 @@ const HUNG: u8 = 2;
 const AUTH_ADMISSION_BURST: u8 = 3;
 const KEY_LOOKUP_BURST: u8 = 4;
 const ACTIVITY_PATH: &str = "/_internal/v1/activity-snapshot";
+// The paused-time unit contract in `http::internal_activity` pins the common
+// peer deadline itself at exactly two seconds. This separate-daemon test also
+// measures process scheduling, HTTP delivery, and JSON decoding on a shared CI
+// host, so leave wall-clock headroom without weakening the exact unit proof.
+const ACTIVITY_TIMEOUT_WALL_CEILING: Duration = Duration::from_secs(5);
 
 fn canonical_tempdir() -> tempfile::TempDir {
     let root =
@@ -1160,8 +1165,8 @@ async fn node_a_coalesces_activity_reads_and_reports_peer_failures_truthfully() 
         "hung peer returned too early: {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(3),
-        "hung peer exceeded the common bound: {elapsed:?}"
+        elapsed < ACTIVITY_TIMEOUT_WALL_CEILING,
+        "hung peer exceeded the common deadline plus scheduler allowance: {elapsed:?}"
     );
     assert!(timed_out["activity_nodes"]
         .as_array()

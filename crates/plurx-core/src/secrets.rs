@@ -16,7 +16,7 @@
 //! and the cleartext exists only between [`CredentialKey::seal_trakt`] and
 //! [`CredentialKey::open_trakt`], inside one node's process.
 //!
-//! [`CLUSTERING-PLAN.md`]: ../../../docs/CLUSTERING-PLAN.md
+//! [`CLUSTERING-PLAN.md`]: ../../../docs/cluster/CLUSTERING-PLAN.md
 
 use std::collections::BTreeSet;
 use std::fmt;

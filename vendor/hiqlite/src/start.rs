@@ -5,6 +5,7 @@ use crate::{CacheVariants, Client, Error, NodeConfig, init, split_brain_check, s
 use axum::Router;
 use axum::routing::{get, post};
 use chrono::Utc;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
@@ -56,14 +57,32 @@ where
     let backup_applied = backup::restore_backup_start(&node_config).await?;
 
     let raft_config = Arc::new(node_config.raft_config.clone().validate().unwrap());
+    let snapshot_transport = crate::LocalSnapshotTransportStatus::new(
+        node_config.node_id,
+        node_config
+            .nodes
+            .iter()
+            .map(|node| node.id)
+            .collect::<BTreeSet<_>>(),
+    );
 
     let _do_reset_metadata = init::check_execute_reset(&node_config.data_dir).await?;
     #[cfg(feature = "sqlite")]
-    let raft_db =
-        store::start_raft_db(&node_config, raft_config.clone(), _do_reset_metadata).await?;
+    let raft_db = store::start_raft_db(
+        &node_config,
+        raft_config.clone(),
+        _do_reset_metadata,
+        snapshot_transport.clone(),
+    )
+    .await?;
 
     #[cfg(feature = "cache")]
-    let raft_cache = store::start_raft_cache::<C>(&node_config, raft_config.clone()).await?;
+    let raft_cache = store::start_raft_cache::<C>(
+        &node_config,
+        raft_config.clone(),
+        snapshot_transport.clone(),
+    )
+    .await?;
 
     let (api_addr, rpc_addr) = {
         let node = node_config
@@ -91,6 +110,8 @@ where
 
     #[cfg(feature = "sqlite")]
     let (tx_client_stream, rx_client_stream) = flume::bounded(1);
+    #[cfg(feature = "sqlite")]
+    let (tx_client_control, rx_client_control) = flume::bounded(1);
 
     let state = Arc::new(AppState {
         app_start: Utc::now(),
@@ -101,6 +122,7 @@ where
         #[cfg(feature = "cache")]
         nodes: node_config.nodes.clone(),
         addr_api: api_addr.clone(),
+        snapshot_transport,
         #[cfg(feature = "sqlite")]
         raft_db,
         #[cfg(feature = "cache")]
@@ -116,6 +138,8 @@ where
         client_request_id: std::sync::atomic::AtomicUsize::new(0),
         #[cfg(any(feature = "backup", feature = "dashboard"))]
         tx_client_stream: tx_client_stream.clone(),
+        #[cfg(feature = "dashboard")]
+        tx_client_control: tx_client_control.clone(),
         health_check_delay_secs: node_config.health_check_delay_secs,
         learner_only: node_config.learner_only,
         #[cfg(feature = "s3")]
@@ -186,6 +210,13 @@ where
                         .delete(management::leave_cluster),
                 )
                 .route("/metrics/{raft_type}", get(management::metrics))
+                .route(
+                    "/transport/sqlite",
+                    management::snapshot_transport_sqlite_route(
+                        &state.secret_api,
+                        state.snapshot_transport.clone(),
+                    ),
+                )
                 .route("/elect/{raft_type}", post(management::elect)),
         )
         .route("/listen", get(api::listen))
@@ -237,10 +268,7 @@ where
         task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
-            server
-                .serve(router_api.into_make_service())
-                .await
-                .unwrap();
+            server.serve(router_api.into_make_service()).await.unwrap();
         }));
     } else {
         let listener = TcpListener::from_std(listener_api)?;
@@ -309,6 +337,10 @@ where
         tx_client_stream,
         #[cfg(feature = "sqlite")]
         rx_client_stream,
+        #[cfg(feature = "sqlite")]
+        tx_client_control,
+        #[cfg(feature = "sqlite")]
+        rx_client_control,
         tx_shutdown,
         #[cfg(feature = "cache")]
         node_config.rate_limit_cache,

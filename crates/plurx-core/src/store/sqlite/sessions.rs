@@ -150,7 +150,15 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         && activation.response_json.len() <= 64 * 1024
         && activation.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
         && (0..=MAX_MEDIA_MILLIS).contains(&activation.media_origin_ms)
-        && activation.lease_expires_at_ms > activation.now_ms;
+        && activation.lease_expires_at_ms > activation.now_ms
+        // Zero is the sentinel the statement reads as "no expectation", so an
+        // activation may not state it: a caller that meant "no ask" says
+        // `None`, and one that says `Some(0)` is asking for a revision the
+        // table's own CHECK forbids. Refused here rather than silently
+        // admitting everything.
+        && activation
+            .expected_desired_revision
+            .is_none_or(|revision| revision > 0);
     if valid {
         Ok(())
     } else {
@@ -158,6 +166,55 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
             "invalid media-session activation".to_owned(),
         ))
     }
+}
+
+/// The bounds the table's own CHECK constraints enforce, refused before the
+/// statement rather than as a database error.
+///
+/// Same reason every other validator here exists: a constraint violation
+/// arrives as an opaque database failure that a caller cannot act on and an
+/// operator cannot read, and the two backends have to refuse the same inputs
+/// or a replicated import disagrees with the node it imported from.
+fn validate_desired_selection(
+    playback_id: &str,
+    digest: &str,
+    canonical_form: &str,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let valid = (1..=128).contains(&playback_id.len())
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && (1..=512).contains(&canonical_form.len())
+        && now_ms > 0;
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Task("invalid desired selection".to_owned()))
+    }
+}
+
+fn desired_within(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    playback_id: &str,
+) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT revision, digest, canonical_form, updated_at_ms
+           FROM media_playback_desired
+          WHERE user_id = ?1 AND playback_id = ?2",
+    )?;
+    let mut rows = statement.query(rusqlite::params![user_id, playback_id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(crate::domain::DesiredOwnership {
+        user_id,
+        playback_id: playback_id.to_owned(),
+        revision: row.get(0)?,
+        digest: row.get(1)?,
+        canonical_form: row.get(2)?,
+        updated_at_ms: row.get(3)?,
+    }))
 }
 
 fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), StoreError> {
@@ -297,6 +354,33 @@ fn prepare_within(
         .is_some();
     if !predecessor_is_authoritative {
         return Ok(None);
+    }
+    // The ask has to still be the one this successor is for.
+    //
+    // Inside the transaction rather than before it, which is the whole point:
+    // the source file read and the height resolution that precede staging are
+    // awaits, and an ask that lands across them is exactly what a pre-await
+    // check cannot see. Single-writer SQLite makes the window smaller than the
+    // replicated backend's, not absent — the caller still awaits between
+    // reading the ask and calling this.
+    //
+    // A missing row admits. A playback that predates this schema, or one whose
+    // viewer has never sent an intent-changing request, has no ask to disagree
+    // with, and fencing every session older than the node's own schema would
+    // be a worse failure than the one this closes.
+    if let Some(expected) = preparation.expected_desired_revision {
+        let ask_still_current = tx
+            .query_row(
+                "SELECT 1 FROM media_playback_desired
+                  WHERE user_id = ?1 AND playback_id = ?2 AND revision != ?3",
+                params![preparation.user_id, preparation.playback_id, expected],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_none();
+        if !ask_still_current {
+            return Ok(None);
+        }
     }
     let existing = tx
         .query_row(
@@ -1062,20 +1146,63 @@ impl MediaSessionStore for SqliteStore {
                 tx.rollback()?;
                 return Ok(None);
             };
-            tx.execute(
+            // The ask rides inside the pointer write, not in front of it.
+            //
+            // Everything else this transaction checks is a separate read plus
+            // a Rust branch, which single-writer SQLite makes safe. This one
+            // is written the other way round on purpose, because it is the
+            // predicate whose replicated twin cannot be a read: the same
+            // compare has to mean the same thing in a transaction that cannot
+            // branch, and the two disagreeing is only discoverable during a
+            // restore. `commit_media_session_preparation` learned this the
+            // expensive way and carries the predicate inline for exactly this
+            // reason.
+            //
+            // A refused ask therefore lands in the same place a lost pointer
+            // race does: no rows, and the whole activation rolled back. The
+            // upsert was previously unconditional and its result ignored, so
+            // the row count is now what decides, and a pointer that did not
+            // advance is a refusal rather than a silent success.
+            //
+            // The predicate is on the `SELECT` only, and deliberately not
+            // repeated on the `ON CONFLICT` arm. A row that the `SELECT` does
+            // not produce cannot conflict, so a second copy there is
+            // unreachable — removing it changes no test, which is the reason
+            // not to ship it: a guard no test can distinguish from its absence
+            // reads as protection and provides none. The insert gate covers
+            // both the first pointer for a playback and the replacement of an
+            // existing one, and there is a case for each.
+            let expected_desired_revision = activation.expected_desired_revision.unwrap_or(0);
+            let pointer_advanced = tx.execute(
                 "INSERT INTO media_playback_pointers
-                    (user_id, playback_id, current_incarnation_id, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4)
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms,
+                     desired_revision)
+                 SELECT ?1, ?2, ?3, ?4,
+                        -- Read here rather than passed in, so the row records
+                        -- the ask that was current when it was written and a
+                        -- null means the playback had none. A writer without
+                        -- this column cannot produce anything but a null, which
+                        -- is what the fence trigger keys on.
+                        (SELECT revision FROM media_playback_desired
+                          WHERE user_id = ?1 AND playback_id = ?2)
+                  WHERE (?5 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                          WHERE user_id = ?1 AND playback_id = ?2 AND revision != ?5))
                  ON CONFLICT(user_id, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
-                    updated_at_ms = excluded.updated_at_ms",
+                    updated_at_ms = excluded.updated_at_ms,
+                    desired_revision = excluded.desired_revision",
                 params![
                     activation.user_id,
                     activation.playback_id,
                     activation.incarnation_id,
                     activation.now_ms,
+                    expected_desired_revision,
                 ],
             )?;
+            if pointer_advanced != 1 {
+                tx.rollback()?;
+                return Ok(None);
+            }
             // Re-read inside the transaction instead of fabricating a
             // superseded result. Another first-writer terminal cause may have
             // won before activation; callers must project that durable cause
@@ -1530,6 +1657,108 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn record_desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        digest: &str,
+        canonical_form: &str,
+        now_ms: i64,
+    ) -> Result<crate::domain::DesiredOwnership, StoreError> {
+        validate_desired_selection(playback_id, digest, canonical_form, now_ms)?;
+        let playback_id = playback_id.to_owned();
+        let digest = digest.to_owned();
+        let canonical_form = canonical_form.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            // The revision advances only on a change of digest, and the
+            // decision is made inside the transaction rather than by reading
+            // first and writing after: two exchanges for the same playback can
+            // otherwise both read revision 3 and both write 4, which turns a
+            // monotone revision into a number two different asks share.
+            tx.execute(
+                "INSERT INTO media_playback_desired
+                     (user_id, playback_id, revision, digest, canonical_form, updated_at_ms)
+                 VALUES (?1, ?2, 1, ?3, ?4, ?5)
+                 ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                     revision = CASE
+                         WHEN media_playback_desired.digest = excluded.digest
+                             THEN media_playback_desired.revision
+                         ELSE media_playback_desired.revision + 1
+                     END,
+                     digest = excluded.digest,
+                     canonical_form = excluded.canonical_form,
+                     updated_at_ms = CASE
+                         WHEN media_playback_desired.digest = excluded.digest
+                             THEN media_playback_desired.updated_at_ms
+                         ELSE excluded.updated_at_ms
+                     END",
+                rusqlite::params![user_id, &playback_id, &digest, &canonical_form, now_ms],
+            )?;
+            let owned = desired_within(&tx, user_id, &playback_id)?
+                .ok_or_else(|| StoreError::Database("desired selection vanished".into()))?;
+            tx.commit()?;
+            Ok(owned)
+        })
+        .await
+    }
+
+    async fn validation_playback_pointer_desired_revision(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<i64>, StoreError> {
+        let playback_id = playback_id.to_owned();
+        self.with_conn(move |conn| {
+            let value: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT desired_revision FROM media_playback_pointers
+                      WHERE user_id = ?1 AND playback_id = ?2",
+                    params![user_id, playback_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(value.flatten())
+        })
+        .await
+    }
+
+    async fn validation_write_legacy_playback_pointer(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        // Exactly the statement a binary from before v49 emits: four columns,
+        // no `desired_revision`, so the row arrives with a null there.
+        let playback_id = playback_id.to_owned();
+        let incarnation_id = incarnation_id.to_owned();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO media_playback_pointers
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                    current_incarnation_id = excluded.current_incarnation_id,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![user_id, playback_id, incarnation_id, now_ms],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+        let playback_id = playback_id.to_owned();
+        self.with_conn(move |conn| desired_within(conn, user_id, &playback_id))
+            .await
+    }
+
     async fn rejoin_media_session_preparation(
         &self,
         staged_incarnation_id: &str,
@@ -1757,7 +1986,9 @@ impl MediaSessionStore for SqliteStore {
             // that made a flag on `activate_media_session` unacceptable.
             let pointer_advanced = tx.execute(
                 "UPDATE media_playback_pointers
-                    SET current_incarnation_id = ?1, updated_at_ms = ?2
+                    SET current_incarnation_id = ?1, updated_at_ms = ?2,
+                        desired_revision = (SELECT revision FROM media_playback_desired
+                          WHERE user_id = ?3 AND playback_id = ?4)
                   WHERE user_id = ?3 AND playback_id = ?4
                     AND current_incarnation_id = ?5
                     AND EXISTS (SELECT 1 FROM media_sessions predecessor
@@ -1771,7 +2002,21 @@ impl MediaSessionStore for SqliteStore {
                         AND preparation.deadline_ms > ?2)
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = ?1 AND user_id = ?3
-                        AND playback_id = ?4 AND state = 'active')",
+                        AND playback_id = ?4 AND state = 'active')
+                    -- The ask has to still be the one this successor is for.
+                    -- Carried in the CAS rather than checked before it, and
+                    -- that placement is the behaviour: a stale ask makes this
+                    -- update affect no rows, which drops into the same abort
+                    -- branch a lost pointer race does. A successor built for
+                    -- an ask the viewer has left is not a successor to keep —
+                    -- its recipe is for the old ask and it can never
+                    -- legitimately commit — so tearing it down and freeing the
+                    -- slot is the outcome, not leaving it staged. Checking
+                    -- earlier and returning made this backend keep the row
+                    -- while the replicated twin tore it down, which the
+                    -- three-voter lane caught.
+                    AND (?8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                      WHERE user_id = ?3 AND playback_id = ?4 AND revision != ?8))",
                 params![
                     staged.staged_incarnation_id,
                     now_ms,
@@ -1780,6 +2025,7 @@ impl MediaSessionStore for SqliteStore {
                     staged.expected_predecessor_incarnation_id,
                     request.expected_predecessor_owner_node_id,
                     request.expected_predecessor_owner_epoch,
+                    request.expected_desired_revision.unwrap_or(0),
                 ],
             )?;
             if pointer_advanced != 1 {
@@ -3111,7 +3357,11 @@ impl MediaSessionStore for SqliteStore {
             let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
             let retire_before = now_ms.saturating_sub(TAKEOVER_RECOVERY_MS);
             // A preparation expires on **its own deadline**, and this is the
-            // only thing that enforces it.
+            // durable thing that enforces it. (It said "the only thing" until
+            // 2026-09-08; `arm_preparation_deadline` in `http/hls.rs` also
+            // fires, in-process, and its job is the actor's in-memory slot,
+            // which nothing here settles. Neither is the only enforcement and
+            // both are needed.)
             //
             // A staged row sits at the publication sentinel — deliberately, so
             // takeover inventory never mistakes a successor nobody waited for

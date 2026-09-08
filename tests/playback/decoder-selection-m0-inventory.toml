@@ -504,8 +504,8 @@ obligation = "serve only the authenticated object handle"
 id = "client.web_actions"
 kind = "client_capability"
 source = "crates/plurxd/src/web/playback-control.js"
-anchor = 'Object.freeze(["hold", "retry_resource", "terminal"])'
-obligation = "add and physically qualify prepare_replacement before full recovery"
+anchor = '"hold", "retry_resource", "terminal", PREPARE_REPLACEMENT_ACTION,'
+obligation = "physically qualify two-player replacement: the vocabulary, the prepare handler, the successor element and the acknowledgement ladder are implemented, and no measured web run has been taken yet"
 
 [[surfaces]]
 id = "client.live_tv_web"
@@ -518,8 +518,8 @@ obligation = "remain prepublication-only until its separate lifecycle negotiates
 id = "client.apple_actions"
 kind = "client_capability"
 source = "clients/apple/Sources/PlaybackControlReporter.swift"
-anchor = 'static let supportedActions = ["hold", "retry_resource", "terminal"]'
-obligation = "implement and physically qualify two-player replacement"
+anchor = '"hold", "retry_resource", "terminal", prepareReplacementAction,'
+obligation = "physically qualify two-player replacement: Apple is the measured candidate and the one client half a viewer reaches, so its fleet receipt is what the enable path waits on"
 
 [[surfaces]]
 id = "client.android_actions"

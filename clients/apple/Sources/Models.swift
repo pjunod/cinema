@@ -243,7 +243,7 @@ enum ViewerAppearance: String, CaseIterable, Identifiable {
 ///   subtitle is chosen. The cost is one restart, and only for viewers who
 ///   actually use subtitles.
 ///
-/// Recorded as a deliberate tradeoff in docs/APPLE-CLIENT-PARITY.md §2.
+/// Recorded as a deliberate tradeoff in docs/clients/APPLE-CLIENT-PARITY.md §2.
 enum SubtitleReadiness: String, CaseIterable, Identifiable {
     case instant
     case onDemand

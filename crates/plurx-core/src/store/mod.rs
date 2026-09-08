@@ -74,6 +74,26 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Exact replicated exclusion claim required by clustered credential writes.
+///
+/// Only the membership coordinator can mint one. Store implementations use
+/// the opaque value as a transaction predicate so a credential proposal that
+/// arrives after cancellation cleanup cannot commit outside its membership
+/// exclusion interval. Standalone SQLite passes no claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CacheAdminMutationClaim(String);
+
+#[cfg(feature = "hiqlite-store")]
+impl CacheAdminMutationClaim {
+    pub(crate) fn new(claim_id: String) -> Self {
+        Self(claim_id)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Keeps the request claim and the route publication fence in one database
 /// write. Hiqlite transactions do not expose an application-level rollback
 /// after affected-row counts are returned, so this trigger is the common
@@ -341,6 +361,153 @@ pub(crate) fn recovery_reservation_from_row(
         updated_at_ms,
     })
 }
+
+/// What a viewer has asked for, per playback, shared verbatim by both backends.
+///
+/// Everything else about a playback records what *happened*: which incarnation
+/// is current, what was built, how far it produced, what the response said.
+/// This is the only row that records what was *wanted*, and the distinction is
+/// the whole reason it exists. A resolved height cannot tell Original from a
+/// manual pick at the source's own height; a session's recipe is desired-as-
+/// built and is written once at activation; the durable intent fingerprint is
+/// deliberately lossy so a retry recovers the first answer. None of the three
+/// can answer "has the viewer asked for something else since", which is the
+/// question every admission point has to ask before it publishes media.
+///
+/// Keyed by playback rather than by session, and kept out of
+/// `media_playback_pointers` for the reason that matters here: a desired row
+/// has to be able to exist *before* the session that satisfies it, and that
+/// table's `current_incarnation_id` is `NOT NULL`. An ask that only becomes
+/// durable once something has already been built for it cannot be the thing
+/// that decides whether to build it.
+///
+/// `revision` advances only when `digest` changes, which is what makes it a
+/// media-intent revision rather than a cadence counter — the four near misses
+/// §1 names all move on heartbeats, reporter attachments or recovery. It is
+/// monotone per playback so two asks are orderable, which a content hash alone
+/// can never be.
+///
+/// `canonical_form` is stored beside the digest deliberately, at the cost of
+/// about a hundred bytes. A digest whose input is not recoverable is a hash
+/// nobody can check: an operator reading this row can see what the viewer
+/// asked for, and a later binary can verify that its own canonical form still
+/// produces the stored digest rather than discovering a silent mismatch when
+/// every comparison starts failing.
+pub(crate) const MEDIA_PLAYBACK_DESIRED_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS media_playback_desired (
+        user_id        INTEGER NOT NULL,
+        playback_id    TEXT NOT NULL
+            CHECK (length(playback_id) BETWEEN 1 AND 128),
+        revision       INTEGER NOT NULL CHECK (revision > 0),
+        digest         TEXT NOT NULL CHECK (length(digest) = 64),
+        canonical_form TEXT NOT NULL
+            CHECK (length(canonical_form) BETWEEN 1 AND 512),
+        updated_at_ms  INTEGER NOT NULL,
+        PRIMARY KEY (user_id, playback_id)
+    ) STRICT;";
+
+/// Fence a playback pointer written against an ask that is not the current one.
+///
+/// Every comparison of the desired revision up to now has been application SQL
+/// — the predicate preparation admission, prepared commit and ordinary
+/// activation each carry. That fences *this* binary against a stale ask and
+/// does nothing at all about an older one, because an older binary simply does
+/// not emit the predicate. Schema compatibility is checked when a database is
+/// opened and never again, so a process that was already running when the
+/// cluster migrated keeps writing this pointer with statements from before the
+/// rule existed. A trigger is the only thing standing in the path of a
+/// statement this binary did not write.
+///
+/// The column and both triggers are one step because they are one change. A
+/// column nothing enforces is not a fence, and a trigger cannot be created on
+/// a column that does not exist yet; a database holding one without the other
+/// accepts exactly the writes this exists to refuse. The replicated chain has
+/// already spent a whole extra version step recovering from a trigger that
+/// shipped separately from the column it guards, which is the mistake being
+/// avoided here rather than repeated.
+///
+/// `desired_revision` is nullable and the null carries meaning: it is what a
+/// write leaves when the playback has no recorded ask. Every writer in this
+/// binary fills it from `media_playback_desired` inside the same statement, so
+/// a null on a playback that *does* have an ask can only have come from a
+/// binary that predates the column — which is precisely the writer being
+/// fenced. `IS NOT` rather than `!=` because a null compared with `!=` is
+/// null, not true, and the old writer would sail through the one comparison
+/// written for it.
+///
+/// Both operations, because an upsert reaches the pointer through both: a
+/// first pointer inserts, a replacement updates. A fence on one of them is a
+/// fence on nothing, since the case that matters — an old writer replacing a
+/// live pointer — is the one that updates.
+///
+/// A playback with no ask row is untouched, deliberately. "No ask recorded" is
+/// not "a different ask", the first play of every title looks like this, and
+/// an import loads pointers before it loads asks. `RAISE(ABORT)` rather than a
+/// silent no-op, because an old writer that believes it advanced the pointer
+/// is the whole failure being prevented, and a refusal it cannot see is not a
+/// fence.
+macro_rules! pointer_desired_revision_column {
+    () => {
+        // No trailing semicolon. The replicated backend submits this as one
+        // prepared statement and a trailing `;` makes it unpreparable — which
+        // is exactly how the three-voter lane failed every migration test in
+        // the chain while the SQLite batch, where the semicolon was needed,
+        // passed. The batch below adds its own separator instead.
+        "ALTER TABLE media_playback_pointers ADD COLUMN desired_revision INTEGER"
+    };
+}
+
+macro_rules! pointer_desired_fence_insert_trigger {
+    () => {
+        "CREATE TRIGGER IF NOT EXISTS media_playback_pointers_desired_fence_ai
+    BEFORE INSERT ON media_playback_pointers
+    WHEN EXISTS (SELECT 1 FROM media_playback_desired
+                  WHERE user_id = NEW.user_id AND playback_id = NEW.playback_id
+                    AND revision IS NOT NEW.desired_revision)
+    BEGIN
+      SELECT RAISE(ABORT, 'playback pointer written against an ask that is not current');
+    END;"
+    };
+}
+
+macro_rules! pointer_desired_fence_update_trigger {
+    () => {
+        "CREATE TRIGGER IF NOT EXISTS media_playback_pointers_desired_fence_au
+    BEFORE UPDATE ON media_playback_pointers
+    WHEN EXISTS (SELECT 1 FROM media_playback_desired
+                  WHERE user_id = NEW.user_id AND playback_id = NEW.playback_id
+                    AND revision IS NOT NEW.desired_revision)
+    BEGIN
+      SELECT RAISE(ABORT, 'playback pointer written against an ask that is not current');
+    END;"
+    };
+}
+
+/// The three statements as one SQLite migration, applied in one transaction.
+///
+/// Written through macros rather than by hand twice because the replicated
+/// backend needs them as separate transaction entries and this one needs them
+/// as a batch — and the two backends holding different text for the same
+/// guard is the failure every shared schema constant here exists to prevent.
+pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_SCHEMA: &str = concat!(
+    pointer_desired_revision_column!(),
+    ";\n",
+    pointer_desired_fence_insert_trigger!(),
+    "\n",
+    pointer_desired_fence_update_trigger!(),
+);
+
+/// The column on its own, for the replicated migration's first statement.
+pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_REVISION_COLUMN: &str =
+    pointer_desired_revision_column!();
+
+/// The insert-path trigger on its own.
+pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_INSERT_TRIGGER: &str =
+    pointer_desired_fence_insert_trigger!();
+
+/// The update-path trigger on its own.
+pub(crate) const MEDIA_PLAYBACK_POINTER_DESIRED_FENCE_UPDATE_TRIGGER: &str =
+    pointer_desired_fence_update_trigger!();
 
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
@@ -1220,6 +1387,19 @@ pub mod keys {
     /// the shorter per-request block deadline so clients can retry 503s while
     /// the same bounded production attempt continues.
     pub const VOD_MATERIALIZE_BUDGET_SECS: &str = "playback.vod_materialize_budget_secs";
+    /// How many blocked VOD segment GETs this node will hold at once.
+    ///
+    /// A blocked GET is a parked request holding an admission slot and a
+    /// retention pin until its segment lands, so the cap is what stops a seek
+    /// storm turning into unbounded parked work. Promised as a setting by the
+    /// VOD presentation plan §2.3 and hard-coded until now; the per-session
+    /// cap stays fixed because it bounds one viewer rather than the node.
+    ///
+    /// The right number is a property of the deployment, not of the code: a
+    /// node serving a handful of viewers wants far less parked work than one
+    /// fronting a household, and an operator watching `pool_full` refusals is
+    /// the only one who can tell which they have.
+    pub const VOD_BLOCKED_GET_CAP: &str = "playback.vod_blocked_get_cap";
     /// How many transcodes may run on the hardware encoder at once.
     ///
     /// An iGPU has one video-processing block, and two 4K sessions on it do not
@@ -1398,11 +1578,42 @@ pub trait UserStore: Send + Sync + 'static {
     /// merely to inspect a small prediction rail.
     async fn list_users_page(&self, after_id: i64, limit: i64) -> Result<Vec<User>, StoreError>;
     async fn delete_user(&self, id: i64) -> Result<bool, StoreError>;
+    /// Delete a user only when doing so leaves at least one administrator.
+    /// The predicate and delete must be one Store mutation so concurrent admin
+    /// requests cannot both pass a separate count preflight.
+    async fn delete_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
     async fn count_admins(&self) -> Result<i64, StoreError>;
     /// Replace a user's password hash. Callers should also revoke the user's
     /// tokens so old sessions die with the old password.
     async fn set_password(&self, id: i64, password_hash: &str) -> Result<bool, StoreError>;
+    /// Atomically replace a password and revoke every existing login token.
+    async fn reset_password_and_revoke_tokens(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
+    /// Atomically grant administrator status, replace the password, and revoke
+    /// every existing token. A failed combined update must never leave an old
+    /// session newly authorized as an administrator.
+    async fn promote_user_and_reset_password(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError>;
+    /// Revoke admin status only when another administrator exists in the same
+    /// Store mutation.
+    async fn demote_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
     /// Revoke every login token for one user; returns how many were dropped.
     async fn delete_tokens_for_user(&self, user_id: i64) -> Result<u64, StoreError>;
 
@@ -1413,9 +1624,26 @@ pub trait UserStore: Send + Sync + 'static {
         user_id: i64,
         device: Option<&str>,
     ) -> Result<(), StoreError>;
+    /// Register a login token only if the user's password is still the exact
+    /// version the caller authenticated. This closes the interval in which a
+    /// concurrent reset could otherwise finish before token insertion.
+    async fn create_token_if_password_matches(
+        &self,
+        token_hash: &str,
+        user_id: i64,
+        device: Option<&str>,
+        expected_password_hash: &str,
+    ) -> Result<bool, StoreError>;
     /// Resolve a token hash to its user (touching `last_seen_at`).
     async fn user_for_token(&self, token_hash: &str) -> Result<Option<User>, StoreError>;
     async fn delete_token(&self, token_hash: &str) -> Result<bool, StoreError>;
+    /// Delete a login token only while the exact clustered cache-revocation
+    /// exclusion claim is still live. Standalone SQLite passes no claim.
+    async fn delete_token_with_cache_admin_claim(
+        &self,
+        token_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError>;
 }
 
 #[async_trait]
@@ -1697,7 +1925,7 @@ pub trait MediaStore: Send + Sync + 'static {
         edit: &ItemEdit,
     ) -> Result<Option<Item>, StoreError>;
     /// Record that an NFO sidecar has been consumed for this item. Seeding
-    /// happens at most once, ever (docs/HOMEVIDEO-PLAN.md §4.3) — after this
+    /// happens at most once, ever (docs/features/HOMEVIDEO-PLAN.md §4.3) — after this
     /// the sidecar is dead to plurx, so a user's edits can never be clobbered.
     async fn set_nfo_seeded(&self, item_id: i64) -> Result<(), StoreError>;
 
@@ -3140,6 +3368,74 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Record what a viewer is asking for, and return the ownership that
+    /// results.
+    ///
+    /// Idempotent on the ask rather than on the call. Recording the same
+    /// digest again returns the existing row unchanged — the revision does not
+    /// move — because a viewer repeating themselves has not changed their
+    /// mind, and a revision that advanced on repetition would be the cadence
+    /// counter this exists to replace. Recording a different digest advances
+    /// the revision by exactly one.
+    ///
+    /// Written before an intent-changing request is reported accepted, so
+    /// there is no window in which a client has been told its new selection
+    /// was taken and nothing durable says so.
+    async fn record_desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        digest: &str,
+        canonical_form: &str,
+        now_ms: i64,
+    ) -> Result<crate::domain::DesiredOwnership, StoreError>;
+
+    /// What this playback is currently asking for, if anything ever said.
+    ///
+    /// `None` for a playback that predates this row or has never sent an
+    /// intent-changing request. Absent is not "unchanged" and not "default":
+    /// it is no evidence, and every caller has to treat it that way or an
+    /// upgraded node would fence every session that started before it.
+    /// Write a playback pointer the way a binary from before `desired_revision`
+    /// would: naming only the columns that existed then.
+    ///
+    /// A test-only shape on a production trait, which is a cost worth naming.
+    /// It exists because there is no other way to produce that write from this
+    /// binary — every real writer fills the column inside its own statement —
+    /// and a fence proved only against writes this binary can make is not
+    /// proved against the writer it was built for. The alternative was to test
+    /// the trigger as SQL text on one backend and assert nothing at all about
+    /// the replicated one, where the same guard has to hold and where a
+    /// divergence would surface during a restore.
+    ///
+    /// It is deliberately not a bypass: it takes no revision, so it cannot be
+    /// used to write a pointer *around* the fence, only to attempt the exact
+    /// write the fence exists to refuse.
+    /// The ask a playback's pointer was written against, as the fence reads it.
+    ///
+    /// A read rather than a shape: the column is not on `MediaSessionRoute`
+    /// and has no business being there — nothing serving a stream needs it —
+    /// but a proof that the write chain reaches it does.
+    async fn validation_playback_pointer_desired_revision(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<i64>, StoreError>;
+
+    async fn validation_write_legacy_playback_pointer(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError>;
+
+    async fn desired_selection(
+        &self,
+        user_id: i64,
+        playback_id: &str,
+    ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError>;
 
     /// Replace one named staged successor with a merged preparation.
     ///

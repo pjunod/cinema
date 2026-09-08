@@ -23,7 +23,7 @@ pub enum LibraryKind {
     Books,
     /// Home video & photos: a folder tree of camera files. No metadata
     /// provider — the source of truth is the disk (folder layout, optional
-    /// Kodi-style `.nfo` sidecars, embedded dates). See docs/HOMEVIDEO-PLAN.md.
+    /// Kodi-style `.nfo` sidecars, embedded dates). See docs/features/HOMEVIDEO-PLAN.md.
     Home,
 }
 
@@ -172,7 +172,7 @@ pub struct Item {
     pub tags: Vec<String>,
     /// Unix seconds when an NFO sidecar was consumed for this item.
     /// `None` = never seeded (and eligible for seeding if a sidecar appears).
-    /// Once set, the sidecar is dead to plurx — see docs/HOMEVIDEO-PLAN.md §4.3.
+    /// Once set, the sidecar is dead to plurx — see docs/features/HOMEVIDEO-PLAN.md §4.3.
     pub nfo_seeded_at: Option<i64>,
     /// Unix seconds of the last artwork *download attempt*, and why it failed
     /// if it did (`None` = it didn't, or none has been made).
@@ -332,7 +332,7 @@ impl MetadataPatch {
 }
 
 /// A hand edit of one item's metadata (home libraries only — see
-/// docs/HOMEVIDEO-PLAN.md §2). Unlike [`MetadataPatch`], which agents use to
+/// docs/features/HOMEVIDEO-PLAN.md §2). Unlike [`MetadataPatch`], which agents use to
 /// add or replace, an edit must be able to *clear* a field: the outer
 /// `Option` is "present in the request", the inner one is the new value.
 #[derive(Debug, Clone, Default)]
@@ -513,7 +513,7 @@ pub struct ProbeResult {
     /// Container capture time (`format.tags.creation_time`), normalized to a
     /// local-naive ISO-8601 string. Phones and camcorders set it, which makes
     /// it the best home-video date short of an NFO — see
-    /// docs/HOMEVIDEO-PLAN.md §4.4.
+    /// docs/features/HOMEVIDEO-PLAN.md §4.4.
     pub creation_time: Option<String>,
 }
 
@@ -960,6 +960,22 @@ pub struct MediaSessionActivation {
     pub media_origin_ms: i64,
     pub now_ms: i64,
     pub lease_expires_at_ms: i64,
+    /// The desired revision this activation was decided against, compared
+    /// inside the committing statement.
+    ///
+    /// Preparation admission and prepared commit already carry this. Ordinary
+    /// activation is the third door into the same pointer and had no such
+    /// compare at all, which left the whole guard bypassable by the plainest
+    /// path there is: a viewer who changes their selection while a create is
+    /// in flight gets a pointer advanced to a session built for the selection
+    /// they left.
+    ///
+    /// `None` means no expectation and admits anything — the shape every
+    /// caller that predates this field keeps, and the shape a create that
+    /// carried no ask still has. It is not "revision zero": a playback with no
+    /// recorded ask must still activate, or the first play of every title
+    /// would be refused.
+    pub expected_desired_revision: Option<i64>,
 }
 
 /// Inputs for staging a successor that exists without being current.
@@ -978,6 +994,38 @@ pub struct MediaSessionActivation {
 /// takeover inventory. Both are properties of the row, not of a mode flag —
 /// the sentinel already means *not publishable*, and a staged successor wants
 /// exactly that until it commits.
+/// What a viewer has asked for, and how many times they have changed it.
+///
+/// The durable answer to "has the viewer asked for something else since", which
+/// nothing else about a playback can give. A resolved height cannot tell
+/// Original from a manual pick at the source's own height; a session's recipe
+/// is desired-as-built and is written once at activation; the intent
+/// fingerprint is deliberately lossy so a retry recovers the first answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DesiredOwnership {
+    pub user_id: i64,
+    pub playback_id: String,
+    /// Monotone per playback, and advanced only when `digest` changes.
+    ///
+    /// That is what separates it from the four near misses: a capture
+    /// revision, an attachment generation, a generic intent generation and a
+    /// control sequence all move on cadence, on reconnection or on recovery.
+    /// This moves when, and only when, the viewer asks for something else — so
+    /// two asks are orderable, which a content hash alone can never be.
+    pub revision: i64,
+    /// The normalized selection's digest.
+    pub digest: String,
+    /// The text that digest was taken over.
+    ///
+    /// Stored so the digest is checkable. A hash whose input is not recoverable
+    /// is a value nobody can verify: an operator can read what the viewer asked
+    /// for, and a later binary can confirm its own canonical form still
+    /// produces this digest rather than discovering a silent mismatch when
+    /// every comparison suddenly starts failing.
+    pub canonical_form: String,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MediaSessionPreparation {
     /// The successor being staged. Minted like any other incarnation.
@@ -1001,6 +1049,17 @@ pub struct MediaSessionPreparation {
     /// Exact source position represented by session-relative zero.
     pub media_origin_ms: i64,
     pub now_ms: i64,
+    /// The desired revision this successor is being built for.
+    ///
+    /// Compared inside the admission transaction, not before it: the source
+    /// file read and the height resolution that precede staging are awaits,
+    /// and an ask that changes across them is exactly the case a pre-await
+    /// check cannot see. `None` where no durable ask exists — a playback that
+    /// predates the row, or one whose viewer has never sent an
+    /// intent-changing request — and absent is no evidence, so it admits
+    /// rather than refuses. An upgraded node that fenced every session older
+    /// than its own schema would be a worse failure than the one this closes.
+    pub expected_desired_revision: Option<i64>,
     /// When the preparation stops being a candidate.
     ///
     /// One clock, deliberately. This is written to the staged row's
@@ -1039,6 +1098,17 @@ pub struct MediaSessionPreparationCommitRequest {
     pub now_ms: i64,
     pub lease_expires_at_ms: i64,
     pub control_receipt: Option<MediaSessionTerminalAck>,
+    /// The desired revision this successor was admitted under.
+    ///
+    /// Re-compared at the commit, because the gap between admission and commit
+    /// is a client round trip — the successor is announced, the client
+    /// prepares it, and only then acknowledges — and a viewer can change their
+    /// mind twice inside it. The actor-local check that precedes this is a
+    /// pre-await check by construction: it cannot see an ask that lands while
+    /// the Store call is in flight.
+    ///
+    /// `None` admits, for the same reason it does at staging.
+    pub expected_desired_revision: Option<i64>,
 }
 
 /// Actor-authorized inputs for discarding one prepared successor.

@@ -16,6 +16,7 @@ import tv.plurx.app.data.Net
 import tv.plurx.app.data.Session
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The playback-control exchange, over HTTP.
@@ -102,8 +103,21 @@ class PlaybackControlTransport(
  * "the player changed" rather than in reporters, transports, identities and
  * deadlines.
  */
-class PlaybackControlSession(private val scope: CoroutineScope) {
+class PlaybackControlSession(
+    private val scope: CoroutineScope,
+    private val dispatchSubtitleReady: (() -> Unit) -> Unit = { callback ->
+        scope.launch { callback() }
+    },
+) {
     private var reporter: PlaybackControlReporter? = null
+    // Session departure stops callbacks immediately, while a replacement's
+    // create still needs the predecessor's final ordering counter.
+    private var orderingSource: PlaybackControlReporter? = null
+    private var observe: (() -> PlayerControlObservation?)? = null
+    // Only caller/player-dispatcher entry points sample the player. The
+    // reporter reads this immutable envelope, including on cadence/retry.
+    private val latest = AtomicReference<PlaybackControlCapture?>(null)
+    private var captureRevision = 0L
 
     /**
      * Whether an exchange coming back is still allowed to reach the player.
@@ -135,7 +149,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * the safe direction. Null before the first exchange.
      */
     suspend fun controlSequence(): Long? =
-        reporter?.status()?.sequence?.takeIf { it > 0L }
+        orderingSource?.status()?.sequence?.takeIf { it > 0L }
 
     /**
      * Every exchange's action, tagged with the sequence of the request it
@@ -146,6 +160,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     private var answerAction: ControlAction? = null
     private var answerRequestSequence = 0L
     private var answersSeen = 0L
+    private var ownerChangesSeen = 0L
     /**
      * The answer slot keeps its own copy of the generation rather than reading
      * the verdict slot's under the wrong lock. Two counters that must agree
@@ -159,6 +174,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     private var verdictArmedAtMs = 0L
     private var verdictLeaseMs = 0L
     private var verdictGeneration = 0
+    private var verdictIntentGeneration = 0L
 
     /**
      * The last terminal verdict this session was given, if any.
@@ -177,7 +193,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             // production attempt that ended an hour ago would caption an
             // unrelated failure. The bound is the server's own number rather
             // than one invented here.
-            if (System.currentTimeMillis() - verdictArmedAtMs > verdictLeaseMs) {
+            if (monotonicNowMs() - verdictArmedAtMs > verdictLeaseMs) {
                 verdict = null
                 return@synchronized null
             }
@@ -214,6 +230,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         if (status.stopped) return null
         val floor = status.sequence + 1
         val seenAtStart = synchronized(answerLock) { answersSeen }
+        val ownerChangesAtStart = synchronized(answerLock) { ownerChangesSeen }
         publish()
         val startedAt = now()
         var deadline = startedAt + boundMs
@@ -231,6 +248,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             }
         }
         while (now() < deadline) {
+            if (synchronized(answerLock) { ownerChangesSeen > ownerChangesAtStart }) return null
             ready()?.let { return it.getOrNull() }
             val count = synchronized(answerLock) { answersSeen }
             if (count > seen) {
@@ -265,7 +283,11 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * explains normally arrives on the far side of one.
      */
     fun clearVerdict() {
-        synchronized(verdictLock) { verdict = null }
+        synchronized(verdictLock) {
+            verdictIntentGeneration += 1
+            verdict = null
+            latest.set(null)
+        }
     }
 
     /** Test seam: what the verdict's staleness bound is measured against. */
@@ -285,6 +307,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         onAcknowledged: (ActionAcknowledgement) -> Unit = {},
     ) {
         end()
+        this.observe = observe
         // `end()` closed the dispatch switch on the generation that just
         // finished. This one is open again; the generation below is what keeps
         // the two apart.
@@ -294,18 +317,22 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
         // this begin — and an old in-flight exchange completing in that window
         // would otherwise carry a previous generation's verdict into this one.
         val generation = synchronized(verdictLock) { ++verdictGeneration }
+        val owner = PlaybackControlCaptureOwner(clientInstanceId, generation)
         synchronized(answerLock) {
             answerGeneration = generation
             answerAction = null
             answerRequestSequence = 0
             answersSeen = 0
+            ownerChangesSeen = 0
         }
         val leaseMs = bootstrap.leaseTimeoutMs
         val subtitleReadiness = SubtitleReadinessRetryState()
+        publish()
         val subject = PlaybackControlReporter.create(
             bootstrap = bootstrap,
             clientInstanceId = clientInstanceId,
-            snapshot = { observe()?.let(PlaybackControlMapping::snapshot) },
+            owner = owner,
+            capture = { latest.get()?.takeIf { it.owner == owner } },
             send = { path, request -> transport.send(path, request) },
             pace = { kotlinx.coroutines.delay(it) },
             now = { System.currentTimeMillis() },
@@ -317,28 +344,41 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             // already honours them; a player acting on them here would be
             // deciding, which is the next slice.
             onExchange = { exchange ->
+                if (exchange.capture.owner != PlaybackControlCaptureOwner(clientInstanceId, generation) ||
+                    latest.get()?.owner != exchange.capture.owner
+                ) {
+                    return@create
+                }
                 // Every exchange advances the counter, including a failed one:
                 // an owner that asked must not wait out its whole bound for an
                 // exchange that has already come back with nothing.
                 synchronized(answerLock) {
                     if (generation == answerGeneration) {
                         answersSeen += 1
+                        if (exchange.failure == "transport:409:owner_changed") {
+                            ownerChangesSeen += 1
+                        }
                         answerAction = exchange.response?.action
                         answerRequestSequence = exchange.request.sequence
                     }
                 }
-                // Recorded always, dispatched only for the generation that
-                // asked. The state machine has to see every sample or its
-                // false-to-true edge is wrong; the *action* must not cross a
-                // reopen, because it disables and re-enables the text track and
-                // a stale one lands on the new session just after `prepare()`,
-                // fighting the override `applyTextSelection` is trying to
-                // place — subtitles dropping out and returning after a stall
-                // recovery, on a session that never reported the edge.
-                val readinessEdge =
-                    subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
-                if (readinessEdge && generation == answerGeneration && dispatching) {
-                    scope.launch { onSubtitleReady() }
+                if (exchange.capture.hasSameIntent(latest.get()) && subtitleReadiness.record(
+                        exchange.response?.delivery?.subtitleReadiness, commitReady = false,
+                    )) {
+                    dispatchSubtitleReady {
+                        // The callback can be queued while begin/end replaces
+                        // the reporter. Check ownership when it executes, not
+                        // when the response merely schedules it.
+                        synchronized(verdictLock) {
+                            if (generation == verdictGeneration &&
+                                exchange.capture.owner == PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration) &&
+                                exchange.intentGeneration == verdictIntentGeneration &&
+                                subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
+                            ) {
+                                onSubtitleReady()
+                            }
+                        }
+                    }
                 }
                 // An acknowledgement rides on the request, so its delivery is
                 // an answer to *this* exchange rather than a separate reply.
@@ -373,9 +413,12 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
                     !action.message.isNullOrEmpty()
                 ) {
                     synchronized(verdictLock) {
-                        if (generation == verdictGeneration) {
+                        if (generation == verdictGeneration &&
+                            exchange.capture.owner == PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration) &&
+                            exchange.intentGeneration == verdictIntentGeneration
+                        ) {
                             verdict = action
-                            verdictArmedAtMs = System.currentTimeMillis()
+                            verdictArmedAtMs = monotonicNowMs()
                             verdictLeaseMs = leaseMs
                         }
                     }
@@ -383,6 +426,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             },
         ) ?: return
         reporter = subject
+        orderingSource = subject
         scope.launch { subject.start(scope) }
     }
 
@@ -392,8 +436,9 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * but replaces what the next exchange will carry.
      */
     fun playerChanged() {
+        val capture = publish() ?: return
         val subject = reporter ?: return
-        scope.launch { subject.notify() }
+        scope.launch { subject.notify(capture) }
     }
 
     /**
@@ -406,15 +451,78 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
      * cadence is unchanged.
      */
     fun reportEvidence() {
+        val capture = publish() ?: return
         val subject = reporter ?: return
-        scope.launch { subject.notifyUrgently(scope) }
+        scope.launch { subject.notifyUrgently(scope, capture) }
     }
 
+    /**
+     * Publish a viewer destination before the media item or server session is
+     * replaced. The pending target lives in [PlaybackIntent], so the snapshot
+     * remains truthful when the replacement reporter starts as well.
+     */
+    suspend fun reportIntent(): Long? {
+        // Read and map on the caller before the first suspension. Controller
+        // actions await this enqueue before touching Media3, so neither a
+        // dispatcher hop nor composition teardown can turn "before" into
+        // "after". The reporter receives an immutable snapshot value.
+        val capture = publish() ?: return null
+        val subject = reporter ?: return null
+        return subject.notifyUrgently(scope, capture)
+    }
+
+    /** Called synchronously by the player dispatcher; never by the reporter. */
+    private fun publish(): PlaybackControlCapture? = synchronized(verdictLock) {
+        val snapshot = observe?.invoke()?.let(PlaybackControlMapping::snapshot)
+        val capture = snapshot?.let {
+            PlaybackControlCapture(
+                it,
+                verdictIntentGeneration,
+                PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
+                ++captureRevision,
+            )
+        }
+        latest.set(capture)
+        capture
+    }
+
+    /**
+     * Stamp the current authority onto a snapshot the caller already holds.
+     *
+     * [publish] cannot serve the teardown exchange: it reads through `observe`,
+     * and the caller closed that observation before calling — deliberately,
+     * because every read past that point is against a player being released.
+     * The identity is still this session's, so it is taken from the same place
+     * [publish] takes it, under the same lock.
+     */
+    private fun captureOf(snapshot: PlaybackControlSnapshot): PlaybackControlCapture =
+        synchronized(verdictLock) {
+            val capture = PlaybackControlCapture(
+                snapshot,
+                verdictIntentGeneration,
+                PlaybackControlCaptureOwner(clientInstanceId, verdictGeneration),
+                ++captureRevision,
+            )
+            latest.set(capture)
+            capture
+        }
+
     fun end() {
+        // Stopping the coroutine is asynchronous. Invalidate every callback
+        // synchronously, including an exchange already returning from HTTP.
         dispatching = false
-        val subject = reporter ?: return
+        val generation = synchronized(verdictLock) {
+            latest.set(null)
+            ++verdictGeneration
+        }
+        synchronized(answerLock) {
+            answerGeneration = generation
+            ownerChangesSeen += 1
+        }
+        val subject = reporter
         reporter = null
-        scope.launch { subject.stop() }
+        observe = null
+        if (subject != null) scope.launch { subject.stop() }
     }
 
     /**
@@ -442,7 +550,35 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
     ) {
         dispatching = false
         val subject = reporter ?: return
+        // Stamped before the invalidation below, from the identity the reporter
+        // was built with — it is answering for that session, not for whatever
+        // replaces it.
+        val settling = captureOf(finalSnapshot)
+        // The same synchronous invalidation [end] performs, and for the same
+        // reason twice over. A reopen calls this and then begins a new session
+        // immediately, so an exchange still returning from HTTP on the old
+        // reporter must not reach a callback that would act on it — least of
+        // all `onPrepare`, which builds a player. The exchange itself survives
+        // the invalidation because a settled reporter reads what it was handed
+        // rather than the slot this empties.
+        //
+        // What does not survive is the delivery callback for the
+        // acknowledgement this carries: it is fenced by the generation being
+        // bumped here, so the acknowledgement stays pending and may ride the
+        // next session's first exchange as well. That duplicate is inert — the
+        // server ignores an `action_id` not bound to the session it arrives on
+        // — and the alternative is leaving a live reporter un-fenced across a
+        // reopen, which is not a trade.
+        val generation = synchronized(verdictLock) {
+            latest.set(null)
+            ++verdictGeneration
+        }
+        synchronized(answerLock) {
+            answerGeneration = generation
+            ownerChangesSeen += 1
+        }
         reporter = null
+        observe = null
         outerScope.launch {
             // `settle`, not `notifyUrgently`. The urgent path deliberately
             // leaves an in-flight exchange alone, because `run()` picks the
@@ -451,7 +587,7 @@ class PlaybackControlSession(private val scope: CoroutineScope) {
             // "straight after it" never arrives, and the coroutine dies inside
             // `send` without ever clearing `inFlight`. Re-homing
             // unconditionally is what makes this path work at all.
-            val handed = subject.settle(outerScope, finalSnapshot)
+            val handed = subject.settle(outerScope, settling)
             val deadline = monotonicNowMs() + FINAL_EXCHANGE_MS
             while (handed && monotonicNowMs() < deadline) {
                 val status = subject.status()

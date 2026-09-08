@@ -1,8 +1,9 @@
 //! User management (admin only). The rules exist to make lockouts
 //! impossible: the last admin can be neither deleted nor demoted, and you
 //! cannot delete yourself. Password resets revoke the target's sessions.
-//! (A forgotten *admin* password is handled by `plurxd reset-password` on
-//! the server console, not by HTTP.)
+//! A forgotten last-admin password currently has no safe console reset path:
+//! the legacy direct-store command is refused because it cannot invalidate
+//! daemon-local recovery proofs. Admins can still reset other users here.
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -12,6 +13,7 @@ use serde::Deserialize;
 use super::dto::UserDto;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
+use super::internal_auth_revocation::ClusterCacheRevocation;
 use crate::state::AppState;
 
 /// GET /api/v1/users (admin)
@@ -71,31 +73,91 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(req): Json<UpdateUser>,
 ) -> Result<Json<UserDto>, ApiError> {
-    let target = state
+    state
         .store
         .get_user(id)
         .await?
         .ok_or(ApiError::NotFound("user"))?;
 
-    if let Some(is_admin) = req.is_admin {
-        // Never demote the last admin — that would orphan the server.
-        if target.is_admin && !is_admin && state.store.count_admins().await? <= 1 {
-            return Err(ApiError::Conflict(
-                "cannot remove admin from the last admin account".into(),
-            ));
-        }
-        state.store.set_admin(id, is_admin).await?;
-    }
-    if let Some(password) = req.password {
-        if password.len() < 8 {
+    let password_hash = match req.password.as_deref() {
+        Some(password) if password.len() < 8 => {
             return Err(ApiError::BadRequest(
                 "password must be at least 8 characters".into(),
             ));
         }
-        let hash = auth::hash_password(&password).map_err(|e| ApiError::Internal(e.to_string()))?;
-        state.store.set_password(id, &hash).await?;
-        // Old sessions die with the old password.
-        state.store.delete_tokens_for_user(id).await?;
+        Some(password) => {
+            Some(auth::hash_password(password).map_err(|e| ApiError::Internal(e.to_string()))?)
+        }
+        None => None,
+    };
+    let needs_revocation = req.is_admin == Some(false) || password_hash.is_some();
+    let mut proof_revocation = if needs_revocation {
+        Some(ClusterCacheRevocation::begin_user(&state, id).await?)
+    } else {
+        None
+    };
+    let combined_promotion = req.is_admin == Some(true) && password_hash.is_some();
+
+    if let (Some(true), Some(hash)) = (req.is_admin, password_hash.as_deref()) {
+        let changed = state
+            .store
+            .promote_user_and_reset_password(
+                id,
+                hash,
+                proof_revocation
+                    .as_ref()
+                    .and_then(ClusterCacheRevocation::mutation_claim),
+            )
+            .await?;
+        if !changed {
+            return Err(ApiError::ServiceUnavailable(
+                "combined promotion lost its cache-revocation exclusion; retry the request".into(),
+            ));
+        }
+    }
+
+    if let Some(is_admin) = req.is_admin.filter(|_| !combined_promotion) {
+        if is_admin {
+            state.store.set_admin(id, true).await?;
+        } else if !state
+            .store
+            .demote_user_preserving_admin(
+                id,
+                proof_revocation
+                    .as_ref()
+                    .and_then(ClusterCacheRevocation::mutation_claim),
+            )
+            .await?
+        {
+            proof_revocation
+                .take()
+                .expect("demotion owns a cache revocation fence")
+                .finish(&state)
+                .await?;
+            return Err(ApiError::Conflict(
+                "cannot remove admin from the last admin account".into(),
+            ));
+        }
+    }
+    if let Some(hash) = password_hash.filter(|_| !combined_promotion) {
+        let changed = state
+            .store
+            .reset_password_and_revoke_tokens(
+                id,
+                &hash,
+                proof_revocation
+                    .as_ref()
+                    .and_then(ClusterCacheRevocation::mutation_claim),
+            )
+            .await?;
+        if !changed {
+            return Err(ApiError::ServiceUnavailable(
+                "password reset lost its cache-revocation exclusion; retry the request".into(),
+            ));
+        }
+    }
+    if let Some(proof_revocation) = proof_revocation {
+        proof_revocation.finish(&state).await?;
     }
 
     let user = state
@@ -123,10 +185,19 @@ pub async fn delete(
             "you cannot delete the account you are signed in with".into(),
         ));
     }
-    if target.is_admin && state.store.count_admins().await? <= 1 {
+    // Tokens and watch state go with the user (ON DELETE CASCADE).
+    let proof_revocation = ClusterCacheRevocation::begin_user(&state, id).await?;
+    if !state
+        .store
+        .delete_user_preserving_admin(id, proof_revocation.mutation_claim())
+        .await?
+    {
+        proof_revocation.finish(&state).await?;
+        if state.store.get_user(id).await?.is_none() {
+            return Err(ApiError::NotFound("user"));
+        }
         return Err(ApiError::Conflict("cannot delete the last admin".into()));
     }
-    // Tokens and watch state go with the user (ON DELETE CASCADE).
-    state.store.delete_user(id).await?;
+    proof_revocation.finish(&state).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

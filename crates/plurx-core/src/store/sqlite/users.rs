@@ -6,7 +6,16 @@ use rusqlite::{params, OptionalExtension};
 use super::{user_from_row, SqliteStore, USER_COLS};
 use crate::domain::User;
 use crate::error::StoreError;
-use crate::store::UserStore;
+use crate::store::{CacheAdminMutationClaim, UserStore};
+
+fn require_standalone_claim(claim: Option<&CacheAdminMutationClaim>) -> Result<(), StoreError> {
+    if claim.is_some() {
+        return Err(StoreError::Database(
+            "cluster cache-admin mutation claim cannot be used by standalone SQLite".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 #[async_trait]
 impl UserStore for SqliteStore {
@@ -101,6 +110,26 @@ impl UserStore for SqliteStore {
         .await
     }
 
+    async fn delete_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        require_standalone_claim(claim)?;
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "DELETE FROM users
+                 WHERE id = ?1
+                   AND (is_admin = 0 OR EXISTS (
+                     SELECT 1 FROM users AS other
+                     WHERE other.is_admin = 1 AND other.id != ?1
+                   ))",
+                params![id],
+            )? > 0)
+        })
+        .await
+    }
+
     async fn count_admins(&self) -> Result<i64, StoreError> {
         self.with_conn(|conn| {
             Ok(
@@ -123,11 +152,73 @@ impl UserStore for SqliteStore {
         .await
     }
 
+    async fn reset_password_and_revoke_tokens(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        require_standalone_claim(claim)?;
+        let password_hash = password_hash.to_owned();
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE users SET password_hash = ?2 WHERE id = ?1",
+                params![id, password_hash],
+            )?;
+            transaction.execute("DELETE FROM tokens WHERE user_id = ?1", params![id])?;
+            transaction.commit()?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn promote_user_and_reset_password(
+        &self,
+        id: i64,
+        password_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        require_standalone_claim(claim)?;
+        let password_hash = password_hash.to_owned();
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE users SET password_hash = ?2, is_admin = 1 WHERE id = ?1",
+                params![id, password_hash],
+            )?;
+            transaction.execute("DELETE FROM tokens WHERE user_id = ?1", params![id])?;
+            transaction.commit()?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
     async fn set_admin(&self, id: i64, is_admin: bool) -> Result<bool, StoreError> {
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE users SET is_admin = ?2 WHERE id = ?1",
                 params![id, is_admin as i64],
+            )? > 0)
+        })
+        .await
+    }
+
+    async fn demote_user_preserving_admin(
+        &self,
+        id: i64,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        require_standalone_claim(claim)?;
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE users SET is_admin = 0
+                 WHERE id = ?1
+                   AND (is_admin = 0 OR EXISTS (
+                     SELECT 1 FROM users AS other
+                     WHERE other.is_admin = 1 AND other.id != ?1
+                   ))",
+                params![id],
             )? > 0)
         })
         .await
@@ -154,6 +245,27 @@ impl UserStore for SqliteStore {
                 params![token_hash, user_id, device],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn create_token_if_password_matches(
+        &self,
+        token_hash: &str,
+        user_id: i64,
+        device: Option<&str>,
+        expected_password_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let token_hash = token_hash.to_owned();
+        let device = device.map(str::to_owned);
+        let expected_password_hash = expected_password_hash.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "INSERT INTO tokens (token_hash, user_id, device) \
+                 SELECT ?1, id, ?2 FROM users \
+                 WHERE id = ?3 AND password_hash = ?4",
+                params![token_hash, device, user_id, expected_password_hash],
+            )? > 0)
         })
         .await
     }
@@ -196,11 +308,21 @@ impl UserStore for SqliteStore {
         })
         .await
     }
+
+    async fn delete_token_with_cache_admin_claim(
+        &self,
+        token_hash: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<bool, StoreError> {
+        require_standalone_claim(claim)?;
+        self.delete_token(token_hash).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::store::{SqliteStore, UserStore};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn user_and_token_lifecycle() {
@@ -250,5 +372,134 @@ mod tests {
             .await
             .expect("resolve")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn password_and_session_revocation_roll_back_together_on_delete_failure() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let user = store
+            .create_user("paul", "old-hash", true)
+            .await
+            .expect("create");
+        store
+            .create_token("old-session", user.id, None)
+            .await
+            .expect("token");
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TEMP TRIGGER reject_token_revocation
+                     BEFORE DELETE ON tokens
+                     BEGIN
+                       SELECT RAISE(ABORT, 'injected token revocation failure');
+                     END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("install fault");
+
+        store
+            .reset_password_and_revoke_tokens(user.id, "new-hash", None)
+            .await
+            .expect_err("token failure must abort the password transaction");
+        assert_eq!(
+            store
+                .get_user(user.id)
+                .await
+                .expect("user query")
+                .expect("user")
+                .password_hash,
+            "old-hash"
+        );
+        assert!(store
+            .user_for_token("old-session")
+            .await
+            .expect("session query")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_combined_promotion_never_authorizes_the_old_session() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let user = store
+            .create_user("viewer", "old-hash", false)
+            .await
+            .expect("create");
+        store
+            .create_token("viewer-session", user.id, None)
+            .await
+            .expect("token");
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TEMP TRIGGER reject_combined_token_revocation
+                     BEFORE DELETE ON tokens
+                     BEGIN
+                       SELECT RAISE(ABORT, 'injected combined update failure');
+                     END;",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("install fault");
+
+        store
+            .promote_user_and_reset_password(user.id, "new-hash", None)
+            .await
+            .expect_err("token failure must abort promotion and password reset");
+        let session_user = store
+            .user_for_token("viewer-session")
+            .await
+            .expect("session query")
+            .expect("old session remains a viewer");
+        assert!(!session_user.is_admin);
+        assert_eq!(session_user.password_hash, "old-hash");
+    }
+
+    #[tokio::test]
+    async fn concurrent_admin_demote_and_delete_preserve_one_administrator() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
+        let first = store
+            .create_user("first", "hash", true)
+            .await
+            .expect("first admin");
+        let second = store
+            .create_user("second", "hash", true)
+            .await
+            .expect("second admin");
+
+        let (first_demote, second_demote) = tokio::join!(
+            store.demote_user_preserving_admin(first.id, None),
+            store.demote_user_preserving_admin(second.id, None),
+        );
+        assert_ne!(
+            first_demote.expect("first demotion"),
+            second_demote.expect("second demotion"),
+            "exactly one concurrent demotion must commit"
+        );
+        assert_eq!(store.count_admins().await.expect("admin count"), 1);
+
+        store
+            .set_admin(first.id, true)
+            .await
+            .expect("restore first admin");
+        store
+            .set_admin(second.id, true)
+            .await
+            .expect("restore second admin");
+        assert_eq!(store.count_admins().await.expect("admin count"), 2);
+
+        let (first_delete, second_delete) = tokio::join!(
+            store.delete_user_preserving_admin(first.id, None),
+            store.delete_user_preserving_admin(second.id, None),
+        );
+        assert_ne!(
+            first_delete.expect("first delete"),
+            second_delete.expect("second delete"),
+            "exactly one concurrent delete must commit"
+        );
+        assert_eq!(store.count_users().await.expect("user count"), 1);
+        assert_eq!(store.count_admins().await.expect("admin count"), 1);
     }
 }

@@ -48,10 +48,11 @@ object PlaybackControlMapping {
             bufferedThroughMs = range.second,
             playbackRate = playbackRate(observation, demand),
             renderState = render,
-            // Only a seek reports a target, and the target *is* the position:
-            // the playhead the viewer asked for, not the one Media3 is still
-            // rendering.
-            seekTargetMs = if (render == RenderState.SEEKING) position else null,
+            // The current playhead and the requested destination are different
+            // facts until the destination is presented. Inferring the target
+            // from Media3's currentPosition made most real seeks report no
+            // intent at all.
+            seekTargetMs = if (render == RenderState.SEEKING) observation.seekTargetMs else null,
             observedDownloadBps = observation.observedDownloadBps?.takeIf { it > 0 },
             selection = observation.selection,
             capabilities = observation.capabilities,
@@ -191,6 +192,8 @@ data class PlayerControlObservation(
     /** The bytes ran out. Not necessarily the title: see [ENDED_SLACK_MS]. */
     val isEnded: Boolean,
     val isSeeking: Boolean,
+    /** Explicit viewer destination, retained above the media-item lifetime. */
+    val seekTargetMs: Long? = null,
     /**
      * True once real playback has begun. Before it, the player is starting
      * however busy it looks.
@@ -299,7 +302,7 @@ fun controlCapabilities(
         // device with a measured hard failure, and a platform-wide `false`
         // throws away two phones that passed. Protocol v1 has no way to say
         // "yes on phones, no on tunneled televisions" — that is a v2 decision
-        // (`docs/M6-IMPLEMENTATION-HANDOFF.md` §3).
+        // (`docs/playback-control/M6-IMPLEMENTATION-HANDOFF.md` §3).
         //
         // Which leaves the narrowest honest answer available today: the person
         // holding the device decides, with the measurements in front of them.

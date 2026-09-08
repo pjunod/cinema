@@ -2,7 +2,7 @@
 //! seeding, and the recorded-date ladder.
 //!
 //! Home video has no metadata provider — the source of truth is what's on
-//! disk. The directory tree *is* the organization (docs/HOMEVIDEO-PLAN.md
+//! disk. The directory tree *is* the organization (docs/features/HOMEVIDEO-PLAN.md
 //! §1.2): `2019/Beach Trip/clip.mp4` becomes a Folder "2019" holding a Folder
 //! "Beach Trip" holding a Video. Loose files at a root stand alone.
 //!
@@ -137,7 +137,7 @@ pub async fn after_record(
 }
 
 /// Seed an item's metadata from `<basename>.nfo` — **at most once, ever**
-/// (docs/HOMEVIDEO-PLAN.md §4.3). Returns whether a sidecar was consumed.
+/// (docs/features/HOMEVIDEO-PLAN.md §4.3). Returns whether a sidecar was consumed.
 ///
 /// Photos never seed: Kodi has no photo NFO convention, so their metadata
 /// comes from EXIF and the filename.

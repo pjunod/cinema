@@ -1,5 +1,5 @@
-use crate::store::state_machine::memory::state_machine::{CacheRequest, CacheResponse};
 use crate::Node;
+use crate::store::state_machine::memory::state_machine::{CacheRequest, CacheResponse};
 #[cfg(feature = "in-memory-snapshots")]
 use std::io::Cursor;
 
