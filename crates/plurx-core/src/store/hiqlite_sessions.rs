@@ -4064,7 +4064,9 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
         let statements = vec![
             // A preparation expires on its own deadline; see the SQLite
-            // backend's maintenance for why nothing else enforces it.
+            // backend's maintenance for why this is the durable enforcement.
+            // (It said "nothing else enforces it" until 2026-09-08; an
+            // in-process timer also fires, for the actor's in-memory slot.)
             (
                 "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
                         publication_ready_at_ms = $2, updated_at_ms = $1

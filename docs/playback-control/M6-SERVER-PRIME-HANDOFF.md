@@ -37,7 +37,8 @@ happen at all:
 
 So **a `GET` of the successor's `playlist_url` answers `503
 media_owner_transition` on every request** while the staged lease is live, and
-`410 media_owner_lost` after the 330-second deadline. A client that builds a
+`410 media_owner_lost` after `PREPARATION_DEADLINE_MS` (330 s, derived —
+see §6 step 1). A client that builds a
 second pipeline on that URL waits out its readiness bound and gives up, every
 time.
 
@@ -73,9 +74,17 @@ is the deadlock.
 
 **Teardown is already solved.** `VodServe::begin_end_detached` writes the
 tombstone and hands off to the terminal cleanup that detaches the reader and
-lets the driver reclaim the producer. It needs wiring into all four exits —
-abort, the 330-second deadline, a refused commit, and `reject_commit` — not
-inventing.
+lets the driver reclaim the producer. It needs wiring into the exits that
+actually tear a successor down, not inventing.
+
+> **Corrected 2026-09-08.** This paragraph used to name "all four exits —
+> abort, the 330-second deadline, a refused commit, and `reject_commit`", and
+> §6 step 1's note gives a *different* four. Both were written from a reading
+> rather than an enumeration, and a document with two incompatible lists of
+> "the four exits" is worse than one with none. The enumeration is in §6 step 1
+> and it is the one to use; this paragraph now points at it instead of
+> competing with it. The deadline is `PREPARATION_DEADLINE_MS`, derived rather
+> than literal — see that note.
 
 ## 3. What the fence is really for, and the one thing that must not change
 
@@ -310,11 +319,20 @@ first.
    > "build the teardown first" means, and it is worth saying plainly because
    > the sentence reads as a present-tense bug.
    >
-   > **"Both refusal branches" undercounts.** Four exits discard a successor:
-   > stage refused by the slot (the durable row is rolled back), commit refused
-   > by the gate (an early return that touches neither store nor slot), commit
-   > refused by the store's CAS, and `reject_commit`. The gate-refusal one is
-   > the easiest to miss precisely because it does nothing else.
+   > **"Both refusal branches" undercounts, and one of them is not a
+   > teardown at all.** Three exits discard a successor: stage refused by the
+   > slot (the durable row is rolled back), commit refused by the store's CAS,
+   > and `reject_commit`. `abort()` is the fourth, named separately in the step
+   > text above.
+   >
+   > The commit-gate refusal is a fifth *exit* and deliberately not a teardown:
+   > `may_commit_preparation_for_owner` is a pure `&self` read, and on refusal
+   > `commit` returns `Refused` having touched neither the store nor the slot.
+   > It fires exactly when the slot no longer holds this successor — the
+   > deadline already aborted it — or the epoch is stale, so wiring
+   > `begin_end_detached` in there would be a candidate double-free rather
+   > than a plugged hole. **Leave it alone**, and do not read the earlier
+   > wording as having missed it.
    >
    > **The constant is `PREPARATION_DEADLINE_MS` in `http/hls.rs`**, derived as
    > `VOD_LEASE_TIMEOUT_MS + 30_000` — there is no literal `330` to grep for,
@@ -328,8 +346,14 @@ first.
    > `PreparationExecutor::abort` is `async` and makes a store round trip —
    > the detached spawn gets that for free and the actor does not. It needs the
    > directive shape `PreparationDirective` already uses, or the actor blocks.
-   > That routing is the part that can blow a 120-180 line estimate, and it is
-   > a design decision rather than a transcription.
+   > That routing is a design decision rather than a transcription, and it is
+   > the part that can blow any estimate of this step. **A scoping pass on
+   > 2026-09-08 put the rest at roughly 120-180 lines** across the constant's
+   > removal, a companion `Instant` on the slot and its construction and match
+   > sites, the `.min(...)`, a new `settle_preparation_deadline_at`, and its
+   > two call sites. That figure is one afternoon's reading and nothing in this
+   > repository corroborates it — treat it as an order of magnitude, not a
+   > budget, and re-derive it before planning around it.
    >
    > **Add the settle to both entry points.** `settle_due_deadlines_at` is
    > `#[cfg(test)]`; production fires through `handle_producer_blocks_at`. A

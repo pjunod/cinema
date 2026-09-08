@@ -3342,7 +3342,11 @@ impl MediaSessionStore for SqliteStore {
             let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
             let retire_before = now_ms.saturating_sub(TAKEOVER_RECOVERY_MS);
             // A preparation expires on **its own deadline**, and this is the
-            // only thing that enforces it.
+            // durable thing that enforces it. (It said "the only thing" until
+            // 2026-09-08; `arm_preparation_deadline` in `http/hls.rs` also
+            // fires, in-process, and its job is the actor's in-memory slot,
+            // which nothing here settles. Neither is the only enforcement and
+            // both are needed.)
             //
             // A staged row sits at the publication sentinel — deliberately, so
             // takeover inventory never mistakes a successor nobody waited for

@@ -6649,12 +6649,17 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
 /// **Correction, 2026-09-08: the store does enforce this bound, and this
 /// paragraph used to say it did not.** It read *"This bound is enforced here,
 /// not by the store. Maintenance retires an expired row only
-/// `TAKEOVER_RECOVERY_MS` after its lease lapses…"*, which was true when it
-/// was written and stopped being true forty-seven minutes earlier: `1d55c976`,
-/// "a preparation expires on its own deadline", landed before `27e77824` added
-/// this comment. `sqlite/sessions.rs` now ends a staged row keyed on
-/// `deadline_ms` directly — *"A preparation expires on **its own deadline**,
-/// and this is the only thing that enforces it"* — and the lease loop refuses
+/// `TAKEOVER_RECOVERY_MS` after its lease lapses…"*, and that was
+/// **already false when it was committed**: `1d55c976`, "a preparation expires
+/// on its own deadline", landed at 02:47:33 and `27e77824`, which added this
+/// paragraph, at 04:14:45 the same morning — eighty-seven minutes later. The
+/// belief was true when its author formed it; the tree moved underneath them
+/// before they wrote it down, which is the ordinary way a comment is born
+/// wrong rather than a way it goes stale.
+///
+/// `sqlite/sessions.rs` ends a staged row keyed on `deadline_ms` directly, and
+/// `hiqlite_sessions.rs` mirrors it — *"A preparation expires on **its own
+/// deadline**"* — and the lease loop refuses
 /// to renew any incarnation carrying a preparation row, so the deadline cannot
 /// be postponed.
 ///
