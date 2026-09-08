@@ -16,7 +16,9 @@ use sha2::{Digest, Sha256};
 use super::{
     EffectiveRateControl, Encoder, OutputGrade, Pipeline, SubtitleBurn, ToneMap, TranscodeOptions,
 };
-use crate::domain::{DolbyVisionFacts, MediaFile};
+use crate::domain::{
+    ContinuationDecodeRestriction, DecodeRestrictionError, DolbyVisionFacts, MediaFile,
+};
 
 const MAX_FACT_TOKEN_BYTES: usize = 128;
 const MAX_DECODER_NAME_BYTES: usize = 128;
@@ -120,6 +122,56 @@ impl DecodeBackend {
             Self::Cuda => "cuda",
             Self::Qsv => "qsv",
             Self::Vaapi => "vaapi",
+        }
+    }
+
+    /// Every backend, in declaration order.
+    ///
+    /// Exhaustiveness is not something the compiler can check about an array,
+    /// so it is checked by a test that matches exhaustively over the variants:
+    /// adding one fails to compile there, and the arm it makes you write is
+    /// the reminder to extend this list and [`Self::parse`] with it.
+    pub const ALL: [Self; 5] = [
+        Self::Software,
+        Self::VideoToolbox,
+        Self::Cuda,
+        Self::Qsv,
+        Self::Vaapi,
+    ];
+
+    /// The exact inverse of [`Self::name`], and no more than that.
+    ///
+    /// A durable continuation restriction stores backend names as strings, so
+    /// something has to turn one back into a backend. `None` is the only
+    /// answer for a name this build does not know — never a default, never the
+    /// nearest match, never a case-insensitive or trimmed match.
+    ///
+    /// **This inverts [`Self::name`], which is not the only string form this
+    /// type has.** The `serde` derive renames variants to snake_case, so
+    /// `VideoToolbox` serializes as `video_toolbox` while `name` spells it
+    /// `videotoolbox`. Both are stored somewhere. A record whose backend field
+    /// was filled from the serde form rather than from `name` will not parse
+    /// here, and the round-trip test pins both spellings so that divergence
+    /// stays deliberate rather than becoming a surprise at the writer.
+    ///
+    /// Deliberately not `FromStr`. The names are a stored wire vocabulary
+    /// rather than a user-facing spelling, and a trait implementation invites
+    /// `"Software".parse()` and `" software".parse()` to be expected to work.
+    pub fn parse(name: &str) -> Option<Self> {
+        // A string match, matching `Encoder::parse` and
+        // `ProducerRecoveryState::parse`. An earlier draft used a search over
+        // an array literal and claimed in its own comment that a new variant
+        // would fail to compile here. It would not. `name` is an exhaustive
+        // match, so the compiler forces a spelling to be *written* and never
+        // forces it to be *readable* — which would leave a build refusing
+        // records naming a backend it runs perfectly well.
+        match name {
+            "software" => Some(Self::Software),
+            "videotoolbox" => Some(Self::VideoToolbox),
+            "cuda" => Some(Self::Cuda),
+            "qsv" => Some(Self::Qsv),
+            "vaapi" => Some(Self::Vaapi),
+            _ => None,
         }
     }
 }
@@ -1560,6 +1612,63 @@ impl AttemptRestrictions {
             excluded: BTreeSet::new(),
             required: Some(backend),
         }
+    }
+
+    /// The restriction a durable continuation record asks for.
+    ///
+    /// [`ContinuationDecodeRestriction`] stores both backends as strings and
+    /// its own validation deliberately does not check that either names a real
+    /// decoder — it checks length, and that the required backend differs from
+    /// the failed one, because "require the backend that just failed" is a
+    /// loop rather than a restriction. Turning the record into a selection
+    /// input is where a name has to mean something.
+    ///
+    /// **Only the required name has to parse.** An earlier draft refused on
+    /// the failed one too, reasoning that a record naming a decoder family
+    /// this build has never heard of was written by a build that knew
+    /// something this one does not. That is true and it is not a reason to
+    /// refuse, because the failed name is never used: the returned value is
+    /// `requiring(required)`, and `requiring` is strictly narrower than
+    /// automatic selection. These records are explicitly cross-node, a new
+    /// backend name is not a schema change so `version` does not bump, and the
+    /// case is therefore an ordinary rolling upgrade — a newer node writes
+    /// `failed_backend: "<something new>", required_backend: "software"`, the
+    /// playback moves to an older node, and refusing there would restore
+    /// hardware decode for a source that already failed on hardware. That is
+    /// the exact loop this record exists to stop, reached by being careful.
+    ///
+    /// An unreadable *required* name is still a refusal rather than an
+    /// absence, for the same reason stated the other way round: there is no
+    /// safe substitute for the answer.
+    ///
+    /// **This does not check that the restriction applies to the plan.** A
+    /// record carries `source_revision_digest`, `input_video_stream`,
+    /// `input_codec` and `policy_revision` precisely so a caller can refuse to
+    /// apply one written about a different source, a different stream, or
+    /// under a policy snapshot that has since moved. All four comparisons
+    /// belong at the call site, which is the only place those facts are known.
+    /// A caller that skips them restricts the wrong thing, or inherits a stale
+    /// policy silently.
+    ///
+    /// **Nor does it check that this node can run what the record requires.**
+    /// A record may legitimately require a hardware backend, and a node
+    /// without that capability gets `PlanError::CapabilityUnavailable` with no
+    /// software rescue — the fallback branches are all gated on the
+    /// restriction permitting software, which a hardware requirement does not.
+    /// That is fail-closed and correct, and it is permanent for as long as the
+    /// record stands, so a caller placing one is choosing that.
+    pub fn for_continuation(
+        restriction: &ContinuationDecodeRestriction,
+    ) -> Result<Self, DecodeRestrictionError> {
+        let required = DecodeBackend::parse(&restriction.required_backend).ok_or_else(|| {
+            DecodeRestrictionError::UnknownBackend(restriction.required_backend.clone())
+        })?;
+        // `requiring` rather than `excluding(failed)`: the required form is
+        // the branch `resolve_transcode` reads first, and it names the
+        // successor outright instead of leaving preference order to decide
+        // what is left. An exclusion would also permit a third backend that
+        // nobody measured.
+        Ok(Self::requiring(required))
     }
 
     fn permits(&self, backend: DecodeBackend) -> bool {

@@ -2429,6 +2429,53 @@ two-sided — reserve the durable budget and install the restricted recipe when
 one is available, fall to the permanent verdict only when it is not. Seams 4,
 5, 6, 7 and 9 are all still open.
 
+### M5c2a, merged: seam 5, and what the review took out of it
+
+The durable restriction stores both backends as strings, and
+`ContinuationDecodeRestriction::validate` deliberately checks only length and
+that the required backend differs from the failed one. Nothing turned a record
+into the `AttemptRestrictions` that plan resolution consumes, so the column
+could be written and never applied. `DecodeBackend::parse` and
+`AttemptRestrictions::for_continuation` close that.
+
+Two of the review's findings are worth keeping here rather than only in the
+diff, because both were arguments that sounded careful and were wrong.
+
+**The first draft claimed a compile-time guarantee it did not have.** Its
+`parse` searched an array literal and its own comment said a new backend would
+fail to compile there. It would not — and the failure would have been
+asymmetric in the worst direction: `name` *is* an exhaustive match, so the
+compiler forces a new variant's spelling to be **written** and never forces it
+to be **readable**. A build would refuse records naming a backend it runs
+perfectly well. The parse is now an ordinary string match, matching
+`Encoder::parse` and `ProducerRecoveryState::parse`, and the exhaustiveness
+claim moved to a test that matches over the variants, where it is true.
+
+**And it refused a record it should have honoured.** The draft refused when
+either name was unparseable, reasoning that a record from a build that knew
+more should not be half-honoured. But the failed name is never used — the
+answer is `requiring(required)` — and these records are explicitly cross-node.
+A new backend name is not a schema change, so `version` does not bump and an
+older node really does see the record. The case is an ordinary rolling
+upgrade: a newer node writes `failed_backend` naming something new and
+`required_backend: "software"`, the playback moves to an older node, and
+refusing there restores hardware decode for a source that already failed on
+hardware. That is the loop the record exists to stop, reached by being
+careful. Only the required name is refused now.
+
+The review also produced `DecodeRestrictionError::UnknownBackend`, because
+`InvalidField` means *the stored record is malformed* everywhere else and a
+record that reaches this conversion has already passed `decode`. An operator
+diagnosing a mixed-version fleet needs to be told "newer", not "invalid".
+
+Still owed by the conversion's callers, and documented on it rather than
+enforced: the four identity comparisons (`source_revision_digest`,
+`input_video_stream`, `input_codec`, `policy_revision`) that decide whether a
+record applies to the plan at all, and the fact that a record requiring a
+hardware backend on a node without it is a permanent `CapabilityUnavailable`
+with no software rescue — fail-closed and correct, and a choice the caller is
+making.
+
 ### What must not be assumed on the way
 
 The restriction is durable and applies to *every* later continuation, so the
