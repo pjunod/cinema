@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
@@ -56,6 +56,10 @@ const DEFAULT_GUIDE_HOURS: u8 = 24;
 const MIN_GUIDE_HOURS: u8 = 4;
 const MAX_GUIDE_HOURS: u8 = 72;
 const MAX_XMLTV_URL_BYTES: usize = 1024;
+/// An ingress remembers the owner's answer for this long, so a click-storm on
+/// a busy page is not a relay-storm on the owner. It is deliberately shorter
+/// than the refresh interval: this bounds fan-out, it does not add staleness
+/// the owner has not already accounted for.
 const RELAY_GUIDE_MEMORY: Duration = Duration::from_secs(60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const TUNER_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -291,12 +295,93 @@ pub(crate) fn validate_xmltv_url(value: &str) -> Result<reqwest::Url, LiveTvErro
             "XMLTV URL must not carry a username or password".to_owned(),
         ));
     }
-    if url.host_str().is_none_or(str::is_empty) {
+    let Some(host) = url.host_str().filter(|host| !host.is_empty()) else {
         return Err(LiveTvError::InvalidConfig(
             "XMLTV URL must name a host".to_owned(),
         ));
+    };
+    // A literal is decided here and now. A name cannot be — what it resolves
+    // to is only known at fetch time, which is where `resolve_permitted_addrs`
+    // decides it.
+    if let Some(address) = host_ip_literal(host) {
+        validate_guide_fetch_addr(address)?;
     }
     Ok(url)
+}
+
+/// The host as an address, when it is one. `Url` normalises every IPv4
+/// spelling to the canonical dotted form and brackets IPv6, so this sees the
+/// same destination the connection would.
+fn host_ip_literal(host: &str) -> Option<IpAddr> {
+    host.strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse::<IpAddr>()
+        .ok()
+}
+
+/// Where an operator-supplied guide URL is allowed to point.
+///
+/// This is an admin-only setting, but "admin of plurx" must not widen into
+/// "read any HTTP service this node can reach". A LAN address is the whole
+/// point — the XMLTV document usually lives on another node — so private
+/// space stays open, and what closes is the machine's own view of itself:
+/// loopback, where plurx's unauthenticated internal listeners live, and
+/// link-local, which carries the cloud metadata endpoint.
+fn validate_guide_fetch_addr(address: IpAddr) -> Result<(), LiveTvError> {
+    let refused = match address {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Link-local (fe80::/10), and the IPv4-mapped form of anything
+                // refused above: a mapped 127.0.0.1 is loopback in a different
+                // notation, not a different destination.
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| validate_guide_fetch_addr(IpAddr::V4(mapped)).is_err())
+        }
+    };
+    if refused {
+        return Err(LiveTvError::InvalidConfig(
+            "XMLTV URL must not point at this machine or at link-local space; use a LAN or public address".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the URL's host and refuse the fetch unless **every** answer is
+/// permitted, then hand the checked addresses back so the request is pinned to
+/// them. Checking and then letting reqwest resolve again would leave the gap
+/// this closes: a name that answers with a LAN address for the check and
+/// loopback for the connection.
+async fn resolve_permitted_addrs(url: &reqwest::Url) -> Result<Vec<SocketAddr>, LiveTvError> {
+    let host = url.host_str().unwrap_or_default().to_owned();
+    if host.is_empty() || host_ip_literal(&host).is_some() {
+        return Ok(Vec::new());
+    }
+    let port = url.port_or_known_default().unwrap_or(80);
+    let resolved = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|_| LiveTvError::DeviceUnavailable("the XMLTV host did not resolve".to_owned()))?
+        .collect::<Vec<_>>();
+    if resolved.is_empty() {
+        return Err(LiveTvError::DeviceUnavailable(
+            "the XMLTV host did not resolve".to_owned(),
+        ));
+    }
+    for candidate in &resolved {
+        validate_guide_fetch_addr(candidate.ip())?;
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn parse_device_ipv4(value: &str) -> Result<Option<Ipv4Addr>, LiveTvError> {
@@ -1004,7 +1089,18 @@ struct GuideCacheState {
     cached: Option<CachedGuide>,
     /// Kept separately from the cache so a refresh that failed while a good
     /// cache is still warm reports the failure without discarding the answer.
-    last_error: Option<String>,
+    /// Scoped to the generation it happened under: an error from the previous
+    /// configuration is not a fact about the current one.
+    last_error: Option<(i64, String)>,
+}
+
+impl GuideCacheState {
+    fn error_for(&self, generation: i64) -> Option<String> {
+        self.last_error
+            .as_ref()
+            .filter(|(recorded, _)| *recorded == generation)
+            .map(|(_, message)| message.clone())
+    }
 }
 
 /// Programme titles by guide number, each row a `(start, end, title)` span.
@@ -1042,7 +1138,11 @@ impl GuideCache {
             .filter(|cached| cached.generation == config.generation)
             .filter(|cached| now.duration_since(cached.observed) <= guide::GUIDE_STALE_TTL)
         else {
-            return LiveTvGuide::unavailable(config.guide_source, window, state.last_error.clone());
+            return LiveTvGuide::unavailable(
+                config.guide_source,
+                window,
+                state.error_for(config.generation),
+            );
         };
         let age = now.duration_since(cached.observed);
         let mut guide = cached.guide.clipped(&window);
@@ -1053,13 +1153,13 @@ impl GuideCache {
         } else {
             GuideFreshness::Stale
         };
-        guide.refresh_error = state.last_error.clone();
+        guide.refresh_error = state.error_for(config.generation);
         guide
     }
 
     /// A completed refresh. A failure keeps the previous cache and records the
     /// error; only a success replaces the content.
-    async fn store(&self, generation: i64, result: Result<LiveTvGuide, LiveTvError>) {
+    async fn store(&self, generation: i64, result: &Result<LiveTvGuide, LiveTvError>) {
         let mut state = self.state.lock().await;
         match result {
             Ok(guide) => {
@@ -1067,11 +1167,13 @@ impl GuideCache {
                     generation,
                     observed: tokio::time::Instant::now(),
                     fetched_at: unix_seconds(),
-                    guide,
+                    guide: guide.clone(),
                 });
                 state.last_error = None;
             }
-            Err(error) => state.last_error = Some(guide::sanitize_refresh_error(&error)),
+            Err(error) => {
+                state.last_error = Some((generation, guide::sanitize_refresh_error(error)))
+            }
         }
     }
 
@@ -2057,17 +2159,32 @@ impl LiveTvManager {
         } else {
             None
         };
-        // The cache is matched against a lineup, so a refresh needs one. The
-        // *cached* lineup is fine and deliberate: a guide refresh must never
-        // be a reason to talk to the tuner.
-        let snapshot = self.local_snapshot(config, false, false).await?;
-        let result = self.fetch_guide(config, &snapshot.channels).await;
+        // The cache is matched against a lineup, so a refresh needs one — but
+        // the *cached* one, and only the cached one. Asking `local_snapshot`
+        // for it hits the device whenever the 30 s lineup TTL has expired,
+        // which at a 20-minute cadence is every single time; an XMLTV guide
+        // then failed outright whenever the tuner was switched off, having
+        // never reached the XMLTV URL. A guide refresh must never be a reason
+        // to talk to the tuner, and now it cannot be.
+        let channels = self.cached_lineup(config).await;
+        // A cold lineup is not a guide with no programmes — it is a refresh
+        // that cannot be matched yet. Fetching anyway produces an empty guide
+        // and *stores* it, replacing a good cache with nothing and reporting
+        // `matched_channels: 0` as if the source were at fault. Refusing here
+        // keeps whatever is cached; the loop comes back in a minute.
+        if channels.is_empty() {
+            self.metrics
+                .observe_guide_refresh(config.guide_source, "cold_lineup");
+            return Err(LiveTvError::DeviceUnavailable(
+                "the channel lineup has not been read yet on this node; open Live TV once, or wait a minute, and the guide fills in"
+                    .to_owned(),
+            ));
+        }
+        let result = self.fetch_guide(config, &channels).await;
         let outcome = if result.is_ok() { "ok" } else { "error" };
         self.metrics
             .observe_guide_refresh(config.guide_source, outcome);
-        self.guide_cache
-            .store(config.generation, result.clone())
-            .await;
+        self.guide_cache.store(config.generation, &result).await;
         // A failed refresh keeps the previous titles for as long as the cache
         // behind them is still served.
         if let Ok(guide) = &result {
@@ -2075,6 +2192,19 @@ impl LiveTvManager {
             self.publish_guide_titles(guide);
         }
         result
+    }
+
+    /// The lineup the guide is matched against, read from the snapshot cache
+    /// without ever refreshing it. An empty answer is a refresh that has to
+    /// wait, not a guide with no channels.
+    async fn cached_lineup(&self, config: &LiveTvConfig) -> Vec<LiveTvChannel> {
+        let state = self.cache.state.lock().await;
+        state
+            .snapshot
+            .as_ref()
+            .filter(|cached| cached.generation == config.generation)
+            .map(|cached| cached.snapshot.channels.clone())
+            .unwrap_or_default()
     }
 
     async fn fetch_guide(
@@ -2097,6 +2227,12 @@ impl LiveTvManager {
             }
             GuideSource::Xmltv => {
                 let url = validate_xmltv_url(&config.xmltv_url)?;
+                let pinned = resolve_permitted_addrs(&url).await?;
+                let client = if pinned.is_empty() {
+                    client.clone()
+                } else {
+                    self.pinned_guide_client(&url, &pinned)?
+                };
                 let body = fetch_bounded(
                     &client,
                     url,
@@ -2205,12 +2341,7 @@ impl LiveTvManager {
             .then(|| guide.clone())
     }
 
-    pub(crate) async fn remember_relayed_guide(
-        &self,
-        generation: i64,
-        guide: LiveTvGuide,
-        _memory: Duration,
-    ) {
+    pub(crate) async fn remember_relayed_guide(&self, generation: i64, guide: LiveTvGuide) {
         *self.relayed_guide.lock().await = Some((generation, tokio::time::Instant::now(), guide));
     }
 
@@ -2245,6 +2376,28 @@ impl LiveTvManager {
     /// A dedicated client: the guide's deadline is its own, and unlike the
     /// tuner client it talks to a *public* host, which is where an unrefused
     /// redirect would otherwise carry the credential somewhere else.
+    /// The guide client, but able to reach the host only at the addresses
+    /// `resolve_permitted_addrs` approved. Redirects are already refused, so
+    /// this is the last hop as well as the first.
+    fn pinned_guide_client(
+        &self,
+        url: &reqwest::Url,
+        addrs: &[SocketAddr],
+    ) -> Result<reqwest::Client, LiveTvError> {
+        let host = url.host_str().unwrap_or_default().to_owned();
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(guide::GUIDE_FETCH_TIMEOUT)
+            .user_agent(concat!("plurx/", env!("CARGO_PKG_VERSION")))
+            .resolve_to_addrs(&host, addrs)
+            .build()
+            .map_err(|error| {
+                LiveTvError::DeviceUnavailable(format!("building guide HTTP client: {error}"))
+            })
+    }
+
     fn guide_client(&self) -> Result<reqwest::Client, LiveTvError> {
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -2263,6 +2416,7 @@ impl LiveTvManager {
     /// and only while a source is configured, and it re-reads settings each
     /// tick so turning the guide on or off takes effect without a restart.
     pub(crate) async fn guide_refresh_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        let mut delay = guide::GUIDE_REFRESH_INTERVAL;
         loop {
             if let Ok(config) = self.config().await {
                 let ours = config.owner_node_id == self.node_id;
@@ -2276,21 +2430,33 @@ impl LiveTvManager {
                     self.clear_guide_titles();
                 }
                 if ours && config.guide_fetches() && self.serving.admit().is_some() {
-                    if let Err(error) = self.refresh_guide(&config, false).await {
-                        tracing::warn!(
-                            source = config.guide_source.as_str(),
-                            code = error.code(),
-                            "programme guide refresh failed on the tuner owner"
-                        );
+                    match self.refresh_guide(&config, false).await {
+                        Ok(_) => delay = guide::GUIDE_REFRESH_INTERVAL,
+                        Err(error) => {
+                            // Only a cold lineup comes back sooner. Every other
+                            // failure is the source or the network, and retrying
+                            // either a minute apart helps nobody.
+                            delay = if self.cached_lineup(&config).await.is_empty() {
+                                guide::GUIDE_COLD_LINEUP_RETRY
+                            } else {
+                                guide::GUIDE_REFRESH_INTERVAL
+                            };
+                            tracing::warn!(
+                                source = config.guide_source.as_str(),
+                                code = error.code(),
+                                "programme guide refresh failed on the tuner owner"
+                            );
+                        }
                     }
                 } else {
+                    delay = guide::GUIDE_REFRESH_INTERVAL;
                     self.metrics
                         .observe_guide_refresh(config.guide_source, "skipped");
                 }
             }
             tokio::select! {
                 _ = shutdown.cancelled() => return,
-                _ = tokio::time::sleep(guide::GUIDE_REFRESH_INTERVAL) => {}
+                _ = tokio::time::sleep(delay) => {}
             }
         }
     }
@@ -6000,7 +6166,7 @@ exec /bin/cat >/dev/null
             "an empty cache is unavailable, not an error"
         );
 
-        cache.store(4, Ok(guide_with(2, 2, 8))).await;
+        cache.store(4, &Ok(guide_with(2, 2, 8))).await;
         assert_eq!(
             cache.read(&config, window.clone()).await.freshness,
             GuideFreshness::Fresh
@@ -6017,7 +6183,7 @@ exec /bin/cat >/dev/null
         cache
             .store(
                 4,
-                Err(LiveTvError::DeviceUnavailable("the tuner is asleep".into())),
+                &Err(LiveTvError::DeviceUnavailable("the tuner is asleep".into())),
             )
             .await;
         let after_failure = cache.read(&config, window.clone()).await;
@@ -6036,7 +6202,7 @@ exec /bin/cat >/dev/null
             "past the stale window a confidently wrong grid is worse than none"
         );
 
-        cache.store(4, Ok(guide_with(2, 2, 8))).await;
+        cache.store(4, &Ok(guide_with(2, 2, 8))).await;
         config.generation = 5;
         assert_eq!(
             cache.read(&config, window).await.freshness,
@@ -6083,6 +6249,163 @@ exec /bin/cat >/dev/null
             .is_err());
     }
 
+    #[test]
+    fn xmltv_text_survives_entities_and_cdata_because_real_grabbers_emit_both() {
+        let lineup = guide_lineup();
+        let body = br#"<tv>
+          <channel id="c1"><display-name>7.1</display-name></channel>
+          <programme start="20260907200000 -0400" stop="20260907203000 -0400" channel="c1">
+            <title>Tom &amp; Jerry</title>
+            <sub-title><![CDATA[Cat & Mouse: "the chase"]]></sub-title>
+            <desc>Fast &lt;and&gt; loud &#8212; very.</desc>
+            <episode-num system="onscreen">S00E05</episode-num>
+          </programme>
+        </tv>"#;
+        let channels = guide::parse_xmltv(body, &lineup).expect("xmltv document");
+        let row = &channels[0].programmes[0];
+        assert_eq!(
+            row.title, "Tom & Jerry",
+            "an entity is its own event; reading only text events truncated the title at it"
+        );
+        assert_eq!(
+            row.episode_title.as_deref(),
+            Some("Cat & Mouse: \"the chase\""),
+            "CDATA is character data too, and was being dropped entirely"
+        );
+        assert_eq!(row.synopsis.as_deref(), Some("Fast <and> loud — very."));
+        assert_eq!(
+            row.episode.as_deref(),
+            Some("S0E5"),
+            "S00E05 is how every source spells a special; trimming zeros first dropped it"
+        );
+    }
+
+    #[test]
+    fn text_bounds_are_the_bytes_the_contract_states_not_characters() {
+        // The contract's limits are byte limits, and the guide host is
+        // untrusted: 256 CJK characters is 768 bytes.
+        let wide = "\u{6f22}".repeat(400);
+        let bounded = guide::bounded_text(Some(wide), 256).expect("some text survives");
+        assert!(bounded.len() <= 256, "bounded by bytes, not characters");
+        assert!(
+            bounded.chars().all(|c| c == '\u{6f22}'),
+            "and never split mid-character"
+        );
+    }
+
+    #[test]
+    fn a_guide_far_over_the_cap_is_trimmed_rather_than_emptied() {
+        // Headroom that scaled with the overshoot asked to drop nine times the
+        // cap's worth of rows and returned an empty grid — the one outcome the
+        // clip exists to prevent.
+        let huge = guide_with(200, 120, 700);
+        let clipped = huge.clipped(&GuideWindow {
+            start: 0,
+            end: i64::from(u32::MAX),
+        });
+        let encoded = serde_json::to_vec(&clipped).expect("json").len();
+        assert!(encoded <= guide::MAX_GUIDE_RESPONSE_BYTES);
+        assert_eq!(
+            clipped.channels.len(),
+            200,
+            "channels are never dropped, only the furthest-out programmes"
+        );
+        assert!(
+            clipped.total_programmes() > 0,
+            "a guide well over the cap still answers with a readable grid"
+        );
+    }
+
+    #[test]
+    fn an_xmltv_url_may_reach_the_lan_but_not_this_machine_or_link_local_space() {
+        // The LAN is the point: the plan's own acceptance puts the XMLTV
+        // document on another node.
+        for allowed in [
+            "http://192.168.4.7:8080/guide.xml",
+            "http://10.1.2.3/xmltv.gz",
+            "https://guide.example.com/xmltv.xml",
+            "http://[2001:db8::5]/g.xml",
+        ] {
+            assert!(
+                validate_xmltv_url(allowed).is_ok(),
+                "{allowed} is a destination an operator legitimately has"
+            );
+        }
+        // Admin of plurx must not widen into reading this node's own
+        // unauthenticated internal listeners, or cloud metadata.
+        for refused in [
+            "http://127.0.0.1:3000/_internal/v1/live-tv/snapshot",
+            "http://127.1/x.xml",
+            "http://0.0.0.0/x.xml",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/x.xml",
+            "http://[::ffff:127.0.0.1]/x.xml",
+            "http://[fe80::1]/x.xml",
+            "http://255.255.255.255/x.xml",
+            "http://239.1.1.1/x.xml",
+        ] {
+            assert!(
+                validate_xmltv_url(refused).is_err(),
+                "{refused} points at this machine or at link-local space"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_name_that_resolves_to_loopback_is_refused_at_fetch_time() {
+        // The literal check cannot see through a name, so the fetch resolves
+        // first and refuses on the answer.
+        let url = validate_xmltv_url("http://localhost:8080/guide.xml").expect("a name parses");
+        let error = resolve_permitted_addrs(&url)
+            .await
+            .expect_err("localhost is this machine");
+        assert!(matches!(error, LiveTvError::InvalidConfig(_)));
+
+        // A literal needs no resolution and pins nothing.
+        let literal = validate_xmltv_url("http://192.168.4.7/guide.xml").expect("a literal parses");
+        assert!(resolve_permitted_addrs(&literal)
+            .await
+            .expect("a permitted literal")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_no_cached_lineup_refuses_rather_than_storing_an_empty_guide() {
+        let root = crate::test_tempdir().expect("scratch root");
+        let manager = test_manager(root.path());
+        seed_test_config(manager.as_ref()).await;
+        let mut config = manager.config().await.expect("config");
+        config.guide_source = GuideSource::Xmltv;
+        config.xmltv_url = "http://192.168.4.7/guide.xml".to_owned();
+        config.owner_node_id = manager.node_id.clone();
+
+        // A good guide is cached and the lineup cache is cold — the state a
+        // freshly restarted owner is in before anyone opens Live TV.
+        manager
+            .guide_cache
+            .store(config.generation, &Ok(guide_with(2, 2, 8)))
+            .await;
+
+        let error = manager
+            .refresh_guide(&config, false)
+            .await
+            .expect_err("a cold lineup is not something to fetch against");
+        assert!(
+            format!("{error}").contains("lineup"),
+            "the operator is told what is missing, not that the source failed"
+        );
+
+        // And crucially the good guide survived: fetching anyway matched
+        // nothing and stored the empty result over it.
+        let window = GuideWindow {
+            start: 0,
+            end: i64::from(u32::MAX),
+        };
+        let served = manager.guide_cache.read(&config, window).await;
+        assert_eq!(served.channels.len(), 2);
+        assert_eq!(served.matched_channels, 2);
+    }
+
     #[tokio::test]
     async fn a_guide_never_carries_deviceauth_into_anything_that_leaves_the_owner() {
         let root = crate::test_tempdir().expect("scratch root");
@@ -6092,11 +6415,35 @@ exec /bin/cat >/dev/null
         config.guide_source = GuideSource::HdHomeRun;
 
         let secret = "SECRET-DEVICE-AUTH-VALUE";
-        let mut guide = guide_with(1, 1, 8);
-        guide.channels[0].programmes[0].title = "City Beat".into();
+
+        // The credential is genuinely in flight on the real request path.
+        // Asserting that first is what makes every absence below mean
+        // something: a test that only searched a guide the secret was never
+        // put into would pass with every credential precaution deleted.
+        let request = guide::guide_request_url(secret, Some("7.1"), Some(1_789_000_800))
+            .expect("guide request url");
+        assert!(
+            request.as_str().contains(secret),
+            "the credential really is a query parameter of the outbound fetch"
+        );
+
+        // And the guide under test is what that credentialed fetch produced,
+        // parsed by the shipping parser, rather than a hand-built value.
+        let lineup = guide_lineup();
+        let body = br#"[
+          {"GuideNumber":"7.1","GuideName":"WABC","Affiliate":"ABC",
+           "Guide":[{"StartTime":1789000800,"EndTime":1789002600,"Title":"City Beat",
+                     "Synopsis":"A rebuild."}]}
+        ]"#;
+        let channels =
+            guide::parse_hdhomerun_guide(body, &guide_by_number(&lineup)).expect("guide document");
+        let mut guide = guide_with(0, 0, 0);
+        guide.matched_channels = channels.len();
+        guide.lineup_channels = lineup.len();
+        guide.channels = channels;
         manager
             .guide_cache
-            .store(config.generation, Ok(guide))
+            .store(config.generation, &Ok(guide))
             .await;
 
         let served = manager
@@ -6118,6 +6465,46 @@ exec /bin/cat >/dev/null
         assert!(settings
             .values()
             .all(|value| !value.contains(secret) && !value.contains("DeviceAuth")));
+
+        // The relay is the one path that copies a guide off this node, so it
+        // must be clean for the same reason — asserted on the value the relay
+        // actually holds, not on a copy of it.
+        manager
+            .remember_relayed_guide(config.generation, served.clone())
+            .await;
+        let relayed = manager
+            .relayed_guide(config.generation)
+            .await
+            .expect("relayed guide");
+        let relayed_json = serde_json::to_string(&relayed).expect("relay json");
+        assert!(!relayed_json.contains(secret));
+        assert!(!relayed_json.contains("DeviceAuth"));
+
+        // Failure copy is the other way a URL escapes. Every message the fetch
+        // path can produce is a fixed sentence, so a failed refresh recorded
+        // against this generation says nothing about the request it made.
+        manager
+            .guide_cache
+            .store(
+                config.generation,
+                &Err(LiveTvError::DeviceUnavailable(
+                    "HDHomeRun device request failed".to_owned(),
+                )),
+            )
+            .await;
+        let after_failure = manager
+            .local_guide(
+                &config,
+                GuideWindow {
+                    start: 0,
+                    end: i64::from(u32::MAX),
+                },
+            )
+            .await;
+        let failure_json = serde_json::to_string(&after_failure).expect("failure json");
+        assert!(!failure_json.contains(secret));
+        assert!(!failure_json.contains("DeviceAuth"));
+        assert!(!failure_json.contains("api.hdhomerun.com"));
     }
 
     #[tokio::test]

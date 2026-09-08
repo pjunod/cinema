@@ -2278,8 +2278,17 @@ pub async fn update_settings(
             transition_drain_before = 0;
         }
         if current.enabled && req.live_tv_enabled == Some(false) {
-            transition_from_owner_node_id = current.owner_node_id.clone();
-            transition_drain_before = next_generation;
+            // Never overwrite a barrier that is still standing. The drain
+            // above clears it on success; if it is still here, an *earlier*
+            // owner was never drained and may still be holding the tuner.
+            // Replacing that record with the current owner erases the only
+            // evidence of it, and the recovery proof then names the wrong
+            // node. Keep the older, unresolved one — it is the one that
+            // matters.
+            if transition_from_owner_node_id.is_empty() {
+                transition_from_owner_node_id = current.owner_node_id.clone();
+                transition_drain_before = next_generation;
+            }
         }
 
         let candidate = crate::live_tv::LiveTvConfig {
@@ -2300,6 +2309,19 @@ pub async fn update_settings(
         candidate
             .validate_static()
             .map_err(super::live_tv::api_error)?;
+        // The one enable-time refusal that is structural rather than
+        // advisory. `validate_static` checks the barrier is *well-formed*,
+        // never that it is *resolved* — so with readiness demoted to advice,
+        // nothing else stood between an operator and enabling a tuner a
+        // previous owner may still be holding. Two nodes ingesting the same
+        // physical tuner is not "the feature does not work"; it is the system
+        // being wrong, which is exactly the line advisory readiness draws.
+        if candidate.enabled && !candidate.transition_from_owner_node_id.is_empty() {
+            return Err(ApiError::Conflict(format!(
+                "Live TV cannot be enabled while node {} is still fenced: it was never confirmed drained and may still hold the tuner. Recover it first (a separate request while disabled, carrying the current barrier and confirmation that the old process is stopped).",
+                candidate.transition_from_owner_node_id
+            )));
+        }
         // Readiness is advisory, not a gate (2026-09-07). A structural
         // invariant — an address that is not private, a barrier that is not
         // resolved, a generation that lost its CAS — still refuses above and

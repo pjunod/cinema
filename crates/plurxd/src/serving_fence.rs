@@ -248,6 +248,16 @@ impl ServingFence {
             // from a memory it can no longer refresh. It admits no media work,
             // which is why it is here and not in `starts_mutable_media`.
             || path.ends_with("/live-tv/guide")
+            // A refresh reaches out to the tuner or to the XMLTV host on the
+            // owner's behalf. An owner that has lost serving authority must
+            // not do that work: `owner_node_id == node_id` still holds while
+            // authority is gone, so the handler's own owner check is not the
+            // fence this needs.
+            || path.ends_with("/live-tv/guide/refresh")
+            // `/live-tv/guide/readiness` is deliberately absent. It reads
+            // saved configuration and contacts nothing, exactly as `/settings`
+            // does, and it is advisory: an operator diagnosing why an ingress
+            // is not serving is precisely who needs it to still answer.
             || path == "/_internal/v1/live-tv/snapshot"
             || path == "/_internal/v1/live-tv/guide"
     }
