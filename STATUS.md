@@ -6,8 +6,9 @@ first.
 
 ## Apple viewers were paying for encoders nobody told them about
 
-**Open, on effort branch `effort/m6-apple-prepared-replacement` into
-`main`. Not deployed.**
+**Open on
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/122), from
+`effort/m6-apple-prepared-replacement` into `main`. Not deployed.**
 Apple is the only platform whose `dual_player_preparation` is `true`,
 measured on an iPhone 17 Pro Max and an Apple TV 4K at 20/20 on both cases.
 So the server has been staging real successors for Apple viewers all along —
