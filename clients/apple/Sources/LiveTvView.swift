@@ -147,7 +147,7 @@ final class LiveTvPlayerController: ObservableObject {
                 // 4-hour setting the right-hand columns were permanently empty
                 // even where the owner had data.
                 if let fetched = try? await api.guide(
-                    hours: LiveTvGridGeometry.requestedHours) {
+                    hours: LiveTvGridMetrics.requestedHours) {
                     guard self.loadId == loading else { return }
                     self.guide = fetched
                 }
