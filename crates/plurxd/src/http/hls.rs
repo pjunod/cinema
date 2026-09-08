@@ -4254,6 +4254,7 @@ fn local_control_response(
             start.delivered_dynamic_range.clone(),
         ),
         action: crate::playback_control::ControlAction::None,
+        accepted_acknowledgements: crate::playback_control::accepted_acknowledgements(),
     };
     // The advisory hold is derived from the delivery this response is already
     // carrying, so the two can never disagree. Building the response first and
@@ -5429,6 +5430,35 @@ async fn control_inner(
                 )
             }
         };
+    }
+    // `switched` on a draining predecessor releases it now rather than at its
+    // deadline. That is the whole of §4 step 2: the drain exists so a client
+    // that has committed but not yet displayed keeps a stream to fall back on,
+    // and the moment it says a frame reached the screen there is nothing left
+    // to fall back to.
+    //
+    // Before `control_local`, because the exchange is still answered normally
+    // — this is a report, not a request to end anything the client is
+    // watching. What ends is the route it has just told us it left. The next
+    // request on that route gets the ordinary `410 session_ended`.
+    //
+    // Not gated on a receipt, for the same reason the `demand: end` path is
+    // not: this session's one receipt slot holds the commit's, and a client
+    // that misses this reply learns the same thing from the 410.
+    if route.drain_deadline_ms.is_some()
+        && request.acknowledgement.as_ref().map(|ack| ack.state)
+            == Some(crate::playback_control::AcknowledgementState::Switched)
+    {
+        if let Err(error) = state
+            .store
+            .end_media_session(&route.session_id, "superseded", unix_ms())
+            .await
+        {
+            // Not fatal to the exchange. The deadline and the cross-node sweep
+            // are both still behind this, so a failed early release costs the
+            // rest of the window, not correctness.
+            tracing::debug!(%error, "a switched acknowledgement could not release the drain");
+        }
     }
     control_local(&state, &route, request, deadline_unix_ms).await
 }
@@ -12863,6 +12893,7 @@ mod tests {
                     dynamic_range: Some("sdr".to_owned()),
                 },
                 action: crate::playback_control::ControlAction::None,
+                accepted_acknowledgements: crate::playback_control::accepted_acknowledgements(),
             };
             let acknowledgement = MediaSessionTerminalAck {
                 incarnation_id: generation.clone(),

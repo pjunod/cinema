@@ -573,6 +573,34 @@ a settled contract instead of three guesses.
   Step 2 then replaces "after the window" with "when `Switched` arrives, or the
   window lapses", which is the same call at a different trigger.
 
+  **Step 2's server half has landed. Its client half must not follow in the
+  same release, and this is the part the first attempt got wrong.**
+  `AcknowledgementState` has no unknown-value fallback, so a `switched` sent to
+  an owner that does not know the word is a deserialize failure, an empty 400,
+  and a 503 with `retry_after_ms` that the client retries forever. During any
+  rolling upgrade some owners are older than some clients. So the sequencing is
+  fixed and is not a matter of taste:
+
+  1. **This release** teaches every node to accept `switched`, act on it — it
+     releases a draining predecessor early — and advertise that it does, in
+     `ControlResponseV1.accepted_acknowledgements`. No client sends it, so
+     nothing can wedge.
+  2. **A later release**, once every node in the fleet runs a binary from step
+     1, teaches clients to send it — and only ever to an owner whose response
+     carried that field with `switched` in it. A client that has not seen the
+     field must treat the vocabulary as the original five states. The field is
+     `Option`, so an older owner omitting it reads as exactly that rather than
+     as a fleet-wide unknown.
+
+  `ACCEPTED_ACKNOWLEDGEMENTS` is written out by hand rather than derived from
+  the enum, deliberately: the list is a wire promise, and a variant added to
+  the enum should not become one until somebody decides it is ready to be.
+
+  What step 2's client half is worth, now that `demand: end` already releases
+  the drain: the client that switches and keeps the tab open. That client tears
+  nothing down, so without `switched` it pays the full window — and the window
+  is one of two admission permits.
+
   ~~**Land step 1 and step 2 together.** Step 1 alone makes the product worse
   for the window it opens: today a superseded predecessor answers a clean
   terminal `410 session_ended`, and a half-built drain replaces that with a

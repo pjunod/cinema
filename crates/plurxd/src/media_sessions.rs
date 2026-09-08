@@ -5888,6 +5888,7 @@ mod tests {
                 dynamic_range: Some("sdr".to_owned()),
             },
             action: crate::playback_control::ControlAction::None,
+            accepted_acknowledgements: crate::playback_control::accepted_acknowledgements(),
         }
     }
 

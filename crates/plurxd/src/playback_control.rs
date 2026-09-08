@@ -277,8 +277,17 @@ impl ControlRequestV1 {
         }
         if let Some(acknowledgement) = &self.acknowledgement {
             acknowledgement.validate()?;
+            // A request cannot both ask to end the stream and report progress
+            // on a successor it wants to keep. `Switched` joins `Committed`
+            // here for the same reason and one more: `end` on a draining
+            // predecessor already ends the drain, so a packet carrying both
+            // would be asking for the same teardown twice, through two paths,
+            // with only one of them carrying a frame timestamp.
             if self.demand == PlaybackDemand::End
-                && acknowledgement.state == AcknowledgementState::Committed
+                && matches!(
+                    acknowledgement.state,
+                    AcknowledgementState::Committed | AcknowledgementState::Switched
+                )
             {
                 return Err("acknowledgement.state");
             }
@@ -658,6 +667,12 @@ impl ActionAcknowledgement {
             AcknowledgementState::Committed if self.committed_media_origin_ms.is_none() => {
                 Err("acknowledgement.committed_media_origin_ms")
             }
+            // A frame timestamp is the entire content of this state. Without
+            // it, `switched` says only "I sent a different word than last
+            // time", which is not evidence that anything reached a screen.
+            AcknowledgementState::Switched if self.first_frame_unix_ms.is_none() => {
+                Err("acknowledgement.first_frame_unix_ms")
+            }
             _ => Ok(()),
         }
     }
@@ -669,6 +684,28 @@ pub(crate) enum AcknowledgementState {
     MetadataReady,
     BufferReady,
     Committed,
+    /// The successor is on screen. The client has stopped drawing the
+    /// predecessor and the server may stop producing it.
+    ///
+    /// Distinct from `Committed`, and the distinction is why this exists.
+    /// `Committed` is the *server's* transaction — the pointer moved — and
+    /// until now it was also the last thing the client ever said, so a client
+    /// that committed and then failed to present was indistinguishable from
+    /// one that succeeded.
+    ///
+    /// `first_frame_unix_ms` is required here rather than on `Committed`,
+    /// where nothing has reached the screen yet and requiring it made a client
+    /// invent a timestamp for a frame it had not drawn.
+    ///
+    /// **No shipped client sends this yet, and none may until every node in a
+    /// fleet runs a binary that accepts it.** `AcknowledgementState` has no
+    /// unknown-value fallback, so a `switched` sent to an older owner is a
+    /// deserialize failure, an empty 400, and a 503 with `retry_after_ms` that
+    /// the client retries forever. That is why this lands server-first: this
+    /// release teaches every node the word, and only a later one teaches a
+    /// client to say it. `accepted_acknowledgements` on the response is how a
+    /// client will know which it is talking to.
+    Switched,
     Failed,
     Aborted,
 }
@@ -685,6 +722,22 @@ pub(crate) struct ControlResponseV1 {
     pub delivery: DeliveryView,
     pub effective_selection: EffectiveSelection,
     pub action: ControlAction,
+    /// Acknowledgement states this server will accept, for a client deciding
+    /// what it may send.
+    ///
+    /// The reverse of `supported_actions`, and it exists for the same reason
+    /// in the other direction. `AcknowledgementState` has no unknown-value
+    /// fallback, so a state an owner does not know is a deserialize failure,
+    /// an empty 400, and a 503 the client retries forever — the failure that
+    /// withdrew the first attempt at `switched`. A client must therefore be
+    /// able to ask before it speaks, and the only moment it can ask is a
+    /// response it has already been given.
+    ///
+    /// Optional so an older owner, which omits it, reads as "the original five
+    /// states and nothing more" rather than as a fleet-wide unknown. A client
+    /// that has not seen this field must not send anything outside that set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_acknowledgements: Option<Vec<String>>,
 }
 
 impl ControlResponseV1 {
@@ -2859,6 +2912,31 @@ impl PreparationGate for RollingControlHandle {
     }
 }
 
+/// Every acknowledgement state this build accepts, newest last.
+///
+/// Sent on every response so a client can tell what it is talking to before it
+/// speaks. Written out rather than derived from the enum on purpose: this list
+/// is a wire promise, and a variant added to the enum should not silently
+/// become one until somebody decides it is ready to be.
+pub(crate) const ACCEPTED_ACKNOWLEDGEMENTS: &[&str] = &[
+    "metadata_ready",
+    "buffer_ready",
+    "committed",
+    "switched",
+    "failed",
+    "aborted",
+];
+
+/// The advertisement as the response carries it.
+pub(crate) fn accepted_acknowledgements() -> Option<Vec<String>> {
+    Some(
+        ACCEPTED_ACKNOWLEDGEMENTS
+            .iter()
+            .map(|state| (*state).to_owned())
+            .collect(),
+    )
+}
+
 pub(crate) trait TerminalControlCommitter: Send + Sync {
     /// Start the continuation synchronously. The returned receipt may be
     /// awaited by HTTP, but dropping every waiter cannot cancel the commit.
@@ -2904,6 +2982,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             dynamic_range: Some("sdr".to_owned()),
         },
         action: result.action.clone(),
+        accepted_acknowledgements: accepted_acknowledgements(),
     }
 }
 
@@ -3771,6 +3850,7 @@ impl ControlState {
                 )
             }),
             AcknowledgementState::Committed
+            | AcknowledgementState::Switched
             | AcknowledgementState::Failed
             | AcknowledgementState::Aborted => true,
         };
@@ -3807,6 +3887,14 @@ impl ControlState {
                     })
                 }
             }
+            // `Switched` arrives *after* a commit, not instead of one, so it
+            // has no preparation left to direct: the ledger row is gone and
+            // the successor is the pointer's current incarnation. It is not an
+            // abort — aborting here would tear down the stream the viewer is
+            // now watching — and it is not a second commit. What it releases
+            // is the predecessor's drain, and that is handled where the
+            // predecessor's route is, not on the successor's preparation.
+            AcknowledgementState::Switched => None,
             AcknowledgementState::Failed | AcknowledgementState::Aborted => {
                 self.abort_preparation(&staged_incarnation_id);
                 Some(PreparationDirective::Abort {
@@ -13375,6 +13463,7 @@ mod tests {
                     dynamic_range: Some("sdr".to_owned()),
                 },
                 action: ControlAction::None,
+                accepted_acknowledgements: accepted_acknowledgements(),
             }
         }
 
@@ -13472,6 +13561,96 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take(),
+            );
+        }
+    }
+
+    /// A `switched` acknowledgement is only worth anything with the frame
+    /// timestamp on it, and it may not ride an `end`.
+    ///
+    /// The two halves matter for different reasons. `committed` is the
+    /// server's transaction and `switched` is the client's display, so the
+    /// timestamp belongs on the second — requiring it on the first made a
+    /// client invent one for a frame it had not drawn. And a packet that both
+    /// ends the stream and reports a successor reaching the screen is asking
+    /// for one teardown down two paths.
+    #[test]
+    fn a_switched_acknowledgement_needs_the_frame_it_claims() {
+        let ack = |state: AcknowledgementState, first_frame: Option<i64>| ActionAcknowledgement {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            state,
+            buffered_through_ms: Some(25_000),
+            committed_media_origin_ms: Some(0),
+            first_frame_unix_ms: first_frame,
+        };
+        let with = |acknowledgement, demand| {
+            let mut request = request();
+            request.acknowledgement = Some(acknowledgement);
+            request.demand = demand;
+            if demand != PlaybackDemand::Active {
+                request.playback_rate = 0.0;
+            }
+            request.validate(None, 2_000)
+        };
+
+        assert_eq!(
+            with(
+                ack(AcknowledgementState::Switched, None),
+                PlaybackDemand::Active
+            ),
+            Err("acknowledgement.first_frame_unix_ms"),
+            "switched without a frame timestamp says only that a different word was sent"
+        );
+        assert!(with(
+            ack(AcknowledgementState::Switched, Some(1_700_000_000_000)),
+            PlaybackDemand::Active
+        )
+        .is_ok());
+        assert_eq!(
+            with(
+                ack(AcknowledgementState::Switched, Some(1_700_000_000_000)),
+                PlaybackDemand::End
+            ),
+            Err("acknowledgement.state"),
+            "a request cannot both end the stream and report a successor on screen"
+        );
+    }
+
+    /// Every state this build accepts is advertised, and the advertisement is
+    /// what a client reads before it dares send a new one.
+    ///
+    /// `AcknowledgementState` has no unknown-value fallback, so a state an
+    /// owner does not know is a 400 and then a 503 the client retries forever.
+    /// The list is therefore a wire promise: it has to name exactly what
+    /// `validate` will accept, and it is written out by hand so that adding a
+    /// variant to the enum does not silently make one.
+    #[test]
+    fn the_advertised_states_are_exactly_the_ones_this_build_accepts() {
+        for state in ACCEPTED_ACKNOWLEDGEMENTS {
+            let decoded: AcknowledgementState =
+                serde_json::from_value(serde_json::Value::String((*state).to_owned()))
+                    .unwrap_or_else(|error| {
+                        panic!("advertised {state:?} does not decode: {error}")
+                    });
+            assert_eq!(
+                serde_json::to_value(decoded).expect("re-encode"),
+                serde_json::Value::String((*state).to_owned()),
+                "advertised {state:?} does not round-trip"
+            );
+        }
+        for state in [
+            AcknowledgementState::MetadataReady,
+            AcknowledgementState::BufferReady,
+            AcknowledgementState::Committed,
+            AcknowledgementState::Switched,
+            AcknowledgementState::Failed,
+            AcknowledgementState::Aborted,
+        ] {
+            let wire = serde_json::to_value(state).expect("encode");
+            let wire = wire.as_str().expect("a state is a string on the wire");
+            assert!(
+                ACCEPTED_ACKNOWLEDGEMENTS.contains(&wire),
+                "{wire} is accepted but not advertised, so a client cannot learn it may send it"
             );
         }
     }
@@ -15371,6 +15550,7 @@ mod tests {
             delivery: delivery_view(),
             effective_selection: prepared_selection(),
             action: action.clone(),
+            accepted_acknowledgements: accepted_acknowledgements(),
         };
         let relay = ControlRelayRequest {
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -17168,6 +17348,7 @@ mod tests {
                 dynamic_range: Some("sdr".to_owned()),
             },
             action: ControlAction::None,
+            accepted_acknowledgements: accepted_acknowledgements(),
         };
         (response, request)
     }
@@ -21243,6 +21424,7 @@ mod tests {
                 dynamic_range: Some("sdr".to_owned()),
             },
             action: ControlAction::None,
+            accepted_acknowledgements: accepted_acknowledgements(),
         };
         assert!(response.is_valid_for(&request));
 
