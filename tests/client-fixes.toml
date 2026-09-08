@@ -717,3 +717,11 @@ source_anchor = "catch (cancelled: CancellationException) {"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "a teardown across an in-flight exchange sends the snapshot it was handed"
 
+[[fixes]]
+id = "android.prepared-offer-is-learned"
+commits = ["96a1be44"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "if (!canOfferPreparation) return PreparationOffer.Refuse"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "a successor that was never playable ends the offers for this playback"
+
