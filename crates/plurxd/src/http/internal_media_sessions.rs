@@ -750,7 +750,7 @@ async fn control_inner(
 /// body was unreachable from `cargo test` and a mutation reverting any of its
 /// gates survived the suite. The one line this leaves untested is the
 /// `authorize` call itself, which is proved by the router's own auth tests.
-async fn control_authorized(
+pub(crate) async fn control_authorized(
     state: AppState,
     request: crate::playback_control::ControlRelayRequest,
 ) -> Response {

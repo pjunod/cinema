@@ -1262,7 +1262,9 @@ mod tests {
                 // schema never has — both arrive in the same migration line —
                 // but it is exactly what winding a database backwards by hand
                 // produces.
-                "DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
+                "DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
+                 ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms;
+                 DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_ai;
                  DROP TRIGGER IF EXISTS media_playback_pointers_desired_fence_au;
                  ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
                  DROP INDEX dv_conversions_recovery_guard;
@@ -1348,6 +1350,10 @@ mod tests {
     /// was not extended, and the failure landed on a guard test in a file the
     /// change never touched.
     ///
+    /// Each entry names whatever that migration added, which is not always a
+    /// table: v49 and v50 add a column and a trigger, and a column has to be
+    /// dropped after the triggers that read it or SQLite refuses.
+    ///
     /// So the count is asserted rather than the drops derived. Deriving them
     /// would mean working out which objects a migration created and how to
     /// undo them, which is a down-migration this store deliberately does not
@@ -1357,12 +1363,13 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 5] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 6] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
             "media_playback_desired",
             "desired_revision",
+            "drain_deadline_ms",
         ];
 
         assert!(

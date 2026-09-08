@@ -2889,7 +2889,7 @@ mod tests {
                 .await
                 .expect("read source import chunk");
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].len(), 19, "media session import parameter count");
+            assert_eq!(rows[0].len(), 20, "media session import parameter count");
             let expected_terminal = if schema_version < 34 {
                 Param::Null
             } else {
@@ -2922,6 +2922,11 @@ mod tests {
                     Param::Integer(4),
                     Param::Integer(5),
                     Param::Integer(9_000),
+                    // v50's drain deadline. No legacy source has the column,
+                    // and null is what "not draining" means on every row it
+                    // migrates onto, so the import projects it rather than
+                    // inventing a deadline in 1970.
+                    Param::Null,
                 ],
                 "schema v{schema_version} import row",
             );

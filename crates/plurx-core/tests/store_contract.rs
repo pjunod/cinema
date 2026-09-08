@@ -14162,7 +14162,11 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
-             -- v49's pointer fence first: both triggers name
+             -- v50's drain deadline first, and its trigger ahead of its
+             -- column: SQLite refuses to drop a column a trigger reads.
+             DROP TRIGGER IF EXISTS media_sessions_drain_ownership_fence_au;
+             ALTER TABLE media_sessions DROP COLUMN drain_deadline_ms;
+             -- Then v49's pointer fence: both triggers name
              -- `media_playback_desired`, so once that table is gone every
              -- write to `media_playback_pointers` fails with \"no such
              -- table\" instead of anything to do with this fixture. Then

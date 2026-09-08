@@ -573,6 +573,43 @@ a settled contract instead of three guesses.
   Step 2 then replaces "after the window" with "when `Switched` arrives, or the
   window lapses", which is the same call at a different trigger.
 
+  **Step 2's server half has landed. Its client half must not follow in the
+  same release, and this is the part the first attempt got wrong.**
+  `AcknowledgementState` has no unknown-value fallback, so a `switched` sent to
+  an owner that does not know the word is a deserialize failure, an empty 400,
+  and a 503 with `retry_after_ms` that the client retries forever. During any
+  rolling upgrade some owners are older than some clients. So the sequencing is
+  fixed and is not a matter of taste:
+
+  1. **This release** teaches every node to accept `switched` and act on it —
+     it releases a draining predecessor early. No client sends it, so nothing
+     can wedge.
+  2. **A later release**, once every node in the fleet runs a binary from step
+     1, teaches clients to send it.
+
+  **How a client will learn which owner it is talking to is step 2's problem,
+  and it is not solved by adding a response field.** The first attempt at this
+  advertised the vocabulary as `ControlResponseV1.accepted_acknowledgements`
+  and had to be withdrawn before merge: `ControlResponseV1` carries
+  `#[serde(deny_unknown_fields)]` and is re-parsed by the *relaying* node in
+  `validated_control_relay_response`, so a new field on it is not additive at
+  all — during a rolling upgrade an older ingress relaying to a newer owner
+  fails to parse the reply and answers `503 control_unavailable`, and the same
+  applies to a `RetainedTerminalResponse.response_json` replayed after a
+  rollback. Any negotiation field therefore needs `deny_unknown_fields`
+  relaxed, shipped alone, and rolled out fleet-wide *first* — which is three
+  releases, not two, and is why none of it belongs in this one. Alternatives
+  worth weighing when step 2 is picked up: relaxing the attribute on its own;
+  putting the vocabulary in the start response, which is minted by the owner
+  and not re-parsed by a relay; or having the client discover it by sending
+  `switched` once and treating a `400` as "this owner is older", which needs no
+  wire change at all but costs one wasted exchange per session.
+
+  What step 2's client half is worth, now that `demand: end` already releases
+  the drain: the client that switches and keeps the tab open. That client tears
+  nothing down, so without `switched` it pays the full window — and the window
+  is one of two admission permits.
+
   ~~**Land step 1 and step 2 together.** Step 1 alone makes the product worse
   for the window it opens: today a superseded predecessor answers a clean
   terminal `410 session_ended`, and a half-built drain replaces that with a
