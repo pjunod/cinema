@@ -804,3 +804,16 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func selectQuality(_ height: Int?)"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
+
+[[fixes]]
+# Entering picture-in-picture backgrounds the app, and the release rule read
+# only the scene phase — so the one case picture-in-picture exists for would
+# have released the tuner underneath its own window. Every release path now
+# asks whether PiP is running first.
+id = "apple.live-tv-picture-in-picture-keeps-its-tuner"
+commits = ["22292ac1"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "private var mayRelease: Bool { !pictureInPicture.isActive }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheLiveSurfaceAllowsPictureInPictureAndReleasesOnlyWhenItIsNotActive"
+

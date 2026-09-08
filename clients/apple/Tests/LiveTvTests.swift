@@ -199,6 +199,316 @@ final class LiveTvTests: XCTestCase {
         XCTAssertFalse(playlist.absoluteString.contains("account-secret"))
         XCTAssertThrowsError(try api.playlistURL(""))
     }
+
+    // ---- the programme guide -------------------------------------------
+    // tests/playback/live-tv-guide-cases.json is the same fixture the web and
+    // Android suites read. Three reducers, one truth: if this file and
+    // tests/web/live-tv.test.js disagree, one of the clients is lying about
+    // what is on.
+
+    private struct GuideCases: Decodable {
+        struct Expect: Decodable {
+            let nowTitle: String?
+            let nextTitle: String?
+            let progress: Double?
+            enum CodingKeys: String, CodingKey {
+                case nowTitle = "now_title"
+                case nextTitle = "next_title"
+                case progress
+            }
+        }
+        struct AiringCase: Decodable {
+            let name: String
+            let channel: String
+            let now: Int
+            let expect: Expect
+        }
+        struct GridCell: Decodable {
+            let title: String
+            let left: Double
+            let width: Double
+            let airing: Bool
+            let clipped: Bool
+        }
+        struct GridRow: Decodable {
+            let channel: String
+            let cells: [GridCell]
+        }
+        struct GridExpect: Decodable {
+            let nowLineX: Double
+            let totalWidth: Double
+            let rows: [GridRow]
+            enum CodingKeys: String, CodingKey {
+                case nowLineX = "now_line_x"
+                case totalWidth = "total_width"
+                case rows
+            }
+        }
+        struct Grid: Decodable {
+            let window: LiveTvGuideWindow
+            let now: Int
+            let slotSeconds: Int
+            let pxPerSlot: Double
+            let expect: GridExpect
+            enum CodingKeys: String, CodingKey {
+                case window, now, expect
+                case slotSeconds = "slot_seconds"
+                case pxPerSlot = "px_per_slot"
+            }
+        }
+        struct FilterOptions: Decodable {
+            let query: String
+            let filter: String
+            let hideProtected: Bool
+            enum CodingKeys: String, CodingKey {
+                case query, filter
+                case hideProtected = "hide_protected"
+            }
+        }
+        struct FilterCase: Decodable {
+            let name: String
+            let opts: FilterOptions
+            let expect: [String]
+        }
+        struct AdjacentCase: Decodable {
+            let name: String
+            let visible: [String]
+            let current: String
+            let delta: Int
+            let expect: String?
+        }
+        let lineup: [LiveTvChannel]
+        let guide: LiveTvGuide
+        let programmeAt: [AiringCase]
+        let grid: Grid
+        let filters: [FilterCase]
+        let adjacent: [AdjacentCase]
+        enum CodingKeys: String, CodingKey {
+            case lineup, guide, grid, filters, adjacent
+            case programmeAt = "programme_at"
+        }
+    }
+
+    /// `.convertFromSnakeCase` on the whole document, exactly as the client
+    /// decodes a live server response — which is also what proves the wire
+    /// model in `LiveTvGuide.swift` matches the shape the server sends.
+    private func guideCases() throws -> GuideCases {
+        let url = try XCTUnwrap(
+            Bundle(for: LiveTvTests.self).url(forResource: "live-tv-guide-cases", withExtension: "json")
+        )
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(GuideCases.self, from: Data(contentsOf: url))
+    }
+
+    func testAiringAnswersEverySharedNowNextProgressCase() throws {
+        let cases = try guideCases()
+        XCTAssertFalse(cases.programmeAt.isEmpty, "the fixture lost its airing cases")
+        for row in cases.programmeAt {
+            let answer = LiveTvGuideReducer.airing(cases.guide, channelId: row.channel, now: row.now)
+            XCTAssertEqual(answer.now?.title, row.expect.nowTitle, row.name)
+            XCTAssertEqual(answer.next?.title, row.expect.nextTitle, row.name)
+            if let expected = row.expect.progress {
+                let actual = try XCTUnwrap(answer.progress, row.name)
+                XCTAssertEqual(actual, expected, accuracy: 1e-9, row.name)
+            } else {
+                XCTAssertNil(answer.progress, row.name)
+            }
+        }
+    }
+
+    func testGridLayoutPlacesEveryCellWhereTheSharedCasesSay() throws {
+        let cases = try guideCases()
+        let grid = cases.grid
+        let layout = LiveTvGuideReducer.gridLayout(
+            guide: cases.guide, channels: cases.lineup, window: grid.window,
+            now: grid.now, slotSeconds: grid.slotSeconds, pxPerSlot: grid.pxPerSlot)
+        XCTAssertEqual(layout.nowX, grid.expect.nowLineX)
+        XCTAssertEqual(layout.totalWidth, grid.expect.totalWidth)
+        XCTAssertEqual(layout.rows.count, cases.lineup.count, "a channel never loses its row")
+        for expected in grid.expect.rows {
+            let row = try XCTUnwrap(layout.rows.first { $0.channel.id == expected.channel },
+                                    "no row for \(expected.channel)")
+            XCTAssertEqual(row.cells.count, expected.cells.count, expected.channel)
+            for (cell, want) in zip(row.cells, expected.cells) {
+                let where_ = "\(expected.channel)/\(want.title)"
+                XCTAssertEqual(cell.programme.title, want.title, where_)
+                XCTAssertEqual(cell.left, want.left, accuracy: 1e-9, where_)
+                XCTAssertEqual(cell.width, want.width, accuracy: 1e-9, where_)
+                XCTAssertEqual(cell.airing, want.airing, where_)
+                XCTAssertEqual(cell.clipped, want.clipped, where_)
+            }
+            // Geometry the fixture cannot state row by row: cells advance and
+            // never overlap, so the grid can never draw two programmes on top
+            // of one another.
+            var edge = -Double.infinity
+            for cell in row.cells {
+                XCTAssertGreaterThanOrEqual(cell.left, edge - 1e-9, "\(expected.channel): cells overlap")
+                XCTAssertGreaterThan(cell.width, 0, "\(expected.channel): a zero-width cell")
+                edge = cell.left + cell.width
+            }
+        }
+        // A lineup channel the guide does not carry keeps its row, empty.
+        let protectedRow = try XCTUnwrap(layout.rows.first { $0.channel.id == "68.1" })
+        XCTAssertTrue(protectedRow.cells.isEmpty)
+        XCTAssertEqual(LiveTvGuideReducer.gridSlots(window: grid.window,
+                                                    slotSeconds: grid.slotSeconds).count, 4)
+        XCTAssertNotNil(LiveTvGuideReducer.guideEnds(cases.guide, channelId: "11.1", window: grid.window))
+        XCTAssertNil(LiveTvGuideReducer.guideEnds(cases.guide, channelId: "7.1", window: grid.window))
+    }
+
+    func testFilteringAndChannelAdjacencyAnswerTheSharedCases() throws {
+        let cases = try guideCases()
+        for row in cases.filters {
+            let visible = LiveTvGuideReducer.filter(
+                channels: cases.lineup, guide: cases.guide,
+                options: LiveTvChannelFilter(query: row.opts.query,
+                                             favoritesOnly: row.opts.filter == "favorites",
+                                             hideProtected: row.opts.hideProtected),
+                now: cases.grid.now)
+            XCTAssertEqual(visible.map(\.id), row.expect, row.name)
+        }
+        for row in cases.adjacent {
+            XCTAssertEqual(
+                LiveTvGuideReducer.adjacent(visible: row.visible, current: row.current, delta: row.delta),
+                row.expect, row.name)
+        }
+    }
+
+    func testAGuideThatIsOffOrEmptyIsARenderedStateRatherThanAFailure() throws {
+        let cases = try guideCases()
+        let empty = LiveTvGuide(source: "off", freshness: "unavailable", ageSeconds: 0,
+                                fetchedAt: nil,
+                                window: LiveTvGuideWindow(start: 0, end: 0), refreshError: nil,
+                                matchedChannels: 0, lineupChannels: 0, channels: [])
+        XCTAssertFalse(empty.hasProgrammes)
+        XCTAssertEqual(LiveTvGuideReducer.airing(empty, channelId: "7.1", now: cases.grid.now), .none)
+        XCTAssertEqual(LiveTvGuideReducer.airing(nil, channelId: "7.1", now: 0), .none)
+        // Every channel still renders, with a row and no cells, and filtering
+        // still works with no guide behind it.
+        let layout = LiveTvGuideReducer.gridLayout(
+            guide: empty, channels: cases.lineup, window: cases.grid.window, now: cases.grid.now,
+            slotSeconds: 1800, pxPerSlot: 240)
+        XCTAssertEqual(layout.rows.count, cases.lineup.count)
+        XCTAssertTrue(layout.rows.allSatisfy { $0.cells.isEmpty })
+        XCTAssertEqual(
+            LiveTvGuideReducer.filter(channels: cases.lineup, guide: empty,
+                                      options: LiveTvChannelFilter(query: "wabc"), now: 0).map(\.id),
+            ["7.1"])
+    }
+
+    func testGuideWireShapeDecodesWithSnakeCaseAndIgnoresWhatItShouldNotSee() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let guide = try decoder.decode(LiveTvGuide.self, from: Data(#"""
+        {"source":"hdhomerun","freshness":"fresh","age_seconds":412,"fetched_at":1789000000,
+         "window":{"start":1788996400,"end":1789086400},"refresh_error":null,
+         "matched_channels":12,"lineup_channels":12,"device_auth":"MUST-NOT-BE-READ",
+         "channels":[{"id":"7.1","guide_number":"7.1","affiliate":"ABC","image_url":"https://x/i.png",
+           "programmes":[{"start":1789000800,"end":1789002600,"title":"City Beat",
+             "episode_title":"Pier 40","episode":"S3E14","synopsis":"…",
+             "original_air_date":"2026-09-07","filters":["News"]}]}]}
+        """#.utf8))
+        XCTAssertEqual(guide.matchedChannels, 12)
+        XCTAssertEqual(guide.channels.first?.affiliate, "ABC")
+        XCTAssertEqual(guide.channels.first?.programmes.first?.episodeTitle, "Pier 40")
+        XCTAssertEqual(guide.channels.first?.programmes.first?.originalAirDate, "2026-09-07")
+        XCTAssertTrue(guide.hasProgrammes)
+    }
+
+    // ---- the live input table ------------------------------------------
+
+    private struct LiveContractFixture: Decodable {
+        struct Live: Decodable {
+            struct Timings: Decodable {
+                let hideAfterMs: Int
+                let channelCoalesceMs: Int
+                enum CodingKeys: String, CodingKey {
+                    case hideAfterMs = "hide_after_ms"
+                    case channelCoalesceMs = "channel_coalesce_ms"
+                }
+            }
+            // Spelled out rather than decoded with `.convertFromSnakeCase`:
+            // that strategy rewrites dictionary KEYS too, so the routing
+            // table's inputs would arrive as `playPause`/`tapSurface` and stop
+            // matching the contract's raw values — which is the whole point.
+            let routing: [String: [String: [String: String]]]
+            let inputs: [String]
+            let timings: Timings
+        }
+        let live: Live
+    }
+
+    func testLiveInputRoutingMatchesTheSharedContract() throws {
+        let url = try XCTUnwrap(
+            Bundle(for: LiveTvTests.self).url(forResource: "player-input-contract", withExtension: "json")
+        )
+        let fixture = try JSONDecoder().decode(LiveContractFixture.self, from: Data(contentsOf: url))
+        XCTAssertEqual(Set(fixture.live.inputs),
+                       Set(LiveTvContractInput.allCases.map(\.rawValue)),
+                       "the fixture's live input names are the enum's raw values")
+        XCTAssertEqual(Set(fixture.live.routing.keys),
+                       Set(LiveTvInputSurface.allCases.map(\.rawValue)))
+        for (surfaceName, states) in fixture.live.routing {
+            let surface = try XCTUnwrap(LiveTvInputSurface(rawValue: surfaceName))
+            XCTAssertEqual(Set(states.keys), Set(LiveTvInputState.allCases.map(\.rawValue)), surfaceName)
+            for (stateName, row) in states {
+                let state = try XCTUnwrap(LiveTvInputState(rawValue: stateName))
+                for (inputName, expected) in row {
+                    let input = try XCTUnwrap(LiveTvContractInput(rawValue: inputName))
+                    XCTAssertEqual(
+                        LiveTvInputRouting.route(surface: surface, state: state, input: input).rawValue,
+                        expected, "\(surfaceName)/\(stateName)/\(inputName)")
+                }
+            }
+        }
+        XCTAssertEqual(LiveTvInputRouting.overlayAutoHideNanoseconds,
+                       UInt64(fixture.live.timings.hideAfterMs) * 1_000_000)
+        XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds,
+                       fixture.live.timings.channelCoalesceMs)
+    }
+
+    // ---- the two narrowings, pinned in the source they live in ----------
+
+    func testTheLiveSurfaceAllowsPictureInPictureAndReleasesOnlyWhenItIsNotActive() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        // Both PlayerSurface sites hand the element to AVKit.
+        XCTAssertEqual(source.components(separatedBy: "allowsPictureInPicture: true").count - 1, 2,
+                       "both live surfaces must allow picture-in-picture")
+        XCTAssertFalse(source.contains("allowsPictureInPicture: false"))
+        // Entering PiP backgrounds the app. Stopping on that would kill the one
+        // case PiP exists for, so every release path consults it.
+        XCTAssertTrue(source.contains("private var mayRelease: Bool { !pictureInPicture.isActive }"))
+        XCTAssertTrue(source.contains("if phase != .active && mayRelease"))
+        XCTAssertTrue(source.contains("if !fullscreen && mayRelease"))
+    }
+
+    func testTheGuideRefreshAndHeartbeatOutliveTheViewThatStartedThem() throws {
+        // Both are Tasks on the shared controller rather than `.task {}` on a
+        // view, so SwiftUI cannot cancel them when the view leaves the
+        // hierarchy — which is what keeps a lease alive in picture-in-picture.
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(source.contains("private var guideRefresh: Task<Void, Never>?"))
+        XCTAssertTrue(source.contains("guideRefresh = Task { @MainActor [weak self] in"))
+        XCTAssertTrue(source.contains("heartbeat = Task { @MainActor [weak self] in"))
+        XCTAssertEqual(LiveTvPlayerController.guideRefreshNanoseconds, 20 * 60 * 1_000_000_000)
+    }
+
+    func testAHeldChannelKeyIsOneTunerStart() async throws {
+        // The coalescing window is the guardrail against a channel-surf storm.
+        // Superseding requests must cancel, not queue.
+        let controller = LiveTvPlayerController.shared
+        controller.requestChannel(channel)
+        controller.requestChannel(channel)
+        controller.requestChannel(channel)
+        XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds, 350)
+    }
 }
 
 private final class LiveTvMemoryBarrierStore: LiveTvBarrierStore {
