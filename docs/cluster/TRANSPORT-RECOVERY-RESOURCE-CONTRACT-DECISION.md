@@ -49,18 +49,35 @@ cycles. The opening window is the first half rounded up — cycles 0..=10 —
 and the closing window is cycles 11..=20. The two edges catch different
 leaks: one that starts early adds every cycle and lifts the closing *floor*
 by ten or more; one that starts after the opening window never lifts the
-closing floor (its first cycles are still at the old floor) but lifts the
-closing *ceiling* past anything the opening half showed. A single socket
-leaked at cycle 15 and never released is a ceiling one higher than the
-opening half ever reached, and fails at zero allowance.
+closing floor (its first cycles are still at the old floor) but puts most of
+the closing window above anything the opening half showed, and that is the
+closing *ceiling*.
+
+The two edges are not the same kind of number, and the ceiling is defined
+accordingly. The floor is a resting state — one sample of it is evidence.
+The ceiling is whatever was still in flight when the sampler looked, and
+§2.2's own table shows it is not one value: node 1's owned tasks sat at 35
+on one high-side cycle and 34 on the next. A raw maximum at zero allowance
+would fail the campaign on that alone. So the **closing ceiling is the
+fourth-highest sample of the closing window**
+(`RESOURCE_CEILING_SUSTAINED_SAMPLES`): a count that three cycles reached
+and seven did not is a spike — a replacement connection during one
+recovery, a slower drain on one cycle, a blocking thread that had not idled
+out — and a leak is not a spike. A leak from cycle 13 puts eight samples
+above the opening ceiling and its fourth-highest is five over; one socket
+leaked at cycle 15 and never released puts six samples one over, and fails
+at zero allowance. The opening ceiling is the plain highest of cycles 1
+through 10, so a spike there raises the bar for the closing window rather
+than lowering it. The warmup baseline, the one number in the artifact that
+nothing recomputes, bounds the floor only.
 
 ### 0.2 The allowances, and what each one hides
 
 | resource | allowance | why, and the boundary |
 |---|---|---|
-| sockets | **0** | the drain is one connection per peer, and an eleven-sample opening window holds both of its states; a per-peer transport that stops being released is +10 at the floor, and one leaked connection late in the campaign is +1 at the ceiling. What hides: a leak that starts after cycle 11 *and* has accumulated less than the drain amplitude — one per peer — by cycle 20, because the closing ceiling then still fits under the opening's high state. That is the limit of any method on this signal |
+| sockets | **0** | the drain is one connection per peer, and a ten-cycle opening window holds both of its states; a per-peer transport that stops being released is +10 at the floor, and one leaked connection at cycle 15 is +1 at the sustained ceiling. What hides: a leak that starts after cycle 11 *and* has fewer than four closing samples above the opening's high state by cycle 20 — a per-cycle leak from cycle 18 on, or one leaked connection after cycle 17, or any late leak that has accumulated less than the drain amplitude on the low-side samples. That is the limit of a sustained statistic on this signal, and the alternative was a ceiling that fails on one sample |
 | owned async tasks | **0** | same shape, same reasoning, same boundary |
-| threads | **2** | §2.3 and §5.3: threads jitter with no recovery in flight, and the floor is not seen on every cycle; two is the widest measured swing. A thread leaked every recovery is +10 at the floor; one every fourth recovery lifts the closing ceiling by three and is caught; **one every fifth recovery or slower hides** inside the allowance. The per-cycle check could not see a leak that slow either, because it never finished a campaign |
+| threads | **2** | §2.3 and §5.3: threads jitter with no recovery in flight, and the floor is not seen on every cycle; two is the widest measured swing. A thread leaked every recovery is +10 at the floor; one every third recovery lifts the closing floor by three and is caught; **one every fourth recovery or slower hides** inside the allowance at both edges. The per-cycle check could not see a leak that slow either, because it never finished a campaign |
 
 These replace `THREAD_MARGIN` / `SOCKET_MARGIN` / `OWNED_ASYNC_TASK_MARGIN`
 as `THREAD_ENVELOPE_ALLOWANCE` / `SOCKET_ENVELOPE_ALLOWANCE` /
@@ -73,16 +90,24 @@ allowances are exactly where the leak that matters would show.
 
 The claim is not "noise cannot move a minimum". It is: if a cycle lands in
 the drain's low state with probability *p*, the closing floor misses the low
-state with probability (1−*p*)^10 and the opening ceiling misses the high
-state with probability *p*^11. At the measured *p* = ½ that is 0.1% and
-0.05% per node and resource, about 2% per campaign over the six persistent
-node-resources of two roles; at strict alternation, which is what the four
-measured samples show, it is zero. On a fast host the drain finishes before
-the sampler looks and every sample lands low — nuc3 sampled `16/31` on both
-the warmup and cycle 1 — and then both windows agree trivially. What would
-move that number is a runner whose drain timing *changes between the halves*
-of a campaign; the per-cycle print (§0.4) is how the next red says whether it
-did.
+state with probability (1−*p*)^10, and the sustained closing ceiling clears
+the opening ceiling only when the opening's ten cycles never showed the high
+state *and* at least four of the closing ten did — *p*^10 · P(Bin(10, 1−*p*)
+≥ 4). At the measured *p* = ½ that is 0.1% and 0.08% per node and resource,
+about 2% per campaign over the six persistent node-resources of two roles;
+at strict alternation, which is what the CI runner's four measured samples
+show, it is zero. The two edges fail on opposite hosts. A slow runner that
+mostly lands high is exposed at the floor; a fast one that mostly lands low
+— nuc3 sampled `16/31` on the warmup and cycles 1 and 2, then `19/35` on
+cycle 3 — is exposed at the ceiling, and needs four slow drains in the
+closing half after none in the opening: at one slow drain in five, 0.7% per
+role. The other wobble in the record, 34 against 35 owned tasks on node 1's
+high side, needs the rarer value four times in the closing half and never in
+the opening ten; at one in four it is about 1% per node-resource, and it was
+the reason the raw maximum was not shipped. What would move any of these
+numbers is a runner whose drain timing *changes between the halves* of a
+campaign; the per-cycle print (§0.4) is how the next red says whether it
+did, and the first green campaigns are what calibrates them.
 
 Two benign things fail this assertion, and both are visible in the log:
 
@@ -131,7 +156,7 @@ was ever produced; the version-1 contract never completed a campaign.
 
 ### 0.5 The pinning tests
 
-`transport_recovery::tests` holds 38 (from 31: nine added, three removed —
+`transport_recovery::tests` holds 39 (from 31: eleven added, three removed —
 the two `one_extra_*_after_quiescence_is_rejected` and the wait report that
 named a count over its baseline, which the sampler no longer computes).
 
@@ -141,7 +166,9 @@ Leaks that must fail, and do, naming node, resource, edge and both values:
 `a_leak_that_begins_late_in_the_campaign_is_rejected` (onset at cycle 13,
 caught at the ceiling with the floor untouched; and one socket leaked at
 cycle 15) · `a_thread_envelope_past_the_allowance_is_rejected` (including
-one thread every fourth recovery, and every fifth as the documented miss) ·
+one thread every third recovery, and every fourth as the documented miss) ·
+`three_high_closing_samples_are_spikes_and_four_are_a_trend` (and a
+baseline written as 99 sockets bounds nothing at the ceiling) ·
 `owned_async_task_growth_has_no_resource_slack` — name kept, the Makefile
 and `test_contracts.py` pin it; it now proves the sampler records a high
 sample rather than refusing it, and that a task floor rising by exactly one
@@ -152,7 +179,8 @@ Measured noise that must pass, and does:
 bands identical across the halves; and the same drain with the warmup on the
 high side, landing high every third cycle) ·
 `thread_jitter_inside_the_allowance_is_not_growth` ·
-`a_single_high_sample_in_either_window_is_recorded_not_rejected`.
+`a_single_high_sample_in_either_window_is_recorded_not_rejected` (a lone
+spike in either window, unmatched by the other).
 
 The artifact proving itself: `recorded_resource_envelopes_must_match_the_cycles`
 (each of the four recorded numbers tampered) ·

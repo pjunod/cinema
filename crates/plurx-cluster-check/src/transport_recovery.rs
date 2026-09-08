@@ -74,8 +74,9 @@ const RESOURCE_BASELINE_WARMUP_CYCLES: u32 = 1;
 /// allowance — one per-peer transport that stops being released is exactly
 /// the leak this exists to catch. Threads get two, the widest swing measured
 /// with nothing in flight (`docs/cluster/TRANSPORT-RECOVERY-RESOURCE-BASELINE.md`
-/// §3); a thread that leaks every recovery still shows as +10, and one that
-/// leaks every fourth recovery still lifts the closing ceiling by three.
+/// §3); a thread that leaks every recovery still shows as +10 at the floor,
+/// and one that leaks every third recovery as +3. One every fourth or slower
+/// hides inside the allowance.
 const THREAD_ENVELOPE_ALLOWANCE: u64 = 2;
 const SOCKET_ENVELOPE_ALLOWANCE: u64 = 0;
 const OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE: u64 = 0;
@@ -85,6 +86,17 @@ const OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE: u64 = 0;
 /// but does not fail on it, because a window of two or three samples is the
 /// same coin flip the per-cycle ceiling lost.
 const RESOURCE_ENVELOPE_WINDOW_SAMPLES: usize = 10;
+/// The closing ceiling is the fourth-highest sample of the closing window,
+/// not its highest. The floor is a resting state and one sample of it is
+/// evidence; the ceiling is whatever was still in flight when the sampler
+/// looked, and the measurement shows it is not one value (node 1's owned
+/// tasks sat at 35 on one high-side cycle and 34 on the next). A count that
+/// three samples reached and seven did not is a spike — a replacement
+/// connection during one recovery, a slower drain on one cycle, a blocking
+/// thread that had not idled out — and a leak is not a spike: one that
+/// starts at cycle 13 puts eight samples above the opening ceiling, and one
+/// connection leaked at cycle 15 puts six.
+const RESOURCE_CEILING_SUSTAINED_SAMPLES: usize = 4;
 const RECOVERY_WRITE_SQL: &str =
     "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3)";
 
@@ -1594,21 +1606,38 @@ struct ResourceEnvelopeAllowances {
 }
 
 impl ResourceBand {
-    fn single(sample: &ProcessResourceCount) -> Self {
-        Self {
-            floor: sample.clone(),
-            ceiling: sample.clone(),
+    /// The band of `samples`: the floor is the elementwise minimum, over
+    /// `floor_only` as well, and the ceiling is the `sustained`-th highest
+    /// value of each resource over `samples` alone — the highest when
+    /// `sustained` is one, the fourth-highest for the closing window, clamped
+    /// to what a shorter window holds. `floor_only` is the warmup baseline:
+    /// a resting sample that belongs in the floor and, as the one number in
+    /// the artifact nothing recomputes, bounds nothing at the ceiling.
+    fn over(
+        samples: &[ProcessResourceCount],
+        floor_only: Option<&ProcessResourceCount>,
+        sustained: usize,
+    ) -> Option<Self> {
+        let first = samples.first()?;
+        let mut floor = floor_only.unwrap_or(first).clone();
+        for sample in samples {
+            floor.threads = floor.threads.min(sample.threads);
+            floor.sockets = floor.sockets.min(sample.sockets);
+            floor.owned_async_tasks = floor.owned_async_tasks.min(sample.owned_async_tasks);
         }
-    }
-
-    fn widen(&mut self, sample: &ProcessResourceCount) {
-        self.floor.threads = self.floor.threads.min(sample.threads);
-        self.floor.sockets = self.floor.sockets.min(sample.sockets);
-        self.floor.owned_async_tasks = self.floor.owned_async_tasks.min(sample.owned_async_tasks);
-        self.ceiling.threads = self.ceiling.threads.max(sample.threads);
-        self.ceiling.sockets = self.ceiling.sockets.max(sample.sockets);
-        self.ceiling.owned_async_tasks =
-            self.ceiling.owned_async_tasks.max(sample.owned_async_tasks);
+        let kth_highest = |pick: fn(&ProcessResourceCount) -> u64| {
+            let mut values = samples.iter().map(pick).collect::<Vec<_>>();
+            values.sort_unstable_by(|a, b| b.cmp(a));
+            values[sustained.clamp(1, values.len()) - 1]
+        };
+        Some(Self {
+            floor,
+            ceiling: ProcessResourceCount {
+                threads: kth_highest(|sample| sample.threads),
+                sockets: kth_highest(|sample| sample.sockets),
+                owned_async_tasks: kth_highest(|sample| sample.owned_async_tasks),
+            },
+        })
     }
 }
 
@@ -1686,22 +1715,35 @@ fn resource_envelopes(cycles: &[RecoveryCycleEvidence]) -> Result<RecoveryResour
         .iter()
         .enumerate()
         .map(|(position, sample)| {
-            let mut opening = ResourceBand::single(&sample.baseline);
-            let mut closing: Option<ResourceBand> = None;
-            for cycle in cycles {
-                let post_quiescence = &cycle.node_resources[position].post_quiescence;
-                if cycle.cycle <= opening_window_last_cycle {
-                    opening.widen(post_quiescence);
-                } else {
-                    match closing.as_mut() {
-                        Some(closing) => closing.widen(post_quiescence),
-                        None => closing = Some(ResourceBand::single(post_quiescence)),
-                    }
-                }
-            }
+            let (opening_samples, closing_samples): (Vec<_>, Vec<_>) = cycles
+                .iter()
+                .map(|cycle| {
+                    (
+                        cycle.cycle,
+                        cycle.node_resources[position].post_quiescence.clone(),
+                    )
+                })
+                .partition(|(cycle, _)| *cycle <= opening_window_last_cycle);
+            let samples = |window: Vec<(u32, ProcessResourceCount)>| {
+                window
+                    .into_iter()
+                    .map(|(_, sample)| sample)
+                    .collect::<Vec<_>>()
+            };
+            let opening_samples = samples(opening_samples);
+            let closing_samples = samples(closing_samples);
+            // An opening window is the baseline alone only for a one-cycle
+            // campaign, whose single cycle is then the whole closing window.
+            let opening = ResourceBand::over(&opening_samples, Some(&sample.baseline), 1)
+                .unwrap_or_else(|| ResourceBand {
+                    floor: sample.baseline.clone(),
+                    ceiling: sample.baseline.clone(),
+                });
             // The last cycle is always past the opening window, so a
             // non-empty campaign always has a closing sample.
-            let closing = closing.context("closing window has no sample")?;
+            let closing =
+                ResourceBand::over(&closing_samples, None, RESOURCE_CEILING_SUSTAINED_SAMPLES)
+                    .context("closing window has no sample")?;
             Ok(NodeResourceEnvelope {
                 node_id: sample.node_id,
                 kind: sample.kind,
@@ -1819,6 +1861,9 @@ fn describe_resource_series(cycles: &[RecoveryCycleEvidence]) -> Vec<String> {
     let Some(first) = cycles.first() else {
         return Vec::new();
     };
+    let mut ordered = cycles.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|cycle| cycle.cycle);
+    let cycles = ordered.as_slice();
     let sources = cycles
         .iter()
         .map(|cycle| cycle.source_outbound.observing_node_id.to_string())
@@ -3352,7 +3397,7 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("node 1 sockets ceiling rose 18 -> 28"),
+            rendered.contains("node 1 sockets ceiling rose 18 -> 25"),
             "{rendered}"
         );
     }
@@ -3372,10 +3417,12 @@ mod tests {
 
     /// A leak that starts after the opening window never lifts the closing
     /// floor — the closing window's first cycles are still at the old floor
-    /// — so it is the ceiling that has to catch it: the closing window shows
-    /// counts the opening window never did. The onset here is cycle 13, past
-    /// the edge, and a single leaked socket at cycle 15 that is never
-    /// released is the smallest possible late leak.
+    /// — so it is the ceiling that has to catch it: most of the closing
+    /// window sits above anything the opening window showed. The onset here
+    /// is cycle 13, past the edge, which puts eight samples above the
+    /// opening ceiling and makes the fourth-highest 13; a single leaked
+    /// socket at cycle 15 that is never released is the smallest possible
+    /// late leak and puts six.
     #[test]
     fn a_leak_that_begins_late_in_the_campaign_is_rejected() {
         let mut value = artifact();
@@ -3386,7 +3433,7 @@ mod tests {
         let rendered = format!("{error:#}");
         assert!(!rendered.contains("floor rose"), "{rendered}");
         assert!(
-            rendered.contains("node 2 sockets ceiling rose 8 -> 16"),
+            rendered.contains("node 2 sockets ceiling rose 8 -> 13"),
             "{rendered}"
         );
 
@@ -3469,32 +3516,90 @@ mod tests {
         });
         assert!(validate_transport_recovery_artifact(&value).is_err());
 
-        // One thread every fourth recovery lifts the closing ceiling by three
-        // against an opening ceiling of two; every fifth does not, and that
-        // is the slowest thread leak the allowance hides.
+        // One thread every third recovery lifts the closing floor by three
+        // against an allowance of two; every fourth lifts it by two and sits
+        // inside the allowance at both edges, and that is the fastest thread
+        // leak the allowance hides.
+        let mut value = artifact();
+        with_node_series(&mut value.learner, 3, |cycle| {
+            counts(12 + u64::from(cycle / 3), 8, 10)
+        });
+        let error = validate_transport_recovery_artifact(&value).expect_err("one per three");
+        assert!(
+            format!("{error:#}").contains("node 4 threads floor rose 12 -> 15"),
+            "{error:#}"
+        );
         let mut value = artifact();
         with_node_series(&mut value.learner, 3, |cycle| {
             counts(12 + u64::from(cycle / 4), 8, 10)
         });
-        assert!(validate_transport_recovery_artifact(&value).is_err());
-        let mut value = artifact();
-        with_node_series(&mut value.learner, 3, |cycle| {
-            counts(12 + u64::from(cycle / 5), 8, 10)
-        });
         validate_transport_recovery_artifact(&value).expect("hidden inside the allowance");
     }
 
-    /// One high sample, in either window, is recorded and is not a verdict
-    /// — as long as the opening window showed that height too. This is the
+    /// One high sample, in either window, is recorded and is not a verdict,
+    /// whether or not the other window ever showed that height. This is the
     /// sample the old per-cycle ceiling failed the whole lane on.
     #[test]
     fn a_single_high_sample_in_either_window_is_recorded_not_rejected() {
         let mut value = artifact();
         value.voter.cycles[0].node_resources[0].post_quiescence = counts(14, 11, 13);
-        value.voter.cycles[15].node_resources[0].post_quiescence = counts(14, 11, 13);
+        value.voter.cycles[15].node_resources[2].post_quiescence = counts(15, 12, 14);
         value.voter.resource_envelopes =
             resource_envelopes(&value.voter.cycles).expect("rewritten envelopes");
         validate_transport_recovery_artifact(&value).expect("a high sample is evidence");
+    }
+
+    /// The closing ceiling is the fourth-highest sample: three cycles that
+    /// reached a count the opening window never did are spikes — a
+    /// replacement connection, a slower drain, a blocking thread that had
+    /// not idled out — and four are a trend. The opening ceiling is the
+    /// highest of its cycles, so a spike there raises the bar for the
+    /// closing window rather than lowering it, and the warmup baseline,
+    /// which nothing recomputes, bounds the floor only.
+    #[test]
+    fn three_high_closing_samples_are_spikes_and_four_are_a_trend() {
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 0, |cycle| {
+            counts(12, if [12, 15, 19].contains(&cycle) { 9 } else { 8 }, 10)
+        });
+        validate_transport_recovery_artifact(&value).expect("three spikes");
+        assert_eq!(
+            value.voter.resource_envelopes.nodes[0]
+                .closing
+                .ceiling
+                .sockets,
+            8
+        );
+
+        let mut value = artifact();
+        with_node_series(&mut value.voter, 0, |cycle| {
+            counts(
+                12,
+                if [12, 15, 17, 19].contains(&cycle) {
+                    9
+                } else {
+                    8
+                },
+                10,
+            )
+        });
+        let error = validate_transport_recovery_artifact(&value).expect_err("four samples");
+        assert!(
+            format!("{error:#}").contains("node 1 sockets ceiling rose 8 -> 9"),
+            "{error:#}"
+        );
+
+        let mut value = artifact();
+        value.voter.cycles.iter_mut().for_each(|cycle| {
+            cycle.node_resources[0].baseline = counts(12, 99, 10);
+        });
+        with_node_series(&mut value.voter, 0, |cycle| {
+            counts(12, if cycle >= 13 { 8 + u64::from(cycle) } else { 8 }, 10)
+        });
+        let envelopes = &value.voter.resource_envelopes;
+        assert_eq!(envelopes.nodes[0].opening.floor.sockets, 8);
+        assert_eq!(envelopes.nodes[0].opening.ceiling.sockets, 8);
+        assert!(validate_transport_recovery_artifact(&value).is_err());
     }
 
     #[test]
@@ -3575,7 +3680,8 @@ mod tests {
         assert_eq!(envelopes.nodes[0].opening.floor, counts(12, 8, 10));
         assert_eq!(envelopes.nodes[0].opening.ceiling, counts(12, 9, 10));
         assert_eq!(envelopes.nodes[0].closing.floor, counts(12, 10, 10));
-        assert_eq!(envelopes.nodes[0].closing.ceiling, counts(12, 11, 10));
+        // Two closing samples: the sustained ceiling clamps to the lower.
+        assert_eq!(envelopes.nodes[0].closing.ceiling, counts(12, 10, 10));
 
         for cycles in [1_usize, 2, 18] {
             let mut campaign =

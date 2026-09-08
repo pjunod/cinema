@@ -22,14 +22,17 @@ plus the twenty cycles, split into an opening half (cycles 0–10) and a
 closing half (11–20); neither the floor nor the ceiling of the closing half
 may exceed the opening half's by more than the allowance — zero for sockets
 and owned async tasks, two for threads. A leak that starts early adds every
-cycle and lifts the closing floor by ten or more; one that starts late lifts
-the closing ceiling past anything the opening half showed; the drain visits
-both of its states within a few cycles and moves neither edge. The option
-first written up — last cycle against first cycle — was rejected on the way:
-two samples of a two-state range is the same coin flip, drawn twice instead
-of forty times. What still hides is stated, not implied: a leak that starts
-after cycle 11 and has accumulated less than one per-peer connection by the
-end, and a thread leak slower than one per four recoveries.
+cycle and lifts the closing floor by ten or more; one that starts late puts
+most of the closing window above anything the opening half showed — the
+closing ceiling is the fourth-highest sample, because the high side is
+in-flight residue and the record already shows it wobbling by one, so three
+spikes are spikes and four are a trend. The drain visits both of its states
+within a few cycles and moves neither edge. The option first written up —
+last cycle against first cycle — was rejected on the way: two samples of a
+two-state range is the same coin flip, drawn twice instead of forty times.
+What still hides is stated, not implied: a late leak with fewer than four
+closing samples above the opening's high state, and a thread leak of one per
+four recoveries or slower.
 
 What moved: the sampler no longer waits for a ceiling, only for idle and two
 identical samples; the record-time bail is gone; the campaign computes and
@@ -40,7 +43,7 @@ leak); the offline validator recomputes the envelopes from the cycles and
 refuses a hand-written or reordered record. A smoke shorter than nineteen
 cycles records and prints its envelope but does not fail on it — two-sample
 windows are the coin flip again. Artifact schema is version 2
-(`resource_*_envelope_allowance`, `resource_envelopes` per role). 38 focused
+(`resource_*_envelope_allowance`, `resource_envelopes` per role). 39 focused
 tests; the mutations prove a socket, thread or task leaked every cycle, a
 leak starting at cycle 13, and one socket leaked at cycle 15 all still fail —
 and that the measured drain and jitter pass. Decision document:

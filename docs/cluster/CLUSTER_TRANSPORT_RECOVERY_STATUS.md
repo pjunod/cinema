@@ -38,13 +38,14 @@ the decision and what it changed, site by site, is
 §0. In one line: neither the floor nor the ceiling of each resource over
 the closing half of the campaign may exceed the opening half's — by zero for
 sockets and owned async tasks, by two for threads. A leak that starts early
-lifts the closing floor by ten or more; one that starts late lifts the closing
-ceiling past anything the opening half showed; the drain visits both of its
-states within a few cycles and moves neither. The artifact is schema version
-2 and records both bands per node, so it proves the comparison without the
-harness. What hides, stated in §0.2 there: a leak that starts after cycle 11
-and has accumulated less than one per-peer connection by cycle 20, and a
-thread leak slower than one per four recoveries. The `idle` predicate itself
+lifts the closing floor by ten or more; one that starts late puts most of the
+closing window above anything the opening half showed, and the closing
+ceiling is the fourth-highest sample so that three spikes are not a trend;
+the drain visits both of its states within a few cycles and moves neither
+edge. The artifact is schema version 2 and records both bands per node, so
+it proves the comparison without the harness. What hides, stated in §0.2
+there: a leak with fewer than four closing samples above the opening's high
+state, and a thread leak of one per four recoveries or slower. The `idle` predicate itself
 is unchanged and still wrong on its own terms; that is Option C in the
 decision document and remains open.
 
