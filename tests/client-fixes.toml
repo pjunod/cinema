@@ -804,3 +804,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func selectQuality(_ height: Int?)"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testQualityAudioAndSubtitleCommandsCreateANewPresentationDestinationSynchronously"
+
+[[fixes]]
+id = "apple.prepared-switch-lifecycle-hardening"
+commits = ["638ac998"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "private var pendingAcknowledgements: [ActionAcknowledgement] = []"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testRapidPreparedProgressQueuesInOrderAndCommitStopsThePredecessor"
