@@ -360,6 +360,28 @@ EPUB sections use, with the tuner as the thing being protected.
   *closed* — the channel is treated as protected rather than as playable.
 - **Transport logs carry no capability.** Live TV diagnostics are redacted, so a
   log shipped for support does not hand over a live session.
+- **The programme guide is the one outbound internet call, and it is opt-in.**
+  Until an administrator selects a source, plurx makes no request off the LAN
+  for Live TV at all. With `live_tv.guide_source = hdhomerun`, the **owner node
+  only** reads `DeviceAuth` from the device's own `discover.json` at the moment
+  of each refresh, sends it to a host pinned by allowlist —
+  `api.hdhomerun.com` or `my.hdhomerun.com`, `https`, port 443, no userinfo,
+  redirects refused — and forgets it. It is never written to the settings
+  table, never in a snapshot, an internal relay body, a log line, a metric
+  label, an error message or an API response, and it never crosses to a
+  non-owner node: what is relayed between voters is the guide *result*.
+  Reading it fresh each refresh is also why the guide survives Silicondust
+  rotating the credential. With `live_tv.guide_source = xmltv` the only host
+  contacted is the URL the administrator supplied, which must be `http`/`https`
+  with no userinfo and at most 1 KiB. Both documents are bounded at 4 MiB —
+  a gzipped body is bounded again after inflation, so a compression bomb is
+  refused rather than allocated — and every string in them is length-capped
+  before it reaches a client, because a guide host is untrusted input in
+  exactly the way a tuner is.
+- **Programme artwork is passed through, never fetched.** A guide's image URLs
+  are handed to clients as `https` links after validation; the server does not
+  retrieve them, so the guide adds no image-proxy surface and no new artwork
+  allowlist host.
 
 **Not defended against.** A capability holder on the LAN can watch the channel
 for the life of that session; the boundary here is between "a live stream" and

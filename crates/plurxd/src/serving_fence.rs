@@ -243,7 +243,13 @@ impl ServingFence {
             || path.starts_with("/library/metadata/")
             || path == "/photo/:/transcode"
             || path.ends_with("/live-tv/channels")
+            // The guide is a read of owner state exactly as the lineup is, and
+            // an ingress that has lost serving authority must not answer it
+            // from a memory it can no longer refresh. It admits no media work,
+            // which is why it is here and not in `starts_mutable_media`.
+            || path.ends_with("/live-tv/guide")
             || path == "/_internal/v1/live-tv/snapshot"
+            || path == "/_internal/v1/live-tv/guide"
     }
 
     /// Routes whose successful handler may admit new process-local media

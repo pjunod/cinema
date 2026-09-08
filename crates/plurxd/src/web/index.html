@@ -13766,21 +13766,85 @@ function developerPanel(settings){
       ${togRow("phs",`Typeless sliding HLS <span class="pill warn">experimental</span>`,"Only for the iPad control comparison.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr"></div>
       ${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${preview}${prepared}${experimental}`;
+  return `${setHead("Developer","Switches that are off on purpose — previews, unfinished halves, and anything that costs more than it looks. Nothing here is needed for ordinary playback.")}${transportRecovery}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}${preview}${prepared}${experimental}`;
+}
+function liveTvGuideCard(s){
+  // The guide's own enable section. Everything here is advisory: it says what
+  // has to be true for a source to work and whether it is true right now, and
+  // then it lets the operator turn it on anyway. A feature that refuses to
+  // switch on is a feature nobody can diagnose, and the guide takes no tuner
+  // and changes no playback — a wrong setting leaves the rows blank, nothing
+  // more. (Keep this comment inside the body: a leading comment lands in the
+  // previous function's slice in tests/web/settings-sections.test.js.)
+  const source=s.live_tv_guide_source||"off";
+  const on=source!=="off";
+  const pill=on?`<span class="pill acc">${source==="xmltv"?"XMLTV":"HDHomeRun guide"}</span>`:`<span class="pill">Off</span>`;
+  const opt=(value,label)=>`<option value="${value}"${source===value?' selected':''}>${label}</option>`;
+  return setCard(`${cardHead("Programme guide","What is on each channel now and next. Read-only: no recording, no reminders, no scheduling.",pill)}
+    <div class="hint"><b>This is the first outbound internet request the tuner owner makes on your behalf</b>, which is why it is off until you turn it on. The HDHomeRun guide reads your device's <code>DeviceAuth</code> fresh at each refresh, sends it to <code>api.hdhomerun.com</code> over TLS, and forgets it — plurx never stores, logs or relays that credential, and only the owner node ever holds it. XMLTV fetches the one URL you give and nothing else.</div>
+    <div class="setfields">
+      <div><label for="ltgsrc">Source</label><select id="ltgsrc" onchange="renderSettings()">${opt("off","Off")}${opt("hdhomerun","HDHomeRun guide")}${opt("xmltv","XMLTV")}</select></div>
+      ${source==="xmltv"?`<div style="flex:1 1 340px"><label for="ltgurl">XMLTV URL</label><input id="ltgurl" value="${esc(s.live_tv_xmltv_url||"")}" placeholder="https://example/guide.xml.gz" maxlength="1024"><div class="hint">Plain or gzipped. Matched to your lineup by display name, then LCN, then callsign.</div></div>`:""}
+      <div><label for="ltghours">Look ahead</label><select id="ltghours">${[4,8,12,24,48,72].map(n=>`<option value="${n}"${n===Number(s.live_tv_guide_hours)?' selected':''}>${n} hours</option>`).join("")}</select></div>
+    </div>
+    <h2 class="section">What must be true to enable it safely</h2>
+    <div id="ltgready" aria-live="polite"><p class="muted">Checking…</p></div>
+    <div class="err" id="ltgerr" role="alert"></div>
+    ${setCardFoot("saveLiveTvGuide")}
+    <div class="row"><button class="ghost sm" onclick="checkLiveTvGuide(this)">Check the guide</button><button class="ghost sm" onclick="refreshLiveTvGuide(this)">Refresh now</button><a href="#/live-tv">Browse channels</a></div>`,{id:"live-tv-guide-settings"});
+}
+async function saveLiveTvGuide(button){
+  const source=document.getElementById("ltgsrc").value;
+  const url=document.getElementById("ltgurl");
+  return liveTvSettingsWrite({live_tv_config_generation:SETTINGS.live_tv_config_generation,
+    live_tv_guide_source:source,
+    live_tv_xmltv_url:url?url.value.trim():(SETTINGS.live_tv_xmltv_url||""),
+    live_tv_guide_hours:Number(document.getElementById("ltghours").value)},button);
+}
+function liveTvGuideReadyView(r){
+  // Advisory rendering: a red row is a sentence, never a disabled Save.
+  const rows=(r.checks||[]).map(c=>`<div class="tog"><span>${c.ready?"Met":"Not met yet"}<small>${esc(c.message)}</small></span></div>`).join("");
+  const fresh=r.freshness==="fresh"?`<span class="pill ok">fresh · ${Math.round(r.age_seconds/60)} min old</span>`
+    :r.freshness==="stale"?`<span class="pill warn">stale · ${Math.round(r.age_seconds/60)} min old</span>`
+    :`<span class="pill">no data cached</span>`;
+  const counts=r.source==="off"?"":`<p>${fresh} · matched ${r.matched_channels} of ${r.lineup_channels} lineup channels · ${r.programmes} programmes cached · refreshes every ${Math.round(r.refresh_interval_seconds/60)} minutes.</p>`;
+  const error=r.refresh_error?`<p class="hint"><b>Last refresh failed:</b> ${esc(r.refresh_error)}</p>`:"";
+  return `${rows}${counts}${error}<div class="hint"><b>None of this blocks the switch.</b> Every row above is advice. Save any source you like and read the result here; the guide takes no tuner, so a wrong setting leaves channel rows blank and nothing else.</div>`;
+}
+async function checkLiveTvGuide(button){
+  const generation=PAGE_RENDER_GENERATION;
+  const mount=document.getElementById("ltgready");
+  if(button) button.disabled=true;
+  try{
+    const r=await api("/live-tv/guide/readiness",{signal:AbortSignal.timeout(30000)});
+    if(!settingsCurrent(generation,"developer")||!mount||!mount.isConnected) return;
+    mount.innerHTML=liveTvGuideReadyView(r);
+  }catch(e){ if(settingsCurrent(generation,"developer")&&mount&&mount.isConnected) mount.textContent=e.message; }
+  finally{ if(button&&button.isConnected) button.disabled=false; }
+}
+async function refreshLiveTvGuide(button){
+  const generation=PAGE_RENDER_GENERATION;
+  const error=document.getElementById("ltgerr"); if(error) error.textContent="";
+  button.disabled=true;
+  try{
+    await api("/live-tv/guide/refresh",{method:"POST",signal:AbortSignal.timeout(45000)});
+    if(settingsCurrent(generation,"developer")) await checkLiveTvGuide(null);
+  }catch(e){ if(settingsCurrent(generation,"developer")&&error) error.textContent=e.message; }
+  finally{ if(button.isConnected) button.disabled=false; }
 }
 function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
   const barrier=!!s.live_tv_transition_from_owner_node_id;
   return setCard(`${cardHead("HDHomeRun Live TV","Watch unprotected antenna channels from one network tuner.",`<span class="pill">${enabled?"Enabled":"Disabled"}</span>`)}
     <p>Before enabling: complete the HDHomeRun channel scan; use a stable private IPv4 address; choose one reachable, committed tuner-owner node; and keep every serving node on a compatible plurx version. The owner needs network access to the tuner, writable scratch space, and working FFmpeg H.264/AAC encoding. Each viewer uses one physical tuner and one encoder slot.</p>
-    <p class="hint">Start with 720p and two sessions. ATSC 3.0 may require HEVC and AC-4 decoders your FFmpeg does not include. DRM, recording, rewind, captions, and program-guide scheduling are not supported. A readiness check tests the output graph, not every broadcast codec.</p>
+    <p class="hint">Start with 720p and two sessions. ATSC 3.0 may require HEVC and AC-4 decoders your FFmpeg does not include. DRM, recording, rewind and captions are not supported. A read-only programme guide is configured separately below; there is no recording or scheduling behind it. A readiness check tests the output graph, not every broadcast codec.</p>
     <div class="setfields">
       <div><label for="ltip">Tuner private IPv4</label><input id="ltip" value="${esc(s.live_tv_device_ipv4||"")}" placeholder="192.168.4.100" inputmode="decimal"${disabled}></div>
       <div><label for="ltowner">Tuner-owner node ID</label><input id="ltowner" value="${esc(s.live_tv_owner_node_id||"")}" maxlength="256"${disabled}><div class="hint">Use the node ID shown in Settings → Cluster.</div></div>
       <div><label for="ltlimit">Maximum sessions</label><select id="ltlimit"${disabled}>${[1,2,3,4].map(n=>`<option value="${n}"${n===Number(s.live_tv_max_sessions)?' selected':''}>${n}</option>`).join("")}</select></div>
       <div><label for="ltheight">Output height</label><select id="ltheight"${disabled}>${[720,1080].map(n=>`<option value="${n}"${n===Number(s.live_tv_output_height)?' selected':''}>${n}p</option>`).join("")}</select></div>
     </div>
-    <p class="hint">${enabled?"Disable before changing the device, owner, or profile. Disabling stops current Live TV sessions.":"Save the configuration, check readiness, then enable. Saving never enables playback."}</p>
+    <p class="hint">${enabled?"Disable before changing the device, owner, or profile. Disabling stops current Live TV sessions.":"Save the configuration, check readiness, then enable. Readiness is advice, not a gate — you can enable with a red check and find out what breaks. Saving never enables playback."}</p>
     <div id="ltreadiness" aria-live="polite"></div>
     <div class="err" id="lterr" role="alert"></div>
     ${!enabled?setCardFoot("saveLiveTvSettings"):""}
@@ -13832,7 +13896,7 @@ async function checkLiveTvReadiness(button){
   try{
     const r=await api("/live-tv/readiness/refresh",{method:"POST",signal:AbortSignal.timeout(40000)});
     if(!settingsCurrent(generation,"developer")||!mount.isConnected) return;
-    mount.innerHTML=`<h3>${r.ready?"Ready to enable":"Needs attention"}</h3><ul>${r.checks.map(c=>`<li><strong>${c.ready?"Pass":"Not ready"}:</strong> ${esc(c.message)}</li>`).join("")}</ul>${r.snapshot?`<p>${esc(r.snapshot.device.friendly_name)} · ${esc(r.snapshot.device.model_number)} · ${esc(r.snapshot.device.tuner_count)} tuners</p>`:""}<p class="hint">This result describes saved generation ${esc(r.generation)}. Enabling always rechecks safety on the server.</p>`;
+    mount.innerHTML=`<h3>${r.ready?"Ready to enable":"Needs attention"}</h3><ul>${r.checks.map(c=>`<li><strong>${c.ready?"Pass":"Not ready"}:</strong> ${esc(c.message)}</li>`).join("")}</ul>${r.snapshot?`<p>${esc(r.snapshot.device.friendly_name)} · ${esc(r.snapshot.device.model_number)} · ${esc(r.snapshot.device.tuner_count)} tuners</p>`:""}<p class="hint">This result describes saved generation ${esc(r.generation)}. It is advisory: enabling is not blocked by a red check. Structural problems — an address that is not private, an unresolved previous owner, a stale generation — still refuse the save.</p>`;
   }catch(e){ if(settingsCurrent(generation,"developer")&&mount.isConnected) mount.textContent=e.message; }
   finally{ if(button.isConnected) button.disabled=false; }
 }
