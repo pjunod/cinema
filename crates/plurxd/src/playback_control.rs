@@ -12464,6 +12464,17 @@ static CONTROL_VOCABULARY: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::ne
 /// client had asked for a handoff while a client that omitted
 /// `retry_resource` was asking for exactly that.
 static CONTROL_PREPARE_CAPABLE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Clients by platform that declared the three actions a passive reporter is
+/// made of — `hold`, `terminal`, `retry_resource`.
+///
+/// A third counter rather than a reading of the two above, because those two
+/// answer a different question and cannot be made to answer this one. "Fully
+/// managed" needs all four actions, so every shipped client — each of which
+/// declares exactly these three — counts as partial there, forever, until a
+/// client ships `prepare_replacement`. A report that read "is there a passive
+/// reporter" off that counter would answer no on every fleet that has one.
+static CONTROL_PASSIVE_VOCABULARY: [[AtomicU64; 3]; 2] =
+    [const { [const { AtomicU64::new(0) }; 3] }; 2];
 static ROLLING_LEASE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RETIREMENTS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_HOLDS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -12779,6 +12790,15 @@ pub(crate) fn record_action(
         && request.accepts(RETRY_RESOURCE_ACTION)
         && request.accepts(PREPARE_REPLACEMENT_ACTION);
     CONTROL_VOCABULARY[usize::from(complete)][platform].fetch_add(1, Ordering::Relaxed);
+    // The passive reporter is the three actions a client applies to a stream
+    // it is already playing. `prepare_replacement` is not one of them: it is
+    // the prepared handoff, it has its own counter below and its own
+    // prerequisite row, and folding it in here is what made every real fleet
+    // report that it had no passive reporter.
+    let passive = request.accepts(HOLD_ACTION)
+        && request.accepts(TERMINAL_ACTION)
+        && request.accepts(RETRY_RESOURCE_ACTION);
+    CONTROL_PASSIVE_VOCABULARY[usize::from(passive)][platform].fetch_add(1, Ordering::Relaxed);
     if request.accepts(PREPARE_REPLACEMENT_ACTION) {
         CONTROL_PREPARE_CAPABLE[platform].fetch_add(1, Ordering::Relaxed);
     }
@@ -12799,6 +12819,11 @@ pub(crate) struct ControlVocabularySnapshot {
     pub complete: [u64; 3],
     /// Exchanges from clients declaring only some of them.
     pub partial: [u64; 3],
+    /// Exchanges from clients declaring the whole passive vocabulary —
+    /// `hold`, `terminal`, `retry_resource` — whatever else they declared.
+    pub passive_complete: [u64; 3],
+    /// Exchanges from clients missing at least one of those three.
+    pub passive_partial: [u64; 3],
 }
 
 pub(crate) fn control_vocabulary_snapshot() -> ControlVocabularySnapshot {
@@ -12812,6 +12837,8 @@ pub(crate) fn control_vocabulary_snapshot() -> ControlVocabularySnapshot {
     ControlVocabularySnapshot {
         complete: read(&CONTROL_VOCABULARY[1]),
         partial: read(&CONTROL_VOCABULARY[0]),
+        passive_complete: read(&CONTROL_PASSIVE_VOCABULARY[1]),
+        passive_partial: read(&CONTROL_PASSIVE_VOCABULARY[0]),
     }
 }
 
@@ -12852,6 +12879,12 @@ pub(crate) fn prepare_capable_snapshot() -> [u64; 3] {
 #[cfg(test)]
 pub(crate) fn record_partial_vocabulary_for_tests() {
     CONTROL_VOCABULARY[0][0].fetch_add(1, Ordering::Relaxed);
+    // The passive counter too, because that is the one the passive-reporter
+    // prerequisite reads. Incrementing only the four-action counter drove
+    // that row `Unmet` through the state every shipped client is already in,
+    // so the test that asserts an unmet prerequisite gates nothing was
+    // exercising the everyday reading rather than a failure.
+    CONTROL_PASSIVE_VOCABULARY[0][0].fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn record_producer_hold(reason: crate::transcode::AheadHoldReason) {

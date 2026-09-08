@@ -4397,6 +4397,46 @@ mod tests {
                 "turning the switch on does not make its prerequisite true"
             );
         }
+
+        // Every switch this route reports on, not only the one whose own
+        // prerequisite is refused. A gate is cheapest to add on a *different*
+        // switch than the row that motivated it — refusing to turn the live
+        // recovery fallback off while `vod_coverage_replaces_it` is unmet is
+        // the obvious "don't strand viewers" reflex, and it is exactly the
+        // shape this route exists to refuse. A test that only drives
+        // `playback_control_protocol_v1` would not see it.
+        let switches = call(&app, get("/api/v1/developer/readiness", Some(&admin)))
+            .await
+            .1["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|item| item["setting"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert!(
+            switches.len() >= 2,
+            "the readiness route reports more than one switch; if it stops, this \
+             assertion is the thing that should be revisited, not deleted: {switches:?}"
+        );
+        for setting in switches {
+            for want in [false, true, false] {
+                let (status, body) = call(
+                    &app,
+                    put(
+                        "/api/v1/settings",
+                        Some(&admin),
+                        serde_json::json!({ setting.clone(): want }),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "no advisory prerequisite may refuse `{setting}` in either \
+                     direction: {body}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -10752,7 +10792,12 @@ mod tests {
         );
     }
 
-    /// The shipped default, which no test had ever run.
+    /// The shipped default, which no test had ever asserted.
+    ///
+    /// Not "never run" — the integration tests spawn real `plurxd` binaries,
+    /// so `cfg(not(test))` and this default have been executing in CI all
+    /// along. What had never happened is a VOD prerequisite refusal in front
+    /// of it with an assertion on the other side.
     ///
     /// `live_hls_recovery_enabled` used to read `== Some("1")` under
     /// `cfg(test)` and `!= Some("0")` otherwise, so every VOD-refusal

@@ -281,6 +281,55 @@ function developerPanelSkeleton(readiness) {
     .replace(/<small class="hint" data-devev="[^"]*">[\s\S]*?<\/small>/g, "«evidence»");
 }
 
+// The panel-skeleton comparison below proves the Developer panel gates
+// nothing. It proves nothing about the other three places a gate is cheapest
+// to add: a different panel, a different switch, or a save function that
+// returns early. Each of those needs a reading to gate on, and none of them
+// can have one — so pin that they cannot reach it, which is a stronger claim
+// than pinning what they currently render.
+test("nothing outside the Developer readings can reach a reading", () => {
+  // `pvlr` — the retained live-HLS fallback — lives here, and it is the one
+  // switch a `vod_coverage_replaces_it` reading is literally about. The
+  // "don't strand viewers" gate would go on this panel, and the Developer
+  // skeleton comparison would never see it.
+  const playback = shippedSource("playbackPanel");
+  assert.match(
+    playback,
+    /^function playbackPanel\(settings\)\{/,
+    "playbackPanel takes settings and nothing else; a readiness argument is how a gate arrives",
+  );
+  assert.doesNotMatch(
+    playback,
+    /readiness|devReq|DEV_READINESS/i,
+    "the Playback panel must not be able to read a prerequisite",
+  );
+
+  // A save function that early-returns on an unmet reading is invisible to
+  // any comparison of rendered markup: the stub records the function name,
+  // so the skeleton is byte-identical whatever the function does.
+  for (const name of ["saveDeveloper", "saveExperimental", "saveStreaming"]) {
+    assert.doesNotMatch(
+      shippedSource(name),
+      /readiness|devReq|DEV_READINESS/i,
+      `${name} must not consult a prerequisite before writing a setting`,
+    );
+  }
+
+  // And the reading only reaches the tab that renders it. A route that loads
+  // it is a route that could gate on it.
+  const manifest = SHIPPED_UI.match(/\nconst SETTINGS_MANIFEST=\{[\s\S]*?\n\};/);
+  assert.ok(manifest, "index.html no longer declares SETTINGS_MANIFEST");
+  const carries = manifest[0]
+    .split("\n")
+    .filter((line) => line.includes("developerReadiness"))
+    .map((line) => line.trim().split(":")[0]);
+  assert.deepEqual(
+    carries,
+    ["developer"],
+    "only the Developer tab may load the readiness reading",
+  );
+});
+
 test("Developer is where the switches that cost something live", () => {
   const html = developerPanelUnder(undefined);
   for (const id of ["pcpv1", "phs"]) {
