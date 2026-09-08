@@ -12814,13 +12814,17 @@ pub(crate) fn record_action(
 /// Process-local and reset by a restart, which the route says out loud rather
 /// than presenting a fresh process's zeroes as evidence of anything.
 pub(crate) struct ControlVocabularySnapshot {
-    /// Exchanges from clients declaring every action this server can send,
-    /// indexed web/apple/android.
-    pub complete: [u64; 3],
-    /// Exchanges from clients declaring only some of them.
-    pub partial: [u64; 3],
     /// Exchanges from clients declaring the whole passive vocabulary —
-    /// `hold`, `terminal`, `retry_resource` — whatever else they declared.
+    /// `hold`, `terminal`, `retry_resource` — whatever else they declared,
+    /// indexed web/apple/android.
+    ///
+    /// The four-action "fully managed" counter is deliberately not here. It
+    /// still exists and `prometheus()` still exports it, but nothing has to
+    /// decide met/unmet from it: every shipped client is partial by that
+    /// definition until one ships `prepare_replacement`, so a readiness row
+    /// reading it would answer the prepared-handoff question under the
+    /// passive reporter's name. That question has its own row and its own
+    /// counter.
     pub passive_complete: [u64; 3],
     /// Exchanges from clients missing at least one of those three.
     pub passive_partial: [u64; 3],
@@ -12835,8 +12839,6 @@ pub(crate) fn control_vocabulary_snapshot() -> ControlVocabularySnapshot {
         ]
     };
     ControlVocabularySnapshot {
-        complete: read(&CONTROL_VOCABULARY[1]),
-        partial: read(&CONTROL_VOCABULARY[0]),
         passive_complete: read(&CONTROL_PASSIVE_VOCABULARY[1]),
         passive_partial: read(&CONTROL_PASSIVE_VOCABULARY[0]),
     }
