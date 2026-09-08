@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly disk bound for the Forgejo runners on this host
+
+[Timer]
+# Hourly, because the thing it guards against took three days to fill a 78G
+# guest: an hour is far inside that, and in steady state the run decides
+# "within budget" and deletes nothing.
+OnCalendar=hourly
+RandomizedDelaySec=600
+Persistent=true
+Unit=plurx-ci-janitor.service
+
+[Install]
+WantedBy=timers.target

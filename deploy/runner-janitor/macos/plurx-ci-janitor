@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# The runner janitor, for the one runner that has no systemd.
+#
+# Same problem, same numbers, same three invariants as the Linux janitor in the
+# directory above -- read that script's header for why a Forgejo runner's cache
+# server has to be reset whole and from outside. This is the macOS translation:
+# launchd instead of systemd, a process-tree idle check instead of a cgroup one.
+#
+# One difference matters and is not cosmetic. `systemctl stop` waits for a
+# running job -- the Linux installer raises TimeoutStopSec to 30 minutes for
+# exactly that -- and `launchctl bootout` does not: launchd sends SIGTERM and
+# SIGKILLs about twenty seconds later, which would kill a running Xcode build.
+# So on macOS the idle check is not a courtesy, it is the whole safety
+# mechanism, and it is deliberately stricter than the Linux one: the daemon
+# must have no child processes AND its work root must have been untouched for
+# QUIET_SECONDS.
+set -euo pipefail
+
+BUDGET_GB=${PLURX_JANITOR_BUDGET_GB:-20}
+QUIET_SECONDS=${PLURX_JANITOR_QUIET_SECONDS:-120}
+STATE_DIR=${PLURX_JANITOR_STATE_DIR:-/var/db/plurx-ci-janitor}
+DAEMON_DIR=${PLURX_JANITOR_DAEMON_DIR:-/Library/LaunchDaemons}
+dry_run=false
+
+usage() {
+  cat <<'EOF'
+Usage: plurx-ci-janitor [--dry-run] [--budget-gb N]
+
+Resets any Forgejo runner cache server on this Mac that is over budget or whose
+filesystem is below its reserve. Reports to stdout and to
+/var/db/plurx-ci-janitor/last-run.json.
+
+  --dry-run      decide and report, delete nothing
+  --budget-gb N  cache-server budget in whole gigabytes (default 20)
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) dry_run=true; shift ;;
+    --budget-gb) BUDGET_GB=${2:-}; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "plurx-ci-janitor: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+[[ "$BUDGET_GB" =~ ^[1-9][0-9]*$ ]] || {
+  echo "plurx-ci-janitor: budget must be whole gigabytes" >&2; exit 2
+}
+
+say() { printf 'plurx-ci-janitor: %s\n' "$*"; }
+
+# The reserve the in-job pruners keep, unchanged: 20 % of the filesystem, with a
+# 10 GiB minimum capped at a quarter of it so it can never exceed the disk.
+floor_kb_for() {
+  local filesystem_kb percent minimum quarter
+  filesystem_kb=$(df -Pk "$1" | awk 'NR == 2 { print $2 }')
+  percent=$(((filesystem_kb + 4) / 5))
+  minimum=$((10 * 1024 * 1024))
+  quarter=$(((filesystem_kb + 3) / 4))
+  [ "$minimum" -le "$quarter" ] || minimum=$quarter
+  [ "$percent" -ge "$minimum" ] && { echo "$percent"; return; }
+  echo "$minimum"
+}
+
+available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
+
+# `plutil -convert json` rather than PlistBuddy, because it is on PATH and so a
+# contract test can substitute it. The runner's own plist is the authority on
+# both its label and which config it reads.
+# `plutil -convert json` escapes every forward slash -- the real plist on
+# `gha-mba-apple-01` yields `\/Users\/githubrunner\/forgejo-runner\/config.yml`
+# -- so a path read straight out of it names nothing.
+plist_field() {
+  plutil -convert json -o - "$1" 2>/dev/null |
+    sed 's|\\/|/|g' | tr ',' '\n' | tr -d '[]{}" '
+}
+
+label_for_plist() {
+  plutil -convert json -o - "$1" 2>/dev/null |
+    sed 's|\\/|/|g' | sed -n 's/.*"Label":"\([^"]*\)".*/\1/p'
+}
+
+config_for_plist() {
+  plist_field "$1" | awk '/^-c$/ { want = 1; next } want { print; exit }'
+}
+
+cache_dir_for_config() {
+  awk '
+    /^[a-z]/ { in_cache = ($0 ~ /^cache:/) }
+    in_cache && /^[[:space:]]+dir:/ {
+      sub(/^[[:space:]]+dir:[[:space:]]*/, "")
+      gsub(/^"|"$/, "")
+      print
+      exit
+    }
+  ' "$1"
+}
+
+# launchd gives no graceful drain, so this is the safety mechanism and not a
+# courtesy. A running job is a tree of processes under the daemon; an idle
+# daemon has none. The quiet window catches the gap between a job being handed
+# out and its first child appearing.
+daemon_is_idle() {
+  local label root pid modified now
+  label=$1
+  root=$2
+  pid=$(launchctl print "system/$label" 2>/dev/null |
+    sed -n 's/^[[:space:]]*pid = \([0-9]*\).*/\1/p' | head -1)
+  [ -n "$pid" ] || return 1
+  pgrep -P "$pid" >/dev/null 2>&1 && return 1
+  if [ -d "$root/_work" ]; then
+    modified=$(stat -f '%m' "$root/_work" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    [ "$((now - modified))" -ge "$QUIET_SECONDS" ] || return 1
+  fi
+  return 0
+}
+
+reset_cache() {
+  local label plist dir used_kb
+  label=$1; plist=$2; dir=$3; used_kb=$4
+
+  if ! daemon_is_idle "$label" "$(dirname -- "$dir")"; then
+    say "$label is running a job; leaving its $((used_kb / 1024 / 1024))G cache for the next pass"
+    return 0
+  fi
+  if [ "$dry_run" = true ]; then
+    say "would reset $dir ($((used_kb / 1024 / 1024))G) with $label unloaded"
+    return 0
+  fi
+
+  # Whatever happens next, the runner comes back. A janitor that leaves a
+  # runner unloaded has taken the only Apple slot out of the fleet, which is
+  # worse than the disk it was reclaiming.
+  trap 'launchctl bootstrap system "$plist" >/dev/null 2>&1 || true' RETURN
+  say "unloading $label"
+  launchctl bootout "system/$label" >/dev/null 2>&1 || true
+  rm -rf -- "$dir"
+  launchctl bootstrap system "$plist"
+  trap - RETURN
+  say "reset $dir, reclaimed $((used_kb / 1024 / 1024))G, $label loaded again"
+  reclaimed_kb=$((reclaimed_kb + used_kb))
+  reset_count=$((reset_count + 1))
+  return 0
+}
+
+reclaimed_kb=0
+instances=0
+over_budget=0
+reset_count=0
+
+for plist in "$DAEMON_DIR"/*forgejo*runner*.plist; do
+  [ -f "$plist" ] || continue
+  label=$(label_for_plist "$plist")
+  [ -n "${label:-}" ] || continue
+  config=$(config_for_plist "$plist")
+  [ -n "${config:-}" ] && [ -f "$config" ] || continue
+  dir=$(cache_dir_for_config "$config")
+  [ -n "${dir:-}" ] || continue
+
+  # The same refusal as on Linux, and for the same reason: this deletes a
+  # directory whole, so the path check is the entire safety argument.
+  case "$dir" in */*runner*/cache) ;; *) continue ;; esac
+  [ ! -L "$dir" ] && [ -d "$dir" ] || continue
+  [ -f "$dir/bolt.db" ] || [ -d "$dir/cache" ] || continue
+
+  instances=$((instances + 1))
+  used_kb=$(du -sk "$dir" | awk '{ print $1 }')
+  floor_kb=$(floor_kb_for "$dir")
+  available_kb=$(available_kb_for "$dir")
+  budget_kb=$((BUDGET_GB * 1024 * 1024))
+
+  if [ "$used_kb" -le "$budget_kb" ] && [ "$available_kb" -ge "$floor_kb" ]; then
+    say "$label: $((used_kb / 1024 / 1024))G cached, $((available_kb / 1024 / 1024))G free — within budget"
+    continue
+  fi
+  over_budget=$((over_budget + 1))
+  reset_cache "$label" "$plist" "$dir" "$used_kb"
+done
+
+# The full hostname, not `hostname -s`: on a Mac that cuts at the first dot and
+# both of these report "pauls", which names neither of them.
+if [ "$dry_run" != true ]; then
+  mkdir -p "$STATE_DIR"
+  printf '{"finished":"%s","host":"%s","instances":%d,"over_budget":%d,"reset":%d,"reclaimed_gb":%d,"budget_gb":%d}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" \
+    "$instances" "$over_budget" "$reset_count" \
+    "$((reclaimed_kb / 1024 / 1024))" "$BUDGET_GB" > "$STATE_DIR/last-run.json"
+fi
+say "done: $instances runner cache servers, $over_budget over budget, $reset_count reset, $((reclaimed_kb / 1024 / 1024))G reclaimed"
