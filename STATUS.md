@@ -24,8 +24,8 @@ very first request**, because `classify_durable_route` answers
 control on the same predicate. The pointer moves and the viewer gets nothing.
 
 **The obvious fix is a regression, and that was established by building it.**
-The publication was written as a caller on the commit path; all 1905 daemon
-tests passed, clippy and rustfmt were clean, and an adversarial pass found what
+The publication was written as a caller on the commit path; the whole daemon
+suite passed, clippy and rustfmt were clean, and an adversarial pass found what
 the suite could not. A committed successor has no local worker, because nothing
 primes one. Moving the row off the sentinel puts it into
 `owned_media_sessions`, and the lease loop renews only sessions that are
@@ -60,9 +60,9 @@ all three client halves of M6 are on `main`.** The work was built on
 `effort/decoder-selection-recovery`, where it merged as four pull requests,
 and reconciled here against `main`'s restructured seek path, control session
 and reporter. It was reviewed adversarially as a *change* rather than as a
-move, which is the reason it is worth a line: all three defects the review
-found lived only in the seam, in code that existed on neither branch before
-the reconciliation. `./gradlew testDebugUnitTest :app:assembleDebug
+move, which is the reason it is worth a line: none of the three defects the
+review found is in the feature — all three are in the seam, in pairings that
+existed on neither branch. `./gradlew testDebugUnitTest :app:assembleDebug
 :app:lintDebug` — the non-Docker equivalent of `make android-test` and `make
 android` — green, 519 tests, 0 failures, 0 errors.
 
@@ -171,12 +171,13 @@ without the golden it needed, and `main` stayed red on that lane until the
 web half carried both cards' facts in `37ce1e87`.
 
 The lesson is sharper than "a job can fail twice", and the job logs are what
-sharpen it. Counted across every retained run of that lane, `TargetClosedError`
-appears **six** times in the runs that **succeeded** (tasks 3404, 3497, 3531)
-and **four** times in the ones that failed (3351, 3368, 3451, 3478) — it is
-asyncio teardown noise, printed by passing runs, and nothing has ever failed
-on it. Every failure of that lane was a golden `DRIFT`, including the redness
-on `main` that was being matched against: `37ce1e87`'s own message says so.
+sharpen it. Counted across the runs of that lane retained when this was
+written (tasks 3351 to 3723), `TargetClosedError` appears **six** times in the
+runs that **succeeded** (3404, 3497, 3531) and **four** times in the ones that
+failed (3351, 3368, 3451, 3478, 3723) — it is asyncio teardown noise, printed
+by passing runs, and nothing has ever failed on it. Every failure of that lane
+was a golden `DRIFT`, including the redness on `main` that was being matched
+against: `37ce1e87`'s own message says so.
 So the signature was never a failure signature. **Before treating a red lane
 as somebody else's, find the line that actually failed the job** — the
 `Error`/`FAILED`/`DRIFT` the runner exits on — and check whether it names a
