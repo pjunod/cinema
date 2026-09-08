@@ -36,6 +36,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewModelScope
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -115,7 +116,7 @@ value class SubtitleChoice(val index: Long?)
  */
 @UnstableApi
 class Controller(
-    context: Context,
+    private val context: Context,
     builtPlayer: BuiltPlayer,
     private val plan: PlanLike,
     private val caps: Map<String, String>,
@@ -128,13 +129,42 @@ class Controller(
     retainedSubtitle: SubtitleChoice? = null,
     private val onError: (String) -> Unit = {},
 ) {
-    val player: ExoPlayer = builtPlayer.player
+    /**
+     * The authoritative player — the one on the surface, with the volume up.
+     *
+     * Observable rather than final because a committed prepared replacement
+     * swaps it: the successor was primed on its own pipeline and becomes the
+     * incumbent in one step. Everything that reads `controller.player` from a
+     * composition therefore re-reads it after a commit, and everything that
+     * *registers* against it goes through [addPlayerListener] so the
+     * registration moves with it.
+     */
+    var player: ExoPlayer by mutableStateOf(builtPlayer.player)
+        private set
+
+    /**
+     * Listeners the screen owns, tracked here so a commit can move them.
+     *
+     * `player.addListener` from outside this class would bind to whichever
+     * instance was current at the time and silently stop firing after a swap.
+     */
+    private val externalListeners = mutableListOf<Player.Listener>()
+
+    fun addPlayerListener(value: Player.Listener) {
+        externalListeners += value
+        player.addListener(value)
+    }
+
+    fun removePlayerListener(value: Player.Listener) {
+        externalListeners -= value
+        player.removeListener(value)
+    }
 
     /** Immutable quality of this exact decision; pending intent is separate. */
     private val activeQuality = plan.requestedQuality
     private val planReplacement = PlaybackPlanReplacement(activeQuality)
 
-    private val progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
+    private var progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
     val observedBitsPerSecond: Long? get() = progressiveMediaOrigin.currentObservedBitsPerSecond()
 
     var audioOffsetMs: Long = initialAudioOffsetMs.coerceIn(-15_000, 15_000)
@@ -440,7 +470,16 @@ class Controller(
      * be both illegal and wasteful.
      */
     private val controlCapabilityProbe: Job = scope.launch {
-        deviceControlCapabilities = controlCapabilities(Caps.query(context))
+        deviceControlCapabilities = controlCapabilities(
+            query = Caps.query(context),
+            // Read once, here, for the same reason the rest of the document is
+            // read once: capabilities are required on the first request of a
+            // generation and the server retains what it was told, so a value
+            // that changed mid-player would never reach it anyway. Turning the
+            // switch on takes effect on the next playback, which is also the
+            // only honest moment to change a hardware claim.
+            preparedReplacementEnabled = vm.preferences.value.preparedReplacement,
+        )
     }
 
     /**
@@ -629,6 +668,9 @@ class Controller(
             openStallTracker.reset()
             lastTimeToFirstFrameMs = playbackTelemetry.firstFrame(monotonicNowMs())?.elapsedMs
             playbackNotice = null
+            // A commit outstanding here is the successor's very first frame on
+            // the surface, which is exactly what `first_frame_unix_ms` means.
+            settleCommitOnFirstFrame(System.currentTimeMillis())
         }
 
         override fun onTracksChanged(tracks: Tracks) {
@@ -886,6 +928,10 @@ class Controller(
     /** Execute only the final target after its immutable intent was enqueued. */
     private fun executeSeek(t: Long, sequence: Long) {
         if (!playbackControlBootstrapFence.isActive()) return
+        // A VOD seek never reopens the session and so never reaches
+        // [restartAt], but it moves the playhead away from the point the
+        // successor was primed to — so it abandons the preparation too.
+        abandonPreparedReplacement(failed = false)
         mediaMutationEpoch += 1
         if (planReplacement.route(playbackIntent)) return
         val recipe = currentRecipe()
@@ -973,7 +1019,28 @@ class Controller(
         clearStatusPolling()
         pgsOverlay.release()
         stallGuard.invalidateForUserAction()
-        playbackControl.end()
+        // The terminal acknowledgement a live preparation is owed, and then one
+        // exchange to carry it — on the view model's scope, because this
+        // composition's is cancelled in the same pass that called this. Without
+        // that hand-off the acknowledgement is published into a reporter whose
+        // pump is cancelled before it can build a request, and the staging's
+        // encoder runs for another 330 seconds after the viewer left.
+        abandonPreparedReplacement(failed = false)
+        awaitingCommitFrameSinceMs = null
+        val settling = pendingAcknowledgement?.let {
+            playbackControlObservation()
+                ?.let(PlaybackControlMapping::snapshot)
+                ?.let(::settlingSnapshot)
+        }
+        // Every read below this line is against a player that is about to be
+        // released, so the observation is closed first.
+        controlObservationIsClosed = true
+        collectRetiredPlayer()
+        if (settling != null) {
+            playbackControl.endAfterFinalExchange(vm.viewModelScope, settling)
+        } else {
+            playbackControl.end()
+        }
         // A verdict survives a reopen because the failure it explains usually
         // arrives after one. It must not survive the title: a confident
         // sentence about the wrong film is worse than a generic one.
@@ -1101,6 +1168,10 @@ class Controller(
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
         stallGuard.invalidateForUserAction()
+        // And it abandons any prepared successor: it was staged against the
+        // selection the viewer just replaced, so switching to it would serve
+        // the change before last.
+        abandonPreparedReplacement(failed = false)
         Session.resetMediaFailover()
 
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
@@ -1155,6 +1226,11 @@ class Controller(
         attempt: PlaybackAttempt,
         executionSequence: Long? = playbackIntent.pendingSeek?.sequence,
     ) {
+        // The successor was staged against the session this call is replacing.
+        // A reopen is a different stream, so the preparation is abandoned
+        // rather than left for the server's 330 s deadline — which would hold
+        // this session's one preparation slot for the rest of the film.
+        abandonPreparedReplacement(failed = false)
         val requestVersion = stallGuard.beginRequest()
         val recipe = currentRecipe()
         val createBody = sessionBody(ms, recipe = recipe.recipe)
@@ -1368,6 +1444,16 @@ class Controller(
         // server validates previous_session_id against a live session
         // map.  Session creation supersedes and kills the predecessor
         // atomically.
+        //
+        // The successor was staged against the session this reopen replaces,
+        // and this is the one stream-replacing path that does not go through
+        // `openSession`. Without this the preparation stays live against a
+        // session that no longer exists, and the next tick commits it — putting
+        // the viewer back on the stream that just stalled and orphaning the
+        // replacement they are actually watching. It runs before
+        // [endPlaybackControl] so the abandonment acknowledgement still has a
+        // control session to leave on.
+        abandonPreparedReplacement(failed = false)
         endPlaybackControl()
         sessionId = null
         clearStatusPolling()
@@ -1686,6 +1772,11 @@ class Controller(
         val next = Session.nextMediaFailoverUrl(path) ?: return false
         val recipe = recipeOwnership.attached ?: currentRecipe()
         val presentationSequence = playbackIntent.executedSequence()
+        // Same session, different ingress — but the incumbent is about to be
+        // re-attached and the successor was primed against the playhead the
+        // failure interrupted, so it is abandoned rather than left to commit
+        // over the recovery.
+        abandonPreparedReplacement(failed = false)
         val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
         playbackTelemetry.report(
             event = "playback_transport_failover",
@@ -1775,6 +1866,8 @@ class Controller(
                 bootstrap = bootstrap,
                 observe = ::playbackControlObservation,
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
+                onPrepare = ::onPrepareAction,
+                onAcknowledged = ::acknowledgementDelivered,
             )
         }
     }
@@ -1859,7 +1952,15 @@ class Controller(
         playbackControl.reportEvidence()
     }
 
+    /**
+     * Set the moment the players are torn down. A final exchange may still be
+     * in flight on a scope that outlives this controller, and every field below
+     * is read off an ExoPlayer that no longer exists.
+     */
+    private var controlObservationIsClosed = false
+
     private fun playbackControlObservation(): PlayerControlObservation? {
+        if (controlObservationIsClosed) return null
         val capabilities = deviceControlCapabilities ?: return null
         val position = realPosition()
         val duration = player.duration
@@ -1898,6 +1999,7 @@ class Controller(
             observedDownloadBps = observedBitsPerSecond,
             observationOverride = controlObservationOverride,
             renderOverride = controlRenderOverride,
+            acknowledgement = pendingAcknowledgement,
             selection = playbackControlSelection(),
             capabilities = capabilities,
         )
@@ -1944,6 +2046,7 @@ class Controller(
     private fun playbackControlPlayerChanged() {
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()
+        pollPreparedReplacement()
         playbackControl.playerChanged()
     }
 
@@ -2023,6 +2126,367 @@ class Controller(
         controlRenderOverride = null
         controlEvidencePositionMs = null
     }
+
+    // ------------------------------------------------ prepared replacement
+
+    private val preparedLedger = PreparedReplacementLedger()
+    private var preparedPlayer: ExoPlayer? = null
+    private var preparedOrigin: ProgressiveMediaOrigin? = null
+    private var preparedListener: Player.Listener? = null
+    private var preparedStartedAtMs = 0L
+
+    /**
+     * When the switch happened, while the commit still waits for the frame that
+     * proves it. Null when no commit is outstanding.
+     */
+    private var awaitingCommitFrameSinceMs: Long? = null
+
+    /**
+     * The predecessor, after a commit and before the surface has moved off it.
+     * Collected by [collectRetiredPlayer] the moment the view has re-pointed,
+     * or by [release], whichever comes first.
+     */
+    private var retiredPlayer: ExoPlayer? = null
+
+    /**
+     * When it was parked, so the watchdog can collect one the composition never
+     * came back for. A paused ExoPlayer still holds its renderers — only
+     * `release` frees them — so a predecessor left parked while the frame clock
+     * is stopped is a second live decoder on a device class measured as failing
+     * at two. The fast path stays the composition's; this is the backstop.
+     */
+    private var retiredParkedAtMs = 0L
+
+    /**
+     * Release the player the surface has just moved off.
+     *
+     * Called by the screen from the `AndroidView` update that re-points the
+     * `PlayerView`, because that is the only place that *knows* the surface has
+     * moved. A timer here would be guessing about a frame clock that is parked
+     * whenever the window is not visible, and releasing early leaves the view
+     * calling into a released player.
+     */
+    fun collectRetiredPlayer() {
+        val retired = retiredPlayer ?: return
+        retiredPlayer = null
+        retiredParkedAtMs = 0L
+        retired.release()
+    }
+
+    /**
+     * The acknowledgement the next exchange will carry.
+     *
+     * One slot, not a queue: the ladder is monotonic and the server keeps the
+     * furthest state it was told, so an acknowledgement replaced before it went
+     * out is one the newer one supersedes. Cleared when the exchange carrying
+     * it comes back accepted; a failed exchange replays the same request, so
+     * holding it until then is what makes a lost commit retry rather than
+     * vanish.
+     */
+    private var pendingAcknowledgement: ActionAcknowledgement? = null
+
+    /**
+     * The server named a successor. Build the second pipeline and align it.
+     *
+     * Arm-and-poll, never await: this is reached from a `Player.Listener`
+     * callback's descendants and from the reporter's exchange hook, and both
+     * are non-suspending. Everything that waits — readiness, runway, the
+     * readiness bound — is read by [pollPreparedReplacement] on the tick that
+     * already runs every second.
+     */
+    private fun onPrepareAction(action: ControlAction) {
+        // The session fences this too, and this is the second lock on the same
+        // door: an action that reached a released controller would read the
+        // playhead off a released ExoPlayer and stand up a pipeline nothing is
+        // left running to release.
+        if (controlObservationIsClosed) return
+        when (val offer = preparedLedger.offer(action)) {
+            // The server replays a staging byte-identically until it settles,
+            // so this is what most exchanges carrying a `prepare` are. Building
+            // again would put a third pipeline on the device.
+            is PreparationOffer.Same -> Unit
+            is PreparationOffer.Refuse -> Unit
+            is PreparationOffer.Start -> {
+                offer.supersedes?.let(::publishAcknowledgement)
+                releaseSuccessor()
+                startSuccessor(offer.action)
+            }
+        }
+    }
+
+    private fun startSuccessor(action: ControlAction) {
+        val playlist = action.playlistUrl ?: return
+        val originMs = action.mediaOriginMs ?: return
+        val built = try {
+            buildSuccessorPlayer(context, vm)
+        } catch (_: Exception) {
+            // A device that cannot stand up a second pipeline at all is the
+            // measured Google TV case. It is a `failed`, not a crash.
+            publishAcknowledgement(preparedLedger.failed())
+            return
+        }
+        preparedStartedAtMs = monotonicNowMs()
+        preparedPlayer = built.player
+        preparedOrigin = built.progressiveMediaOrigin
+        val successorListener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                // Posted, not called. Abandoning releases this very player, and
+                // re-entering `release()` from inside its own `ListenerSet`
+                // dispatch is the kind of thing that works until it does not.
+                // A tick's delay costs a viewer who is not watching this
+                // pipeline nothing.
+                //
+                // And it names the pipeline that errored. A seek in the gap
+                // releases this one and the next `prepare` builds another, and
+                // an unqualified post would then report `failed` for a
+                // preparation that never failed and kill it — burning the
+                // session's one preparation slot on a stale event.
+                val errored = built.player
+                scope.launch {
+                    if (preparedPlayer === errored) abandonPreparedReplacement(failed = true)
+                }
+            }
+        }
+        preparedListener = successorListener
+        built.player.addListener(successorListener)
+        built.player.setMediaItem(
+            MediaItem.fromUri(Session.url(playlist)),
+            successorAttachPositionMs(originMs, realPosition()),
+        )
+        built.player.prepare()
+    }
+
+    /**
+     * Read the successor once per tick and move the ladder if it has earned it.
+     *
+     * The whole readiness path is a poll rather than an await for the reason
+     * `docs/playback-control/PLAYBACK-CONTROL-STATUS.md:281-311` records: `onPlayerError` is a
+     * non-suspending override, so this platform *arms* where Apple *awaits*,
+     * and introducing a suspending wait inside a listener callback is the thing
+     * that document says not to do.
+     */
+    private fun pollPreparedReplacement() {
+        // The composition normally collects this within a frame. When the frame
+        // clock is parked it never does, and a paused player is still a decoder.
+        if (retiredPlayer != null &&
+            monotonicNowMs() - retiredParkedAtMs > PREPARED_RETIRED_COLLECT_MS
+        ) {
+            collectRetiredPlayer()
+        }
+        awaitingCommitFrameSinceMs?.let { since ->
+            if (monotonicNowMs() - since > PREPARED_COMMIT_FRAME_BOUND_MS) {
+                settleCommitOnFirstFrame(System.currentTimeMillis())
+            }
+        }
+        val successor = preparedPlayer ?: return
+        if (!preparedLedger.isLive) return
+        if (monotonicNowMs() - preparedStartedAtMs > PREPARED_READINESS_BOUND_MS) {
+            abandonPreparedReplacement(failed = true)
+            return
+        }
+        if (successor.playbackState != Player.STATE_READY) return
+        // Tracks known is what separates "playable" from "prepared": a player
+        // at STATE_READY with no published tracks has nothing to switch to.
+        if (successor.currentTracks.groups.isEmpty()) return
+        publishAcknowledgement(preparedLedger.metadataReady())
+        val originMs = preparedLedger.action?.mediaOriginMs ?: return
+        val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
+        if (!successorIsBuffered(bufferedThrough, realPosition())) return
+        publishAcknowledgement(preparedLedger.bufferReady(bufferedThrough))
+        commitPreparedReplacement()
+    }
+
+    /**
+     * The successor takes the surface and the volume; the predecessor is gone.
+     *
+     * The client decides when to switch — there is no `commit_replacement`
+     * action and the server's answer on the settling exchange is `none`. What
+     * the server does with the commit is move its pointer from the predecessor
+     * incarnation to the staged one, so the predecessor's session is retired by
+     * that CAS rather than by an `endHlsSession` from here.
+     */
+    private fun commitPreparedReplacement() {
+        val successor = preparedPlayer ?: return
+        val action = preparedLedger.action ?: return
+        // The ledger enters its unabortable state before anything moves. From
+        // here the viewer is looking at this pipeline, so a Back press or a
+        // seek in the seconds before its first frame must settle the commit
+        // rather than publish an `aborted` for the staging the server is about
+        // to move its pointer to.
+        if (!preparedLedger.switched()) return
+        // Armed here rather than at the end of this function. `switched()` is
+        // what makes an abandon settle instead of abort, and the settle is
+        // gated on this clock — so any window where one is set and the other is
+        // not is a window where a preparation can be left permanently
+        // unsettleable.
+        awaitingCommitFrameSinceMs = monotonicNowMs()
+        val previous = player
+        val previousVolume = previous.volume
+
+        successor.volume = previousVolume
+        preparedOrigin?.let { progressiveMediaOrigin = it }
+
+        preparedListener?.let { successor.removeListener(it) }
+        preparedListener = null
+        preparedPlayer = null
+        preparedOrigin = null
+
+        previous.removeListener(this.listener)
+        externalListeners.forEach { previous.removeListener(it) }
+        successor.addListener(this.listener)
+        externalListeners.forEach { successor.addListener(it) }
+
+        player = successor
+        mediaSession.setPlayer(successor)
+
+        // The successor is its own session on its own timeline. Everything the
+        // controller derives from "which session am I playing" moves with it,
+        // in one place, so no two answers about the same stream can drift.
+        activeMediaPath = action.playlistUrl?.let(::relativeMediaPath)
+        baseMs = sessionPlaybackTimeline(
+            mediaOriginMs = action.mediaOriginMs ?: 0L,
+            isVod = sessionIsVod,
+            requestedStartMs = 0L,
+        ).baseMs
+        action.sessionId?.let { successorSession ->
+            sessionId = successorSession
+            startStatusPolling(successorSession)
+        }
+        action.effectiveSelection?.let { stallReopenBudget.seed(it.height.toInt()) }
+        // The badges and the info panel describe the stream on the screen, and
+        // both halves of the grade move together or neither does.
+        adoptedGrade(
+            DeliveredGrade(deliveredRange, deliveredDolbyVisionProfile),
+            action.effectiveSelection,
+        ).let {
+            deliveredRange = it.range
+            deliveredDolbyVisionProfile = it.dolbyVisionProfile
+        }
+        // The successor is a different encoder on a different session. The
+        // status poll started above refills both within a couple of seconds;
+        // until it does, no answer is better than the predecessor's.
+        encoder = null
+        sessionStatus = null
+        establishedPlayback = false
+        armTrackSelections()
+        applyTextSelection()
+        applyAudioSelection()
+
+        // Not released here. `player` is snapshot state, so the `PlayerView`
+        // re-points at the successor on the next composition pass — releasing
+        // the predecessor synchronously would leave the view holding a released
+        // player for a frame, and would tear the surface down before the
+        // successor could take it. The surface owner collects it the moment it
+        // has re-pointed, which is the only deterministic answer: a timer would
+        // be guessing about a frame clock that is parked whenever the window is
+        // not visible. It is paused rather than stopped, so the predecessor's
+        // last frame stays on screen through the swap instead of a shutter.
+        // Collect before parking. Two commits between two composition passes
+        // would otherwise drop the first predecessor on the floor — never
+        // released, never referenced again. An uncollected one here means
+        // `player` has already moved twice, so the view is demonstrably past
+        // it.
+        collectRetiredPlayer()
+        previous.playWhenReady = false
+        retiredParkedAtMs = monotonicNowMs()
+        retiredPlayer = previous
+        // The commit is owed a `first_frame_unix_ms`, and the honest source is
+        // the successor's own first render — which cannot have happened yet,
+        // because a prepared successor has no surface and a surfaceless player
+        // renders nothing. So the acknowledgement waits for
+        // `onRenderedFirstFrame` on the pipeline that is now the incumbent;
+        // [pollPreparedReplacement] sends it with the wall clock anyway if no
+        // frame arrives within [PREPARED_COMMIT_FRAME_BOUND_MS], because by
+        // then the switch has demonstrably happened and a late commit is worth
+        // more than a precise one.
+    }
+
+    /**
+     * The successor rendered its first frame after taking the surface, so the
+     * commit can name the moment the viewer actually saw it.
+     */
+    private fun settleCommitOnFirstFrame(firstFrameUnixMs: Long) {
+        if (awaitingCommitFrameSinceMs == null) return
+        awaitingCommitFrameSinceMs = null
+        publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
+    }
+
+    /**
+     * Give up on the successor and fall back to the in-place path.
+     *
+     * The interruption that follows is Android's ordinary reopen, measured at
+     * 353–766 ms on the Google TV. It works, and it is not seamless; nothing
+     * here should ever describe it as such.
+     */
+    /**
+     * Every path that replaces the stream calls this, and the list is the rule.
+     *
+     * There are five: [seekTo] (a VOD seek never reopens, so it never reaches
+     * `restartAt`), [restartAt] (quality, audio, subtitle, fallback),
+     * [openSession], [onStall]'s reopen, [retryMediaOnNextNode], and [release].
+     * A sixth path that replaces the stream and does not appear here leaves the
+     * successor priming against a session that is gone, and the next tick
+     * commits it — which is what `onStall` did until a review traced it.
+     *
+     * The list is a comment rather than a test because reaching any of those
+     * from the JVM unit lane needs a `Context` and a real ExoPlayer. Both
+     * decisions this used to make inline — which grade to adopt, and what a
+     * settling snapshot looks like — now live in `PreparedReplacement.kt`
+     * where they are tested; this is the residue that genuinely needs a player.
+     */
+    private fun abandonPreparedReplacement(failed: Boolean) {
+        // A switched preparation cannot be abandoned — the viewer is watching
+        // it. Settle the commit it is still owed instead, with the best clock
+        // available, and leave the ledger terminal.
+        if (preparedLedger.isSwitched) {
+            settleCommitOnFirstFrame(System.currentTimeMillis())
+            return
+        }
+        val owed = if (failed) preparedLedger.failed() else preparedLedger.aborted()
+        releaseSuccessor()
+        publishAcknowledgement(owed)
+    }
+
+    /**
+     * Every exit releases the successor: disposal, session end, a seek, another
+     * quality change, backgrounding. A prepared player that outlives its reason
+     * is a second decoder the viewer is paying for and cannot see.
+     */
+    private fun releaseSuccessor() {
+        val successor = preparedPlayer ?: return
+        preparedListener?.let { successor.removeListener(it) }
+        preparedListener = null
+        preparedPlayer = null
+        preparedOrigin = null
+        successor.release()
+    }
+
+    /**
+     * Put an acknowledgement on the next exchange, now rather than at the next
+     * cadence.
+     *
+     * Coalescing is right for a position update and wrong for this: the pump
+     * sleeps for `next_exchange_ms`, and a commit that arrives after the
+     * server's deadline reaped the staging comes back
+     * `acknowledgement_rejected`.
+     */
+    private fun publishAcknowledgement(value: ActionAcknowledgement?) {
+        val acknowledgement = value ?: return
+        pendingAcknowledgement = acknowledgement
+        playbackControl.reportEvidence()
+    }
+
+    /**
+     * The exchange that carried an acknowledgement came back accepted.
+     *
+     * A `200` is not proof the *server* accepted the settlement — an
+     * acknowledgement whose `action_id` does not match the bound staging is
+     * silently ignored — but it is proof this client does not have to send this
+     * one again, which is the only thing this slot decides.
+     */
+    private fun acknowledgementDelivered(value: ActionAcknowledgement) {
+        if (pendingAcknowledgement == value) pendingAcknowledgement = null
+    }
 }
 
 /**
@@ -2089,7 +2553,7 @@ internal fun controlErrorCode(errorCode: Int): ClientErrorCode = when (errorCode
  * TELEVISION` is what `currentFormFactor()` reads in Compose; this is the
  * non-composable path for the player's construction.
  */
-private fun isTelevision(context: Context): Boolean =
+internal fun isTelevision(context: Context): Boolean =
     context.resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK ==
         Configuration.UI_MODE_TYPE_TELEVISION
 
@@ -2137,7 +2601,44 @@ class BuiltPlayer internal constructor(
 )
 
 @UnstableApi
-fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer {
+fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer =
+    buildPipeline(context, vm, tunneling = isTelevision(context))
+
+/**
+ * The second pipeline a prepared replacement primes.
+ *
+ * Not [buildPlayer] called twice: a successor is muted and has no surface until
+ * the moment it commits, and it must be visibly a different construction so
+ * that neither one can quietly acquire the other's properties.
+ *
+ * **Tunneling inherits the incumbent's setting**, which on a television means
+ * the successor is tunneled too. That is deliberate and it is the *lossy*
+ * choice: M5.5's only hard failure was same-codec dual prime on a tunneled
+ * Google TV — two identical tunneled pipelines appear to contend where two
+ * different codecs get distinct decoder instances — so this reproduces that
+ * failure rather than dodging it. The alternative, building the successor with
+ * tunneling forced off, would probably make that device pass, but the pipeline
+ * that primed would not be the pipeline that serves after the switch, and a
+ * measurement that cannot fail is the same class of error as M5.5's rejected
+ * first instrument set. The failure path here is `failed` plus the fallback
+ * ladder, which is a bounded cost; a successful prime that proves nothing is
+ * not. Revisit with evidence if the tunneling-off re-run is ever taken
+ * (`docs/playback-control/PLAYBACK-CONTROL-STATUS.md:1240-1243`).
+ */
+@UnstableApi
+fun buildSuccessorPlayer(context: Context, vm: AppViewModel): BuiltPlayer {
+    val built = buildPipeline(context, vm, tunneling = isTelevision(context))
+    // Never audible and never visible before the switch. Silence is set here
+    // rather than relied on from the composition not rendering it: a prepared
+    // successor that is merely off-screen is still an audio stream.
+    built.player.volume = 0f
+    built.player.setVideoSurface(null)
+    built.player.playWhenReady = true
+    return built
+}
+
+@UnstableApi
+private fun buildPipeline(context: Context, vm: AppViewModel, tunneling: Boolean): BuiltPlayer {
     val selector = DefaultTrackSelector(context).apply {
         parameters = buildUponParameters()
             .setPreferredAudioLanguage(vm.audioLang)
@@ -2146,7 +2647,7 @@ fun buildPlayer(context: Context, vm: AppViewModel): BuiltPlayer {
             // built around. Requested only on television devices: on a phone it
             // buys nothing and some handset decoders refuse the mode outright.
             // Media3 falls back to normal playback when the device says no.
-            .setTunnelingEnabled(isTelevision(context))
+            .setTunnelingEnabled(tunneling)
             // Text selection is the server's policy, carried by [Controller] —
             // not the selector's: a preferred language here re-enables the
             // "merely the same language" tail that policy deletes, and the

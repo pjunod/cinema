@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tv.plurx.app.BuildConfig
@@ -40,6 +41,8 @@ import tv.plurx.app.data.OfflineQuality
 import tv.plurx.app.data.PosterSize
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.ThemeId
+import tv.plurx.app.player.isTelevision
+import tv.plurx.app.player.preparedReplacementRequirements
 import tv.plurx.app.ui.components.ChoicePicker
 import tv.plurx.app.ui.components.RequestInitialFocus
 import tv.plurx.app.ui.components.SafeTopRow
@@ -204,6 +207,11 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
 
             SettingsSection("Developer", "Runtime enablement with the requirements needed to use each feature safely.") {
                 PreferenceAction("HDHomeRun Live TV setup and enablement", onClick = onOpenDeveloper)
+                PreparedReplacementEnable(
+                    enabled = preferences.preparedReplacement,
+                    isTelevision = isTelevision(LocalContext.current),
+                    onEnabled = vm::setPreparedReplacement,
+                )
             }
 
             SettingsSection("About", null) {
@@ -215,6 +223,76 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDeveloper: () -> 
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Settings → Developer → "Prepared replacement".
+ *
+ * The switch is on the left of nothing: it is never disabled, never gated, and
+ * never conditioned on the rows beneath it. Those rows say what M5.5 measured
+ * and whether this device meets it, so the person turning it on knows what
+ * they are taking on — which is a different thing from a literal deciding for
+ * them, and the only mechanism protocol v1 leaves available. The field it sets
+ * is per platform and frozen; the measurement behind it is per device class.
+ *
+ * Two of the four conditions belong to a session rather than to the device, so
+ * this screen states them and says so rather than scoring them.
+ */
+@Composable
+private fun PreparedReplacementEnable(
+    enabled: Boolean,
+    isTelevision: Boolean,
+    onEnabled: (Boolean) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        PreferenceSwitch("Prepared replacement", enabled, onEnabled)
+        Text(
+            "Tells the server this device can hold two live decode pipelines, " +
+                "so a quality change can hand over on a second player instead " +
+                "of reopening the first. Takes effect on the next playback. " +
+                "When it cannot be used the player falls back to reopening in " +
+                "place, which interrupts the picture briefly.",
+            color = Muted,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
+        preparedReplacementRequirements(
+            isTelevision = isTelevision,
+            // The successor inherits the incumbent's tunneling, and tunneling
+            // is requested on televisions only.
+            tunnelingEnabled = isTelevision,
+            sessionIsLive = null,
+            observedDownloadBps = null,
+            throughputKnown = false,
+        ).forEach { requirement ->
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(requirement.label, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        requirement.status,
+                        color = if (requirement.met == false) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            Muted
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                Text(
+                    requirement.detail,
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
     }

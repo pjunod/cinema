@@ -2,6 +2,7 @@ package tv.plurx.app.player
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -400,5 +401,82 @@ class PlaybackControlMappingTotalityTest {
             }
         }
         assertEquals(144, checked)
+    }
+}
+
+/**
+ * `dual_player_preparation` is a hardware claim: *this platform can hold two
+ * live decode pipelines*. It decides whether the server may build a successor
+ * at all, so it is the one field on this document that authorises work on a
+ * viewer's device — and it had no assertion of its own on Android at all, only
+ * three fixtures that happened to hardcode `false`. Apple has the mirror image
+ * (`AppleClientTests.swift:5361-5378`).
+ */
+class ControlCapabilitiesPreparationTest {
+    @Test
+    fun `a device that was never asked reports no dual player preparation`() {
+        // The default is the whole protection. M5.5 measured the capability per
+        // *device class*, not per platform: both phones passed same-codec dual
+        // preparation 20 of 20, and the tunneled Google TV failed that same
+        // case 0 of 3 — and same-codec is the only kind of change the server
+        // ever prepares. Protocol v1 has no way to say "yes on phones, no on
+        // tunneled televisions", so nothing may turn this on for a whole
+        // platform at once, and a default that drifted to `true` would
+        // authorise the server to prime a second pipeline on the one device
+        // with a measured hard failure. Changing it needs a deliberate edit to
+        // this test and a reason written next to it.
+        assertFalse(controlCapabilities(mapOf("vcodec" to "h264,hevc")).dualPlayerPreparation)
+        assertFalse(controlCapabilities(emptyMap()).dualPlayerPreparation)
+    }
+
+    @Test
+    fun `only the operator's own switch turns it on`() {
+        // Settings -> Developer, advisory and never gated: the person holding
+        // the device can read what was measured and decide for their own
+        // hardware, which is the narrowest true statement protocol v1 leaves
+        // available. Nothing derives this from the device itself.
+        assertTrue(
+            controlCapabilities(
+                query = mapOf("vcodec" to "h264"),
+                preparedReplacementEnabled = true,
+            ).dualPlayerPreparation,
+        )
+    }
+
+    @Test
+    fun `the rest of the document is untouched by the switch`() {
+        val off = controlCapabilities(mapOf("vcodec" to "h264,av1", "hdr" to "1"))
+        val on = controlCapabilities(
+            query = mapOf("vcodec" to "h264,av1", "hdr" to "1"),
+            preparedReplacementEnabled = true,
+        )
+        assertEquals(off.copy(dualPlayerPreparation = true), on)
+        assertTrue(off.isValid)
+    }
+}
+
+/**
+ * An acknowledgement is a fact about a transaction, not a reading of the
+ * player, so the mapping carries it and derives nothing from it.
+ */
+class SnapshotAcknowledgementTest {
+    @Test
+    fun `the acknowledgement is carried through untouched`() {
+        val acknowledgement = ActionAcknowledgement(
+            actionId = "33333333-3333-4333-8333-333333333333",
+            state = AcknowledgementState.BUFFER_READY,
+            bufferedThroughMs = 90_000,
+        )
+        val mapped = PlaybackControlMapping.snapshot(
+            playing().copy(acknowledgement = acknowledgement),
+        )
+        assertEquals(acknowledgement, mapped.acknowledgement)
+        assertEquals(acknowledgement, mapped.sendableAcknowledgement)
+        assertTrue(mapped.isValid)
+    }
+
+    @Test
+    fun `no preparation means no acknowledgement key to send`() {
+        assertNull(PlaybackControlMapping.snapshot(playing()).acknowledgement)
     }
 }
