@@ -7,13 +7,23 @@ job running on that runner cannot do. So the janitor does it from outside, and
 the three things that must hold are that it never resets a runner that is
 working, that it always brings a runner it stopped back, and that it does
 nothing at all while the cache is inside its budget.
+
+A fourth was added on 2026-09-08, after `gha-nuc4-general-01` refused two jobs
+in a row while this janitor reported it healthy: **the reserve it keeps has to
+be at least the free space a job is refused for not having.** The preflight
+demanded 25 G and the reserve was 20 % of the filesystem, 15.6 G on a 78 GB
+guest, so at 18 G free both were satisfied at once -- one by refusing work, the
+other by doing nothing about it. That band is what `test_the_reserve_is_never`
+`_below_what_a_job_is_refused_for` and the parity test below exist to close.
 """
 
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -241,6 +251,94 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
         self.assertFalse(self.cache.exists())
 
+    def test_the_reserve_is_never_below_what_a_job_is_refused_for(self):
+        """`gha-nuc4-general-01`, 2026-09-08, the exact numbers.
+
+        A 78 GB guest with 18 G free and a 4 G cache. The preflight refused two
+        jobs in a row for wanting 25 G; 20 % of 78 GB is 15.6 G, so the janitor
+        called the same runner healthy and reclaimed nothing, and every re-push
+        landed on the same guest because the job's labels pin it there. Both
+        rules were satisfied at once and the fleet was stuck between them.
+        """
+        self.environment["FIXTURE_AVAIL_KB"] = str(18 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("within budget", result.stdout)
+        self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
+        self.assertFalse(self.cache.exists())
+        self.assertEqual(self.last_run()["reset"], 1)
+
+    def test_the_janitor_reserve_and_the_preflight_bar_are_one_number(self):
+        """Two files, one figure, and nothing but this test holding them level.
+
+        The janitor is installed standalone on each host -- it cannot read the
+        workflow at runtime -- so the shared constant has to be a contract
+        rather than an import. If `disk-gb` is ever raised without raising
+        `REQUIRED_GB`, the band that refused `gha-nuc4-general-01` reopens
+        silently and every runner reports healthy while jobs are turned away.
+        """
+        script = SCRIPT.read_text(encoding="utf-8")
+        action = (
+            ROOT / ".github/actions/cargo-cache/action.yml"
+        ).read_text(encoding="utf-8")
+
+        janitor_gb = re.search(
+            r"^REQUIRED_GB=\$\{PLURX_JANITOR_REQUIRED_GB:-(\d+)\}", script, re.M
+        )
+        self.assertIsNotNone(janitor_gb, "the janitor must name its required GB")
+        preflight_gb = re.search(r'"\$\{DISK_GB:-(\d+)\}"', action)
+        self.assertIsNotNone(preflight_gb, "the action must name its disk-gb default")
+        self.assertEqual(janitor_gb.group(1), preflight_gb.group(1))
+
+    def test_a_requirement_larger_than_the_disk_is_said_out_loud_not_chased(self):
+        """The original bug was a fixed reserve that could never be satisfied.
+
+        100 GiB on a 78 GB guest meant the pruner deleted everything it was
+        allowed to and failed anyway. Raising the reserve to meet a job's
+        demand must not reintroduce that, so a demand above half the filesystem
+        is capped -- and reported, because a bound that silently cannot be met
+        is exactly how this went wrong the first time.
+        """
+        self.environment["PLURX_JANITOR_REQUIRED_GB"] = "60"
+        self.environment["FIXTURE_AVAIL_KB"] = str(45 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no amount of pruning reaches that", result.stderr)
+        # 45 G free is above the 39 G half-filesystem cap, so nothing is taken.
+        self.assertEqual(self.systemctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+
+    def test_a_delete_that_fails_still_brings_the_runner_back(self):
+        """The one invariant this script promises unconditionally.
+
+        `set -e` aborts the shell on a failed `rm -rf`, and a RETURN trap does
+        not run on shell exit -- so before this, an EBUSY on a leftover mount
+        or an EACCES on another uid's file took the runner out of the fleet
+        with nothing left to start it again. The hourly timer would not
+        recover it either: nothing here ever starts a runner it did not itself
+        stop.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root deletes anything; the mode below proves nothing")
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        undeletable = self.cache / "cache/0a"
+        undeletable.chmod(0o500)
+        self.addCleanup(undeletable.chmod, 0o700)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("could not fully delete", result.stdout)
+        self.assertEqual(self.systemctl_calls(), ["stop", UNIT, "start", UNIT])
+        # And the pass still finishes: the receipt and the summary are how a
+        # host nobody is watching stays attributable.
+        self.assertIn("done:", result.stdout)
+        self.assertTrue((self.state / "last-run.json").is_file())
+
     def test_a_cache_dir_the_config_points_somewhere_else_is_refused(self):
         """The delete is a whole directory, so the path check is the safety."""
         elsewhere = Path(self._directory.name) / "var/lib/plurxd"
@@ -315,6 +413,12 @@ class MacosJanitorContractCase(unittest.TestCase):
         fixture = Path(self._directory.name)
 
         self.runner_root = fixture / "Users/githubrunner/forgejo-runner"
+        # A `_work` at all is what reaches `daemon_is_idle`'s quiet window --
+        # the macOS janitor's stricter half, which nothing here executed until
+        # this directory existed.
+        self.work = self.runner_root / "_work/plurx"
+        self.work.mkdir(parents=True)
+        (self.work / "checkout").write_bytes(b"an Xcode build's tree")
         self.cache = self.runner_root / "cache"
         (self.cache / "cache/0a").mkdir(parents=True)
         (self.cache / "bolt.db").write_bytes(b"index")
@@ -354,6 +458,12 @@ class MacosJanitorContractCase(unittest.TestCase):
                 "#!/bin/sh\nshift $(($# - 1))\n"
                 'printf \'%s\\t%s\\n\' "$FIXTURE_USED_KB" "$1"\n'
             ),
+            # BSD `stat -f '%m'` prints an epoch second, which is correct for
+            # the platform that script runs on. GNU `stat` spells that `-c` and
+            # reads `-f` as --file-system, so on a Linux runner the real binary
+            # answers a "File: ..." block that bash then evaluates
+            # arithmetically. Faked so the quiet window can be tested at all.
+            "stat": "#!/bin/sh\nprintf '%s\\n' \"$FIXTURE_WORK_MTIME\"\n",
         }
         for name, body in tools.items():
             path = self.bin / name
@@ -377,6 +487,9 @@ class MacosJanitorContractCase(unittest.TestCase):
                 "FIXTURE_FS_KB": str(460 * 1024 * 1024),
                 "FIXTURE_AVAIL_KB": str(119 * 1024 * 1024),
                 "FIXTURE_USED_KB": str(4 * 1024 * 1024),
+                # Long past the 120-second quiet window: idle by default, so
+                # each test says for itself when it wants a busy runner.
+                "FIXTURE_WORK_MTIME": "1",
             }
         )
 
@@ -440,6 +553,43 @@ class MacosJanitorContractCase(unittest.TestCase):
         self.assertTrue((self.cache / "bolt.db").is_file())
         self.assertEqual(self.last_run()["over_budget"], 1)
         self.assertEqual(self.last_run()["reset"], 0)
+
+    def test_a_recently_touched_work_tree_keeps_the_cache(self):
+        """The quiet window, which nothing in this suite reached before.
+
+        `pgrep -P` sees a job only once the daemon has spawned a child. Between
+        being handed a job and that first child appearing there is a gap, and
+        on this platform a wrong answer in that gap is a SIGKILLed Xcode build
+        rather than a drained one. So the daemon must ALSO have left `_work`
+        alone for QUIET_SECONDS, and a fresh mtime is a refusal.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_WORK_MTIME"] = str(int(time.time()))
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("running a job", result.stdout)
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertTrue((self.cache / "bolt.db").is_file())
+        self.assertEqual(self.last_run()["over_budget"], 1)
+        self.assertEqual(self.last_run()["reset"], 0)
+
+    def test_the_macos_janitor_leaves_the_work_tree_alone(self):
+        """Both triggers at once, and the checkouts survive both.
+
+        `_work`'s mtime is this janitor's quiet signal, so a janitor that
+        emptied it would be destroying the evidence its own next pass reasons
+        from -- and `launchctl bootout` has no graceful drain to fall back on
+        if that reasoning is ever wrong.
+        """
+        self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)
+        self.environment["FIXTURE_AVAIL_KB"] = str(9 * 1024 * 1024)
+
+        result = self.run_janitor()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.work / "checkout").is_file())
 
     def test_a_daemon_with_no_pid_keeps_its_cache(self):
         self.environment["FIXTURE_USED_KB"] = str(41 * 1024 * 1024)

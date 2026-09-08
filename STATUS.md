@@ -234,20 +234,54 @@ verified there: it read the runner's label and config out of the launchd plist,
 unloaded the daemon, reset a 4 G cache and loaded it again, and the runner was
 back `idle` in Forgejo twenty seconds later. **The cache is bounded fleet-wide.**
 
-**What is still unbounded, found 2026-09-08 and not fixed here.** The janitor
-bounds `cache.dir`. It does not bound `_work`, and that is what refused a job
-this morning: task 3753 on `gha-nuc4-general-01` ended
+**The band between two bounds, found and closed 2026-09-08.**
+`gha-nuc4-general-01` refused two jobs in a row — tasks 3753 and 3780 — with
 `::error::gha-nuc4-general-01 is out of disk: 18G available at
-/opt/forgejo-runner/_work/1e3b94b21c43de67/hostexecutor, need 25G`, with the
-preflight refusing before anything compiled. The preflight is doing its job —
-it says the real cause instead of letting a link die on `signal 7` — but a
-checkout tree that nothing evicts fills the same disk the cache used to. The
-janitor's own comment already names this host, so the gap is the directory,
-not the coverage. A `_work` reaper wants the same shape: graceful stop, a
-budget, mutation-proven refusals. The `pjunod/ansible`
-repository still describes the retired GitHub `actions-runner` fleet and knows
-nothing about `forgejo-runner`, so the janitor ships from this repository until
-that catches up.
+/opt/forgejo-runner/_work/<hash>/hostexecutor, need 25G`, identical to the
+gigabyte across both, because the job's labels pin it to that guest and a
+re-push lands on the same disk. The janitor reported that runner healthy the
+whole time, and by its own rule it was: **the preflight refuses a job below
+25 G and the janitor reserved 20 % of the filesystem, 15.6 G on a 78 GB guest.**
+Between those two figures is a band where the fleet turns work away and the
+janitor reclaims nothing, and 18 G is inside it. Two bounds, both satisfied,
+nobody minding the gap.
+
+The reserve is now `max(20 % of the filesystem, the preflight's own number)`.
+A demand above half the filesystem is capped **and said out loud** rather than
+chased, because the original bug in this same function was a fixed 100 GiB
+reserve on a 78 GB guest — a rule that could never be satisfied, so the pruner
+deleted everything it was permitted to and failed anyway. The janitor is
+installed standalone per host and cannot read the workflow at run time, so a
+contract test holds the two figures level instead of an import: raise
+`disk-gb` without raising `REQUIRED_GB` and the test fails rather than the
+band reopening in silence.
+
+**A wrong fix was built first, and the way it was wrong is the lesson.** The
+error message names a path under `_work`, so `_work` was taken to be the full
+directory and a reaper for it was written — script, tests, mutations, the lot.
+An adversarial review checked the premise instead of the code: `18G available
+at .../hostexecutor` is `df` on the **filesystem**, not a size of that
+directory, and the preflight's own diagnostic in the same log lists the whole
+checkout at about 58 MB (`20M docs`, `19M crates`, `4.6M brand`). The reaper
+was withdrawn. What it would have deleted was never the problem, and it could
+not have fired anyway — it sat behind the same 20 % reserve that had already
+read healthy at 18 G. The measurement is now in `docs/ci/RUNNER-DISK.md` and in
+the janitor's own header, next to the instruction to measure `_work` before
+writing anything that deletes from it.
+
+**Two things the same review found in code that was already merged.** A failed
+`rm -rf` — `EBUSY` on a leftover mount, `EACCES` on another uid's file — aborted
+the shell under `set -e` before the restart, and a `RETURN` trap does not run
+on shell exit, so the janitor could take a runner out of the fleet with nothing
+left to bring it back; the operations doc had listed "a failed delete still
+ends with the runner up" as a tested invariant, and it never was. It is now.
+And the macOS janitor's quiet window — its stricter half of the idle check, and
+the only thing standing between a wrong answer and a SIGKILLed Xcode build —
+had never been executed by the suite at all, because the fixture had no `_work`
+for it to look at. It has a mutation-proven test now, and a faked `stat`,
+because BSD `stat -f '%m'` prints an epoch second while GNU `stat` reads `-f`
+as `--file-system` and answers a `File: ...` block that bash then evaluates
+arithmetically.
 
 ## Settings put the operator on the login page, and the cause was a tombstone
 

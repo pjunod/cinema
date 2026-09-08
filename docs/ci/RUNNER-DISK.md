@@ -36,6 +36,7 @@ Measured on the fleet on 2026-09-07, when the whole thing was full:
 | Consumer | Where | Measured | Bounded by |
 |---|---|---|---|
 | Runner cache server | `<runner>/cache` (`bolt.db` + blobs) | 41 G on `gha-m6-general-01`, ~167 G fleet-wide | the janitor timer, and nothing else |
+| Runner work root | `<runner>/_work` (checkouts) | ~58 M on `gha-nuc4-general-01`, 2026-09-08 | nothing, and it does not need to be |
 | Cargo caches | `$RUNNER_TOOL_CACHE/plurx-ci/cargo/...` | 30 G budget per runner | `scripts/ci-cache-prune`, before and after every job |
 | Docker + BuildKit | `/var/lib/docker` | 101 G images · 58 G build cache on nynuc | `scripts/ci-buildkit-prune` (50 G) and the janitor |
 
@@ -204,14 +205,19 @@ Removing index and blobs together is always consistent; removing one without
 the other promises the next job an entry it cannot download. The cost is a cold
 cache for the next few jobs, and nothing in that directory is not reproducible.
 
-**Three invariants, each with a test.** It never resets a runner that is
+**Four invariants, each with a test.** It never resets a runner that is
 working — idleness is "the unit's cgroup holds nothing but the daemon" on Linux
-and "the daemon has no child processes" on macOS, a local answer either way
-that needs no API token. It never leaves a runner stopped: the restart
-is on a `RETURN` trap, so a failed stop or a failed delete still ends with the
-runner up. And it refuses any `cache.dir` that is not a runner root ending in
-`cache` and holding `bolt.db` — the delete is a whole directory, so the path
-check *is* the safety argument.
+and "the daemon has no child processes, and `_work` has been quiet for two
+minutes" on macOS, a local answer either way that needs no API token. It never
+leaves a runner stopped: the restart is on a `RETURN` trap for a failed stop,
+and a failed *delete* is caught rather than allowed to abort the shell — `set
+-e` would exit before the restart, and a `RETURN` trap does not run on shell
+exit, which is how an `EBUSY` on a leftover mount would have taken a runner out
+of the fleet with nothing left to bring it back. It refuses any `cache.dir`
+that is not a runner root ending in `cache` and holding `bolt.db` or a blob
+tree — the delete is a whole directory, so the path check *is* the safety
+argument. **And its reserve is never below what a job is refused for not
+having**, which is the invariant that was missing; see below.
 
 **What it reports.** Every pass writes a line per runner to the journal and a
 record to `/var/lib/plurx-ci-janitor/last-run.json`:
@@ -225,6 +231,29 @@ record to `/var/lib/plurx-ci-janitor/last-run.json`:
 `over_budget` and `reset` are deliberately separate: a runner that is over
 budget every hour and never idle enough to reset is a real condition, and it
 should be visible rather than silently skipped forever.
+
+### The reserve has to clear the bar jobs are held to
+
+The janitor keeps a reserve; the preflight refuses a job that has less free
+space than `disk-gb` (25 G). Those were two different numbers, and **between
+them was a band in which the fleet refused work and the janitor reported every
+runner healthy.** 20 % of a 78 GB guest is 15.6 G, so at 18 G free both rules
+were satisfied at once — one by turning jobs away, the other by doing nothing
+about it.
+
+`gha-nuc4-general-01` sat in that band on 2026-09-08: two jobs refused with
+`18G available … need 25G`, identical to the gigabyte across both, because the
+job's labels pin it to that guest and a re-push lands on the same disk. So the
+reserve is now `max(20 % of the filesystem, disk-gb)`, and a demand above half
+the filesystem is capped **and said out loud** rather than chased — the
+original bug here was a fixed 100 GiB reserve on a 78 GB guest, a rule that
+could never be satisfied, so the pruner deleted everything it was allowed to
+and failed anyway.
+
+The janitor is installed standalone on each host and cannot read the workflow
+at run time, so the two figures are held level by a contract test rather than
+by an import: `test_the_janitor_reserve_and_the_preflight_bar_are_one_number`
+fails if `disk-gb` is raised without `REQUIRED_GB`. Raise them together.
 
 ```bash
 systemctl list-timers plurx-ci-janitor.timer     # when it next runs
@@ -241,8 +270,16 @@ janitor becomes the thing that breaks CI.
 
 - **No cleanup of `_work`.** It holds other jobs' checkouts on a shared
   runner, several repositories deep, and there is no reliable signal from
-  outside a job that a tree is finished. It is also small — under 2 G on every
-  runner measured. Not worth the risk it carries.
+  outside a job that a tree is finished. It is also small: the preflight's own
+  diagnostic on `gha-nuc4-general-01` on 2026-09-08 listed the whole checkout
+  at about 58 MB — `20M docs`, `19M crates`, `4.6M brand`, and down from there.
+
+  A reaper for it was written and withdrawn on that measurement, and the
+  mistake is worth recording because the message invites it: `18G available at
+  /opt/forgejo-runner/_work/<hash>/hostexecutor` is `df` on the **filesystem**,
+  not a size of that directory. Reading it as one turns "this disk is full"
+  into "this directory is full" and builds the wrong fix. Measure `_work`
+  before writing anything that deletes from it.
 - **No deletion from a job.** A job cannot stop the runner it runs on, and
   partial deletion from the cache server is worse than none.
 - **No cache in the workspace.** `CARGO_TARGET_DIR` deliberately lives outside

@@ -27,10 +27,23 @@
 #
 # What it will not do: touch `_work`. That holds other jobs' checkouts, several
 # repositories deep, and nothing outside a job can tell which trees are
-# finished. It is also under 2G on every runner measured.
+# finished. It is also small: the preflight's own diagnostic on
+# `gha-nuc4-general-01`, 2026-09-08, listed the whole checkout at about 58 MB
+# (`20M docs`, `19M crates`, `4.6M brand`, and down from there). A reaper for
+# it was written and withdrawn on that measurement -- see the reserve below for
+# what was actually wrong, and do not rewrite it without measuring `_work`
+# first. `18G available at .../_work/<hash>/hostexecutor` is `df` on the
+# filesystem, not a size of that directory, and reading it as one is how the
+# wrong fix gets built.
 set -euo pipefail
 
 BUDGET_GB=${PLURX_JANITOR_BUDGET_GB:-20}
+# What a job is refused for not having. This is the same number
+# `.github/actions/cargo-cache/action.yml` passes to `scripts/ci-require-disk`
+# as `disk-gb`, and `tests/operations/test_ci_janitor.py` fails if the two ever
+# drift, because a janitor whose reserve is below the bar jobs are held to is a
+# janitor that reports every runner healthy while the fleet refuses work.
+REQUIRED_GB=${PLURX_JANITOR_REQUIRED_GB:-25}
 STOP_TIMEOUT=${PLURX_JANITOR_STOP_TIMEOUT:-1200}
 IMAGE_AGE=${PLURX_JANITOR_IMAGE_AGE:-336h}
 BUILD_CACHE_AGE=${PLURX_JANITOR_BUILD_CACHE_AGE:-168h}
@@ -38,6 +51,8 @@ STATE_DIR=${PLURX_JANITOR_STATE_DIR:-/var/lib/plurx-ci-janitor}
 # Overridable only so the contract test can build a cgroup tree it owns.
 CGROUP_ROOT=${PLURX_JANITOR_CGROUP_ROOT:-/sys/fs/cgroup}
 dry_run=false
+
+say() { printf 'plurx-ci-janitor: %s\n' "$*"; }
 
 usage() {
   cat <<'EOF'
@@ -65,23 +80,44 @@ done
   echo "plurx-ci-janitor: budget must be whole gigabytes" >&2; exit 2
 }
 
-say() { printf 'plurx-ci-janitor: %s\n' "$*"; }
-
-# The same reserve the in-job pruners keep: 20 % of the filesystem, with a
-# 10 GiB minimum that can never exceed a quarter of it. A fixed reserve was the
-# previous bug -- 100 GiB on a 78 GB runner guest is a rule that can never be
-# satisfied, so the pruner deleted everything it was allowed to and failed
-# anyway.
+# The reserve, which is the whole point of the janitor and was the whole bug.
+#
+# It started as 20 % of the filesystem with a 10 GiB minimum capped at a quarter
+# -- the cap because a *fixed* reserve was the previous bug, 100 GiB on a 78 GB
+# runner guest being a rule that can never be satisfied, so the pruner deleted
+# everything it was allowed to and failed anyway.
+#
+# What that missed is that a job is refused against a different number. The
+# preflight demands REQUIRED_GB (25) and this reserved 20 % -- 15.6 G on a 78 GB
+# guest -- so between those two figures the fleet refuses jobs while the janitor
+# reports every runner healthy and reclaims nothing. `gha-nuc4-general-01` sat
+# in that band on 2026-09-08 with 18 G free: two jobs refused, `18G >= 15.6G`,
+# nothing done, and the same failure on every re-push because the labels pin the
+# job to that guest. The band is the defect.
+#
+# So the reserve is at least what a job is required to have. The half-filesystem
+# cap keeps the original lesson: a requirement larger than that cannot be freed
+# by deleting caches, and chasing it would delete everything and fail anyway --
+# it is said out loud instead, because a bound that silently cannot be met is
+# how this went wrong the first time.
 floor_kb_for() {
-  local path filesystem_kb percent minimum quarter
+  local path filesystem_kb percent minimum quarter required half
   path=$1
   filesystem_kb=$(df -Pk "$path" | awk 'NR == 2 { print $2 }')
   percent=$(((filesystem_kb + 4) / 5))
   minimum=$((10 * 1024 * 1024))
   quarter=$(((filesystem_kb + 3) / 4))
   [ "$minimum" -le "$quarter" ] || minimum=$quarter
-  [ "$percent" -ge "$minimum" ] && { echo "$percent"; return; }
-  echo "$minimum"
+  [ "$percent" -ge "$minimum" ] || percent=$minimum
+
+  required=$((REQUIRED_GB * 1024 * 1024))
+  half=$((filesystem_kb / 2))
+  if [ "$required" -gt "$half" ]; then
+    say "a job needs ${REQUIRED_GB}G and $path holds $((filesystem_kb / 1024 / 1024))G; no amount of pruning reaches that, reserving $((half / 1024 / 1024))G" >&2
+    required=$half
+  fi
+  [ "$percent" -ge "$required" ] && { echo "$percent"; return; }
+  echo "$required"
 }
 
 available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
@@ -139,7 +175,12 @@ reset_cache() {
     say "$unit did not stop in ${STOP_TIMEOUT}s; leaving its cache alone"
     return 0
   }
-  rm -rf -- "$dir"
+  # `set -e` would abort here on a delete that fails -- EBUSY on a leftover
+  # mount, EACCES on a file another uid owns -- and a RETURN trap does not run
+  # on shell exit, so the runner would stay stopped. That is the one invariant
+  # this script promises unconditionally, so the failure is reported and the
+  # restart happens either way.
+  rm -rf -- "$dir" || say "could not fully delete $dir; restarting $unit anyway"
   systemctl start "$unit"
   trap - RETURN
   say "reset $dir, reclaimed $((used_kb / 1024 / 1024))G, $unit restarted"
