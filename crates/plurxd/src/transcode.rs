@@ -5708,16 +5708,28 @@ impl Session {
     /// when this session has one.
     ///
     /// `None` for a cached serve and a test fixture, which have no producer.
-    /// `Some` with an empty epoch for a legacy process-local start and for a
-    /// relayed worker start: both reach the daemon without a server-minted
-    /// epoch, and the ledger refuses an empty one — so both mean *no budget*
-    /// rather than *an unspent budget*, which is the distinction a caller must
-    /// not collapse.
+    /// `None` too for a legacy process-local start and a relayed worker start:
+    /// both reach the daemon without a server-minted epoch, so both mean *no
+    /// budget* rather than *an unspent budget* — a distinction a caller must
+    /// not collapse, because reading "no epoch" as "a fresh one" grants an
+    /// automatic recovery per attempt on exactly the paths that have no
+    /// durable bound.
+    ///
+    /// The filter checks all three fields rather than the epoch alone. The
+    /// store refuses a non-positive `user_id`, an empty incarnation and an
+    /// empty epoch, and it refuses them separately — so a `Some` this method
+    /// returned on the strength of the epoch alone would be a reservation the
+    /// store rejects at the moment it is needed. Today the three legacy sites
+    /// zero all three together and the epoch check happens to catch them, but
+    /// "happens to" is not a contract, and this method is the one place a
+    /// caller is entitled to trust.
     #[cfg_attr(not(test), allow(dead_code))]
     fn recovery_identity(&self) -> Option<&SessionRecoveryIdentity> {
-        self.recovery
-            .as_ref()
-            .filter(|recovery| !recovery.recovery_epoch.is_empty())
+        self.recovery.as_ref().filter(|recovery| {
+            recovery.user_id > 0
+                && !recovery.incarnation_id.is_empty()
+                && !recovery.recovery_epoch.is_empty()
+        })
     }
 
     fn compatibility_producer_attempt(&self) -> u64 {
@@ -32596,6 +32608,29 @@ pub(crate) mod tests {
             session.recovery_identity().is_none(),
             "an empty epoch is what the legacy and relayed starts carry, and the \
              ledger refuses it — so it is no budget, not an unspent one"
+        );
+
+        // Each field the store refuses, refused here too. A `Some` returned on
+        // the strength of the epoch alone is a reservation that fails at the
+        // moment it is needed, and this method is the one place a caller is
+        // entitled to trust.
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: "incarnation".to_owned(),
+            recovery_epoch: "epoch-1".to_owned(),
+        });
+        assert!(
+            session.recovery_identity().is_none(),
+            "the store refuses a non-positive user id"
+        );
+        session.recovery = Some(SessionRecoveryIdentity {
+            user_id: 7,
+            incarnation_id: String::new(),
+            recovery_epoch: "epoch-1".to_owned(),
+        });
+        assert!(
+            session.recovery_identity().is_none(),
+            "the store refuses an empty failed incarnation"
         );
 
         session.recovery = Some(SessionRecoveryIdentity {

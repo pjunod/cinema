@@ -1890,6 +1890,23 @@ pub async fn create(
         .media_session_route_for_playback(user.id, &request.playback_id)
         .await
         .map_err(|error| session_store_error("reading the predecessor route", error))?;
+    // One mint for this start, bound here rather than called twice.
+    //
+    // `recovery_epoch_for` is not a pure function: with no predecessor it
+    // draws a fresh UUID, which is the whole point of it — a deliberate new
+    // play is a new budget, and `recovery_epoch_for`'s own test asserts that
+    // two calls with `None` differ. So calling it once for the session and
+    // again for the activation would give a new play two epochs: the live
+    // session would believe in one that exists in no durable row, and the
+    // next continuation would inherit the other and find it unspent. That is
+    // one automatic recovery per attempt against a file that cannot be
+    // decoded, which is the loop the budget exists to close.
+    //
+    // Bound above placement because the session that carries it is built by
+    // the task the placement loop spawns, 268 lines before the activation
+    // literal is reached. The only input is the predecessor route, already
+    // read above, so this costs one binding and no store read.
+    let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());
     if activation_predecessor
         .as_ref()
         .is_some_and(|route| route.state == "active" && route.publication_ready_at_ms != 0)
@@ -2034,18 +2051,10 @@ pub async fn create(
             let guard_incarnation = incarnation_id.clone();
             let guard_request = request_claim_id.clone();
             let guard_user = user.id;
-            // The epoch is decided here rather than at the activation literal
-            // below, because the session that will hold it is built by the
-            // task this block spawns — about two hundred lines before that
-            // literal is reached. Its only input is the predecessor route,
-            // which is already read above, so moving the decision up costs a
-            // moved expression and no store read. The activation still calls
-            // `recovery_epoch_for` itself: the store row is the authority, and
-            // this value is the same function of the same input.
             let worker_recovery = crate::transcode::SessionRecoveryIdentity {
                 user_id: user.id,
                 incarnation_id: incarnation_id.clone(),
-                recovery_epoch: recovery_epoch_for(activation_predecessor.as_ref()),
+                recovery_epoch: recovery_epoch.clone(),
             };
             let worker_serving_authority = ingress_serving_authority.clone();
             let mut start_task = tokio::spawn(async move {
@@ -2307,13 +2316,19 @@ pub async fn create(
     let response_json = serde_json::to_string(&response)?;
     let activation_now_ms = unix_ms();
     let activation = MediaSessionActivation {
-        // Read at the point of use rather than kept in a local. The store
-        // decides the row's epoch — an activation that loses a race or is
-        // replayed keeps whatever the winning row already had — and
-        // `activation_route_matches` does not compare this field, so a local
-        // copy could be believed after the store had ruled otherwise. The
-        // authority is the route the store hands back.
-        recovery_epoch: recovery_epoch_for(activation_predecessor.as_ref()),
+        // The one mint for this start, from the local bound above placement.
+        //
+        // This used to call `recovery_epoch_for` here, with a comment saying a
+        // local copy could be believed after the store had ruled otherwise.
+        // That reasoning is about a *read*: the store decides the row's epoch,
+        // an activation that loses a race keeps whatever the winning row had,
+        // and `activation_route_matches` does not compare this field — all
+        // still true, and all reasons to trust the route the store hands back
+        // rather than this value. It was never a reason to mint twice, and
+        // minting twice is what calling it here a second time now does, since
+        // the session start above needs the same epoch this row is about to
+        // be given.
+        recovery_epoch: recovery_epoch.clone(),
         incarnation_id: incarnation_id.clone(),
         session_id: info.session_id.clone(),
         user_id: user.id,
@@ -10995,6 +11010,72 @@ mod tests {
             super::recovery_epoch_for(Some(&route(""))),
             "",
             "a session that never had a budget does not gain one by continuing"
+        );
+    }
+
+    /// One start mints one epoch, and the session and the durable row get the
+    /// same one.
+    ///
+    /// `recovery_epoch_for` is deliberately not pure: with no predecessor it
+    /// draws a fresh UUID, and the test above asserts that two calls differ.
+    /// That makes "call it where each value is needed" — which reads as the
+    /// careful choice, and which this file's own comment used to recommend —
+    /// the way to give one new play two budgets: the live session believes in
+    /// an epoch that reaches no durable row, and the next continuation
+    /// inherits the other and finds it unspent. One automatic recovery per
+    /// attempt against a file that cannot be decoded is the loop the ledger
+    /// exists to close, so this is pinned rather than left to review.
+    ///
+    /// A control-flow property of one `async fn` that needs a store, a
+    /// transcode manager and an authenticated owner to reach, so nothing
+    /// executes it. Pinned where it lives, like the reservation above.
+    #[test]
+    fn one_start_mints_one_recovery_epoch_for_both_the_session_and_the_row() {
+        // The production half only: this module's own text contains every
+        // literal it asserts about, so counting the whole file counts the test.
+        let source = include_str!("hls.rs")
+            .split_once("\nmod tests {")
+            .expect("the test module boundary")
+            .0;
+        assert_eq!(
+            source
+                .matches("recovery_epoch_for(activation_predecessor.as_ref())")
+                .count(),
+            1,
+            "the epoch is minted once per start; a second call mints a second budget"
+        );
+        assert!(
+            source.contains(
+                "let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());"
+            ),
+            "the one mint is bound to a local"
+        );
+        let after_mint = source
+            .split_once("let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());")
+            .expect("the mint")
+            .1;
+        assert!(
+            after_mint.contains("recovery_epoch: recovery_epoch.clone(),"),
+            "the session identity and the activation both read that local"
+        );
+        assert_eq!(
+            after_mint
+                .matches("recovery_epoch: recovery_epoch.clone(),")
+                .count(),
+            2,
+            "both the session identity and the durable activation, and nothing else"
+        );
+        // And the mint precedes placement, because the session that carries it
+        // is built by the task the placement loop spawns.
+        let placement = source
+            .find("let mut start_task = tokio::spawn(async move {")
+            .expect("the placement task");
+        let mint = source
+            .find("let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());")
+            .expect("the mint");
+        assert!(
+            mint < placement,
+            "a mint after placement cannot reach the session placement starts"
         );
     }
 
