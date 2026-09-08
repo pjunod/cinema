@@ -2026,6 +2026,41 @@ struct PrepublicationTranscodeRetry {
     /// `execute_prepublication_transcode_retry` resolves that name against
     /// this pair and refuses anything else.
     decode_alternate: Option<Box<PrepublicationTranscodeRetry>>,
+    /// The durable recovery budget this recipe spends when it is installed.
+    ///
+    /// `Some` only on a decode alternate that a session start found an unspent
+    /// budget for. `None` on the colour-safe retry, on an alternate belonging
+    /// to a session with no durable identity, and on an alternate whose
+    /// playback has already recovered — in which last case there is no
+    /// alternate at all.
+    recovery: Option<Box<DecodeRecoveryReservation>>,
+}
+
+/// The durable recovery budget a decode alternate spends, frozen beside it.
+///
+/// Held on the alternate and on nothing else. The colour-safe retry answers
+/// "this encode route stopped" rather than "this source did not decode", so it
+/// is not a recovery from a decode fault and does not spend the budget; and
+/// [`PrepublicationCopyRetry`] has no field to carry one at all, which is how
+/// the copy path is excluded — structurally, rather than by a runtime check a
+/// later edit could forget to keep. A copy attempt's diagnostic identity is
+/// `copy:<session>` rather than a plan digest, so the store would refuse its
+/// reservation anyway; being unable to write the call is better than finding
+/// out at the store, in the middle of a recovery.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone)]
+struct DecodeRecoveryReservation {
+    ledger: crate::playback_control::ProducerRecoveryLedger,
+    /// The plan the fault will be about: the delivered plan this session
+    /// started on.
+    ///
+    /// Frozen here for the reason every other field of this recipe is frozen,
+    /// and for one more — the fault that names the failed plan is reported to
+    /// the *actor*, and the executor that installs the alternate never sees
+    /// it. There is no install-time source for this value that is not a
+    /// re-derivation, and re-deriving a plan in the middle of a recovery is
+    /// exactly what this type exists to prevent.
+    failed_plan_digest: String,
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -2338,6 +2373,7 @@ impl PrepublicationTranscodeRetry {
             runtime_cache,
             observation,
             decode_alternate: None,
+            recovery: None,
         })
     }
 
@@ -2348,6 +2384,17 @@ impl PrepublicationTranscodeRetry {
     /// argument list is the thing that attribute is apologising for.
     fn with_decode_alternate(mut self, alternate: Option<PrepublicationTranscodeRetry>) -> Self {
         self.decode_alternate = alternate.map(Box::new);
+        self
+    }
+    /// Freeze the durable recovery budget onto this alternate.
+    ///
+    /// Separate from [`Self::with_decode_alternate`] and applied to the
+    /// alternate rather than to the recipe that holds it, because the budget
+    /// belongs to the recipe that spends it. Threading it through the holder
+    /// would put a ledger on the colour-safe retry, where the next reader
+    /// would reasonably conclude that an ordinary retry spends the recovery.
+    fn with_recovery(mut self, recovery: DecodeRecoveryReservation) -> Self {
+        self.recovery = Some(Box::new(recovery));
         self
     }
 }
@@ -3468,6 +3515,43 @@ async fn fail_prepublication_transaction(session: &Arc<Session>, reason: String)
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
+/// Close a decode alternate's reservation, and never fail a session over it.
+///
+/// The budget is not refunded either way, so the outcome recorded is a fact
+/// about what happened rather than a permission for what happens next. What
+/// makes it worth writing at all is the next continuation of this playback:
+/// a settled row reads as a spent budget, and a row left `Reserved` reads as a
+/// live one — which withholds every later alternate for this playback. That is
+/// the safe direction to fail in, and it is why a settlement that does not
+/// land is logged at error rather than retried or escalated.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn settle_decode_recovery(
+    recovery: &DecodeRecoveryReservation,
+    outcome: crate::playback_control::RecoveryOutcome,
+    decision_sequence: u64,
+    sid: &str,
+) {
+    match recovery.ledger.settle(outcome, unix_ms()).await {
+        Ok(crate::playback_control::RecoverySettlement::Settled) => {}
+        Ok(settlement) => tracing::error!(
+            session = %session_log_id(sid),
+            decision_sequence,
+            outcome = ?outcome,
+            settlement = settlement.label(),
+            "a recovery reservation could not be closed; later continuations of \
+             this playback will find it still held"
+        ),
+        Err(error) => tracing::error!(
+            session = %session_log_id(sid),
+            decision_sequence,
+            outcome = ?outcome,
+            %error,
+            "settling a recovery reservation failed; later continuations of \
+             this playback will find it still held"
+        ),
+    }
+}
+
 async fn execute_prepublication_transcode_retry(
     session: Arc<Session>,
     retry: &PrepublicationTranscodeRetry,
@@ -3497,6 +3581,55 @@ async fn execute_prepublication_transcode_retry(
             "actor retry recipe did not match immutable executor recipe ({first_reason:?})"
         ));
     };
+    // The durable budget, taken before anything is torn down.
+    //
+    // Ordering is the correctness here. `begin_child_replacement` is the point
+    // after which this session has no producer until a new one is installed,
+    // so a refusal that arrives later turns "this playback already recovered"
+    // into "this playback has nothing playing". Reserving first means a
+    // refusal leaves the failed producer exactly where the actor left it.
+    //
+    // Only the alternate carries a ledger; see `DecodeRecoveryReservation`.
+    let recovery = retry.recovery.as_deref();
+    if let Some(recovery) = recovery {
+        let reservation = recovery
+            .ledger
+            .reserve(
+                failed_attempt,
+                decision_sequence,
+                &recovery.failed_plan_digest,
+                // The successor's own plan, read off the recipe that is about
+                // to run, so the row records the plan this session installs
+                // rather than one computed a second time from policy.
+                &retry.observation.plan_digest,
+                unix_ms(),
+            )
+            .await
+            .map_err(|error| format!("the recovery budget could not be reserved: {error}"))?;
+        if !matches!(
+            reservation,
+            crate::playback_control::RecoveryReservation::Held(_)
+        ) {
+            // Session start already read this epoch and withheld the alternate
+            // when it found a row, so an alternate that reaches here and is
+            // refused means the row appeared between that read and now: two
+            // nodes reaching the same playback's fault at once, or a
+            // predecessor settling late. The budget is not this attempt's to
+            // spend, and installing anyway is the second automatic recovery
+            // the ledger exists to make impossible.
+            tracing::warn!(
+                session = %session_log_id(sid),
+                decision_sequence,
+                failed_attempt,
+                reservation = reservation.label(),
+                "a decode alternate was refused its recovery budget"
+            );
+            return Err(format!(
+                "this playback's recovery budget is {}",
+                reservation.label()
+            ));
+        }
+    }
     let mut replacement = session.begin_child_replacement().await;
     // Cancellation after the actor decision has been observed must fence the
     // generation even though retry admission intentionally happens later.
@@ -3635,11 +3768,33 @@ async fn execute_prepublication_transcode_retry(
                     "actor rejected failed retry DecisionApplied acknowledgement"
                 );
             }
+            // The budget is spent by the attempt, not by the outcome. A
+            // recovery that was reserved and then failed to install has been
+            // attempted, and refunding it here would hand the same playback a
+            // second try at the decode that just failed twice.
+            if let Some(recovery) = recovery {
+                settle_decode_recovery(
+                    recovery,
+                    crate::playback_control::RecoveryOutcome::Exhausted,
+                    decision_sequence,
+                    sid,
+                )
+                .await;
+            }
             replacement.settle_terminal_rejection();
             return Err(error);
         }
     };
     replacement.complete();
+    if let Some(recovery) = recovery {
+        settle_decode_recovery(
+            recovery,
+            crate::playback_control::RecoveryOutcome::Installed,
+            decision_sequence,
+            sid,
+        )
+        .await;
+    }
     tracing::info!(
         session = %session_log_id(sid),
         producer_attempt,
@@ -17727,6 +17882,75 @@ impl TranscodeManager {
                             None
                         }
                     };
+                    // The durable budget, consulted once, here — and only to
+                    // withhold.
+                    //
+                    // The actor chooses between the two frozen recipes, and it
+                    // cannot ask the store: it is synchronous and holds no
+                    // handle. So "has this playback already spent its one
+                    // automatic recovery" is answered where a store and the
+                    // identity are both in hand, by not giving the actor an
+                    // alternate to name. A reopen of a playback that already
+                    // recovered then reaches M5c1's permanent verdict on its
+                    // first qualified fault — the honest terminal answer this
+                    // effort exists to produce — instead of being told to
+                    // retry and then failing at install.
+                    //
+                    // A row in *any* state withholds. `Reserved` is a recovery
+                    // in flight or one abandoned by a cancelled executor, and
+                    // both terminal states are a budget already spent.
+                    let alternate = match (
+                        alternate,
+                        crate::playback_control::ProducerRecoveryLedger::new(
+                            Arc::clone(&self.store),
+                            recovery.user_id,
+                            playback_id,
+                            &recovery.recovery_epoch,
+                            // The generation being started is the one that will
+                            // fail, which is what a reservation records.
+                            &recovery.incarnation_id,
+                        ),
+                    ) {
+                        (Some(alternate), Some(ledger)) => match ledger.existing().await {
+                            Ok(None) => Some(alternate.with_recovery(DecodeRecoveryReservation {
+                                ledger,
+                                failed_plan_digest: plan.plan_digest(),
+                            })),
+                            Ok(Some(existing)) => {
+                                tracing::info!(
+                                    session = %session_log_id(&session_id),
+                                    state = existing.state.as_str(),
+                                    "this playback has already used its recovery budget; \
+                                     no software-decode alternate for this session"
+                                );
+                                None
+                            }
+                            Err(error) => {
+                                // Fail closed. An unreadable budget is not an
+                                // unspent one, and the cost of being wrong the
+                                // other way is a second automatic recovery on
+                                // a source that has already proven it does not
+                                // decode.
+                                tracing::warn!(
+                                    session = %session_log_id(&session_id),
+                                    %error,
+                                    "the recovery budget could not be read; withholding the \
+                                     software-decode alternate"
+                                );
+                                None
+                            }
+                        },
+                        // No durable identity: a legacy process-local start, a
+                        // relayed worker start, or a session predating the
+                        // epoch column. Those keep the in-process one-shot they
+                        // have always had — one automatic recovery per session
+                        // — because withholding recovery from them would be a
+                        // regression rather than a fix, and the reopen loop
+                        // they can still reach is the loop that existed before
+                        // this effort, not one it introduced.
+                        (alternate, None) => alternate,
+                        (None, _) => None,
+                    };
                     Some(retry.with_decode_alternate(alternate))
                 }
                 Err(error) => {
@@ -30894,6 +31118,259 @@ pub(crate) mod tests {
             "a completed replacement reopens the publication window"
         );
         session.kill_child().await;
+    }
+
+    /// A playback that has already spent its recovery does not get a second
+    /// one — and finding that out costs it nothing.
+    ///
+    /// The ordering is the assertion. `begin_child_replacement` is the point
+    /// after which this session has no producer until a new one is installed,
+    /// so the reservation is taken before it: a refusal that arrived later
+    /// would turn "this playback already recovered" into "this playback has
+    /// nothing playing".
+    ///
+    /// The fixture puts the ledger on the recipe the actor names directly
+    /// rather than building an alternate to hang it off. Which of the two
+    /// frozen recipes a decision resolves to is tested where that resolution
+    /// lives; what is under test here is what the executor does with a budget
+    /// once it has one.
+    #[tokio::test]
+    async fn a_spent_recovery_budget_refuses_the_retry_before_anything_is_torn_down() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let dir = crate::test_tempdir().expect("session dir");
+        seeded_session_dir(dir.path(), 1, 4.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+
+        // An earlier attempt of this playback took the budget and settled it.
+        let failed_plan_digest = "a".repeat(64);
+        let predecessor = crate::playback_control::ProducerRecoveryLedger::new(
+            Arc::clone(&store),
+            7,
+            "playback-spent",
+            "epoch-spent",
+            "incarnation-1",
+        )
+        .expect("a complete identity");
+        assert!(
+            matches!(
+                predecessor
+                    .reserve(1, 1, &failed_plan_digest, &"b".repeat(64), 1_000)
+                    .await
+                    .expect("reserve"),
+                crate::playback_control::RecoveryReservation::Held(_)
+            ),
+            "the predecessor takes the budget"
+        );
+        assert_eq!(
+            predecessor
+                .settle(crate::playback_control::RecoveryOutcome::Exhausted, 1_100)
+                .await
+                .expect("settle"),
+            crate::playback_control::RecoverySettlement::Settled
+        );
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::VideoToolbox,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+        let retry = build_test_transcode_retry(
+            &mgr,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            dir.path(),
+            "spent-budget",
+        )
+        .await
+        .expect("a CPU-pipeline hardware attempt has a software rung")
+        .with_recovery(DecodeRecoveryReservation {
+            ledger: crate::playback_control::ProducerRecoveryLedger::new(
+                Arc::clone(&store),
+                7,
+                "playback-spent",
+                "epoch-spent",
+                // A continuation of the same playback: same epoch, new
+                // incarnation. This is the reopen the durable budget exists
+                // for.
+                "incarnation-2",
+            )
+            .expect("a complete identity"),
+            failed_plan_digest,
+        });
+
+        let failed_attempt = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("admit the predecessor attempt");
+        *session.child.lock().await = Some(AttemptChild::new(
+            failed_attempt,
+            long_running_child(),
+            session.control.clone(),
+            None,
+        ));
+
+        let result = execute_prepublication_transcode_retry(
+            Arc::clone(&session),
+            &retry,
+            1,
+            failed_attempt,
+            &retry.actor_recipe,
+            crate::playback_control::ProducerDecisionReason::SourceDecodeRetry,
+            "spent-budget",
+        )
+        .await;
+
+        assert!(
+            matches!(&result, Err(error) if error.contains("spent")),
+            "the refusal names which refusal it was, got {result:?}"
+        );
+        assert!(
+            !session.replacing_child.load(Acquire),
+            "a refused budget must not have opened a replacement"
+        );
+        assert!(
+            !session.failed.load(Relaxed),
+            "the session is not failed by a recovery it was never entitled to"
+        );
+        assert!(
+            session
+                .child
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|child| child.id().is_some()),
+            "the failed producer is still exactly where the actor left it"
+        );
+        session.kill_child().await;
+    }
+
+    /// A recovery that was reserved and then failed to install has been
+    /// attempted, and the row says so.
+    ///
+    /// This is the whole reason the budget is not refunded. The alternate is
+    /// installed against a source whose decode already failed once; a refund
+    /// on the failure path would hand the same playback another try at it, and
+    /// the reopen loop this effort is named after is exactly a sequence of
+    /// attempts that each looked like the first.
+    ///
+    /// The failure is a real one — an unclearable predecessor scratch, the
+    /// same fixture the fencing test uses — rather than an injected error, so
+    /// the settle under test is on the path a real transaction takes out.
+    #[tokio::test]
+    async fn a_recovery_that_fails_to_install_still_spends_the_budget() {
+        use plurx_core::domain::ProducerRecoveryState;
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let dir = crate::test_tempdir().expect("session dir");
+        seeded_session_dir(dir.path(), 1, 4.0).await;
+        let served_name = dir.path().join("init.mp4");
+        tokio::fs::create_dir(&served_name)
+            .await
+            .expect("undeletable served-name fixture");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::VideoToolbox,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+        let retry = build_test_transcode_retry(
+            &mgr,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            dir.path(),
+            "budget-spent-on-failure",
+        )
+        .await
+        .expect("a CPU-pipeline hardware attempt has a software rung")
+        .with_recovery(DecodeRecoveryReservation {
+            ledger: crate::playback_control::ProducerRecoveryLedger::new(
+                Arc::clone(&store),
+                7,
+                "playback-failing",
+                "epoch-failing",
+                "incarnation-1",
+            )
+            .expect("a complete identity"),
+            failed_plan_digest: "a".repeat(64),
+        });
+
+        let failed_attempt = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("admit the predecessor attempt");
+        *session.child.lock().await = Some(AttemptChild::new(
+            failed_attempt,
+            long_running_child(),
+            session.control.clone(),
+            None,
+        ));
+
+        let result = execute_prepublication_transcode_retry(
+            Arc::clone(&session),
+            &retry,
+            1,
+            failed_attempt,
+            &retry.actor_recipe,
+            crate::playback_control::ProducerDecisionReason::SourceDecodeRetry,
+            "budget-spent-on-failure",
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(error) if error.contains("clearing predecessor scratch")),
+            "the fixture must fail inside the transaction, got {result:?}"
+        );
+
+        let row = store
+            .producer_recovery_for_epoch(7, "playback-failing", "epoch-failing")
+            .await
+            .expect("read the row")
+            .expect("the executor reserved before it installed");
+        assert_eq!(
+            row.state,
+            ProducerRecoveryState::Exhausted,
+            "a failed install settles the budget rather than leaving it held"
+        );
+        assert_eq!(row.failed_incarnation_id, "incarnation-1");
+        assert_eq!(row.alternate_plan_digest, retry.observation.plan_digest);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("storage failure retires actor ownership");
     }
 
     #[tokio::test]

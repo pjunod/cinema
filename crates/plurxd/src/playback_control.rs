@@ -4603,6 +4603,32 @@ impl ProducerRecoveryLedger {
         }
     }
 
+    /// What this epoch has already decided, if anything — a read, and only a
+    /// read.
+    ///
+    /// The point of asking is to *withhold* an alternate, never to grant one.
+    /// A caller that finds nothing here has learned that no attempt of this
+    /// playback has reserved yet, which is not the same as learning that its
+    /// own reservation will succeed; only [`Self::reserve`] can tell it that,
+    /// and it is that conditional insert which makes the answer linearizable.
+    ///
+    /// It exists because the one component that decides whether a recovery is
+    /// on offer at all — the producer actor — is synchronous and holds no
+    /// store handle. Reading the budget once at session start and simply not
+    /// offering an alternate is what lets a playback that has already
+    /// recovered reach its permanent verdict on its first qualified fault,
+    /// instead of being told to retry and then failing at install.
+    pub(crate) async fn existing(
+        &self,
+    ) -> Result<
+        Option<plurx_core::domain::ProducerRecoveryReservation>,
+        plurx_core::error::StoreError,
+    > {
+        self.store
+            .producer_recovery_for_epoch(self.user_id, &self.playback_id, &self.recovery_epoch)
+            .await
+    }
+
     /// Close this playback's reservation, whatever happened to it.
     ///
     /// `Installed` when the alternate is running, `Exhausted` on every other
@@ -4647,6 +4673,37 @@ impl ProducerRecoveryLedger {
             // answers, which is a caller bug rather than a race, and it is not
             // this type's to paper over — nor to disguise as a lost fence.
             Some(_) => Ok(RecoverySettlement::Conflicting),
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl RecoveryReservation {
+    /// The operator-facing name of this answer.
+    ///
+    /// A log line about a refused recovery has to say which refusal it was —
+    /// that is the whole reason this is not a `bool` — but it must not carry
+    /// the row, which is a durable record of somebody's decision and not a
+    /// field in somebody else's message.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Held(_) => "held",
+            Self::Spent(_) => "spent",
+            Self::Mismatched(_) => "mismatched",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl RecoverySettlement {
+    /// The operator-facing name of this answer, for the same reason.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::NotOurs => "not_ours",
+            Self::Absent => "absent",
+            Self::Conflicting => "conflicting",
         }
     }
 }
