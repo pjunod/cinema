@@ -4145,6 +4145,19 @@ pub(crate) struct InitialProducerPolicy {
     pub startup_kind: ProducerStartupKind,
     pub progress_budget: Duration,
     pub retry_recipe: Option<ValidatedRetryRecipe>,
+    /// The successor a qualified decode fault installs: the same delivery,
+    /// decoded in software.
+    ///
+    /// Separate from `retry_recipe` rather than replacing it, because the two
+    /// answer different questions and a session can need either. The
+    /// colour-safe retry is what a *stopped encode* asks for; this is what a
+    /// *source that did not decode* asks for, and choosing between them is the
+    /// decision's job rather than the policy's.
+    ///
+    /// `None` on every session whose executor could not build one — a software
+    /// encoder has no hardware slot to keep, and a delivery that already
+    /// decodes in software has no alternate at all.
+    pub decode_alternate: Option<ValidatedRetryRecipe>,
     pub presentation_contract_fingerprint: String,
     exit_classifier: ProducerExitClassifier,
     retry_eligibility: ProducerRetryEligibility,
@@ -4169,12 +4182,24 @@ impl InitialProducerPolicy {
             startup_kind,
             progress_budget,
             retry_recipe: Some(retry_recipe),
+            decode_alternate: None,
             presentation_contract_fingerprint,
             exit_classifier: ProducerExitClassifier::Immediate,
             retry_eligibility: ProducerRetryEligibility::AnyPrepublicationFailure,
             expected_remaining_ms: None,
             completion_tolerance_ms: 10_000,
         }
+    }
+
+    /// Attach the software-decode alternate this session's executor built.
+    ///
+    /// A builder rather than a fifth positional argument on
+    /// [`Self::hardware_with_startup`], because the alternate is optional for
+    /// reasons that have nothing to do with the rest of the policy and every
+    /// existing caller would otherwise gain a `None`.
+    pub(crate) fn with_decode_alternate(mut self, recipe: Option<ValidatedRetryRecipe>) -> Self {
+        self.decode_alternate = recipe;
+        self
     }
 
     pub(crate) fn software(
@@ -4185,6 +4210,7 @@ impl InitialProducerPolicy {
             startup_kind: ProducerStartupKind::Software,
             progress_budget,
             retry_recipe: None,
+            decode_alternate: None,
             presentation_contract_fingerprint,
             exit_classifier: ProducerExitClassifier::Immediate,
             retry_eligibility: ProducerRetryEligibility::Never,
@@ -4211,6 +4237,10 @@ impl InitialProducerPolicy {
             startup_kind: ProducerStartupKind::Copy,
             progress_budget,
             retry_recipe,
+            // A copy has no decode to restrict: it is a remux, and its one
+            // validated fallback is the transcode the `Unsupported` verdict
+            // selects.
+            decode_alternate: None,
             presentation_contract_fingerprint,
             exit_classifier: ProducerExitClassifier::CopyReader,
             retry_eligibility,
@@ -4230,6 +4260,7 @@ impl InitialProducerPolicy {
             startup_kind: ProducerStartupKind::Copy,
             progress_budget,
             retry_recipe: None,
+            decode_alternate: None,
             presentation_contract_fingerprint,
             exit_classifier: ProducerExitClassifier::Immediate,
             retry_eligibility: ProducerRetryEligibility::Never,
@@ -8466,6 +8497,37 @@ impl RollingControlActor {
         }
 
         let producer_media_published = control.producer_media_published;
+        // Which successor a qualified decode fault asks for, when the retry
+        // this session is holding is available at all.
+        //
+        // The colour-safe recipe answers "this encode route stopped"; the
+        // alternate answers "this source did not decode". They are different
+        // questions and a session can be handed either, so the choice is the
+        // decision's rather than the policy's — and a decode fault picks the
+        // alternate, because retrying the identical decode is the loop.
+        //
+        // It rides on the same eligibility test as the ordinary retry rather
+        // than getting its own, and that ordering is load-bearing:
+        // `retry_eligibility.allows` is asked about the *incoming* timing
+        // verdict, before any rewrite, so a copy path holding
+        // `UnsupportedOnly` never installs an alternate for a timing reason it
+        // would not have retried anyway. The alternate widens what a retry
+        // *does*, never when one is permitted.
+        let decode_alternate = policy
+            .decode_alternate
+            .as_ref()
+            .filter(|_| {
+                !producer_media_published
+                    && reason.yields_to_decode_evidence()
+                    && latched_fault
+                        .as_ref()
+                        .is_some_and(|(_, _, _, action_qualified)| *action_qualified)
+            })
+            .filter(|alternate| {
+                alternate.presentation_contract_fingerprint
+                    == policy.presentation_contract_fingerprint
+            })
+            .cloned();
         let retry_recipe = match &control.retry_state {
             PrepublicationRetryState::Available(recipe)
                 if !producer_media_published
@@ -8474,7 +8536,17 @@ impl RollingControlActor {
                     && recipe.presentation_contract_fingerprint
                         == policy.presentation_contract_fingerprint =>
             {
-                Some(recipe.clone())
+                // The alternate wins where both are available, and the reason
+                // moves with it so the operator can tell the two apart. It is
+                // impermanent by construction: a permanent reason on a retry
+                // reaches the client as a terminal answer while this very
+                // successor is coming up.
+                if let Some(alternate) = decode_alternate {
+                    reason = ProducerDecisionReason::SourceDecodeRetry;
+                    Some(alternate)
+                } else {
+                    Some(recipe.clone())
+                }
             }
             PrepublicationRetryState::Available(recipe)
                 if recipe.presentation_contract_fingerprint
@@ -23931,6 +24003,7 @@ mod tests {
                     startup_kind: ProducerStartupKind::Hardware,
                     progress_budget: PRODUCER_PROGRESS_BUDGET,
                     retry_recipe: Some(invalid_recipe),
+                    decode_alternate: None,
                     presentation_contract_fingerprint: "presentation-retry".to_owned(),
                     exit_classifier: ProducerExitClassifier::Immediate,
                     retry_eligibility: ProducerRetryEligibility::AnyPrepublicationFailure,
@@ -25008,6 +25081,147 @@ mod tests {
                 })
             ),
             "a permanent verdict that still selects a fallback must survive the fault"
+        );
+    }
+
+    /// The recovery this whole effort exists for, at the moment it fires.
+    ///
+    /// A qualified decode fault reaches a decision that a timing deadline
+    /// triggered. Without an alternate the honest answer is permanent, and
+    /// M5c1 made it so. With one, the honest answer is a retry — but a retry
+    /// on a *different* recipe, because retrying the identical decode is the
+    /// loop this effort is named after, and with an impermanent reason,
+    /// because a permanent one on a retry reaches the client as a terminal
+    /// answer while this very successor is coming up.
+    #[test]
+    fn a_qualified_fault_installs_the_software_decode_alternate_rather_than_the_colour_safe_one() {
+        let started = Instant::now();
+        let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        let mut actor = registered_prepublication_actor(started);
+        let alternate = ValidatedRetryRecipe::new(
+            "software-decode-alternate".to_owned(),
+            "alternate-fingerprint".to_owned(),
+            "presentation-m5c2d".to_owned(),
+            ProducerStartupKind::MixedSoftwareDecode,
+        );
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d", "recipe-m5c2d")
+                    .with_decode_alternate(Some(alternate.clone())),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert!(actor.settle_due_deadlines_at(deadline).is_some());
+
+        let Some(ProducerDecision::Retry { recipe, reason, .. }) =
+            actor.pending_decision.as_deref()
+        else {
+            panic!("a qualified fault with an alternate must install it, not fail");
+        };
+        assert_eq!(
+            recipe, &alternate,
+            "the colour-safe recipe answers a stopped encode; this fault is about the decode"
+        );
+        assert_eq!(*reason, ProducerDecisionReason::SourceDecodeRetry);
+        assert!(
+            !reason.is_permanent(),
+            "a permanent reason here ends the session the successor was going to rescue"
+        );
+    }
+
+    /// The alternate is offered to a decode fault and to nothing else.
+    ///
+    /// An ordinary stall is not evidence about the source, and installing a
+    /// software decode for one would spend the session's one retry on a
+    /// different recipe than the failure called for — and quietly move the
+    /// artifact, since the decode backend feeds the plan digest.
+    #[test]
+    fn a_timing_verdict_without_a_qualified_fault_still_takes_the_colour_safe_recipe() {
+        let started = Instant::now();
+        let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        let alternate = ValidatedRetryRecipe::new(
+            "software-decode-alternate".to_owned(),
+            "alternate-fingerprint".to_owned(),
+            "presentation-m5c2d-plain".to_owned(),
+            ProducerStartupKind::MixedSoftwareDecode,
+        );
+
+        // No fault at all.
+        let mut plain = registered_prepublication_actor(started);
+        assert_eq!(
+            plain.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d-plain", "recipe-m5c2d-plain")
+                    .with_decode_alternate(Some(alternate.clone())),
+            ),
+            Ok(1)
+        );
+        assert!(plain.settle_due_deadlines_at(deadline).is_some());
+        let Some(ProducerDecision::Retry { recipe, reason, .. }) =
+            plain.pending_decision.as_deref()
+        else {
+            panic!("a startup deadline still retries");
+        };
+        assert_ne!(recipe, &alternate);
+        assert_eq!(*reason, ProducerDecisionReason::StartupDeadline);
+
+        // A fault this build cannot vouch for is not evidence either.
+        let mut unqualified = registered_prepublication_actor(started);
+        assert_eq!(
+            unqualified.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d-plain", "recipe-m5c2d-plain")
+                    .with_decode_alternate(Some(alternate.clone())),
+            ),
+            Ok(1)
+        );
+        assert!(unqualified.observe_producer_decode_fault(decode_fault_qualified(1, 5, false)));
+        assert!(unqualified.settle_due_deadlines_at(deadline).is_some());
+        let Some(ProducerDecision::Retry { recipe, reason, .. }) =
+            unqualified.pending_decision.as_deref()
+        else {
+            panic!("a startup deadline still retries");
+        };
+        assert_ne!(
+            recipe, &alternate,
+            "an unqualified window cannot spend the retry on a different recipe"
+        );
+        assert_eq!(*reason, ProducerDecisionReason::StartupDeadline);
+    }
+
+    /// An alternate written for a different presentation is not this
+    /// session's, and the fence that says so is the same one the colour-safe
+    /// recipe passes through.
+    #[test]
+    fn an_alternate_from_another_presentation_contract_is_refused() {
+        let started = Instant::now();
+        let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-m5c2d-fence", "recipe-m5c2d-fence")
+                    .with_decode_alternate(Some(ValidatedRetryRecipe::new(
+                        "software-decode-alternate".to_owned(),
+                        "alternate-fingerprint".to_owned(),
+                        "a-different-presentation".to_owned(),
+                        ProducerStartupKind::MixedSoftwareDecode,
+                    ))),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_decode_fault(decode_fault_qualified(1, 5, true)));
+        assert!(actor.settle_due_deadlines_at(deadline).is_some());
+        let Some(ProducerDecision::Retry { reason, .. }) = actor.pending_decision.as_deref() else {
+            panic!("the colour-safe retry is still available");
+        };
+        assert_eq!(
+            *reason,
+            ProducerDecisionReason::StartupDeadline,
+            "an alternate that fails the presentation fence is not installed, and the \
+             decision falls back to the recipe that passed it"
         );
     }
 

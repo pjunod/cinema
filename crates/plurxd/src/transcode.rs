@@ -2017,6 +2017,15 @@ struct PrepublicationTranscodeRetry {
     /// from, and resolving it again at execution time could answer differently
     /// from the resolution the actor validated.
     observation: DiagnosticObservation,
+    /// The same delivery decoded in software, frozen beside this one.
+    ///
+    /// Boxed because it is the same type: an alternate has no alternate of its
+    /// own, and nothing constructs a second level. Held here rather than in a
+    /// second executor slot so the two cannot be reached independently — the
+    /// actor names exactly one of them in its decision, and
+    /// `execute_prepublication_transcode_retry` resolves that name against
+    /// this pair and refuses anything else.
+    decode_alternate: Option<Box<PrepublicationTranscodeRetry>>,
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -2157,8 +2166,6 @@ impl PrepublicationTranscodeRetry {
     /// slot back and leave a live hardware encoder with nothing reserved for
     /// it.
     ///
-    /// No installer yet: M5c2c is this function's caller.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn prepare_decode_restricted(
         delivered: &ResolvedTranscode,
         alternate: &ResolvedTranscode,
@@ -2323,7 +2330,18 @@ impl PrepublicationTranscodeRetry {
             software_pool,
             runtime_cache,
             observation,
+            decode_alternate: None,
         })
+    }
+
+    /// Freeze the software-decode alternate beside this recipe.
+    ///
+    /// A builder rather than a tenth argument to [`Self::build`], which
+    /// already carries `#[allow(clippy::too_many_arguments)]` and whose
+    /// argument list is the thing that attribute is apologising for.
+    fn with_decode_alternate(mut self, alternate: Option<PrepublicationTranscodeRetry>) -> Self {
+        self.decode_alternate = alternate.map(Box::new);
+        self
     }
 }
 
@@ -3452,11 +3470,26 @@ async fn execute_prepublication_transcode_retry(
     first_reason: crate::playback_control::ProducerDecisionReason,
     sid: &str,
 ) -> Result<(), String> {
-    if actor_recipe != &retry.actor_recipe {
+    // The actor names exactly one of the two frozen recipes. Resolve the name
+    // rather than assuming the colour-safe one: a qualified decode fault
+    // installs the software-decode alternate, and installing the wrong one
+    // would respawn the identical command the fault was about.
+    let retry = if actor_recipe == &retry.actor_recipe {
+        retry
+    } else if retry
+        .decode_alternate
+        .as_deref()
+        .is_some_and(|alternate| actor_recipe == &alternate.actor_recipe)
+    {
+        retry
+            .decode_alternate
+            .as_deref()
+            .expect("the alternate matched on the line above")
+    } else {
         return Err(format!(
             "actor retry recipe did not match immutable executor recipe ({first_reason:?})"
         ));
-    }
+    };
     let mut replacement = session.begin_child_replacement().await;
     // Cancellation after the actor decision has been observed must fence the
     // generation even though retry admission intentionally happens later.
@@ -17484,6 +17517,10 @@ impl TranscodeManager {
             &session_kind,
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
+        // One read for both recipes: they are frozen together and a budget
+        // that moved between them would put two recipes on two different
+        // pictures of the node.
+        let software_budget = self.software_budget().await;
         let retry = if encoder == Encoder::Software {
             None
         } else {
@@ -17506,7 +17543,7 @@ impl TranscodeManager {
                         &dir,
                         &presentation_contract_fingerprint,
                         self.admissions.software_pool(),
-                        self.software_budget().await,
+                        software_budget,
                         self.runtime_cache.clone(),
                     ),
                     Err(error) => Err(error),
@@ -17514,7 +17551,72 @@ impl TranscodeManager {
                 Err(error) => Err(error),
             };
             match retry {
-                Ok(retry) => Some(retry),
+                Ok(retry) => {
+                    // The software-decode alternate, frozen beside the
+                    // colour-safe one and by the same rule: resolved now, from
+                    // this plan, so that nothing re-runs policy in the middle
+                    // of a recovery.
+                    //
+                    // A failure to build it is *not* a failure to start the
+                    // session. The colour-safe retry is what this session has
+                    // always had and it is unaffected; an absent alternate
+                    // costs a decode fault its recovery and nothing else, and
+                    // refusing to play a title because its hypothetical
+                    // second recipe would not resolve is a worse trade than
+                    // any recovery it buys.
+                    let alternate = match self
+                        .resolve_restricted_movie_plan(
+                            &file,
+                            &opts,
+                            encoder,
+                            &plurx_core::transcode::AttemptRestrictions::requiring(
+                                plurx_core::transcode::DecodeBackend::Software,
+                            ),
+                        )
+                        .await
+                    {
+                        Ok(alternate_plan) => {
+                            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                                &plan,
+                                &alternate_plan,
+                                &opts,
+                                encoder,
+                            )
+                            .and_then(|prepared| {
+                                prepared
+                                    .map(|prepared| {
+                                        PrepublicationTranscodeRetry::build(
+                                            &file,
+                                            prepared,
+                                            &alternate_plan,
+                                            pacing,
+                                            &dir,
+                                            &presentation_contract_fingerprint,
+                                            self.admissions.software_pool(),
+                                            software_budget,
+                                            self.runtime_cache.clone(),
+                                        )
+                                    })
+                                    .transpose()
+                            })
+                            .unwrap_or_else(|error| {
+                                tracing::warn!(
+                                    session = %session_log_id(&session_id),
+                                    "no software-decode alternate for this session: {error}"
+                                );
+                                None
+                            })
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                session = %session_log_id(&session_id),
+                                "software-decode alternate did not resolve: {error}"
+                            );
+                            None
+                        }
+                    };
+                    Some(retry.with_decode_alternate(alternate))
+                }
                 Err(error) => {
                     let _ = tokio::fs::remove_dir_all(&dir).await;
                     start_settlement.disarm();
@@ -17541,6 +17643,16 @@ impl TranscodeManager {
                 } else {
                     crate::playback_control::ProducerStartupKind::Hardware
                 },
+            )
+            // The actor decides between the two; it can only do that if it can
+            // see both. The executor holds the material either way, so an
+            // alternate the policy did not name is one the actor will never
+            // ask for and the executor will never install.
+            .with_decode_alternate(
+                retry
+                    .decode_alternate
+                    .as_deref()
+                    .map(|alternate| alternate.actor_recipe.clone()),
             )
         } else {
             crate::playback_control::InitialProducerPolicy::software(
