@@ -368,8 +368,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
         self.assertIn(
             "M0–M5 complete · M6 server/client implementation landed, fleet "
-            "acceptance open · M7b adversarial findings under repair · M8 and "
-            "promotion remain",
+            "acceptance open · M7b final adversarial findings under repair · "
+            "M8 and promotion remain",
             self.flat_status,
         )
         self.assertIn("decoder-plan-v1-unqualified", self.status)
@@ -1175,8 +1175,8 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn(
             '"playback.decoder_health_qualified_artifacts"', store
         )
-        # The rule takes measured facts and nothing else, so it is testable
-        # without a manager, a store, a cache or an FFmpeg.
+        # The rule takes immutable boot facts and selectable paths, so it is
+        # testable without a manager, a store, a cache or an FFmpeg.
         self.assertIn(
             "pub fn artifact_qualification_readiness(\n    requested: bool,", daemon
         )
@@ -1253,6 +1253,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "requested_namespace",
             "path_scoped",
             "eligible",
+            "measured_decoders",
+            "covered_decoders",
+            "measured_paths_v2",
+            "covered_paths_v2",
             "refusal",
             "explanation",
             # The third fact. Without it the surface either hides a saved
@@ -1340,6 +1344,14 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertNotIn("DecodeBackend::Software.name()", readiness)
         self.assertIn(
             'format!("{codec}/{}/{decoder}", backend.name())', system
+        )
+        self.assertIn("measured_paths_v2", system)
+        self.assertIn("covered_paths_v2", system)
+        self.assertIn("q.measured_paths_v2||q.measured_decoders", web)
+        self.assertIn("q.covered_paths_v2||q.covered_decoders", web)
+        self.assertIn(
+            "!delivered.enforces_receipt() || !alternate.enforces_receipt()",
+            daemon,
         )
         self.assertIn("async function saveVerifiedDecode(", web)
         self.assertIn(

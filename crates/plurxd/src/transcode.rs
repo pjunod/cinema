@@ -2226,6 +2226,9 @@ impl PrepublicationTranscodeRetry {
     /// * a delivered plan that already decoded in software has no alternate —
     ///   the digests are equal, so the "recovery" would tear down the failed
     ///   child and respawn the identical command.
+    /// * both the failed path and its same-codec software successor must use
+    ///   the receipt-qualified identity. A qualified fault is not permission
+    ///   to install a producer whose output cannot carry qualified evidence.
     ///
     /// `software_threads` is `None`, which is what makes this the mixed
     /// transition rather than a demotion. The encoder and its hardware slot
@@ -2248,7 +2251,13 @@ impl PrepublicationTranscodeRetry {
                 "the decode-restricted alternate did not resolve to software decode".to_owned(),
             );
         }
+        if alternate.decode().input_codec() != delivered.decode().input_codec() {
+            return Err("the decode-restricted alternate changed the input codec".to_owned());
+        }
         if alternate.plan_digest() == delivered.plan_digest() {
+            return Ok(None);
+        }
+        if !delivered.enforces_receipt() || !alternate.enforces_receipt() {
             return Ok(None);
         }
         let mut retry_opts = opts.clone();
@@ -10559,13 +10568,14 @@ impl ArtifactQualificationReadiness {
 /// unqualified identity. That makes the prerequisites advisory without
 /// rotating uncovered work into a namespace whose receipts it cannot produce.
 ///
-/// A free function, and deliberately not a method: it takes only measured
-/// facts, so the whole rule can be tested without a manager, a store, a cache
-/// or an FFmpeg.
+/// A free function, and deliberately not a method: it takes only immutable
+/// boot facts and the paths planning may select, so the whole rule can be
+/// tested without a manager, a store, a cache or an FFmpeg.
 pub fn artifact_qualification_readiness(
     requested: bool,
     policy: &crate::decoder_health::DiagnosticPolicy,
     measured: &plurx_core::transcode::decoder_inventory::MeasuredDecoders,
+    selectable_paths: &[(String, plurx_core::transcode::DecodeBackend)],
 ) -> ArtifactQualificationReadiness {
     use plurx_core::transcode::ArtifactQualification;
 
@@ -10600,6 +10610,19 @@ pub fn artifact_qualification_readiness(
     let ambiguous = measured_decoders
         .iter()
         .any(|(codec, backend, decoder)| covering(codec, *backend, decoder) > 1);
+    // Successful measurements are not a completeness denominator. The probe
+    // deliberately omits a codec whose decoder exists but whose probe encoder
+    // does not, and planning can still select that codec. Legacy whole-node
+    // fields may say qualified only when every path the manager can select is
+    // both measured and uniquely covered.
+    let all_selectable_paths_covered = !selectable_paths.is_empty()
+        && selectable_paths.iter().all(|(codec, backend)| {
+            covered_decoders
+                .iter()
+                .any(|(covered_codec, covered_backend, _)| {
+                    covered_codec == codec && covered_backend == backend
+                })
+        });
 
     let refusal = if !requested {
         Some(QualificationRefusal::NotRequested)
@@ -10611,7 +10634,7 @@ pub fn artifact_qualification_readiness(
         Some(QualificationRefusal::AmbiguousContract)
     } else if covered_decoders.is_empty() {
         Some(QualificationRefusal::NoContractCoversThisBuild)
-    } else if covered_decoders.len() != measured_decoders.len() {
+    } else if !all_selectable_paths_covered || covered_decoders.len() != measured_decoders.len() {
         Some(QualificationRefusal::IncompleteCoverage)
     } else {
         None
@@ -16784,11 +16807,38 @@ impl TranscodeManager {
         &self,
         requested: bool,
     ) -> ArtifactQualificationReadiness {
+        let selectable_paths = self.selectable_decode_paths();
         artifact_qualification_readiness(
             requested,
             &self.diagnostic_policy,
             &self.measured_decoders,
+            &selectable_paths,
         )
+    }
+
+    /// Every `(codec, backend)` the manager can select under its boot-time
+    /// encoder capabilities. Failed probes stay in this denominator: their
+    /// absence is evidence that whole-node qualification cannot be proven,
+    /// not evidence that the route disappeared.
+    fn selectable_decode_paths(&self) -> Vec<(String, plurx_core::transcode::DecodeBackend)> {
+        use plurx_core::transcode::{DecodeBackend, Encoder};
+
+        let backends = [
+            (Encoder::Software, DecodeBackend::Software),
+            (Encoder::VideoToolbox, DecodeBackend::VideoToolbox),
+            (Encoder::Nvenc, DecodeBackend::Cuda),
+            (Encoder::Qsv, DecodeBackend::Qsv),
+            (Encoder::Vaapi, DecodeBackend::Vaapi),
+        ];
+        self.decoders
+            .iter()
+            .flat_map(|codec| {
+                backends
+                    .iter()
+                    .filter(|(encoder, _)| self.caps.available(*encoder))
+                    .map(|(_, backend)| (codec.clone(), *backend))
+            })
+            .collect()
     }
 
     /// Read and publish the operator's requested path-scoped policy.
@@ -33426,12 +33476,19 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_software_decode_alternate_is_a_distinct_artifact_that_keeps_its_encoder() {
         use plurx_core::store::SqliteStore;
-        use plurx_core::transcode::{AttemptRestrictions, DecodeBackend, DecodeReason};
+        use plurx_core::transcode::{
+            ArtifactQualification, AttemptRestrictions, DecodeBackend, DecodeReason,
+        };
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let (mgr, _work, _cache) = cached_manager(&store);
+        // This test isolates the mixed-resource and recipe shape. The
+        // production-policy pairing rule has its own real-policy regression
+        // below; force both plans qualified here so this test reaches the
+        // shape it is responsible for.
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
         let work = Workload::of(&file, 1080);
 
         let mut opts = mgr.options_for_tone_map(
@@ -33561,6 +33618,183 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A qualified fault may install only a successor that can produce the
+    /// same class of evidence.
+    ///
+    /// The operator request remains enabled under partial coverage; this is
+    /// the recovery boundary, not a settings gate. Hardware-only coverage is
+    /// enough to classify the failed producer, but not enough to call an
+    /// unqualified software producer a verified recovery. Once the same-codec
+    /// pair is covered, the exact same construction becomes attachable.
+    #[tokio::test]
+    async fn automatic_decode_recovery_requires_a_qualified_same_codec_pair() {
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::{ArtifactQualification, AttemptRestrictions, DecodeBackend};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("enable path-scoped policy");
+        let measured = MeasuredDecoders::from_measured(&[
+            ("hevc", DecodeBackend::Software, "hevc"),
+            ("hevc", DecodeBackend::VideoToolbox, "hevc"),
+        ]);
+        let contract = |id: &str, backend: DecodeBackend| {
+            let mut contract = decode_contract_fixture(backend);
+            contract.id = id.to_owned();
+            contract.input_codec = "hevc".to_owned();
+            contract.decoder = "hevc".to_owned();
+            contract
+        };
+        let build = || crate::decoder_health::MeasuredBuild {
+            ffmpeg_version: "9.0.1".to_owned(),
+            binary_sha256: "b".repeat(64),
+            buildconf_sha256: "c".repeat(64),
+        };
+        let options = |mgr: &TranscodeManager| {
+            let mut opts = mgr.options_for_tone_map(
+                Encoder::Software,
+                &file,
+                1080,
+                0.0,
+                None,
+                None,
+                None,
+                tone_map_pref(),
+                OutputGrade::Sdr,
+            );
+            opts.pipeline = Pipeline::Cpu;
+            opts
+        };
+
+        let (mut hardware_only, _work, _cache) = cached_manager(&store);
+        hardware_only.caps.videotoolbox = true;
+        let hardware_only = hardware_only
+            .with_decoders(vec!["hevc".to_owned()])
+            .with_measured_decoders(measured.clone())
+            .with_diagnostic_policy(Arc::new(crate::decoder_health::DiagnosticPolicy::new(
+                Some(build()),
+                vec![contract("hardware", DecodeBackend::VideoToolbox)],
+            )));
+        let published = hardware_only.publish_artifact_qualification().await;
+        assert!(published.requested, "the operator policy remains enabled");
+        assert_eq!(
+            published.effective,
+            ArtifactQualification::Unqualified,
+            "legacy whole-node state stays conservative for a partial pair"
+        );
+        let opts = options(&hardware_only);
+        let delivered = hardware_only
+            .resolve_movie_plan(&file, &opts, Encoder::VideoToolbox)
+            .await
+            .expect("covered hardware delivery");
+        let uncovered_software = hardware_only
+            .resolve_restricted_movie_plan(
+                &file,
+                &opts,
+                Encoder::VideoToolbox,
+                &AttemptRestrictions::requiring(DecodeBackend::Software),
+            )
+            .await
+            .expect("uncovered software plan");
+        assert!(delivered.enforces_receipt());
+        assert!(!uncovered_software.enforces_receipt());
+        assert!(
+            PrepublicationTranscodeRetry::prepare_decode_restricted(
+                &delivered,
+                &uncovered_software,
+                &opts,
+                Encoder::VideoToolbox,
+            )
+            .expect("the unqualified successor is a safe refusal")
+            .is_none(),
+            "hardware-only coverage must attach no automatic decode alternate"
+        );
+
+        let (mut paired, _paired_work, _paired_cache) = cached_manager(&store);
+        paired.caps.videotoolbox = true;
+        let paired = paired
+            .with_decoders(vec!["hevc".to_owned()])
+            .with_measured_decoders(measured)
+            .with_diagnostic_policy(Arc::new(crate::decoder_health::DiagnosticPolicy::new(
+                Some(build()),
+                vec![
+                    contract("hardware", DecodeBackend::VideoToolbox),
+                    contract("software", DecodeBackend::Software),
+                ],
+            )));
+        let published = paired.publish_artifact_qualification().await;
+        assert_eq!(
+            published.effective,
+            ArtifactQualification::HealthQualified,
+            "both selectable paths are now covered"
+        );
+        let opts = options(&paired);
+        let delivered = paired
+            .resolve_movie_plan(&file, &opts, Encoder::VideoToolbox)
+            .await
+            .expect("qualified hardware delivery");
+        let software = paired
+            .resolve_restricted_movie_plan(
+                &file,
+                &opts,
+                Encoder::VideoToolbox,
+                &AttemptRestrictions::requiring(DecodeBackend::Software),
+            )
+            .await
+            .expect("qualified software plan");
+        assert!(delivered.enforces_receipt() && software.enforces_receipt());
+        let prepared = PrepublicationTranscodeRetry::prepare_decode_restricted(
+            &delivered,
+            &software,
+            &opts,
+            Encoder::VideoToolbox,
+        )
+        .expect("the covered pair is compatible")
+        .expect("the covered pair has an automatic alternate");
+        let dir = std::env::temp_dir().join(format!("plurx-m7b-pair-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let alternate = PrepublicationTranscodeRetry::build(
+            &file,
+            prepared,
+            &software,
+            Pacing::unpaced(),
+            &dir,
+            "presentation-m7b-pair",
+            paired.admissions.software_pool(),
+            paired.software_budget().await,
+            paired.runtime_cache.clone(),
+            &paired.measured_decoders,
+            "software-decode",
+        )
+        .expect("qualified alternate recipe");
+        let colour_safe = build_test_transcode_retry(
+            &paired,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            &dir,
+            "presentation-m7b-pair",
+        )
+        .await
+        .expect("colour-safe retry");
+        assert!(
+            colour_safe
+                .with_decode_alternate(Some(alternate))
+                .decode_alternate
+                .is_some(),
+            "paired coverage attaches the alternate the actor may select"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The executor installs the recipe the actor named, and only that one.
     ///
     /// Two recipes are frozen on the same structure and the actor names one of
@@ -33574,12 +33808,13 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_executor_installs_the_recipe_the_actor_named() {
         use plurx_core::store::SqliteStore;
-        use plurx_core::transcode::{AttemptRestrictions, DecodeBackend};
+        use plurx_core::transcode::{ArtifactQualification, AttemptRestrictions, DecodeBackend};
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let (mgr, _work, _cache) = cached_manager(&store);
+        mgr.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
 
         let mut opts = mgr.options_for_tone_map(
             Encoder::Software,
@@ -41307,10 +41542,20 @@ scope = "test"
                 "hevc",
             ),
         ]);
+        let selectable = vec![
+            (
+                "h264".to_owned(),
+                plurx_core::transcode::DecodeBackend::Software,
+            ),
+            (
+                "hevc".to_owned(),
+                plurx_core::transcode::DecodeBackend::Software,
+            ),
+        ];
 
         // Nobody asked. Every deployed node, and the reason it is a separate
         // refusal rather than an absent one: the surface says so out loud.
-        let idle = artifact_qualification_readiness(false, &covered, &measured);
+        let idle = artifact_qualification_readiness(false, &covered, &measured, &selectable);
         assert_eq!(idle.effective, ArtifactQualification::Unqualified);
         assert_eq!(idle.refusal, Some(QualificationRefusal::NotRequested));
         assert!(
@@ -41322,7 +41567,7 @@ scope = "test"
         // Asked, and enabled. Only the covered pair is listed: hevc was
         // measured and is not covered, so the surface must call the node
         // partially covered rather than imply every plan is verified.
-        let asked = artifact_qualification_readiness(true, &covered, &measured);
+        let asked = artifact_qualification_readiness(true, &covered, &measured, &selectable);
         assert_eq!(asked.effective, ArtifactQualification::Unqualified);
         assert_eq!(
             asked.refusal,
@@ -41342,7 +41587,7 @@ scope = "test"
         // contract, so nothing it prints is evidence.
         let unmeasured =
             crate::decoder_health::DiagnosticPolicy::new(None, vec![contract("h264", "h264")]);
-        let readiness = artifact_qualification_readiness(true, &unmeasured, &measured);
+        let readiness = artifact_qualification_readiness(true, &unmeasured, &measured, &selectable);
         assert_eq!(
             readiness.effective,
             ArtifactQualification::Unqualified,
@@ -41359,8 +41604,12 @@ scope = "test"
 
         // No decoder named. A contract is qualified against a *named* decoder,
         // so a plan that names none can never be matched to one.
-        let readiness =
-            artifact_qualification_readiness(true, &covered, &MeasuredDecoders::default());
+        let readiness = artifact_qualification_readiness(
+            true,
+            &covered,
+            &MeasuredDecoders::default(),
+            &selectable,
+        );
         assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
         assert_eq!(
             readiness.refusal,
@@ -41371,7 +41620,7 @@ scope = "test"
         // the fleet's state today and the only refusal that takes real work to
         // leave: it needs a capture from this build.
         let uncovered = crate::decoder_health::DiagnosticPolicy::new(Some(build()), Vec::new());
-        let readiness = artifact_qualification_readiness(true, &uncovered, &measured);
+        let readiness = artifact_qualification_readiness(true, &uncovered, &measured, &selectable);
         assert_eq!(readiness.effective, ArtifactQualification::Unqualified);
         assert_eq!(
             readiness.refusal,
@@ -41402,6 +41651,10 @@ scope = "test"
                 plurx_core::transcode::DecodeBackend::Software,
                 "av1",
             )]),
+            &[(
+                "av1".to_owned(),
+                plurx_core::transcode::DecodeBackend::Software,
+            )],
         );
         assert_eq!(
             readiness.refusal,
@@ -41428,7 +41681,15 @@ scope = "test"
             ("h264", DecodeBackend::VideoToolbox, "h264"),
         ]);
 
-        let readiness = artifact_qualification_readiness(true, &policy, &measured);
+        let readiness = artifact_qualification_readiness(
+            true,
+            &policy,
+            &measured,
+            &[
+                ("h264".to_owned(), DecodeBackend::Software),
+                ("h264".to_owned(), DecodeBackend::VideoToolbox),
+            ],
+        );
         assert_eq!(
             readiness.covered_decoders,
             vec![(
@@ -41525,6 +41786,134 @@ scope = "test"
         );
     }
 
+    /// A successful probe is evidence about that path, not evidence that an
+    /// advertised path which failed to produce a probe no longer exists.
+    #[tokio::test]
+    async fn legacy_whole_node_state_includes_plan_capable_unmeasured_codecs() {
+        use plurx_core::domain::{ItemKind, NewItem, ProbeResult};
+        use plurx_core::store::keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS;
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::decoder_inventory::MeasuredDecoders;
+        use plurx_core::transcode::{ArtifactQualification, DecodeBackend};
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let h264_id = seed_file_with_probe_at(
+            &store,
+            "/media/H264.mkv",
+            ProbeResult {
+                duration_ms: Some(60_000),
+                container: Some("mkv".into()),
+                video_codec: Some("h264".into()),
+                width: Some(1920),
+                height: Some(1080),
+                ..Default::default()
+            },
+        )
+        .await;
+        let library_id = store
+            .list_libraries()
+            .await
+            .expect("libraries")
+            .into_iter()
+            .next()
+            .expect("seed library")
+            .id;
+        let hevc_item = store
+            .insert_item(&NewItem {
+                library_id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HEVC".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("hevc item");
+        let hevc_id = store
+            .upsert_file(
+                hevc_item,
+                "/media/HEVC.mkv",
+                1,
+                1,
+                &ProbeResult {
+                    duration_ms: Some(60_000),
+                    container: Some("mkv".into()),
+                    video_codec: Some("hevc".into()),
+                    width: Some(3840),
+                    height: Some(2160),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("hevc file");
+        let h264 = store.get_file(h264_id).await.expect("get").expect("h264");
+        let hevc = store.get_file(hevc_id).await.expect("get").expect("hevc");
+        let contract = decode_contract_fixture(DecodeBackend::Software);
+        let policy = crate::decoder_health::DiagnosticPolicy::new(
+            Some(crate::decoder_health::MeasuredBuild {
+                ffmpeg_version: contract.ffmpeg_version.clone(),
+                binary_sha256: contract.binary_sha256.clone(),
+                buildconf_sha256: contract.buildconf_sha256.clone(),
+            }),
+            vec![contract],
+        );
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mgr = mgr
+            .with_decoders(vec!["h264".to_owned(), "hevc".to_owned()])
+            .with_measured_decoders(MeasuredDecoders::from_measured(&[(
+                "h264",
+                DecodeBackend::Software,
+                "h264",
+            )]))
+            .with_diagnostic_policy(Arc::new(policy));
+        store
+            .put_setting(DECODER_HEALTH_QUALIFIED_ARTIFACTS, "1")
+            .await
+            .expect("enable request");
+        let published = mgr.publish_artifact_qualification().await;
+        assert!(published.requested, "prerequisites do not gate the setting");
+        assert_eq!(
+            published.refusal,
+            Some(QualificationRefusal::IncompleteCoverage)
+        );
+        assert_eq!(
+            published.effective,
+            ArtifactQualification::Unqualified,
+            "legacy whole-node state cannot ignore the advertised unmeasured codec"
+        );
+
+        let options = |file: &plurx_core::domain::MediaFile| {
+            mgr.options_for_tone_map(
+                Encoder::Software,
+                file,
+                720,
+                0.0,
+                None,
+                None,
+                None,
+                ToneMap::Zscale,
+                OutputGrade::Sdr,
+            )
+        };
+        let h264_plan = mgr
+            .resolve_movie_plan(&h264, &options(&h264), Encoder::Software)
+            .await
+            .expect("h264 plan");
+        let hevc_plan = mgr
+            .resolve_movie_plan(&hevc, &options(&hevc), Encoder::Software)
+            .await
+            .expect("hevc plan");
+        assert!(
+            h264_plan.enforces_receipt(),
+            "the covered exact path still qualifies"
+        );
+        assert!(
+            !hevc_plan.enforces_receipt(),
+            "the plan-capable but unmeasured codec keeps its stable identity"
+        );
+    }
+
     /// The publisher writes the requested policy, and a covered path's
     /// identity moves its cache key.
     ///
@@ -41570,6 +41959,7 @@ scope = "test"
             backend_fault_detail: None,
         };
         let mgr = mgr
+            .with_decoders(vec!["hevc".to_owned()])
             .with_measured_decoders(MeasuredDecoders::from_measured(&[(
                 "hevc",
                 plurx_core::transcode::DecodeBackend::Software,
@@ -41699,6 +42089,16 @@ scope = "test"
                     "hevc",
                 ),
             ]),
+            &[
+                (
+                    "h264".to_owned(),
+                    plurx_core::transcode::DecodeBackend::Software,
+                ),
+                (
+                    "hevc".to_owned(),
+                    plurx_core::transcode::DecodeBackend::Software,
+                ),
+            ],
         );
         assert_eq!(
             readiness.refusal,

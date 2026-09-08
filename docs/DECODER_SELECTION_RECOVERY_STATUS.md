@@ -1,7 +1,7 @@
 # Decoder selection and recovery — implementation status
 
 **Status:** M0–M5 complete · M6 server/client implementation landed, fleet
-acceptance open · M7b adversarial findings under repair · M8 and promotion
+acceptance open · M7b final adversarial findings under repair · M8 and promotion
 remain · **Updated:** 2026-09-08 · **Integration branch:**
 `effort/decoder-selection-recovery` at `48ad8716` · **Active task:**
 `codex/decoder-m7b-inventory`
@@ -24,7 +24,7 @@ An unchecked item is not implied by a nearby passing check.
 | M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
 | M6 · prepared replacement contract and clients | Code landed | Apple is the only client currently reaching a viewer; the cross-client fleet receipt remains M8 evidence |
 | M7a · advisory Developer settings | Done | Keep the prerequisites accurate as hardware contracts land; the controls advise and never gate enablement |
-| M7b · hardware diagnostic path | Follow-up repairs verified locally | Backend-aware inventory is implemented. The first adversarial review's five issues are closed. Its exact-head re-review found three follow-ups; their API, UI-copy and cleanup-proof repairs pass the focused tests and fast lane. Exact-tree re-review, one final full suite, draft-PR promotion and merge remain. A real hardware contract is separate fleet evidence |
+| M7b · hardware diagnostic path | Final review findings under repair | Backend-aware inventory is implemented. The first eight adversarial findings are closed. Exact-head review of `65c688fc` found three further boundaries: require a qualified hardware/software recovery pair, include selectable-but-unmeasured paths in legacy whole-node completeness, and preserve the settings pair lists beside backend-aware v2 siblings. Repairs are in progress; exact-tree re-review, one final full suite, draft-PR promotion and merge remain. A real hardware contract is separate fleet evidence |
 | M7 remainder · offline durability and handoff enforcement | Not yet audited | Job-scoped recovery budget · alternate-result and part/assembly receipt verification · versioned worker capabilities · owner-handoff coverage · shipping-path exercise without the legacy recovery feature flag |
 | M8 · fleet qualification | Not started | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs |
 | Promotion to `main` | Not started | Freeze effort merges · merge fresh `main` · requalify the exact tree · pass Main promotion gate · merge |
@@ -44,11 +44,11 @@ recovery remains deliberately unreachable rather than falsely certified.
 | Task PR | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174), `WIP:`. It stays draft until adversarial findings are clean; the full suite runs once on that corrected candidate |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Implemented locally | Nested backend-aware inventory with a backward-compatible v1 API field and versioned backend-aware sibling · aggregate inventory timeout · successful hardware-frame runtime proof · exact `(codec, backend)` diagnostic lookup · path-scoped policy identity for uniquely covered plans · same-codec recovery readiness · Settings → Developer presents prerequisites as advice and never disables the control |
-| Adversarial review | Exact head `a148676d`: five changes requested and repaired at `b51eed01` with per-path qualification, post-initialization successful hardware evidence, one aggregate deadline, same-codec UI correlation and a versioned inventory API sibling. Re-review of `b51eed01` closed those five and found three follow-ups: conservative legacy settings semantics, path-scoped cache-cost copy, and mutation-sensitive child/file cleanup proof. All three are repaired locally and await exact-head approval |
-| Focused evidence | Pre-review head: validation 196/196. Current repair tree: decoder inventory 15/15, including exact child termination and partial-file removal · Developer UI 16/16 · status contract 21/21 · path-scoped planner test · conservative settings serialization test · settings request/restart API test |
-| Fast lane | Repaired tree: history 1,601 · catalog 24 points / 33 checks / 1,570 audited files · formatting, locked all-target workspace compile, and changed library/binary Clippy with warnings denied pass. Operations has the same 10 failures on this branch and untouched `48ad8716`: the macOS system Bash lacks `mapfile`; 280/290 pass. All-target Clippy reaches the same four unused store-fixture constants on both trees |
+| Adversarial review | Exact head `a148676d`: five findings repaired at `b51eed01`. Re-review of `b51eed01` closed those five and found three follow-ups, repaired at `65c688fc`: conservative legacy settings semantics, path-scoped cache-cost copy, and mutation-sensitive child/file cleanup proof. Review of `65c688fc` confirmed those eight closed and found three final boundaries: qualified successor pairing, selectable-path completeness, and settings path-list wire compatibility. Those three are under repair |
+| Focused evidence | Exact `65c688fc`: decoder inventory 15/15, including exact child termination and partial-file removal, plus complete Forgejo effort gate green. Current final-repair tree: qualified same-codec recovery-pair integration · selectable-but-unmeasured codec planning · all five qualification-readiness cases · legacy/current settings serialization · existing alternate and executor regressions · Developer UI 16/16 · status contract 21/21 all pass |
+| Fast lane | Current final-repair tree: history 1,601 · catalog 24 points / 33 checks / 1,570 audited files · formatting, locked all-target workspace compile, and changed binary Clippy with warnings denied pass. Operations has the same 10 failures on this branch and untouched `48ad8716`: the macOS system Bash lacks `mapfile`; 280/290 pass. All-target Clippy reaches the same four unused store-fixture constants on both trees |
 | Full validation | Per Paul's 2026-09-08 instruction, run one `make validate-full` only after adversarial findings are repaired and immediately before taking `WIP:` off the PR; exact-tree promotion still reruns the Main gate after fresh `main` is merged |
-| Next | Commit/push the verified follow-ups · obtain exact-head adversarial approval · run one final full suite · mark ready and merge after the effort gate |
+| Next | Commit/push the focused and fast-lane-clean final repairs · obtain exact-head adversarial approval · run one final full suite · mark ready and merge after the effort gate |
 | External blocker | No retained contract is yet qualified against a real hardware decoder. The code can make that contract expressible and enforceable; a qualifying host must supply the evidence |
 
 ## Milestones
@@ -2913,7 +2913,7 @@ What cannot be built here is the evidence: a contract qualified against a
 hardware decoder is a claim about a real binary on a real backend, and it is
 written only after a qualifying host has produced the diagnostic capture. This
 milestone makes such a contract *expressible and enforceable*; it does not
-write one. Until one exists, `covered_decoders` stays empty for every hardware
+write one. Until one exists, `covered_paths_v2` stays empty for every hardware
 pair and the Settings card keeps saying so — and the tripwire assertion in
 `tests/web/settings-sections.test.js` is what fails when that stops being true.
 

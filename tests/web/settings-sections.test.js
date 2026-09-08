@@ -384,8 +384,9 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // Requested and enabled, with the uncovered state still shown as advice.
   const refused = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
     namespace: "decoder-plan-v1-unqualified", enforcing: false, policy_enabled: true, eligible: false,
-    measured_build: "ffmpeg version 5.1.9", measured_decoders: ["h264/software/h264", "hevc/software/hevc"],
-    covered_decoders: [], refusal: "no_contract_covers_this_build",
+    measured_build: "ffmpeg version 5.1.9", measured_decoders: ["h264/h264", "hevc/hevc"],
+    covered_decoders: [], measured_paths_v2: ["h264/software/h264", "hevc/software/hevc"],
+    covered_paths_v2: [], refusal: "no_contract_covers_this_build",
     explanation: "No retained diagnostic contract covers this node's FFmpeg build under the qualified log flags.",
   } });
   assert.match(refused, /Enabled · covered paths/);
@@ -398,8 +399,9 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // In force.
   const on = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
     namespace: "decoder-plan-v1-health-qualified-r1", enforcing: true, policy_enabled: true, eligible: true,
-    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/software/h264"],
-    covered_decoders: ["h264/software/h264"], refusal: null, explanation: null,
+    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/h264"],
+    covered_decoders: ["h264/h264"], measured_paths_v2: ["h264/software/h264"],
+    covered_paths_v2: ["h264/software/h264"], refusal: null, explanation: null,
   } });
   assert.match(on, /Enabled · covered paths/);
   assert.equal((on.match(/✗/g) || []).length, 0);
@@ -416,14 +418,25 @@ test("Verified decode states its cost, its prerequisites, and what this node mea
   // an operator just made.
   const pending = card({ decoder_health_qualified_artifacts: true, decoder_health_qualification: {
     namespace: "decoder-plan-v1-unqualified", enforcing: false, policy_enabled: false, eligible: true,
-    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/software/h264"],
-    covered_decoders: ["h264/software/h264"], refusal: "not_requested",
+    measured_build: "ffmpeg version 9.0.1", measured_decoders: ["h264/h264"],
+    covered_decoders: ["h264/h264"], measured_paths_v2: ["h264/software/h264"],
+    covered_paths_v2: ["h264/software/h264"], refusal: "not_requested",
     explanation: "Not requested on this node.", pending_restart: true,
   } });
   assert.match(pending, /Saved · restart to apply/);
   assert.match(pending, /applies the request when it next starts/);
   assert.match(pending, /move an affected key space under work already in flight/);
   assert.doesNotMatch(pending, /every cache key/);
+
+  // A current response prefers the backend-aware sibling, while an older
+  // node with only the pair list remains readable.
+  const legacy = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
+    namespace: "decoder-plan-v1-unqualified", enforcing: false, eligible: true,
+    measured_build: "ffmpeg version 8.0", measured_decoders: ["h264/h264"],
+    covered_decoders: ["h264/h264"], refusal: "not_requested", explanation: null,
+  } });
+  assert.match(legacy, /<code>h264\/h264<\/code>/);
+  assert.match(legacy, /older nodes report software-only/);
 
   // FFmpeg's version banner and decoder names are somebody else's strings.
   const hostile = card({ decoder_health_qualified_artifacts: false, decoder_health_qualification: {
