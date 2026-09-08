@@ -2372,8 +2372,10 @@ this document does not claim it is.
 
 ### M5c1, merged: the ordering question is answered, and by a fourth option
 
-[Forgejo #114](http://192.168.4.7:3000/noirr/plurx/pulls/114), effort head
-`67216de9`. The three candidates above were not chosen between; building the
+[Forgejo #114](http://192.168.4.7:3000/noirr/plurx/pulls/114), branched from
+the M5b merged head `7f2cb598c6ed89dd24996e06783077f1e29c0678` and merged at
+effort head `67216de972c1e39f1ef6aefb2541cf542619cb0c`. The three candidates
+above were not chosen between; building the
 thing produced a fourth that is better than any of them, and the reason is
 worth keeping because it invalidates part of the analysis that generated the
 list.

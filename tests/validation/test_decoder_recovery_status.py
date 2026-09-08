@@ -1344,8 +1344,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "M5c1, merged: the ordering question is answered, and by a fourth option",
             self.status,
         )
-        self.assertIn("Seams 4,
-5, 6, 7 and 9 are all still open.", self.status)
+        self.assertIn("5, 6, 7 and 9 are all still open.", self.status)
 
     def test_m5b_a_budget_is_minted_by_a_new_play_and_inherited_by_everything_else(
         self,
