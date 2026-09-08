@@ -23048,6 +23048,34 @@ mod tests {
         // the publication fence is still at the sentinel, and arming it is
         // `arm_media_session_handoff`'s job, exactly as it is for an
         // activated replacement.
+        //
+        // **And nothing calls it, which is a hole rather than a design.** An
+        // activation has `settle_activation_predecessor` to finish the job; a
+        // commit has no equivalent, so the successor this test just made
+        // current is refused on both planes from its very first request —
+        // `classify_durable_route` answers `OwnerTransition` for any non-zero
+        // fence and `control_owner_refusal` refuses control on the same
+        // predicate. The pointer moved and the viewer got nothing.
+        //
+        // **Do not fix that by publishing here.** Publishing is only half the
+        // transaction and the wrong half first. A committed successor has no
+        // local worker, because nothing primes one — `stage_prepared_successor`
+        // is stage-only. Moving the row off the sentinel puts it into
+        // `owned_media_sessions`, and the lease loop renews only sessions that
+        // are *live*: `take_stale_settlement_candidates` selects exactly the
+        // inventory rows that are not, and `end_media_session_if_owner` ends
+        // them `replaced` **and deletes the playback pointer in the same
+        // transaction**. Publishing a workerless successor therefore trades a
+        // stalled pointer for a deleted one, seconds after the commit instead
+        // of minutes. That was measured, not reasoned about: the call was
+        // written, the suite passed, and an adversarial pass found the sweep.
+        //
+        // The publication belongs to §5.1's phase 3 alongside the priming that
+        // gives the successor a worker, and it needs the predecessor's
+        // terminal projection that `settle_activation_predecessor` waits for
+        // before it may use `PredecessorAcknowledged` at all.
+        // `docs/playback-control/M6-SERVER-PRIME-HANDOFF.md` §4 carries the
+        // whole shape.
         let committed = store
             .media_session_route_by_incarnation(&successor)
             .await
