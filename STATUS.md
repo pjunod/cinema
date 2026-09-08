@@ -6,7 +6,8 @@ first.
 
 ## A prepared commit hands the viewer a session that is refused from its first request
 
-**Open on [its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/137).
+**Merged into `main` as `4c93ef29`, 2026-09-08, from
+[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/137).
 Documentation and one test comment; no runtime change.** Found while writing
 the plan for M6's missing server phase, and it is about code that has been
 merged for days rather than anything new.
@@ -129,6 +130,18 @@ fallback interruption Apple has never measured. Both are operator steps; the
 prompt for them is in the pull request. `make apple-build` and
 `make apple-test` are green on Xcode 26.6 — 900 cases across the iOS and
 tvOS destinations.
+
+**One thing this branch got wrong, recorded because the next person will be
+tempted the same way.** `web layout and accessibility` was already red on
+`main` with a Playwright `TargetClosedError`, and this PR's log carried the
+byte-identical error. That match was taken as proof the lane's redness was
+not this branch's — but the same log also carried `DRIFT 54 structural facts
+differ from tests/ui-structure.golden`: the Developer card's advisory rows
+are DOM facts, and the golden had to move with them. A job can fail twice,
+and matching the *known* signature only proves the known fault is still
+there. `main` stayed red on that lane until the web half carried both cards'
+facts in `37ce1e87`. It is green now, and both halves are covered — but the
+merge here should not have happened without regenerating the golden.
 
 ## The CI fleet filled up because the bound was behind a flag nobody set
 
