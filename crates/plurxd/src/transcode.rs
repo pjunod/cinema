@@ -10449,9 +10449,10 @@ pub enum QualificationRefusal {
     /// This is the fleet's ordinary state today and the one that takes real
     /// work to leave: it needs a capture from this build.
     NoContractCoversThisBuild,
-    /// At least one measured path is covered, but at least one other path is
-    /// not. The enabled policy applies only to the covered paths; this warning
-    /// prevents a partial rollout being mistaken for fleet-wide enforcement.
+    /// At least one selectable path is measured and covered, but at least one
+    /// other selectable path is unmeasured or not uniquely covered. The
+    /// enabled policy applies only to the covered paths; this warning prevents
+    /// a partial rollout being mistaken for fleet-wide enforcement.
     IncompleteCoverage,
     /// More than one retained contract covers this build for the same codec,
     /// decoder and log mode. `contract_for` refuses ambiguity, so this reads
@@ -10496,9 +10497,9 @@ impl QualificationRefusal {
                  verified artifacts."
             }
             Self::IncompleteCoverage => {
-                "Only some measured decode paths have a unique diagnostic contract. The \
-                 enabled policy applies to those paths; capture the missing paths before \
-                 treating this node as fully covered."
+                "Only some selectable decode paths are measured and uniquely covered. The \
+                 enabled policy applies only to qualified paths; complete the missing \
+                 measurements or contracts before treating this node as fully covered."
             }
             Self::AmbiguousContract => {
                 "More than one retained diagnostic contract covers this build for the \
@@ -10526,7 +10527,8 @@ pub struct ArtifactQualificationReadiness {
     /// build, under the qualified log flags.
     pub covered_decoders: Vec<(String, plurx_core::transcode::DecodeBackend, String)>,
     /// Conservative whole-node projection retained for existing API clients.
-    /// This is qualified only when every measured path is uniquely covered;
+    /// This is qualified only when every selectable path is measured and
+    /// uniquely covered;
     /// individual plans still apply `requested` to exact covered paths.
     pub effective: plurx_core::transcode::ArtifactQualification,
     /// Readiness advisory for incomplete or ambiguous coverage, if any.
@@ -41881,6 +41883,22 @@ scope = "test"
             published.effective,
             ArtifactQualification::Unqualified,
             "legacy whole-node state cannot ignore the advertised unmeasured codec"
+        );
+        let explanation = published
+            .refusal
+            .expect("selectable HEVC is not measured")
+            .explanation();
+        assert!(
+            explanation.contains("selectable decode paths"),
+            "the guidance must name the completeness denominator: {explanation}"
+        );
+        assert!(
+            explanation.contains("missing measurements or contracts"),
+            "the guidance must distinguish an unmeasured selectable path from a missing contract: {explanation}"
+        );
+        assert!(
+            !explanation.contains("Only some measured decode paths"),
+            "every measured path in this case is covered: {explanation}"
         );
 
         let options = |file: &plurx_core::domain::MediaFile| {

@@ -466,17 +466,45 @@ test("Automatic recovery requires a covered hardware and software pair for one c
 
   const crossed = card({ decoder_health_qualification: {
     measured_build: "ffmpeg version 9.0.1",
-    covered_decoders: ["h264/software/h264", "hevc/videotoolbox/hevc"],
+    covered_decoders: ["h264/h264"],
+    covered_paths_v2: ["h264/software/h264", "hevc/videotoolbox/hevc"],
   } });
   assert.match(crossed, /✗ The same codec has covered hardware and software paths/);
   assert.match(crossed, /different codecs do not form a recovery/);
 
   const paired = card({ decoder_health_qualification: {
+    policy_enabled: true,
     measured_build: "ffmpeg version 9.0.1",
-    covered_decoders: ["h264/software/h264", "h264/videotoolbox/h264"],
+    covered_decoders: ["h264/h264"],
+    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
   } });
   assert.match(paired, /✓ The same codec has covered hardware and software paths/);
   assert.match(paired, /h264\/videotoolbox\/h264/);
+  assert.match(paired, /ready for eligible sessions/);
+  assert.doesNotMatch(paired, /prerequisites unmet/);
+
+  const off = card({ decoder_health_qualification: {
+    policy_enabled: false,
+    measured_build: "ffmpeg version 9.0.1",
+    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
+  } });
+  assert.match(off, /prerequisites unmet/);
+
+  const pending = card({ decoder_health_qualification: {
+    policy_enabled: true, pending_restart: true,
+    measured_build: "ffmpeg version 9.0.1",
+    covered_paths_v2: ["h264/software/h264", "h264/videotoolbox/h264"],
+  } });
+  assert.match(pending, /prerequisites unmet/);
+
+  const legacy = card({ decoder_health_qualification: {
+    enforcing: true,
+    measured_build: "ffmpeg version 8.0",
+    covered_decoders: ["h264/h264"],
+  } });
+  assert.match(legacy, /✗ The same codec has covered hardware and software paths/);
+  assert.doesNotMatch(legacy, /✓ The same codec has covered hardware and software paths/);
+  assert.match(legacy, /prerequisites unmet/);
 });
 
 test("Maintenance owns the timers, and each of its cards saves its own fields", () => {

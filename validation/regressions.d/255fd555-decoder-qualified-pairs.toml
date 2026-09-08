@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["255fd555"]
+points = ["playback.pipeline", "server.api", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "history-regressions"]
+reason = "The retained manager regressions require automatic retry to pair an exact qualified hardware decode path with a qualified software alternate for the same codec and require the conservative whole-node projection to include selectable-but-unmeasured codecs. Settings serialization keeps legacy software-only pair lists while publishing backend-aware v2 siblings, and the shipped Developer-card test consumes that current response shape, rejects crossed-codec pairs, reports readiness only for an applied policy with a measured matched pair, and keeps prerequisites advisory."

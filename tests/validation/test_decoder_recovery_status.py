@@ -1350,6 +1350,20 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertIn("q.measured_paths_v2||q.measured_decoders", web)
         self.assertIn("q.covered_paths_v2||q.covered_decoders", web)
         self.assertIn(
+            "const covered=q.covered_paths_v2||q.covered_decoders||[];", web
+        )
+        self.assertIn(
+            "const policyEnabled=q.policy_enabled===undefined?!!q.enforcing:!!q.policy_enabled;",
+            web,
+        )
+        self.assertIn(
+            "const ready=policyEnabled&&!q.pending_restart&&!!q.measured_build&&recoverable.length>0;",
+            web,
+        )
+        self.assertIn("ready for eligible sessions", web)
+        self.assertIn("Only some selectable decode paths", daemon)
+        self.assertIn("missing measurements or contracts", daemon)
+        self.assertIn(
             "!delivered.enforces_receipt() || !alternate.enforces_receipt()",
             daemon,
         )

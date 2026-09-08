@@ -14490,7 +14490,7 @@ function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};
   // FFmpeg's strings again — a build banner and decoder names.
   const list=v=>(v&&v.length)?v.map(x=>`<code>${esc(x)}</code>`).join(" "):"<i>none</i>";
-  const covered=q.covered_decoders||[];
+  const covered=q.covered_paths_v2||q.covered_decoders||[];
   const paths=covered.map(value=>{
     const fields=String(value).split("/");
     return fields.length===3?{value:String(value),codec:fields[0],backend:fields[1]}:null;
@@ -14498,8 +14498,13 @@ function decodeRecoveryCard(s){
   const software=paths.filter(path=>path.backend==="software");
   const hardware=paths.filter(path=>path.backend!=="software");
   const recoverable=hardware.filter(path=>software.some(peer=>peer.codec===path.codec));
+  const policyEnabled=q.policy_enabled===undefined?!!q.enforcing:!!q.policy_enabled;
+  const ready=policyEnabled&&!q.pending_restart&&!!q.measured_build&&recoverable.length>0;
   const ok=b=>b?"✓":"✗";
-  return setCard(`${cardHead("Automatic decode recovery","A producer that says out loud it could not decode the source is answered once — by a successor that decodes in software behind the same hardware encoder — instead of being answered with the command that just failed. Every timing verdict tells a client to try again, so without this a file that cannot be decoded is a reopen loop.",`<span class="pill warn">prerequisites unmet</span>`)}
+  const readiness=ready
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">ready for eligible sessions</span>`
+    : `<span class="pill warn">prerequisites unmet</span>`;
+  return setCard(`${cardHead("Automatic decode recovery","A producer that says out loud it could not decode the source is answered once — by a successor that decodes in software behind the same hardware encoder — instead of being answered with the command that just failed. Every timing verdict tells a client to try again, so without this a file that cannot be decoded is a reopen loop.",readiness)}
       <div class="hint"><b>There is no switch here.</b> This recovery is not behind a build flag or a setting; it fires when the conditions below hold and does nothing when they do not. The list is what has to become true, not what you have to click.</div>
       <h2 class="section">What must be true first</h2>
       <div class="tog"><span>${ok(!!q.measured_build)} This node measured its own FFmpeg<small>${q.measured_build?`<code>${esc(q.measured_build)}</code>`:"Not measured. Nothing this build prints can be matched to a contract, so nothing it prints is evidence, and a decode failure is indistinguishable from a stall."}</small></span></div>
