@@ -27,9 +27,17 @@ switch in Settings -> Developer, listed beside what M5.5 found and whether this
 device meets it, advisory and never gating. The narrowest honest statement the
 frozen field leaves available is that the person holding the device decides.
 
-Even switched on it fires on nothing today: `delivered_bps` is `None` on every
-VOD session and the throughput floor needs both numbers, so a prepared handoff
-can only reach a live or live-recovery session. Closing that is server work.
+Even switched on it fires on nothing today, and the reason is bigger than any
+capability: **`stage_prepared_successor` is stage-only.** The roadmap's third
+phase, *reserve and prime*, is not implemented, the staged row carries
+`publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, and the
+successor's playlist answers `503 media_owner_transition` until the pointer
+moves. A client built from the contract's sequence diagram therefore stands up
+a second pipeline that can never become playable, on every selection change,
+for the whole film — a regression rather than a feature. So the ledger learns:
+the first successor that dies before it was ever playable ends the offers for
+that playback, and the next playback forgets. Apple reached the same rule
+independently, which is the sameness the three ports are meant to keep.
 
 Four adversarial review passes; three found real defects and the third found
 the sharpest one — a cancelled coroutine did not unwind out of an exchange, so

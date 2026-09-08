@@ -385,7 +385,7 @@ class PreparedReplacementRequirementsTest {
             observedDownloadBps = 40_000_000,
         )
         assertEquals(false, vod[2].met)
-        assertTrue(vod[2].detail.contains("VOD"))
+        assertTrue(vod[2].detail.contains("delivered throughput"))
     }
 }
 
@@ -770,5 +770,69 @@ class SettlingSnapshotTest {
             ),
         )
         assertEquals(playing, settlingSnapshot(playing))
+    }
+}
+
+/**
+ * The rule that keeps a server which stages without priming from becoming a
+ * regression on every quality change.
+ *
+ * `stage_prepared_successor` is stage-only — "a durable row and the actor's one
+ * successor slot, nothing produced yet" — and the roadmap's third phase,
+ * *reserve and prime*, is not implemented. The staged row carries
+ * `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, so the
+ * successor's playlist answers `503 media_owner_transition` until the pointer
+ * moves. A client that keeps taking the offer builds a second pipeline that can
+ * never become playable, for the life of the film, and pays for it every time
+ * the viewer changes anything.
+ */
+class PreparedOfferIsLearnedTest {
+    @Test
+    fun `a successor that was never playable ends the offers for this playback`() {
+        val ledger = PreparedReplacementLedger()
+        assertTrue(ledger.canOfferPreparation)
+        assertTrue(ledger.offer(prepare()) is PreparationOffer.Start)
+        // It errored, or the readiness bound elapsed, while still STAGED: no
+        // track was ever published, so it was never playable.
+        assertEquals(AcknowledgementState.FAILED, assertNotNull(ledger.failed()).state)
+        assertFalse(ledger.canOfferPreparation)
+        val second = "55555555-5555-4555-8555-555555555555"
+        assertTrue(ledger.offer(prepare(actionId = second)) is PreparationOffer.Refuse)
+        assertEquals(ACTION_ID, ledger.actionId, "nothing was staged over it")
+    }
+
+    @Test
+    fun `a successor that was playable and then failed does not end them`() {
+        // An ordinary failure from a rung it had reached is a fact about this
+        // attempt. The next offer is still worth taking.
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        ledger.metadataReady()
+        ledger.failed()
+        assertTrue(ledger.canOfferPreparation)
+        val second = "55555555-5555-4555-8555-555555555555"
+        assertTrue(ledger.offer(prepare(actionId = second)) is PreparationOffer.Start)
+    }
+
+    @Test
+    fun `an abandoned preparation is not evidence about the platform`() {
+        // The viewer seeked. That says nothing about whether a successor could
+        // have become playable.
+        val ledger = PreparedReplacementLedger()
+        ledger.offer(prepare())
+        ledger.aborted()
+        assertTrue(ledger.canOfferPreparation)
+    }
+
+    @Test
+    fun `the refusal is learned per playback, not remembered across one`() {
+        // The ledger is owned by the controller, which a new playback rebuilds.
+        // A device that could not prepare one film is not a device that can
+        // never prepare.
+        val exhausted = PreparedReplacementLedger()
+        exhausted.offer(prepare())
+        exhausted.failed()
+        assertFalse(exhausted.canOfferPreparation)
+        assertTrue(PreparedReplacementLedger().canOfferPreparation)
     }
 }

@@ -142,8 +142,34 @@ internal class PreparedReplacementLedger {
     val isSwitched: Boolean
         get() = phase == PreparationPhase.SWITCHED
 
+    /**
+     * Whether this playback is still willing to be offered a preparation.
+     *
+     * Learned, not configured, and deliberately not a flag anyone sets: it goes
+     * false the first time a successor dies **before it was ever playable**,
+     * and it is forgotten with the ledger when the player ends.
+     *
+     * The case it exists for is not hypothetical. `stage_prepared_successor` is
+     * stage-only — its own comment says "a durable row and the actor's one
+     * successor slot, nothing produced yet" — and the third of the roadmap's
+     * eight phases, *reserve and prime*, is not implemented. The staged row
+     * carries `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, so
+     * a GET of the successor's playlist answers `503 media_owner_transition`
+     * until the pointer moves, and commit does not publish it either. A client
+     * that keeps trying therefore builds a second pipeline that can never
+     * become playable, on *every* selection change, for the whole film.
+     *
+     * One attempt is evidence about this playback, not about this attempt.
+     */
+    var canOfferPreparation: Boolean = true
+        private set
+
     fun offer(inbound: ControlAction): PreparationOffer {
         if (!inbound.preparedPayloadIsValid) return PreparationOffer.Refuse
+        // A successor already died before it was ever playable on this
+        // playback. The server will go on offering, and the honest answer is
+        // to stop building.
+        if (!canOfferPreparation) return PreparationOffer.Refuse
         // Nothing replaces a preparation the viewer is already watching. Without
         // this the switched-but-unsettled window takes the "supersedes" branch,
         // where `terminal()` correctly refuses to abort it and the branch then
@@ -230,8 +256,21 @@ internal class PreparedReplacementLedger {
         )
     }
 
-    /** The successor could not be made ready. */
-    fun failed(): ActionAcknowledgement? = terminal(PreparationPhase.FAILED)
+    /**
+     * The successor could not be made ready.
+     *
+     * Failing while still [PreparationPhase.STAGED] means it was never playable
+     * at all — the pipeline errored or the readiness bound elapsed before a
+     * single track was published — which is a fact about this playback rather
+     * than about this attempt. Failing later, from a rung it had reached, is
+     * an ordinary failure and the next offer is still worth taking.
+     */
+    fun failed(): ActionAcknowledgement? {
+        val neverPlayable = phase == PreparationPhase.STAGED && isLive
+        val settlement = terminal(PreparationPhase.FAILED)
+        if (neverPlayable) canOfferPreparation = false
+        return settlement
+    }
 
     /** The viewer seeked, changed quality again, or left. */
     fun aborted(): ActionAcknowledgement? = terminal(PreparationPhase.ABORTED)
@@ -348,20 +387,20 @@ internal fun preparedReplacementRequirements(
         },
     ),
     PreparedReplacementRequirement(
-        label = "Live session",
+        label = "Server reports delivered throughput",
         met = sessionIsLive,
         detail = when (sessionIsLive) {
-            true -> "The server reports delivered throughput for live and " +
-                "live-recovery sessions, which the preparation floor needs."
-            false -> "The server leaves delivered throughput unreported on " +
-                "every VOD session, and the floor needs both numbers — so a " +
-                "prepared handoff cannot fire on VOD today, however capable " +
-                "this device is. Nothing on this screen changes that."
-            null -> "A prepared handoff can only fire on a live or " +
-                "live-recovery session. The server leaves delivered " +
-                "throughput unreported on every VOD session, and the " +
-                "preparation floor needs that number, so turning this on will " +
-                "change nothing while you are watching a film."
+            true -> "The server is reporting delivered throughput for this " +
+                "session, which is half of what the preparation floor needs."
+            false -> "This server reports no delivered throughput for the " +
+                "session you are watching, and the preparation floor needs " +
+                "both that number and this device's. Nothing on this screen " +
+                "changes that."
+            null -> "The preparation floor needs a delivered-throughput " +
+                "number from the server as well as this device's. A server " +
+                "that does not measure it for the presentation you are " +
+                "watching will never offer a handoff, whatever this switch " +
+                "says."
         },
     ),
     PreparedReplacementRequirement(

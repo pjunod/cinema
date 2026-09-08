@@ -4,8 +4,7 @@
 **Brief:** [`M6-ANDROID-CLIENT-BUILD.md`](M6-ANDROID-CLIENT-BUILD.md).
 **Contract:** [`M6-CLIENT-REPLACEMENT-CONTRACT.md`](M6-CLIENT-REPLACEMENT-CONTRACT.md).
 **Branch:** `agent/m6-android-prepared-replacement`, cut from
-`effort/decoder-selection-recovery` at `bc9d4100`, **merged as `9047181f`** into
-that effort on 2026-09-08 (PR #118), with current effort merged in first.
+`effort/decoder-selection-recovery` at `bc9d4100`, opened back into that effort.
 **Scope:** `clients/android` only. Web and Apple are being built in parallel by
 separate sessions against the same contract.
 
@@ -127,11 +126,33 @@ the mechanical reason the capability is not a judgement call from here.
   on `owner_epoch == 1`, carrying no acknowledgement, and not ending. That read
   always answers `Absent` while nothing is staged. Correct, not free, and said
   here rather than discovered in a dashboard.
-- With the switch **on**, a prepared handoff still cannot fire on a **VOD**
-  session, on any platform: `DeliveryView::from_status` leaves `delivered_bps`
-  `None` on every VOD session and the throughput floor needs both numbers.
-  Closing that is server work and out of scope for all three client briefs. It
-  is the first thing to re-read if a prepared handoff turns out never to fire.
+- With the switch **on**, a prepared handoff still fires on nothing, and the
+  reason is bigger than any capability. **`stage_prepared_successor` is
+  stage-only.** Its own comment says so — "a durable row and the actor's one
+  successor slot, nothing produced yet" — and the roadmap's third phase,
+  *reserve and prime*, is not implemented. The staged row carries
+  `publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED`, so a GET of
+  the successor's `playlist_url` answers `503 media_owner_transition` until the
+  pointer moves, and commit does not publish it either. A client built from the
+  contract's §C8 sequence diagram therefore stands up a second pipeline that
+  can never become playable — **on every selection change, for the whole
+  film**, which is a regression rather than a feature.
+
+  So the ledger learns. The first successor that dies *before it was ever
+  playable* — no track published, whether it errored or the readiness bound
+  elapsed — ends the offers for that playback. Not a flag anyone sets, and
+  forgotten when the player ends: one attempt is evidence about this playback,
+  not about this attempt. Apple reached the same rule independently
+  (`PreparedReplacementCoordinator.canOfferPreparation`), which is the sameness
+  the three ports are meant to keep.
+- On **VOD**: at this branch `DeliveryView::from_status` still leaves
+  `delivered_bps` `None` on a VOD session and the floor needs both numbers, so
+  VOD cannot reach a preparation here. That is changing — a parallel effort
+  populates it and records that its absence "is what made preparation
+  unreachable on the primary presentation" — so nothing in this client gates on
+  `!isVod`. The requirement row names the mechanism (the server reports a
+  delivered-throughput number, or it does not) rather than the presentation, so
+  it stays true on both sides of that change.
 - Nothing on any of these paths is seamless, and nothing in this branch calls
   it that. Android's fallback interruption is measured at 353–766 ms, mean 471,
   on the Google TV.
@@ -227,32 +248,24 @@ reports, not to this path.
 
 ---
 
-## What the repository's own gates wanted, and why
+## What a parallel effort is about to change, and what to do about it
 
-Recorded because the next client milestone will meet all three.
+Recorded from another session's trace of the same server. None of it is in this
+effort branch yet; all of it changes a client.
 
-- **`decoder-selection-m0-inventory.toml` anchors the Android capability
-  surface on the vocabulary literal.** Changing the vocabulary moves the
-  anchor, and the anchor must match exactly once. Its obligation moved with it.
-- **A corrective client commit needs a `tests/client-fixes.toml` row** naming
-  the production symbol it changed and the test that rejects its regression —
-  not merely a test edit riding the same patch. Two rows here, one per `fix(`
-  commit. Note that a subject containing a word like "stale" is read as
-  corrective whatever its type prefix, so a docs commit can trip it.
-- **`test_control_wire_conformance` pins the four ports' field names
-  together**, and it discarded `acknowledgement` from every set with the
-  comment that no client sends one. That stops being true here, so the field is
-  now pinned against the vocabulary that decides it: a port declaring
-  `prepare_replacement` must carry it, one that does not must not. All four
-  states of "which ports have landed M6" pass, which is what lets web and Apple
-  land independently. The Android vocabulary spells its names literally rather
-  than through the constant, because that check reads source and cannot resolve
-  a symbol.
+- **`ActionAcknowledgement` gains a fifth field, `committed_media_origin_ms`,
+  required on `Committed`** and compared against the staged successor's own
+  `media_origin_ms`. Omit it once that lands and every commit is `400
+  invalid_control`. **Do not add it early**: the struct carries
+  `deny_unknown_fields`, so against today's server a fifth key refuses the whole
+  exchange the acknowledgement rides on. Echo the offer's value when it lands;
+  never recompute it. `test_control_wire_conformance` is what will fail first,
+  which is the cheapest possible warning.
+- **`ControlRequestV1` gains `intent`**, which no client sends yet.
+- **VOD stops being excluded**, as above.
 
-And one that is not a gate: **the effort branch moves under you.** The base
-gained four commits between the branch being cut and CI running, and the
-preflight was testing the merge. Fetch and merge the current base before
-concluding a failure is yours.
+The general rule this branch already follows: the code wins and the contract
+document is the bug. Re-derive every mirrored rule from the Rust at build time.
 
 ---
 
