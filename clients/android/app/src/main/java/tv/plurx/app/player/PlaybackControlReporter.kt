@@ -383,6 +383,21 @@ data class ActionAcknowledgement(
     @SerialName("action_id") val actionId: String,
     val state: AcknowledgementState,
     @SerialName("buffered_through_ms") val bufferedThroughMs: Long? = null,
+    /**
+     * The source position this client's successor timeline actually starts at,
+     * **echoed from the offer** — never recomputed.
+     *
+     * `action_id` says which offer is being answered; this says the client
+     * built the thing that offer described. The server compares it against the
+     * staged successor's own `media_origin_ms` and refuses a mismatch, which
+     * is what makes a commit evidence rather than an assertion: a successor
+     * primed for one point in the film and committed after the viewer seeked
+     * elsewhere was otherwise indistinguishable from a correct commit.
+     *
+     * Recomputing it from the player would defeat the whole check — the number
+     * has to come from the offer, or it only ever agrees with itself.
+     */
+    @SerialName("committed_media_origin_ms") val committedMediaOriginMs: Long? = null,
     @SerialName("first_frame_unix_ms") val firstFrameUnixMs: Long? = null,
 ) {
     /**
@@ -400,8 +415,13 @@ data class ActionAcknowledgement(
                     bufferedThroughMs in 0..PlaybackControl.MAX_MEDIA_MILLIS
                 ) &&
             (firstFrameUnixMs == null || firstFrameUnixMs > 0) &&
+            (
+                committedMediaOriginMs == null ||
+                    committedMediaOriginMs in 0..PlaybackControl.MAX_MEDIA_MILLIS
+                ) &&
             (state != AcknowledgementState.BUFFER_READY || bufferedThroughMs != null) &&
-            (state != AcknowledgementState.COMMITTED || firstFrameUnixMs != null)
+            (state != AcknowledgementState.COMMITTED || firstFrameUnixMs != null) &&
+            (state != AcknowledgementState.COMMITTED || committedMediaOriginMs != null)
 }
 
 @Serializable

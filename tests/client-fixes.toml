@@ -733,3 +733,11 @@ source_anchor = "internal class ThroughputWindow"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/MediaOriginTest.kt"
 test_anchor = "idleTimeBetweenSegmentsIsNotInTheDenominator"
 
+[[fixes]]
+id = "android.commit-echoes-the-offers-origin"
+commits = ["a0746179"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "val origin = action?.mediaOriginMs ?: return null"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "a commit echoes the offer's origin rather than recomputing one"
+

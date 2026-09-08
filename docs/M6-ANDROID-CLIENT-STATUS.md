@@ -28,7 +28,7 @@ a bug.
 
 `./gradlew testDebugUnitTest :app:assembleDebug :app:lintDebug` — the
 non-Docker equivalent of `make android-test` and `make android` — green.
-**442 tests, 0 failures, 0 errors.**
+**461 tests, 0 failures, 0 errors.**
 
 ---
 
@@ -281,16 +281,40 @@ mind rather than concluding Android has no headroom.
 Recorded from another session's trace of the same server. None of it is in this
 effort branch yet; all of it changes a client.
 
-- **`ActionAcknowledgement` gains a fifth field, `committed_media_origin_ms`,
-  required on `Committed`** and compared against the staged successor's own
-  `media_origin_ms`. Omit it once that lands and every commit is `400
-  invalid_control`. **Do not add it early**: the struct carries
-  `deny_unknown_fields`, so against today's server a fifth key refuses the whole
-  exchange the acknowledgement rides on. Echo the offer's value when it lands;
-  never recompute it. `test_control_wire_conformance` is what will fail first,
-  which is the cheapest possible warning.
+- **`ActionAcknowledgement`'s fifth field, `committed_media_origin_ms` —
+  now carried.** It is required on `Committed` on `main` and compared against
+  the staged successor's own `media_origin_ms`; a commit that omits it is a
+  `400 invalid_control`. The earlier note here said not to add it early, on the
+  grounds that `deny_unknown_fields` would make a fifth key refuse the whole
+  exchange against this branch's older server. That was right about the
+  mechanism and wrong about the risk:
+
+  `explicitNulls` is off, so the field is **absent from the wire on every state
+  except `committed`** — the four other acknowledgements are byte-identical to
+  before and this branch's server accepts them unchanged. Only a `committed`
+  carries it, and a `committed` cannot happen here: the successor can never
+  become playable while staging does not prime, so `canOfferPreparation`
+  retires the path after the first attempt. Against `main` it is required. Safe
+  on this branch, correct on the one it is heading for.
+
+  It is echoed from the offer and never recomputed, which is the whole point of
+  the field. `action_id` says which offer is being answered; this says the
+  client built the thing that offer described. A changed *ask* is already caught
+  at commit by the desired digest — what the digest does not cover is position,
+  so a successor primed for one point in the film and committed after the viewer
+  seeked elsewhere was indistinguishable from a correct commit. A number derived
+  from this client's own player would agree with itself whatever the viewer did.
 - **`ControlRequestV1` gains `intent`**, which no client sends yet.
 - **VOD stops being excluded**, as above.
+
+**Where the three ports actually are, 2026-09-08.** Apple's
+`PreparedReplacement.swift` and the five-field acknowledgement are on `main`;
+the web half is PR #125 into `main`; Android is here, on the effort branch,
+because that is the baseline its brief named. So the effort branch's merge into
+`main` is where the three meet — and `test_control_wire_conformance`'s
+`ActionAcknowledgement` arm on `main` already reads Android's Kotlin, which is
+why the field is carried now rather than left for whoever performs that merge to
+find as a red gate.
 
 The general rule this branch already follows: the code wins and the contract
 document is the bug. Re-derive every mirrored rule from the Rust at build time.
