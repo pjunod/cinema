@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["331aea1e"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static", "web-layout"]
+reason = "Two corrections with no new assertion of their own, both about what the shipped page does rather than what its source says. `scripts/control-reporter-browser-check` is the only gate that executes the control module instead of reading it as text — the node suites compose shipped functions with `new Function` over extracted source, which is how this harness once shipped a fully green suite over a control plane that completed zero real exchanges. It now answers the second exchange with a staged successor and requires three, so a browser that parses the module and refuses the preparation payload fails there and nowhere else; its own output is the evidence, and it is quoted in the pull request. The second half removes the prepared successor's `<video>` from the shipped markup and creates it on the first preparation instead: `tests/ui-structure.golden` pins what `#player` contains, so a second element in the page moves the golden on every layout and viewport for a node that is `display:none` on every page that never prepares anything. `web-layout` is the check that would have caught the golden drift, and `web-static` runs the element's lifecycle through `tests/playback/web-control.test.js`, which asserts the element is created on first use, muted, out of the accessibility tree, and destroyed on every abandon path."
