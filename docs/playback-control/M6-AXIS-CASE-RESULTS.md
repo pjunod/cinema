@@ -1,6 +1,7 @@
-# M6 axis case results — physical Apple TV admission failed
+# M6 axis case results — the 30 Mbit/s run, superseded
 
-**Status:** complete · **Outcome:** fail · **Executed:** 2026-09-03 ·
+**Status:** complete · **Outcome:** fail, and **superseded the same day** —
+see the correction below · **Executed:** 2026-09-03 ·
 **Baseline:** `c2702f6166ecc89cf0ab43393e556a3d1575ec1e`
 
 Companion to
@@ -12,8 +13,13 @@ produces: 2160p source/direct play to 1080p server-selected transcode.
 > its verdict below is no longer the fleet's.** The run recorded here used a
 > 30 Mbit/s shaping proxy (§3) against an 18.183 Mbit/s predecessor: 1.65x
 > headroom, *below* the floor `headroom_refusal` itself enforces. So it was
-> measuring a transition the server would have declined anyway, which is why
-> eight of twenty failed before the swap.
+> measuring a transition the server would have declined anyway. **That is why
+> this run does not bear on admission — it is not a root cause for the eight
+> failures.** §8 below declines to name one, and §4's receipts point elsewhere:
+> failure tracks the commit boundary rather than the link (30.0 s and 30.5 s
+> pass 3/3, 31.0 s fails 0/3), and every failed row records `Pred stalls 0`.
+> `0cb370ac`'s message reads as causal on this point; §8 is the authority here
+> and it is unamended.
 >
 > The pair was re-run the same day on a 40 Mbit/s link — 2.20x, above that
 > floor — and came back **20/20 clean, zero failed admissions, zero

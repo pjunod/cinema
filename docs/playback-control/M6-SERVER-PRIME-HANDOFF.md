@@ -1,6 +1,7 @@
-# M6 phase 3 — reserve and prime, and the decision it waits on
+# M6 phase 3 — reserve and prime
 
-**Status:** open · **Blocks:** every client half of M6 doing anything a viewer
+**Status:** open, and no longer waiting on a decision — see §5.1 ·
+**Blocks:** every client half of M6 doing anything a viewer
 sees · **Written:** 2026-09-08 · **Baseline:** `main` at `3006f38a`
 
 The client halves of M6 are being built now — Apple is merged, web and Android
@@ -166,9 +167,14 @@ aspirational rather than true. It needs mirroring in the replicated backend,
 and on its own it changes nothing observable, because a committed successor
 without a worker is reaped by the sweep either way.
 
-## 5. The decision, and it is not ours
+## 5. The decision, taken 2026-09-08 (§5.1)
 
-**The only transition M6 admits produces a recipe the server cannot serve.**
+**The transition the FLEET produces makes a recipe the server cannot serve.**
+
+> **Correction, 2026-09-08.** This line read *"The only transition M6 admits
+> produces a recipe the server cannot serve"*, and that is false. See
+> §5.1 — there is an admitted, receipted, copy-only transition the VOD engine
+> serves today, and it is what phase 3 should be built and proven against.
 
 - `PREPARED_AXIS_SETS` admits `{ResolutionOrBitrate}` and
   `{ResolutionOrBitrate, DeliveryMethod}`. Shadow mode established that a pure
@@ -211,43 +217,63 @@ The options, ranked:
 3), or narrow the admitted axis set so the transaction can be built and proven
 against copy-only recipes (2)?
 
-### Answered 2026-09-08, without Paul, and here is the reasoning to overrule
+### 5.1 Answered 2026-09-08, and the first answer was wrong
 
-**Option 1: hold priming for D6. Do not narrow the axis set.** Three reasons,
-and the first is the one that decides it.
+**Build phase 3 now, and prove it on the copy-to-copy transition that is
+already admitted.** Do not narrow `PREPARED_AXIS_SETS`, and do not wait for D6.
 
-1. **Option 2 is not cheaper — it is a different hardware dependency wearing
-   the costume of a code change.** The copy-only transitions are
-   `{AudioTrackOrOffset}` and a subtitle-burn removal. Neither axis is in
-   `PREPARED_AXIS_SETS`, and neither has a receipt: `PreparationAxis` declares
-   five axes, the table holds two, and the gap between those numbers is
-   entirely "nobody has run it on a device". Admitting an axis so that the
-   transaction can be built against it is reasoning from convenience, which is
-   the exact reasoning shadow mode was built to replace — `0cb370ac` says so in
-   as many words: *"Widening on that observation alone would have been exactly
-   the reasoning shadow mode exists to replace, so the pair was run on hardware
-   first."* So option 2 trades a known hardware dependency (D6) for a new,
-   unscheduled one, and disables the feature for the transition the fleet
-   actually produces while it waits.
-2. **The cost of waiting is bounded and self-clearing.** Apple's
-   `PreparedReplacementCoordinator.canOfferPreparation` learns after one failed
-   staging and stops asking for the rest of that playback, so a viewer pays
-   once per playback rather than once per quality change, nothing configures
-   it, and the day priming lands the client uses it with no change. That is
-   already merged and on `main`. Waiting costs a bounded amount of nothing.
-3. **There is no third path that is buildable today.** Priming's whole job is
-   to make the staged successor's playlist servable, and
-   `VodServe::try_create_with_release_fence` refuses every non-`Copy` kind
-   until D6. Building phases 3-8 against a refusal would produce code exercised
-   only by tests, in the subsystem where the last runtime change made here — the
-   commit publication in §4 — was a net regression that a full 1905-test suite
-   passed and only an adversarial review caught. That is a bad place to build
-   ahead of a measurement.
+An earlier revision of this section answered "hold for D6" on the reasoning
+that no transition M6 admits can be served today. An adversarial review checked
+that premise against the code instead of the prose and it does not survive.
 
-**What this does NOT decide.** If D6 slips far enough that M6 is blocking M8
-§10.2, option 2 becomes worth its receipt — but the order is still: run the
-axis case on a device, write the result up in `docs/playback-control/`, *then*
-admit the axis. Not the reverse.
+**There is an admitted, receipted, copy-only transition, and the engine serves
+it.** `candidate_request` has three arms that leave a `Copy` predecessor a
+`Copy`: `QualitySelection::Auto`, `QualitySelection::Original`, and
+`Manual { height }` where the height is the source height — *"Auto and Original
+leave a copy copying, and a source-height ask is a copy's own delivery asked
+for by name."* `EffectiveSelection::from_request` maps `SessionKind::Copy` to
+codec `"source"`, so both sides read `source` and **no `DeliveryMethod`
+crossing occurs**. The crossing test fires `ResolutionOrBitrate` when the
+height *or* `quality_auto` differs. So a direct-playing session moving between
+Auto and Original — or Auto and a pinned source rung — crosses
+`{ResolutionOrBitrate}` **alone**, which:
+
+- is in `PREPARED_AXIS_SETS`;
+- has a receipt, M5.5 on Apple, 2026-09-01, 20/20;
+- passes `successor_rate_is_bounded`, which only constrains the pair;
+- and yields a `SessionKind::Copy` candidate, so
+  `VodServe::try_create_with_release_fence` **serves it** — the
+  `vod_transcode_unavailable` refusal never fires.
+
+The module's own test asserts exactly this returns
+`Prepare { ResolutionOrBitrate }`. It is a transition a viewer makes: toggling
+Auto on a title that direct-plays.
+
+**So phase 3 is buildable today, against a real production transition, with no
+new hardware receipt and no change to the axis table.** The transcode case
+stays gated by the engine's own D6 refusal, which is the right boundary —
+nothing new is flagged or configured, and the day D6 lands the transcode case
+starts working with no code change.
+
+**What the earlier revision got wrong, recorded because the shape recurs.** It
+enumerated the copy-only transitions as *"`{AudioTrackOrOffset}` and a subtitle
+burn removal"*, and reasoned that since neither axis has a receipt, narrowing
+was a hardware dependency in disguise. Both halves were wrong. Option 2 four
+paragraphs above says *"audio track, source-height **Original**"* — the item
+silently dropped is the one carrying the receipt. And a burn removal is
+unreachable anyway: `try_create_with_release_fence` refuses
+`req.subtitle_burn.is_some()` with `vod_subtitle_burn_unavailable`
+independently of D6, so a VOD session with a burn cannot exist to transition
+out of, and a burn removal moves the delivery method too, making it a pair
+rather than an axis. Substituting an example for the one in the list is how a
+false premise reads as true.
+
+**What is still blocked on D6**, unchanged: priming for the transition the
+fleet actually produces — a copy dropping to a transcoded rung. That is the
+common case, and it stays refused by the engine until the measurement lands.
+Building phase 3 on the copy-to-copy case does not front-run it; it proves the
+eight-phase transaction end to end so that D6 lands into working machinery
+rather than into an unbuilt phase.
 
 Everything below §4 remains unbuilt, and now deliberately so rather than
 pending an answer.
