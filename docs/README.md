@@ -116,6 +116,7 @@ page; the milestone files are contracts an executing agent works from.
 | [M6-APPLE-CLIENT-BUILD.md](playback-control/M6-APPLE-CLIENT-BUILD.md) | Building the Apple half of M6 — the only one a viewer sees. | open |
 | [M6-WEB-CLIENT-BUILD.md](playback-control/M6-WEB-CLIENT-BUILD.md) | Building the web half of M6, proven by tests until a measurement lands. | open |
 | [M6-ANDROID-CLIENT-BUILD.md](playback-control/M6-ANDROID-CLIENT-BUILD.md) | Building the Android half of M6, proven by tests until a measurement lands. | open |
+| [M6-APPLE-HARDWARE-ACCEPTANCE.md](playback-control/M6-APPLE-HARDWARE-ACCEPTANCE.md) | The two M6 numbers a simulator cannot supply, and the prompt that takes them. | open |
 | [M7-REMAINDER-HANDOFF.md](playback-control/M7-REMAINDER-HANDOFF.md) | M7: subtitle readiness, bounded materialization, seek coalescing, burn-join, prewarm. | open |
 | [M7-R-M3-CLAUDE-HANDOFF.md](playback-control/M7-R-M3-CLAUDE-HANDOFF.md) | Finish M2, then build seek coalescing. | open |
 | [M7-M1-LARGE-MKV-OBSERVATION.md](playback-control/M7-M1-LARGE-MKV-OBSERVATION.md) | Large-MKV readiness and bounded subtitle publication, observed. | done |
