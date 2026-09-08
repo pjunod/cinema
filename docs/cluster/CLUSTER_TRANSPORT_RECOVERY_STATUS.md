@@ -26,7 +26,7 @@ image publication, and fleet rollout verification remain open. Follow
 [CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md](CLUSTER-TRANSPORT-RECOVERY-POST-MERGE-HANDOFF.md)
 without weakening or feature-gating the shipped behavior.
 
-## Resource contract — the campaign asserts a floor, not a per-cycle ceiling (2026-09-08)
+## Resource contract — the campaign asserts an envelope, not a per-cycle ceiling (2026-09-08)
 
 The retained 20+20 campaign never passed under the resource check that landed
 with M5: it compared every cycle against one warmed sample at zero margin,
@@ -35,14 +35,18 @@ transports are still open when `operation_owns_work` clears). The measurement
 is [TRANSPORT-RECOVERY-RESOURCE-BASELINE.md](TRANSPORT-RECOVERY-RESOURCE-BASELINE.md);
 the decision and what it changed, site by site, is
 [TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md)
-§0. In one line: the minimum of each resource over the closing half of the
-campaign may not exceed its minimum over the opening half — by zero for
-sockets and owned async tasks, by two for threads. A leak moves that floor by
-ten or more; a drain cannot move a minimum over ten samples at all. The
-artifact is schema version 2 and records both floors per node, so it proves
-the comparison without the harness. The `idle` predicate itself is unchanged
-and still wrong on its own terms; that is Option C in the decision document
-and remains open.
+§0. In one line: neither the floor nor the ceiling of each resource over
+the closing half of the campaign may exceed the opening half's — by zero for
+sockets and owned async tasks, by two for threads. A leak that starts early
+lifts the closing floor by ten or more; one that starts late lifts the closing
+ceiling past anything the opening half showed; the drain visits both of its
+states within a few cycles and moves neither. The artifact is schema version
+2 and records both bands per node, so it proves the comparison without the
+harness. What hides, stated in §0.2 there: a leak that starts after cycle 11
+and has accumulated less than one per-peer connection by cycle 20, and a
+thread leak slower than one per four recoveries. The `idle` predicate itself
+is unchanged and still wrong on its own terms; that is Option C in the
+decision document and remains open.
 
 ## Outcome — bounded recovery without weakening authority
 

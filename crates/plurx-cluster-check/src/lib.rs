@@ -115,11 +115,11 @@ pub use topology::{
 };
 pub use transport_recovery::{
     validate_transport_recovery_artifact, validate_transport_recovery_bytes,
-    AcknowledgedRecoveryWrite, ClusterTransportRecoveryArtifact, NodeResourceFloors,
+    AcknowledgedRecoveryWrite, ClusterTransportRecoveryArtifact, NodeResourceEnvelope,
     ProcessResourceCount, RecoveryCycleEvidence, RecoveryImageEvidence,
-    RecoveryNodeResourceEvidence, RecoveryResourceFloors, RecoveryResourceNodeKind, RecoveryRole,
-    RecoveryRoleCampaign, RecoveryRuntimeStatus, RecoveryWriteDigest, SnapshotFileEvidence,
-    SourceOutboundTransportEvidence, TargetInboundTransportEvidence,
+    RecoveryNodeResourceEvidence, RecoveryResourceEnvelopes, RecoveryResourceNodeKind,
+    RecoveryRole, RecoveryRoleCampaign, RecoveryRuntimeStatus, RecoveryWriteDigest, ResourceBand,
+    SnapshotFileEvidence, SourceOutboundTransportEvidence, TargetInboundTransportEvidence,
     TransportRecoveryWorstDurations, TRANSPORT_RECOVERY_ARTIFACT_SCHEMA_VERSION,
     TRANSPORT_RECOVERY_CYCLES_PER_ROLE, TRANSPORT_RECOVERY_DEFAULT_VOTER_SMOKE_CYCLES,
     TRANSPORT_RECOVERY_LARGE_IMAGE_BYTES, TRANSPORT_RECOVERY_SMALL_IMAGE_BYTES,

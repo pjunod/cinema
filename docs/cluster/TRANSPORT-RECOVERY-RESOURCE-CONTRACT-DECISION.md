@@ -1,6 +1,6 @@
 # Transport-recovery resource contract — the decision
 
-**Status:** decided and built — Option A, as a campaign *floor* (§0) ·
+**Status:** decided and built — Option A, as a campaign *envelope* (§0) ·
 **Decides:** what the campaign's resource check asserts · **Companion to:**
 [TRANSPORT-RECOVERY-RESOURCE-BASELINE.md](TRANSPORT-RECOVERY-RESOURCE-BASELINE.md)
 (the measurement) · **Written:** 2026-09-08 · **Decided:** 2026-09-08
@@ -15,9 +15,11 @@ lands with the same change as §0.
 
 ## 0. What was decided
 
-**Option A, with the comparison made over halves of the campaign rather than
-between its first and last cycle.** Option C stays open as the follow-up that
-makes `idle` honest; nothing here depends on it. Option B was not taken.
+**Option A, with the comparison made between the two halves of the campaign
+rather than between its first and last cycle, and at both edges of the range
+a resource moves in rather than at one point.** Option C stays open as the
+follow-up that makes `idle` honest; nothing here depends on it. Option B was
+not taken.
 
 ### 0.1 Why not §4 exactly as written
 
@@ -31,81 +33,144 @@ cycles 1 and 20 on *opposite* sides every time. §4.3's arithmetic is right
 about a leak; it is wrong about the noise, because a single sample carries
 the full noise amplitude however far apart two samples are.
 
-The statistic that does not carry it is the **minimum over a window**. Ten
-samples of a series that visits its low state every other cycle contain the
-low state; the minimum of ten is the floor, whichever cycles happened to land
-high. A leak adds every cycle, so it moves the floor of the second half by
-ten units or more. So the assertion is on floors, not on cycles:
+A statistic over a *window* does not. Ten samples of a series that visits
+both of its states every few cycles contain both states, so the minimum of
+ten is the low state and the maximum of ten is the high state, whichever
+cycles happened to land where. A leak moves both. So the assertion is on the
+band each resource moved in — its **envelope** — over each half of the
+campaign:
 
-> For each node and each resource, the minimum observed in the *closing*
-> half of the campaign does not exceed the minimum observed in the *opening*
-> half by more than that resource's allowance.
+> For each node and each resource, neither the floor nor the ceiling of the
+> *closing* half of the campaign exceeds the floor or ceiling of the
+> *opening* half by more than that resource's allowance.
 
 The series is the warmup baseline (cycle 0) followed by the twenty recorded
-cycles. The opening window is the first half rounded up — cycles 0..=10 — and
-the closing window is cycles 11..=20. For the bounded smoke the same rule
-splits whatever it ran: three cycles are cycles 0–1 against 2–3.
+cycles. The opening window is the first half rounded up — cycles 0..=10 —
+and the closing window is cycles 11..=20. The two edges catch different
+leaks: one that starts early adds every cycle and lifts the closing *floor*
+by ten or more; one that starts after the opening window never lifts the
+closing floor (its first cycles are still at the old floor) but lifts the
+closing *ceiling* past anything the opening half showed. A single socket
+leaked at cycle 15 and never released is a ceiling one higher than the
+opening half ever reached, and fails at zero allowance.
 
-### 0.2 The allowances
+### 0.2 The allowances, and what each one hides
 
-| resource | allowance | why |
+| resource | allowance | why, and the boundary |
 |---|---|---|
-| sockets | **0** | the drain is one connection per peer; a floor over ten cycles never includes it, and a per-peer transport that stops being released is +10 |
-| owned async tasks | **0** | same shape, same reasoning |
-| threads | **2** | §2.3 and §5.3: threads jitter with no recovery in flight, and the floor is not seen on every cycle; two is the widest measured swing. A thread that leaks every recovery is +10; one that leaks every third recovery is +3 and still caught. What this hides is a thread leak slower than one per five recoveries, which the per-cycle check could not see either because it never finished a campaign |
+| sockets | **0** | the drain is one connection per peer, and an eleven-sample opening window holds both of its states; a per-peer transport that stops being released is +10 at the floor, and one leaked connection late in the campaign is +1 at the ceiling. What hides: a leak that starts after cycle 11 *and* has accumulated less than the drain amplitude — one per peer — by cycle 20, because the closing ceiling then still fits under the opening's high state. That is the limit of any method on this signal |
+| owned async tasks | **0** | same shape, same reasoning, same boundary |
+| threads | **2** | §2.3 and §5.3: threads jitter with no recovery in flight, and the floor is not seen on every cycle; two is the widest measured swing. A thread leaked every recovery is +10 at the floor; one every fourth recovery lifts the closing ceiling by three and is caught; **one every fifth recovery or slower hides** inside the allowance. The per-cycle check could not see a leak that slow either, because it never finished a campaign |
 
 These replace `THREAD_MARGIN` / `SOCKET_MARGIN` / `OWNED_ASYNC_TASK_MARGIN`
-as `THREAD_FLOOR_ALLOWANCE` / `SOCKET_FLOOR_ALLOWANCE` /
-`OWNED_ASYNC_TASK_FLOOR_ALLOWANCE`, recorded in the artifact as
-`resource_*_floor_allowance` and pinned by its identity check as before. This
-is not §6: nothing per cycle is relaxed, and the socket and task allowances
-are exactly where the leak that matters would show.
+as `THREAD_ENVELOPE_ALLOWANCE` / `SOCKET_ENVELOPE_ALLOWANCE` /
+`OWNED_ASYNC_TASK_ENVELOPE_ALLOWANCE`, recorded in the artifact as
+`resource_*_envelope_allowance` and pinned by its identity check as before.
+This is not §6: nothing per cycle is relaxed, and the socket and task
+allowances are exactly where the leak that matters would show.
 
-### 0.3 What moved, site by site
+### 0.3 What it rests on, and the two things that look like a leak
+
+The claim is not "noise cannot move a minimum". It is: if a cycle lands in
+the drain's low state with probability *p*, the closing floor misses the low
+state with probability (1−*p*)^10 and the opening ceiling misses the high
+state with probability *p*^11. At the measured *p* = ½ that is 0.1% and
+0.05% per node and resource, about 2% per campaign over the six persistent
+node-resources of two roles; at strict alternation, which is what the four
+measured samples show, it is zero. On a fast host the drain finishes before
+the sampler looks and every sample lands low — nuc3 sampled `16/31` on both
+the warmup and cycle 1 — and then both windows agree trivially. What would
+move that number is a runner whose drain timing *changes between the halves*
+of a campaign; the per-cycle print (§0.4) is how the next red says whether it
+did.
+
+Two benign things fail this assertion, and both are visible in the log:
+
+- **The snapshot source moving between the halves.** The leader carries the
+  peers' connections (16 sockets on node 1 against 8 on a follower in §2.2).
+  If leadership among nodes 1–3 moves at cycle 12 and stays, the new leader's
+  floor rises by the difference. The series printed on failure carries the
+  source node of every cycle for exactly this reason.
+- **Node 4.** It is killed and restarted every cycle, so its twenty-one
+  samples are twenty-one fresh processes; nothing can leak *inside* it across
+  cycles. Its row is a different claim — that the footprint a fresh target
+  comes up with, against the cluster state the previous cycles left, does not
+  grow — and it is kept because that is a property of the campaign, not of
+  the process.
+
+### 0.4 What moved, site by site
 
 | # | site (§3) | after |
 |---|---|---|
 | 1 | `wait_for_stable_idle_resources` | readiness is *idle and two identical samples*; the ceiling term is gone, so a high-side sample no longer burns the sixty-second horizon |
 | 2 | `collect_node_resource_evidence` | records `baseline` and `post_quiescence`; the `leaked resources` bail is gone |
-| new | `resource_floors` · `resource_floors_over_allowance` | computed at the end of `exercise_role_campaign` for the campaign and for every smoke; a rise past the allowance fails the role with the per-node series printed first |
+| new | `resource_envelopes` · `resource_envelopes_over_allowance` | computed at the end of `exercise_role_campaign` for the campaign and for every smoke, and printed; a rise past the allowance prints the per-node series with the source of each cycle, then fails the role |
 | 3 | `validate_cycle_resources` | shape only — four nodes, in order, correctly labelled |
-| 4 | `validate_role_campaign` | the no-rebase rule stays; `validate_campaign_resource_floors` recomputes the floors from the cycles, refuses a recorded floor that differs, and asks the same question with the artifact's recorded allowances |
+| 4 | `validate_role_campaign` | the no-rebase rule stays; `validate_campaign_resource_envelopes` recomputes the envelopes from the cycles, refuses a recorded envelope that differs, and asks the same question with the artifact's recorded allowances |
 
-The artifact gains `resource_floors` per role campaign (`opening_window_last_cycle`
-and each node's `opening` / `closing` floor), the same way it carries
+`resource_envelopes` refuses, rather than skips, a campaign whose cycle
+records are missing, reordered, mislabelled or renumbered, so the offline
+check does not depend on the per-cycle checks having run first. The
+per-cycle sample is printed as the campaign runs (#123's line), so a failure's
+series is in the CI log without a local reproduction.
+
+**The smoke records and prints its envelope but does not fail on it** unless
+the closing window holds the ten samples the statistics above are for
+(`RESOURCE_ENVELOPE_WINDOW_SAMPLES`): a window of two samples is the coin flip
+this change exists to remove, and `transport-recovery-voter-smoke 3` is a
+rehearsal of the recovery path, not the leak verdict. Nineteen cycles is the
+shortest campaign that asserts.
+
+The artifact gains `resource_envelopes` per role campaign
+(`opening_window_last_cycle`, `closing_window_samples`, and each node's
+`opening` and `closing` band as floor and ceiling), the same way it carries
 `worst_durations` — recomputed and compared by the validator, so the file is
 self-proving without the harness. That is a field-set change, so the schema is
 **version 2** (`cluster-transport-recovery-v2.json`). No version-1 artifact
 was ever produced; the version-1 contract never completed a campaign.
 
-### 0.4 The pinning tests
+### 0.5 The pinning tests
 
-Six new or rewritten, all in `transport_recovery::tests` (37, from 31):
+`transport_recovery::tests` holds 38 (from 31: nine added, three removed —
+the two `one_extra_*_after_quiescence_is_rejected` and the wait report that
+named a count over its baseline, which the sampler no longer computes).
 
-- `a_socket_leaked_every_cycle_is_rejected` and
-  `a_thread_leaked_every_cycle_is_rejected` — the mutation §10.3 asked for,
-  and the error names the node, the resource and both floors;
-- `a_leak_that_begins_late_in_the_campaign_is_rejected`;
-- `the_per_peer_transport_drain_is_not_growth` — §2.2's exact series,
-  accepted, with both floors at the low state;
-- `thread_jitter_inside_the_allowance_is_not_growth` and
-  `a_thread_floor_past_the_allowance_is_rejected`;
-- `a_single_high_sample_in_either_window_is_recorded_not_rejected` — the
-  sample the old ceiling failed the lane on;
-- `recorded_resource_floors_must_match_the_cycles` and
-  `the_opening_window_is_the_first_half_of_the_series_rounded_up`;
-- `owned_async_task_growth_has_no_resource_slack` keeps its name (the
-  Makefile and `test_contracts.py` pin it) and now proves that the sampler
-  records a high sample rather than refusing it, and that a task floor rising
-  by exactly one at zero allowance is a leak.
+Leaks that must fail, and do, naming node, resource, edge and both values:
+`a_socket_leaked_every_cycle_is_rejected` ·
+`a_thread_leaked_every_cycle_is_rejected` ·
+`a_leak_that_begins_late_in_the_campaign_is_rejected` (onset at cycle 13,
+caught at the ceiling with the floor untouched; and one socket leaked at
+cycle 15) · `a_thread_envelope_past_the_allowance_is_rejected` (including
+one thread every fourth recovery, and every fifth as the documented miss) ·
+`owned_async_task_growth_has_no_resource_slack` — name kept, the Makefile
+and `test_contracts.py` pin it; it now proves the sampler records a high
+sample rather than refusing it, and that a task floor rising by exactly one
+is a leak.
 
-### 0.5 What is still true
+Measured noise that must pass, and does:
+`the_per_peer_transport_drain_is_not_growth` (§2.2's exact series, both
+bands identical across the halves; and the same drain with the warmup on the
+high side, landing high every third cycle) ·
+`thread_jitter_inside_the_allowance_is_not_growth` ·
+`a_single_high_sample_in_either_window_is_recorded_not_rejected`.
+
+The artifact proving itself: `recorded_resource_envelopes_must_match_the_cycles`
+(each of the four recorded numbers tampered) ·
+`an_envelope_over_incomplete_or_reordered_records_is_refused` ·
+`the_opening_window_is_the_first_half_of_the_series_rounded_up` (20 →
+0..=10 | 11..=20; smoke 3 → 0..=1 | 2..=3; asserted from nineteen cycles) ·
+`every_persistent_source_voter_requires_resource_evidence` ·
+`persistent_source_resource_baselines_cannot_be_rebased_between_cycles` ·
+`schema_is_closed_and_valid_draft_2020_12`.
+
+### 0.6 What is still true
 
 `RESOURCE_CLEANUP_HORIZON`, `RESOURCE_SAMPLE_INTERVAL`,
 `RESOURCE_STABLE_SAMPLES` and the one warmup cycle are unchanged. The `idle`
 predicate is still `operation_owns_work`, and it is still wrong on its own
 terms — Option C. The campaign stops being broken by it; nothing else that
-reads it gets better until C is built.
+reads it gets better until C is built, and C is also what would let the
+windows shrink and the boundaries in §0.2 tighten with evidence.
 
 ---
 
